@@ -127,6 +127,14 @@ impl DataBus {
     pub fn clear_history(&self) {
         self.inner.history.lock().clear();
     }
+
+    pub fn history_len(&self) -> usize {
+        self.inner.history.lock().len()
+    }
+
+    pub fn published_count(&self) -> u64 {
+        self.inner.next_id.load(Ordering::Relaxed).saturating_sub(1)
+    }
 }
 
 impl Default for DataBus {

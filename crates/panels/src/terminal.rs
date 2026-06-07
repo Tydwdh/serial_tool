@@ -24,10 +24,15 @@ struct PortData {
 }
 
 struct TerminalEntry {
-    timestamp_ms: u64,
+    timestamp_label: String,
     direction: Direction,
-    text: String,
-    bytes: Vec<u8>,
+    display_text: String,
+    hex_line: String,
+}
+
+struct VisibleRow<'a> {
+    port: &'a str,
+    entry: &'a TerminalEntry,
 }
 
 impl TerminalPanel {
@@ -102,7 +107,7 @@ impl TerminalPanel {
                             entry_visible(entry.direction, data.show_rx, data.show_tx)
                         }) {
                             visible_count += 1;
-                            show_entry(ui, None, entry, show_hex);
+                            show_entry_fast(ui, None, entry, show_hex);
                         }
 
                         if visible_count == 0 {
@@ -163,49 +168,66 @@ impl TerminalPanel {
         let scroll_to_bottom = force_scroll_to_bottom || (new_entries > 0 && self.auto_scroll);
         let height = self.height.max(40.0);
 
-        let mut scroll_metrics = None;
+        let mut rows: Vec<VisibleRow<'_>> = Vec::new();
 
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), height),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                let scroll_output = ScrollArea::vertical()
-                    .max_height(height)
-                    .auto_shrink([false, false])
-                    .stick_to_bottom(self.auto_scroll)
-                    .id_salt(&scroll_key)
-                    .show(ui, |ui| {
-                        let mut visible_count = 0;
-
-                        for (port, data) in &self.ports {
-                            for entry in data.entries.iter().filter(|entry| {
-                                entry_visible(entry.direction, self.show_rx, self.show_tx)
-                            }) {
-                                visible_count += 1;
-                                show_entry(ui, Some(port), entry, self.show_hex);
-                            }
-                        }
-
-                        if visible_count == 0 {
-                            ui.label(RichText::new("暂无串口数据").color(theme::TEXT_SECONDARY));
-                        }
-
-                        if scroll_to_bottom {
-                            ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
-                        }
-                    });
-
-                scroll_metrics = Some((
-                    scroll_output.inner_rect,
-                    scroll_output.content_size.y,
-                    scroll_output.state.offset.y,
-                ));
-            },
-        );
-
-        if let Some((inner_rect, content_height, offset_y)) = scroll_metrics {
-            self.update_auto_scroll(ui, &scroll_key, inner_rect, content_height, offset_y);
+        for (port, data) in &self.ports {
+            for entry in data
+                .entries
+                .iter()
+                .filter(|entry| entry_visible(entry.direction, self.show_rx, self.show_tx))
+            {
+                rows.push(VisibleRow {
+                    port: port.as_str(),
+                    entry,
+                });
+            }
         }
+
+        if rows.is_empty() {
+            let scroll_output = ScrollArea::vertical()
+                .max_height(height)
+                .auto_shrink([false, false])
+                .id_salt(&scroll_key)
+                .show(ui, |ui| {
+                    ui.label(RichText::new("暂无串口数据").color(theme::TEXT_SECONDARY));
+                });
+
+            self.update_auto_scroll(
+                ui,
+                &scroll_key,
+                scroll_output.inner_rect,
+                scroll_output.content_size.y,
+                scroll_output.state.offset.y,
+            );
+
+            return;
+        }
+
+        let row_height = 20.0;
+
+        let scroll_output = ScrollArea::vertical()
+            .max_height(height)
+            .auto_shrink([false, false])
+            .stick_to_bottom(self.auto_scroll)
+            .id_salt(&scroll_key)
+            .show_rows(ui, row_height, rows.len(), |ui, row_range| {
+                for row_index in row_range {
+                    let row = &rows[row_index];
+                    show_entry_fast(ui, Some(row.port), row.entry, self.show_hex);
+                }
+
+                if scroll_to_bottom {
+                    ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+                }
+            });
+
+        self.update_auto_scroll(
+            ui,
+            &scroll_key,
+            scroll_output.inner_rect,
+            scroll_output.content_size.y,
+            scroll_output.state.offset.y,
+        );
     }
     fn update_auto_scroll(
         &mut self,
@@ -275,13 +297,23 @@ impl TerminalPanel {
             Payload::Bytes(bytes) => bytes.clone(),
             _ => event.payload.text_lossy().into_bytes(),
         };
+
         let text = event.payload.text_lossy();
+        let display_text = format_terminal_text(&text);
+
+        let hex_line = if bytes.is_empty() {
+            String::new()
+        } else {
+            format!("{} [{}]", format_hex(&bytes), format_ascii(&bytes))
+        };
+
         let data = self.ports.entry(port).or_default();
+
         data.entries.push_back(TerminalEntry {
-            timestamp_ms: event.timestamp_ms,
+            timestamp_label: format!("[{}]", fmt_ts(event.timestamp_ms)),
             direction: event.direction,
-            text,
-            bytes,
+            display_text,
+            hex_line,
         });
 
         while data.entries.len() > self.max_entries {
@@ -298,29 +330,6 @@ impl Default for PortData {
             show_tx: true,
         }
     }
-}
-
-fn show_entry(ui: &mut egui::Ui, port: Option<&str>, entry: &TerminalEntry, show_hex: bool) {
-    ui.horizontal_wrapped(|ui| {
-        let (label, color) = direction_label(entry.direction);
-        ui.label(RichText::new(format!("[{}]", fmt_ts(entry.timestamp_ms))).monospace());
-        if let Some(port) = port {
-            ui.label(RichText::new(port).monospace().color(theme::YELLOW));
-        }
-        ui.label(RichText::new(label).strong().color(color));
-        if show_hex {
-            ui.label(RichText::new(format_hex(&entry.bytes)).monospace());
-            if !entry.bytes.is_empty() {
-                ui.label(
-                    RichText::new(format!("[{}]", format_ascii(&entry.bytes)))
-                        .monospace()
-                        .color(theme::TEXT_DIMMED),
-                );
-            }
-        } else {
-            ui.label(RichText::new(format_terminal_text(&entry.text)).monospace());
-        }
-    });
 }
 
 fn entry_visible(direction: Direction, show_rx: bool, show_tx: bool) -> bool {
@@ -396,4 +405,41 @@ fn direction_label(direction: Direction) -> (&'static str, Color32) {
         Direction::Tx => ("TX", theme::BLUE),
         Direction::Internal => ("IN", Color32::GRAY),
     }
+}
+
+fn show_entry_fast(ui: &mut egui::Ui, port: Option<&str>, entry: &TerminalEntry, show_hex: bool) {
+    let (dir_label, dir_color) = direction_label(entry.direction);
+
+    ui.horizontal(|ui| {
+        ui.set_height(20.0);
+
+        ui.add_sized(
+            [82.0, 20.0],
+            egui::Label::new(
+                RichText::new(&entry.timestamp_label)
+                    .monospace()
+                    .color(theme::TEXT_SECONDARY),
+            ),
+        );
+
+        if let Some(port) = port {
+            ui.add_sized(
+                [90.0, 20.0],
+                egui::Label::new(RichText::new(port).monospace().color(theme::YELLOW)),
+            );
+        }
+
+        ui.add_sized(
+            [36.0, 20.0],
+            egui::Label::new(RichText::new(dir_label).strong().color(dir_color)),
+        );
+
+        let text = if show_hex {
+            &entry.hex_line
+        } else {
+            &entry.display_text
+        };
+
+        ui.add(egui::Label::new(RichText::new(text).monospace()).truncate());
+    });
 }

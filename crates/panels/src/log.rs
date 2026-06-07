@@ -26,7 +26,7 @@ impl LogPanel {
             entries: VecDeque::new(),
             min_level: LogLevel::Info,
             auto_scroll: true,
-            max_entries: 2_000,
+            max_entries: 5_000,
         }
     }
 

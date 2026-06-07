@@ -210,7 +210,7 @@ struct WorkbenchApp {
     activity_drag_source: Option<usize>,
     activity_rects_cache: Vec<egui::Rect>,
     last_rate_check_time: f64,
-    last_event_count: usize,
+    last_event_count: u64,
     event_rate: f64,
 }
 
@@ -504,7 +504,7 @@ impl WorkbenchApp {
         ui.label(egui::RichText::new("DataBus").strong());
         ui.label(format!(
             "事件 {} | {:.0}/s",
-            self.bus.history().len(),
+            self.bus.history_len(),
             self.event_rate
         ));
     }
@@ -1114,14 +1114,14 @@ impl eframe::App for WorkbenchApp {
         if self.last_rate_check_time > 0.0 {
             let el = now - self.last_rate_check_time;
             if el >= 1.0 {
-                let c = self.bus.history().len();
-                self.event_rate = (c.saturating_sub(self.last_event_count)) as f64 / el;
+                let c = self.bus.published_count();
+                self.event_rate = c.saturating_sub(self.last_event_count) as f64 / el;
                 self.last_event_count = c;
                 self.last_rate_check_time = now;
             }
         } else {
             self.last_rate_check_time = now;
-            self.last_event_count = self.bus.history().len();
+            self.last_event_count = self.bus.published_count();
         }
         if now - self.last_port_refresh > PORT_REFRESH_INTERVAL_SECS {
             self.last_port_refresh = now;
