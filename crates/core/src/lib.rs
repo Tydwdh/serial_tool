@@ -145,15 +145,25 @@ impl Event {
     pub fn serial_rx(source: impl Into<String>, bytes: Vec<u8>) -> Self {
         let source = source.into();
         let port = source.strip_prefix("serial:").unwrap_or(&source).to_owned();
-        Self::new(topics::SERIAL_RX, source, Direction::Rx, Payload::Bytes(bytes))
-            .with_metadata(json!({ "port": port }))
+        Self::new(
+            topics::SERIAL_RX,
+            source,
+            Direction::Rx,
+            Payload::Bytes(bytes),
+        )
+        .with_metadata(json!({ "port": port }))
     }
 
     pub fn serial_tx(source: impl Into<String>, bytes: Vec<u8>) -> Self {
         let source = source.into();
         let port = source.strip_prefix("serial:").unwrap_or(&source).to_owned();
-        Self::new(topics::SERIAL_TX, source, Direction::Tx, Payload::Bytes(bytes))
-            .with_metadata(json!({ "port": port }))
+        Self::new(
+            topics::SERIAL_TX,
+            source,
+            Direction::Tx,
+            Payload::Bytes(bytes),
+        )
+        .with_metadata(json!({ "port": port }))
     }
 
     pub fn system_log(

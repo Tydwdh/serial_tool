@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tool_core::{Direction, Event, LogLevel, Payload, topics};
 use tool_databus::{DataBus, Subscription, TopicFilter};
-use tool_lua_host::{run_plugin, LuaPluginRuntime, LuaRunConfig};
+use tool_lua_host::{LuaPluginRuntime, LuaRunConfig, run_plugin};
 use tool_transport::TransportManager;
 use tool_wasm_host::{WasmPluginConfig, WasmPluginRuntime};
 
@@ -278,7 +278,11 @@ impl PluginManager {
         record.state = PluginState::Running;
         record.last_error = None;
         self.lua_runtimes.insert(plugin_id.to_owned(), runtime);
-        self.bus.publish(Event::system_log(LogLevel::Info, format!("plugin:{plugin_id}"), "plugin enabled"));
+        self.bus.publish(Event::system_log(
+            LogLevel::Info,
+            format!("plugin:{plugin_id}"),
+            "plugin enabled",
+        ));
         Ok(())
     }
 
@@ -430,7 +434,11 @@ impl PluginManager {
                         record.state = PluginState::Failed;
                         record.last_error = Some(error_text.clone());
                     }
-                    self.bus.publish(Event::system_log(LogLevel::Warn, format!("plugin:{id}"), error_text));
+                    self.bus.publish(Event::system_log(
+                        LogLevel::Warn,
+                        format!("plugin:{id}"),
+                        error_text,
+                    ));
                 }
             }
         }
@@ -448,10 +456,10 @@ impl PluginManager {
         let ids: Vec<String> = self.lua_runtimes.keys().cloned().collect();
         let mut finished = Vec::new();
         for id in &ids {
-            if let Some(runtime) = self.lua_runtimes.get(id) {
-                if !runtime.is_alive() {
-                    finished.push(id.clone());
-                }
+            if let Some(runtime) = self.lua_runtimes.get(id)
+                && !runtime.is_alive()
+            {
+                finished.push(id.clone());
             }
         }
         for id in &finished {

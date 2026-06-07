@@ -34,15 +34,27 @@ pub type TransportResult<T> = Result<T, TransportError>;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum DataBits { Five, Six, Seven, Eight }
+pub enum DataBits {
+    Five,
+    Six,
+    Seven,
+    Eight,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum StopBits { One, Two }
+pub enum StopBits {
+    One,
+    Two,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum Parity { None, Odd, Even }
+pub enum Parity {
+    None,
+    Odd,
+    Even,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SerialConfig {
@@ -56,13 +68,22 @@ pub struct SerialConfig {
 
 impl Default for SerialConfig {
     fn default() -> Self {
-        Self { port_name: String::new(), baud_rate: 115_200, data_bits: DataBits::Eight,
-               stop_bits: StopBits::One, parity: Parity::None, timeout_ms: 50 }
+        Self {
+            port_name: String::new(),
+            baud_rate: 115_200,
+            data_bits: DataBits::Eight,
+            stop_bits: StopBits::One,
+            parity: Parity::None,
+            timeout_ms: 50,
+        }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SerialPortDescriptor { pub port_name: String, pub port_type: String }
+pub struct SerialPortDescriptor {
+    pub port_name: String,
+    pub port_type: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TransportStatus {
@@ -72,7 +93,13 @@ pub struct TransportStatus {
 }
 
 impl TransportStatus {
-    pub fn closed() -> Self { Self { open: false, port_name: None, baud_rate: None } }
+    pub fn closed() -> Self {
+        Self {
+            open: false,
+            port_name: None,
+            baud_rate: None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -91,12 +118,20 @@ struct PortHandle {
 
 impl TransportManager {
     pub fn new(bus: DataBus) -> Self {
-        Self { bus, ports: Arc::new(Mutex::new(HashMap::new())) }
+        Self {
+            bus,
+            ports: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     pub fn list_serial_ports(&self) -> TransportResult<Vec<SerialPortDescriptor>> {
         let mut ports: Vec<SerialPortDescriptor> = sp::available_ports()?
-            .into_iter().map(|info| SerialPortDescriptor { port_name: info.port_name, port_type: describe_port_type(info.port_type) }).collect();
+            .into_iter()
+            .map(|info| SerialPortDescriptor {
+                port_name: info.port_name,
+                port_type: describe_port_type(info.port_type),
+            })
+            .collect();
         ports.sort_by_key(|port| natural_sort_key(&port.port_name));
         Ok(ports)
     }
@@ -113,7 +148,11 @@ impl TransportManager {
             .timeout(Duration::from_millis(config.timeout_ms));
 
         let port = builder.open().map_err(|error| {
-            self.bus.publish(Event::system_log(LogLevel::Error, "transport.serial", format!("failed to open {}: {error}", config.port_name)));
+            self.bus.publish(Event::system_log(
+                LogLevel::Error,
+                "transport.serial",
+                format!("failed to open {}: {error}", config.port_name),
+            ));
             TransportError::from(error)
         })?;
 
@@ -127,44 +166,84 @@ impl TransportManager {
         let thread_source = source.clone();
 
         let join = thread::spawn(move || {
-            serial_worker_loop(port, write_rx, thread_stop, thread_alive, thread_bus, thread_source);
+            serial_worker_loop(
+                port,
+                write_rx,
+                thread_stop,
+                thread_alive,
+                thread_bus,
+                thread_source,
+            );
         });
 
-        self.ports.lock().insert(config.port_name.clone(), PortHandle {
-            config: config.clone(), writer, stop, alive, join: Some(join),
-        });
+        self.ports.lock().insert(
+            config.port_name.clone(),
+            PortHandle {
+                config: config.clone(),
+                writer,
+                stop,
+                alive,
+                join: Some(join),
+            },
+        );
 
-        self.bus.publish(Event::system_log(LogLevel::Info, "transport.serial", format!("opened {}", source)));
+        self.bus.publish(Event::system_log(
+            LogLevel::Info,
+            "transport.serial",
+            format!("opened {}", source),
+        ));
         Ok(())
     }
 
     // ── 关闭所有端口 ──
     pub fn close_serial(&self) {
         let names: Vec<String> = self.ports.lock().keys().cloned().collect();
-        for name in names { self.close_port(&name); }
+        for name in names {
+            self.close_port(&name);
+        }
     }
 
     // ── 关闭指定端口 ──
     pub fn close_port(&self, port_name: &str) {
         if let Some(mut worker) = self.ports.lock().remove(port_name) {
             worker.stop.store(true, Ordering::Relaxed);
-            if let Some(join) = worker.join.take() { let _ = join.join(); }
-            self.bus.publish(Event::system_log(LogLevel::Info, "transport.serial", format!("closed {} @ {}", worker.config.port_name, worker.config.baud_rate)));
+            if let Some(join) = worker.join.take() {
+                let _ = join.join();
+            }
+            self.bus.publish(Event::system_log(
+                LogLevel::Info,
+                "transport.serial",
+                format!(
+                    "closed {} @ {}",
+                    worker.config.port_name, worker.config.baud_rate
+                ),
+            ));
         }
     }
 
     // ── 发送到指定端口 ──
     pub fn send_to(&self, port_name: &str, bytes: Vec<u8>) -> TransportResult<()> {
         let guard = self.ports.lock();
-        let worker = guard.get(port_name).ok_or_else(|| TransportError::PortNotOpen(port_name.to_owned()))?;
-        if !worker.alive.load(Ordering::Relaxed) { return Err(TransportError::WorkerClosed); }
-        worker.writer.send(bytes).map_err(|_| TransportError::WorkerClosed)
+        let worker = guard
+            .get(port_name)
+            .ok_or_else(|| TransportError::PortNotOpen(port_name.to_owned()))?;
+        if !worker.alive.load(Ordering::Relaxed) {
+            return Err(TransportError::WorkerClosed);
+        }
+        worker
+            .writer
+            .send(bytes)
+            .map_err(|_| TransportError::WorkerClosed)
     }
 
     // ── 向后兼容：发送到第一个已打开端口 ──
     pub fn send(&self, bytes: Vec<u8>) -> TransportResult<()> {
         let guard = self.ports.lock();
-        let name = guard.keys().next().cloned().ok_or(TransportError::NoOpenPort)?;
+        let name = guard
+            .keys()
+            .next()
+            .cloned()
+            .ok_or(TransportError::NoOpenPort)?;
         drop(guard);
         self.send_to(&name, bytes)
     }
@@ -190,7 +269,9 @@ impl TransportManager {
         let guard = self.ports.lock();
         match guard.values().next() {
             Some(w) if w.alive.load(Ordering::Relaxed) => TransportStatus {
-                open: true, port_name: Some(w.config.port_name.clone()), baud_rate: Some(w.config.baud_rate),
+                open: true,
+                port_name: Some(w.config.port_name.clone()),
+                baud_rate: Some(w.config.baud_rate),
             },
             _ => TransportStatus::closed(),
         }
@@ -200,20 +281,30 @@ impl TransportManager {
         let guard = self.ports.lock();
         match guard.get(port_name) {
             Some(w) if w.alive.load(Ordering::Relaxed) => TransportStatus {
-                open: true, port_name: Some(w.config.port_name.clone()), baud_rate: Some(w.config.baud_rate),
+                open: true,
+                port_name: Some(w.config.port_name.clone()),
+                baud_rate: Some(w.config.baud_rate),
             },
             _ => TransportStatus::closed(),
         }
     }
 
     pub fn status_all(&self) -> Vec<TransportStatus> {
-        self.ports.lock().values().map(|w| {
-            if w.alive.load(Ordering::Relaxed) {
-                TransportStatus { open: true, port_name: Some(w.config.port_name.clone()), baud_rate: Some(w.config.baud_rate) }
-            } else {
-                TransportStatus::closed()
-            }
-        }).collect()
+        self.ports
+            .lock()
+            .values()
+            .map(|w| {
+                if w.alive.load(Ordering::Relaxed) {
+                    TransportStatus {
+                        open: true,
+                        port_name: Some(w.config.port_name.clone()),
+                        baud_rate: Some(w.config.baud_rate),
+                    }
+                } else {
+                    TransportStatus::closed()
+                }
+            })
+            .collect()
     }
 
     pub fn open_ports(&self) -> Vec<String> {
@@ -222,7 +313,9 @@ impl TransportManager {
 }
 
 impl Drop for TransportManager {
-    fn drop(&mut self) { self.close_serial(); }
+    fn drop(&mut self) {
+        self.close_serial();
+    }
 }
 
 // ── 串口工作线程 ──
@@ -244,7 +337,11 @@ fn serial_worker_loop(
                     bus.publish(Event::serial_tx(source.clone(), bytes));
                 }
                 Err(error) => {
-                    bus.publish(Event::system_log(LogLevel::Error, "transport.serial", format!("write failed on {source}: {error}")));
+                    bus.publish(Event::system_log(
+                        LogLevel::Error,
+                        "transport.serial",
+                        format!("write failed on {source}: {error}"),
+                    ));
                     alive.store(false, Ordering::Relaxed);
                     return;
                 }
@@ -266,7 +363,11 @@ fn serial_worker_loop(
             }
             Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
             Err(error) => {
-                bus.publish(Event::system_log(LogLevel::Error, "transport.serial", format!("read failed on {source}: {error}")));
+                bus.publish(Event::system_log(
+                    LogLevel::Error,
+                    "transport.serial",
+                    format!("read failed on {source}: {error}"),
+                ));
                 alive.store(false, Ordering::Relaxed);
                 return;
             }
@@ -279,37 +380,54 @@ fn serial_worker_loop(
 
 pub fn parse_hex(input: &str) -> TransportResult<Vec<u8>> {
     let trimmed = input.trim();
-    if trimmed.is_empty() { return Err(TransportError::InvalidHex("empty input".to_owned())); }
+    if trimmed.is_empty() {
+        return Err(TransportError::InvalidHex("empty input".to_owned()));
+    }
 
     let tokens: Vec<&str> = trimmed
         .split(|ch: char| ch.is_ascii_whitespace() || ch == ',' || ch == ';')
-        .filter(|token| !token.is_empty()).collect();
+        .filter(|token| !token.is_empty())
+        .collect();
 
     if tokens.len() == 1 {
         let mut token = normalize_hex_token(tokens[0]);
-        if token.len() > 2 && !token.len().is_multiple_of(2) { token.insert(0, '0'); }
+        if token.len() > 2 && !token.len().is_multiple_of(2) {
+            token.insert(0, '0');
+        }
         if token.len() > 2 {
-            return token.as_bytes().chunks(2).map(|chunk| {
-                parse_byte(std::str::from_utf8(chunk).unwrap_or_default())
-            }).collect();
+            return token
+                .as_bytes()
+                .chunks(2)
+                .map(|chunk| parse_byte(std::str::from_utf8(chunk).unwrap_or_default()))
+                .collect();
         }
     }
 
-    tokens.into_iter().map(|token| {
-        let token = normalize_hex_token(token);
-        if token.is_empty() || token.len() > 2 {
-            return Err(TransportError::InvalidHex(format!("invalid hex: '{token}'")));
-        }
-        parse_byte(&token)
-    }).collect()
+    tokens
+        .into_iter()
+        .map(|token| {
+            let token = normalize_hex_token(token);
+            if token.is_empty() || token.len() > 2 {
+                return Err(TransportError::InvalidHex(format!(
+                    "invalid hex: '{token}'"
+                )));
+            }
+            parse_byte(&token)
+        })
+        .collect()
 }
 
 fn normalize_hex_token(token: &str) -> String {
-    token.trim().trim_start_matches("0x").trim_start_matches("0X").replace(['_', '-'], "")
+    token
+        .trim()
+        .trim_start_matches("0x")
+        .trim_start_matches("0X")
+        .replace(['_', '-'], "")
 }
 
 fn parse_byte(token: &str) -> TransportResult<u8> {
-    u8::from_str_radix(token, 16).map_err(|_| TransportError::InvalidHex(format!("'{token}' is not hex")))
+    u8::from_str_radix(token, 16)
+        .map_err(|_| TransportError::InvalidHex(format!("'{token}' is not hex")))
 }
 
 fn describe_port_type(port_type: sp::SerialPortType) -> String {
@@ -323,20 +441,41 @@ fn describe_port_type(port_type: sp::SerialPortType) -> String {
 
 fn natural_sort_key(name: &str) -> (String, u64) {
     let prefix: String = name.chars().take_while(|c| !c.is_ascii_digit()).collect();
-    let number: u64 = name.chars().skip_while(|c| !c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0);
+    let number: u64 = name
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0);
     (prefix, number)
 }
 
 impl From<DataBits> for sp::DataBits {
     fn from(v: DataBits) -> Self {
-        match v { DataBits::Five => Self::Five, DataBits::Six => Self::Six, DataBits::Seven => Self::Seven, DataBits::Eight => Self::Eight }
+        match v {
+            DataBits::Five => Self::Five,
+            DataBits::Six => Self::Six,
+            DataBits::Seven => Self::Seven,
+            DataBits::Eight => Self::Eight,
+        }
     }
 }
 impl From<StopBits> for sp::StopBits {
-    fn from(v: StopBits) -> Self { match v { StopBits::One => Self::One, StopBits::Two => Self::Two } }
+    fn from(v: StopBits) -> Self {
+        match v {
+            StopBits::One => Self::One,
+            StopBits::Two => Self::Two,
+        }
+    }
 }
 impl From<Parity> for sp::Parity {
-    fn from(v: Parity) -> Self { match v { Parity::None => Self::None, Parity::Odd => Self::Odd, Parity::Even => Self::Even } }
+    fn from(v: Parity) -> Self {
+        match v {
+            Parity::None => Self::None,
+            Parity::Odd => Self::Odd,
+            Parity::Even => Self::Even,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -344,13 +483,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_spaced_hex() { assert_eq!(parse_hex("01 0x02 ff").unwrap(), vec![1, 2, 255]); }
+    fn parses_spaced_hex() {
+        assert_eq!(parse_hex("01 0x02 ff").unwrap(), vec![1, 2, 255]);
+    }
     #[test]
-    fn parses_compact_hex() { assert_eq!(parse_hex("0102ff").unwrap(), vec![1, 2, 255]); }
+    fn parses_compact_hex() {
+        assert_eq!(parse_hex("0102ff").unwrap(), vec![1, 2, 255]);
+    }
     #[test]
-    fn pads_odd_length_compact_hex() { assert_eq!(parse_hex("abc").unwrap(), vec![0x0a, 0xbc]); }
+    fn pads_odd_length_compact_hex() {
+        assert_eq!(parse_hex("abc").unwrap(), vec![0x0a, 0xbc]);
+    }
     #[test]
-    fn parses_single_hex_token() { assert_eq!(parse_hex("FF").unwrap(), vec![255]); }
+    fn parses_single_hex_token() {
+        assert_eq!(parse_hex("FF").unwrap(), vec![255]);
+    }
     #[test]
-    fn parses_spaced_single_digits() { assert_eq!(parse_hex("1 2 3").unwrap(), vec![1, 2, 3]); }
+    fn parses_spaced_single_digits() {
+        assert_eq!(parse_hex("1 2 3").unwrap(), vec![1, 2, 3]);
+    }
 }
