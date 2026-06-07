@@ -1,0 +1,15 @@
+[package]
+name = "tool-testing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "tool_testing"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tool-core = { path = "../core" }
+tool-databus = { path = "../databus" }

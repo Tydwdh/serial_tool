@@ -1,0 +1,21 @@
+[package]
+name = "tool-lua-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "tool_lua_host"
+path = "src/lib.rs"
+
+[dependencies]
+crossbeam-channel.workspace = true
+mlua.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tool-core = { path = "../core" }
+tool-databus = { path = "../databus" }
+tool-testing = { path = "../testing" }
+tool-transport = { path = "../transport" }

@@ -1,0 +1,14 @@
+{
+  "id": "demo.signal-generator",
+  "name": "信号发生器 (Demo)",
+  "version": "1.0.0",
+  "runtime": "lua",
+  "main": "main.lua",
+  "permissions": ["bus", "log", "serial", "ui", "storage", "timer"],
+  "contributes": {
+    "panels": [
+      { "id": "demo-signal-chart", "title": "信号波形", "kind": "chart" },
+      { "id": "demo-signal-form", "title": "信号参数", "kind": "form" }
+    ]
+  }
+}

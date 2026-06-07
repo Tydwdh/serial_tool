@@ -1,0 +1,18 @@
+[package]
+name = "tool-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "tool_transport"
+path = "src/lib.rs"
+
+[dependencies]
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serialport.workspace = true
+thiserror.workspace = true
+tool-core = { path = "../core" }
+tool-databus = { path = "../databus" }

@@ -1,0 +1,15 @@
+[package]
+name = "tool-databus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "tool_databus"
+path = "src/lib.rs"
+
+[dependencies]
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+tool-core = { path = "../core" }

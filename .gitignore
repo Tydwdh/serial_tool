@@ -1,0 +1,23 @@
+# Rust build
+target/
+*.pdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# App data (ignore runtime logs and generated config)
+logs/
+workspace.json
+
+# Claude
+.claude/
+
+# Dist
+dist/

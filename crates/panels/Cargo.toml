@@ -1,0 +1,19 @@
+[package]
+name = "tool-panels"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "tool_panels"
+path = "src/lib.rs"
+
+[dependencies]
+egui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tool-core = { path = "../core" }
+tool-databus = { path = "../databus" }
+tool-extension = { path = "../extension" }
+tool-recorder = { path = "../recorder" }
+tool-transport = { path = "../transport" }
