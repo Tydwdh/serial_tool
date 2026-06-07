@@ -12,8 +12,9 @@ pub struct TerminalPanel {
     show_hex: bool,
     auto_scroll: bool,
     max_entries: usize,
-    pub max_height: f32,
+    pub height: f32,
     pub maximize_clicked: bool,
+    last_scroll_offsets: BTreeMap<String, f32>,
 }
 
 struct PortData {
@@ -39,13 +40,15 @@ impl TerminalPanel {
             show_hex: false,
             auto_scroll: true,
             max_entries: 2_000,
-            max_height: f32::INFINITY,
+            height: 350.0,
             maximize_clicked: false,
+            last_scroll_offsets: BTreeMap::new(),
         }
     }
 
     pub fn clear(&mut self) {
         self.ports.clear();
+        self.last_scroll_offsets.clear();
     }
 
     pub fn port_names(&self) -> Vec<String> {
@@ -57,43 +60,55 @@ impl TerminalPanel {
         let mut show_hex = self.show_hex;
         let mut auto_scroll = self.auto_scroll;
         let mut maximize_clicked = false;
-        let scroll_to_bottom = new_entries > 0 && auto_scroll;
+        let scroll_key = format!("terminal-port-{port_name}");
 
         let (inner_rect, content_height, offset_y) = {
             let data = self.ports.entry(port_name.to_owned()).or_default();
 
-            ui.horizontal(|ui| {
+            let mut force_scroll_to_bottom = false;
+
+            ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(port_name).monospace().strong());
                 ui.checkbox(&mut data.show_rx, "RX");
                 ui.checkbox(&mut data.show_tx, "TX");
                 ui.checkbox(&mut show_hex, "HEX");
-                auto_scroll_button(ui, &mut auto_scroll);
+
+                force_scroll_to_bottom |= auto_scroll_button(ui, &mut auto_scroll);
+
                 if ui.button("清空").clicked() {
                     data.entries.clear();
                 }
+
                 if ui.button("⛶").on_hover_text("放大查看").clicked() {
                     maximize_clicked = true;
                 }
             });
+
             ui.separator();
+
+            let scroll_to_bottom = force_scroll_to_bottom || (new_entries > 0 && auto_scroll);
+            let height = self.height.max(40.0);
 
             let scroll_output =
                 ScrollArea::vertical()
-                    .max_height(self.max_height)
+                    .max_height(height)
+                    .auto_shrink([false, false])
                     .stick_to_bottom(auto_scroll)
-                    .id_salt(format!("terminal-port-{port_name}"))
+                    .id_salt(&scroll_key)
                     .show(ui, |ui| {
                         let mut visible_count = 0;
+
                         for entry in data.entries.iter().filter(|entry| {
                             entry_visible(entry.direction, data.show_rx, data.show_tx)
                         }) {
                             visible_count += 1;
-                            show_entry(ui, Some(port_name), entry, show_hex);
+                            show_entry(ui, None, entry, show_hex);
                         }
 
                         if visible_count == 0 {
                             ui.label(RichText::new("暂无串口数据").color(theme::TEXT_SECONDARY));
                         }
+
                         if scroll_to_bottom {
                             ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
                         }
@@ -109,68 +124,93 @@ impl TerminalPanel {
         self.show_hex = show_hex;
         self.auto_scroll = auto_scroll;
         self.maximize_clicked |= maximize_clicked;
-        self.update_auto_scroll(ui, inner_rect, content_height, offset_y);
+
+        self.update_auto_scroll(ui, &scroll_key, inner_rect, content_height, offset_y);
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let new_entries = self.ingest();
+        let scroll_key = "terminal-all".to_owned();
 
-        ui.horizontal(|ui| {
+        let mut force_scroll_to_bottom = false;
+
+        ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut self.show_rx, "RX");
             ui.checkbox(&mut self.show_tx, "TX");
             ui.checkbox(&mut self.show_hex, "HEX");
-            auto_scroll_button(ui, &mut self.auto_scroll);
+
+            force_scroll_to_bottom |= auto_scroll_button(ui, &mut self.auto_scroll);
+
             if ui.button("清空").clicked() {
                 self.ports.clear();
             }
+
             if ui.button("⛶").on_hover_text("放大查看").clicked() {
                 self.maximize_clicked = true;
             }
+
             let total = self
                 .ports
                 .values()
                 .map(|port| port.entries.len())
                 .sum::<usize>();
+
             ui.label(RichText::new(format!("{total} 条")).color(theme::TEXT_SECONDARY));
         });
+
         ui.separator();
 
-        let scroll_to_bottom = new_entries > 0 && self.auto_scroll;
-        let scroll_output =
-            ScrollArea::vertical()
-                .max_height(self.max_height)
-                .stick_to_bottom(self.auto_scroll)
-                .id_salt("terminal-all")
-                .show(ui, |ui| {
-                    let mut visible_count = 0;
-                    for (port, data) in &self.ports {
-                        for entry in data.entries.iter().filter(|entry| {
-                            entry_visible(entry.direction, self.show_rx, self.show_tx)
-                        }) {
-                            visible_count += 1;
-                            show_entry(ui, Some(port), entry, self.show_hex);
+        let scroll_to_bottom = force_scroll_to_bottom || (new_entries > 0 && self.auto_scroll);
+        let height = self.height.max(40.0);
+
+        let mut scroll_metrics = None;
+
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), height),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                let scroll_output = ScrollArea::vertical()
+                    .max_height(height)
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(self.auto_scroll)
+                    .id_salt(&scroll_key)
+                    .show(ui, |ui| {
+                        let mut visible_count = 0;
+
+                        for (port, data) in &self.ports {
+                            for entry in data.entries.iter().filter(|entry| {
+                                entry_visible(entry.direction, self.show_rx, self.show_tx)
+                            }) {
+                                visible_count += 1;
+                                show_entry(ui, Some(port), entry, self.show_hex);
+                            }
                         }
-                    }
 
-                    if visible_count == 0 {
-                        ui.label(RichText::new("暂无串口数据").color(theme::TEXT_SECONDARY));
-                    }
-                    if scroll_to_bottom {
-                        ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
-                    }
-                });
+                        if visible_count == 0 {
+                            ui.label(RichText::new("暂无串口数据").color(theme::TEXT_SECONDARY));
+                        }
 
-        self.update_auto_scroll(
-            ui,
-            scroll_output.inner_rect,
-            scroll_output.content_size.y,
-            scroll_output.state.offset.y,
+                        if scroll_to_bottom {
+                            ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+                        }
+                    });
+
+                scroll_metrics = Some((
+                    scroll_output.inner_rect,
+                    scroll_output.content_size.y,
+                    scroll_output.state.offset.y,
+                ));
+            },
         );
-    }
 
+        if let Some((inner_rect, content_height, offset_y)) = scroll_metrics {
+            self.update_auto_scroll(ui, &scroll_key, inner_rect, content_height, offset_y);
+        }
+    }
     fn update_auto_scroll(
         &mut self,
         ui: &egui::Ui,
+        scroll_key: &str,
         inner_rect: egui::Rect,
         content_height: f32,
         offset_y: f32,
@@ -179,14 +219,35 @@ impl TerminalPanel {
             .input(|input| input.pointer.hover_pos())
             .is_some_and(|pos| inner_rect.contains(pos));
 
-        if pointer_inside && ui.input(|input| input.smooth_scroll_delta.y > 0.0) {
+        let smooth_scroll_y = ui.input(|input| input.smooth_scroll_delta.y);
+
+        // 你原代码用 > 0.0 作为“用户向上滚，离开底部”的判断，这里保持一致。
+        let scrolling_away_from_bottom = pointer_inside && smooth_scroll_y > 0.0;
+
+        let previous_offset_y = self
+            .last_scroll_offsets
+            .get(scroll_key)
+            .copied()
+            .unwrap_or(offset_y);
+
+        let moving_towards_bottom = offset_y > previous_offset_y + 0.5;
+
+        let bottom_offset = (content_height - inner_rect.height()).max(0.0);
+        let at_bottom = offset_y >= bottom_offset - 4.0;
+
+        if scrolling_away_from_bottom {
             self.auto_scroll = false;
         }
 
-        let at_bottom = offset_y >= content_height - inner_rect.height() - 4.0;
-        if !self.auto_scroll && at_bottom {
+        // 关键点：
+        // 只有用户真的把视图往底部方向移动过，并且已经到底，才自动恢复。
+        // 这样“点击暂停时已经在底部”不会立刻恢复。
+        if !self.auto_scroll && at_bottom && pointer_inside && moving_towards_bottom {
             self.auto_scroll = true;
         }
+
+        self.last_scroll_offsets
+            .insert(scroll_key.to_owned(), offset_y);
     }
 
     fn ingest(&mut self) -> usize {
@@ -270,13 +331,17 @@ fn entry_visible(direction: Direction, show_rx: bool, show_tx: bool) -> bool {
     }
 }
 
-fn auto_scroll_button(ui: &mut egui::Ui, auto_scroll: &mut bool) {
+fn auto_scroll_button(ui: &mut egui::Ui, auto_scroll: &mut bool) -> bool {
     if *auto_scroll {
         if ui.button("⏸").on_hover_text("暂停自动滚动").clicked() {
             *auto_scroll = false;
         }
+        false
     } else if ui.button("↓").on_hover_text("滚动到底部").clicked() {
         *auto_scroll = true;
+        true
+    } else {
+        false
     }
 }
 

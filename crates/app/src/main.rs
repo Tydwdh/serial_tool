@@ -18,8 +18,8 @@ use tool_transport::{
 };
 
 const ACTIVITY_BAR_WIDTH: f32 = 104.0;
-const BOTTOM_PANEL_HEIGHT: f32 = 300.0;
-const BOTTOM_PANEL_MIN: f32 = 250.0;
+const BOTTOM_PANEL_HEIGHT: f32 = 350.0;
+const BOTTOM_PANEL_MIN: f32 = 550.0;
 const INSPECTOR_WIDTH: f32 = 240.0;
 const DEFAULT_WINDOW_WIDTH: f32 = 1280.0;
 const DEFAULT_WINDOW_HEIGHT: f32 = 820.0;
@@ -624,7 +624,8 @@ impl WorkbenchApp {
                     && t != s
                 {
                     let item = self.activity_order.remove(s);
-                    self.activity_order.insert(t, item);
+                    let insert_at = if t > s { t - 1 } else { t };
+                    self.activity_order.insert(insert_at, item);
                     self.save_config();
                 }
             } else {
@@ -788,35 +789,69 @@ impl WorkbenchApp {
         self.ensure_bottom_tab_available();
         let visible_tabs = self.available_bottom_tabs();
 
-        // 标签栏
-        ui.horizontal(|ui| {
+        // 顶部标签栏：固定在底部面板顶部
+        ui.horizontal_wrapped(|ui| {
             for tab in &visible_tabs {
-                if ui.selectable_label(self.bottom_tab == *tab, tab.label()).clicked() {
+                if ui
+                    .selectable_label(self.bottom_tab == *tab, tab.label())
+                    .clicked()
+                {
                     self.bottom_tab = *tab;
                 }
             }
         });
         ui.separator();
 
-        // 预留发送区(120) + 状态栏(22) + 分隔线+边距
-        let term_h = (ui.available_height() - 180.0).max(40.0);
-        self.terminal_panel.max_height = term_h;
-        match self.bottom_tab {
-            BottomTab::Terminal => self.terminal_panel.ui(ui),
-            BottomTab::Logs => self.bottom_log_panel.ui(ui),
-        }
-        ui.separator();
+        let body_height = ui.available_height();
 
-        // 发送区
-        if !self.send_popup_open {
-            self.send_bar(ui);
-            ui.separator();
-        }
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), body_height),
+            egui::Layout::bottom_up(egui::Align::Min),
+            |ui| {
+                // 1. 状态栏固定在最底部
+                self.status_bar(ui);
 
-        // 状态栏
-        self.status_bar(ui);
+                // 2. 发送区固定在状态栏上方
+                if !self.send_popup_open {
+                    ui.separator();
+                    self.send_bar(ui);
+                }
+
+                ui.separator();
+
+                // 3. 剩余空间全部给接收区 / 日志区
+                let receive_area_total_height = ui.available_height().max(80.0);
+
+                match self.bottom_tab {
+                    BottomTab::Terminal => {
+                        // TerminalPanel 内部自己还有 RX/TX/HEX 工具栏 + separator
+                        let terminal_header_height = 42.0;
+
+                        self.terminal_panel.height =
+                            (receive_area_total_height - terminal_header_height).max(40.0);
+
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), receive_area_total_height),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                self.terminal_panel.ui(ui);
+                            },
+                        );
+                    }
+
+                    BottomTab::Logs => {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), receive_area_total_height),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                self.bottom_log_panel.ui(ui);
+                            },
+                        );
+                    }
+                }
+            },
+        );
     }
-
     fn device_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("设备");
         ui.horizontal(|ui| {
@@ -1038,6 +1073,7 @@ impl eframe::App for WorkbenchApp {
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
         theme::BG_PRIMARY.to_normalized_gamma_f32()
     }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         // 终端放大按钮
@@ -1193,17 +1229,21 @@ impl WorkbenchApp {
         if !self.terminal_popup_open {
             return;
         }
+
         let vid = egui::ViewportId::from_hash_of("term-popup");
         let builder = egui::ViewportBuilder::default()
             .with_title("接收区 - 硬件调试工作台")
             .with_inner_size([800.0, 600.0]);
+
         let should_close = ctx.show_viewport_immediate(vid, builder, |ui, _| {
             if ui.ctx().input(|i| i.viewport().close_requested()) {
                 return true;
             }
+
             egui::CentralPanel::default()
                 .show_inside(ui, |ui| {
                     let mut close = false;
+
                     ui.horizontal(|ui| {
                         ui.heading("接收区");
                         if ui.button("关闭").clicked() {
@@ -1211,16 +1251,19 @@ impl WorkbenchApp {
                         }
                     });
                     ui.separator();
+
+                    self.terminal_panel.height = (ui.available_height() - 42.0).max(120.0);
                     self.terminal_panel.ui(ui);
+
                     close
                 })
                 .inner
         });
+
         if should_close {
             self.terminal_popup_open = false;
         }
     }
-
     fn send_popup(&mut self, ctx: &egui::Context) {
         if !self.send_popup_open {
             return;

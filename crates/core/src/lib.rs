@@ -16,15 +16,15 @@ pub mod topics {
     pub const TEST_RESULT: &str = "test.result";
 }
 
-#[derive(Debug, Error)]
-pub enum CoreError {
-    #[error("invalid topic")]
-    InvalidTopic,
-    #[error("time moved backwards")]
-    TimeMovedBackwards,
-}
+// #[derive(Debug, Error)]
+// pub enum CoreError {
+//     #[error("invalid topic")]
+//     InvalidTopic,
+//     #[error("time moved backwards")]
+//     TimeMovedBackwards,
+// }
 
-pub type CoreResult<T> = Result<T, CoreError>;
+// pub type CoreResult<T> = Result<T, CoreError>;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
