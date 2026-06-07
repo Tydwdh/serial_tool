@@ -4,17 +4,33 @@ use std::collections::{BTreeMap, VecDeque};
 use tool_core::{Direction, Event, Payload, topics};
 use tool_databus::{DataBus, Subscription, TopicFilter};
 
+const MAX_INGEST_PER_FRAME: usize = 500;
+
+const TIME_COL_WIDTH: f32 = 118.0;
+const PORT_COL_WIDTH: f32 = 54.0;
+const DIR_COL_WIDTH: f32 = 28.0;
+const ROW_LEFT_PADDING: f32 = 4.0;
+const COL_GAP: f32 = 4.0;
+
 pub struct TerminalPanel {
     subscription: Subscription,
     ports: BTreeMap<String, PortData>,
+
     show_rx: bool,
     show_tx: bool,
     show_hex: bool,
     auto_scroll: bool,
+
     max_entries: usize,
+
     pub height: f32,
     pub maximize_clicked: bool,
+
     last_scroll_offsets: BTreeMap<String, f32>,
+
+    next_entry_id: u64,
+    selected_entry_id: Option<u64>,
+    detail_entry_id: Option<u64>,
 }
 
 struct PortData {
@@ -24,15 +40,44 @@ struct PortData {
 }
 
 struct TerminalEntry {
+    id: u64,
+    timestamp_ms: u64,
     timestamp_label: String,
     direction: Direction,
+
+    raw_text: String,
     display_text: String,
-    hex_line: String,
+
+    hex_text: String,
+    ascii_text: String,
+    hex_preview: String,
 }
 
 struct VisibleRow<'a> {
-    port: &'a str,
+    port: Option<&'a str>,
     entry: &'a TerminalEntry,
+}
+
+#[derive(Clone)]
+struct EntryDetail {
+    port: String,
+    timestamp_label: String,
+    direction: Direction,
+
+    raw_text: String,
+    display_text: String,
+
+    hex_text: String,
+    ascii_text: String,
+    hex_preview: String,
+}
+
+struct RenderOutcome {
+    inner_rect: egui::Rect,
+    content_height: f32,
+    offset_y: f32,
+    clicked_entry_id: Option<u64>,
+    open_detail_entry_id: Option<u64>,
 }
 
 impl TerminalPanel {
@@ -40,20 +85,30 @@ impl TerminalPanel {
         Self {
             subscription: bus.subscribe(TopicFilter::prefix("transport.serial.")),
             ports: BTreeMap::new(),
+
             show_rx: true,
             show_tx: true,
             show_hex: false,
             auto_scroll: true,
+
             max_entries: 2_000,
+
             height: 350.0,
             maximize_clicked: false,
+
             last_scroll_offsets: BTreeMap::new(),
+
+            next_entry_id: 1,
+            selected_entry_id: None,
+            detail_entry_id: None,
         }
     }
 
     pub fn clear(&mut self) {
         self.ports.clear();
         self.last_scroll_offsets.clear();
+        self.selected_entry_id = None;
+        self.detail_entry_id = None;
     }
 
     pub fn port_names(&self) -> Vec<String> {
@@ -61,19 +116,21 @@ impl TerminalPanel {
     }
 
     pub fn port_ui(&mut self, ui: &mut egui::Ui, port_name: &str) {
-        let new_entries = self.ingest();
+        let _new_entries = self.ingest();
+
         let mut show_hex = self.show_hex;
         let mut auto_scroll = self.auto_scroll;
         let mut maximize_clicked = false;
+        let mut clear_selection = false;
         let scroll_key = format!("terminal-port-{port_name}");
 
-        let (inner_rect, content_height, offset_y) = {
+        let render_outcome = {
             let data = self.ports.entry(port_name.to_owned()).or_default();
-
             let mut force_scroll_to_bottom = false;
 
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(port_name).monospace().strong());
+
                 ui.checkbox(&mut data.show_rx, "RX");
                 ui.checkbox(&mut data.show_tx, "TX");
                 ui.checkbox(&mut show_hex, "HEX");
@@ -82,6 +139,7 @@ impl TerminalPanel {
 
                 if ui.button("清空").clicked() {
                     data.entries.clear();
+                    clear_selection = true;
                 }
 
                 if ui.button("⛶").on_hover_text("放大查看").clicked() {
@@ -91,38 +149,21 @@ impl TerminalPanel {
 
             ui.separator();
 
-            let scroll_to_bottom = force_scroll_to_bottom || (new_entries > 0 && auto_scroll);
-            let height = self.height.max(40.0);
+            let rows: Vec<VisibleRow<'_>> = data
+                .entries
+                .iter()
+                .filter(|entry| entry_visible(entry.direction, data.show_rx, data.show_tx))
+                .map(|entry| VisibleRow { port: None, entry })
+                .collect();
 
-            let scroll_output =
-                ScrollArea::vertical()
-                    .max_height(height)
-                    .auto_shrink([false, false])
-                    .stick_to_bottom(auto_scroll)
-                    .id_salt(&scroll_key)
-                    .show(ui, |ui| {
-                        let mut visible_count = 0;
-
-                        for entry in data.entries.iter().filter(|entry| {
-                            entry_visible(entry.direction, data.show_rx, data.show_tx)
-                        }) {
-                            visible_count += 1;
-                            show_entry_fast(ui, None, entry, show_hex);
-                        }
-
-                        if visible_count == 0 {
-                            ui.label(RichText::new("暂无串口数据").color(theme::TEXT_SECONDARY));
-                        }
-
-                        if scroll_to_bottom {
-                            ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
-                        }
-                    });
-
-            (
-                scroll_output.inner_rect,
-                scroll_output.content_size.y,
-                scroll_output.state.offset.y,
+            render_rows_view(
+                ui,
+                &scroll_key,
+                self.height,
+                &rows,
+                show_hex,
+                auto_scroll || force_scroll_to_bottom,
+                self.selected_entry_id,
             )
         };
 
@@ -130,11 +171,17 @@ impl TerminalPanel {
         self.auto_scroll = auto_scroll;
         self.maximize_clicked |= maximize_clicked;
 
-        self.update_auto_scroll(ui, &scroll_key, inner_rect, content_height, offset_y);
+        if clear_selection {
+            self.selected_entry_id = None;
+            self.detail_entry_id = None;
+        }
+
+        self.apply_render_outcome(&scroll_key, render_outcome, ui);
+        self.detail_popup(ui.ctx());
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
-        let new_entries = self.ingest();
+        let _new_entries = self.ingest();
         let scroll_key = "terminal-all".to_owned();
 
         let mut force_scroll_to_bottom = false;
@@ -148,6 +195,8 @@ impl TerminalPanel {
 
             if ui.button("清空").clicked() {
                 self.ports.clear();
+                self.selected_entry_id = None;
+                self.detail_entry_id = None;
             }
 
             if ui.button("⛶").on_hover_text("放大查看").clicked() {
@@ -165,70 +214,59 @@ impl TerminalPanel {
 
         ui.separator();
 
-        let scroll_to_bottom = force_scroll_to_bottom || (new_entries > 0 && self.auto_scroll);
-        let height = self.height.max(40.0);
+        let render_outcome = {
+            let mut rows: Vec<VisibleRow<'_>> = Vec::new();
 
-        let mut rows: Vec<VisibleRow<'_>> = Vec::new();
-
-        for (port, data) in &self.ports {
-            for entry in data
-                .entries
-                .iter()
-                .filter(|entry| entry_visible(entry.direction, self.show_rx, self.show_tx))
-            {
-                rows.push(VisibleRow {
-                    port: port.as_str(),
-                    entry,
-                });
+            for (port, data) in &self.ports {
+                for entry in data
+                    .entries
+                    .iter()
+                    .filter(|entry| entry_visible(entry.direction, self.show_rx, self.show_tx))
+                {
+                    rows.push(VisibleRow {
+                        port: Some(port.as_str()),
+                        entry,
+                    });
+                }
             }
-        }
 
-        if rows.is_empty() {
-            let scroll_output = ScrollArea::vertical()
-                .max_height(height)
-                .auto_shrink([false, false])
-                .id_salt(&scroll_key)
-                .show(ui, |ui| {
-                    ui.label(RichText::new("暂无串口数据").color(theme::TEXT_SECONDARY));
-                });
+            // 全局视图按时间排序，不按 COM 分组。
+            rows.sort_by_key(|row| (row.entry.timestamp_ms, row.entry.id));
 
-            self.update_auto_scroll(
+            render_rows_view(
                 ui,
                 &scroll_key,
-                scroll_output.inner_rect,
-                scroll_output.content_size.y,
-                scroll_output.state.offset.y,
-            );
+                self.height,
+                &rows,
+                self.show_hex,
+                self.auto_scroll || force_scroll_to_bottom,
+                self.selected_entry_id,
+            )
+        };
 
-            return;
+        self.apply_render_outcome(&scroll_key, render_outcome, ui);
+        self.detail_popup(ui.ctx());
+    }
+
+    fn apply_render_outcome(&mut self, scroll_key: &str, outcome: RenderOutcome, ui: &egui::Ui) {
+        if let Some(entry_id) = outcome.clicked_entry_id {
+            self.selected_entry_id = Some(entry_id);
         }
 
-        let row_height = 20.0;
-
-        let scroll_output = ScrollArea::vertical()
-            .max_height(height)
-            .auto_shrink([false, false])
-            .stick_to_bottom(self.auto_scroll)
-            .id_salt(&scroll_key)
-            .show_rows(ui, row_height, rows.len(), |ui, row_range| {
-                for row_index in row_range {
-                    let row = &rows[row_index];
-                    show_entry_fast(ui, Some(row.port), row.entry, self.show_hex);
-                }
-
-                if scroll_to_bottom {
-                    ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
-                }
-            });
+        if let Some(entry_id) = outcome.open_detail_entry_id {
+            self.selected_entry_id = Some(entry_id);
+            self.detail_entry_id = Some(entry_id);
+        }
 
         self.update_auto_scroll(
             ui,
-            &scroll_key,
-            scroll_output.inner_rect,
-            scroll_output.content_size.y,
-            scroll_output.state.offset.y,
+            scroll_key,
+            outcome.inner_rect,
+            outcome.content_height,
+            outcome.offset_y,
         );
     }
+
     fn update_auto_scroll(
         &mut self,
         ui: &egui::Ui,
@@ -243,7 +281,6 @@ impl TerminalPanel {
 
         let smooth_scroll_y = ui.input(|input| input.smooth_scroll_delta.y);
 
-        // 你原代码用 > 0.0 作为“用户向上滚，离开底部”的判断，这里保持一致。
         let scrolling_away_from_bottom = pointer_inside && smooth_scroll_y > 0.0;
 
         let previous_offset_y = self
@@ -261,9 +298,6 @@ impl TerminalPanel {
             self.auto_scroll = false;
         }
 
-        // 关键点：
-        // 只有用户真的把视图往底部方向移动过，并且已经到底，才自动恢复。
-        // 这样“点击暂停时已经在底部”不会立刻恢复。
         if !self.auto_scroll && at_bottom && pointer_inside && moving_towards_bottom {
             self.auto_scroll = true;
         }
@@ -274,13 +308,20 @@ impl TerminalPanel {
 
     fn ingest(&mut self) -> usize {
         let mut count = 0;
-        for event in self.subscription.drain() {
+
+        for _ in 0..MAX_INGEST_PER_FRAME {
+            let Some(event) = self.subscription.try_recv() else {
+                break;
+            };
+
             if !matches!(event.topic.as_str(), topics::SERIAL_RX | topics::SERIAL_TX) {
                 continue;
             }
+
             self.push_event(event);
             count += 1;
         }
+
         count
     }
 
@@ -298,26 +339,175 @@ impl TerminalPanel {
             _ => event.payload.text_lossy().into_bytes(),
         };
 
-        let text = event.payload.text_lossy();
-        let display_text = format_terminal_text(&text);
+        let raw_text = event.payload.text_lossy();
+        let display_text = format_terminal_text(&raw_text);
 
-        let hex_line = if bytes.is_empty() {
+        let hex_text = format_hex(&bytes);
+        let ascii_text = format_ascii(&bytes);
+
+        let hex_preview = if hex_text.is_empty() {
             String::new()
         } else {
-            format!("{} [{}]", format_hex(&bytes), format_ascii(&bytes))
+            format!("{hex_text} [{ascii_text}]")
         };
+
+        let entry_id = self.next_entry_id;
+        self.next_entry_id = self.next_entry_id.wrapping_add(1).max(1);
 
         let data = self.ports.entry(port).or_default();
 
         data.entries.push_back(TerminalEntry {
+            id: entry_id,
+            timestamp_ms: event.timestamp_ms,
             timestamp_label: format!("[{}]", fmt_ts(event.timestamp_ms)),
             direction: event.direction,
+
+            raw_text,
             display_text,
-            hex_line,
+
+            hex_text,
+            ascii_text,
+            hex_preview,
         });
 
         while data.entries.len() > self.max_entries {
-            data.entries.pop_front();
+            let removed = data.entries.pop_front();
+
+            if let Some(removed) = removed {
+                if self.selected_entry_id == Some(removed.id) {
+                    self.selected_entry_id = None;
+                }
+
+                if self.detail_entry_id == Some(removed.id) {
+                    self.detail_entry_id = None;
+                }
+            }
+        }
+    }
+
+    fn entry_detail(&self, entry_id: u64) -> Option<EntryDetail> {
+        for (port, data) in &self.ports {
+            for entry in &data.entries {
+                if entry.id == entry_id {
+                    return Some(EntryDetail {
+                        port: port.clone(),
+                        timestamp_label: entry.timestamp_label.clone(),
+                        direction: entry.direction,
+
+                        raw_text: entry.raw_text.clone(),
+                        display_text: entry.display_text.clone(),
+
+                        hex_text: entry.hex_text.clone(),
+                        ascii_text: entry.ascii_text.clone(),
+                        hex_preview: entry.hex_preview.clone(),
+                    });
+                }
+            }
+        }
+
+        None
+    }
+
+    fn detail_popup(&mut self, ctx: &egui::Context) {
+        let Some(entry_id) = self.detail_entry_id else {
+            return;
+        };
+
+        let Some(detail) = self.entry_detail(entry_id) else {
+            self.detail_entry_id = None;
+            return;
+        };
+
+        let mut open = true;
+
+        egui::Window::new("接收详情")
+            .open(&mut open)
+            .resizable(true)
+            .default_size([760.0, 500.0])
+            .show(ctx, |ui| {
+                let (dir_label, dir_color) = direction_label(detail.direction);
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(&detail.timestamp_label).monospace());
+                    ui.label(RichText::new(&detail.port).monospace().color(theme::YELLOW));
+                    ui.label(RichText::new(dir_label).strong().color(dir_color));
+
+                    if ui.button("复制内容").clicked() {
+                        ui.ctx().copy_text(detail.raw_text.clone());
+                    }
+
+                    if ui.button("复制显示文本").clicked() {
+                        ui.ctx().copy_text(detail.display_text.clone());
+                    }
+
+                    if ui.button("复制 HEX").clicked() {
+                        ui.ctx().copy_text(detail.hex_text.clone());
+                    }
+                });
+
+                ui.separator();
+
+                ui.label(RichText::new("原始内容").strong());
+                let mut raw_text = detail.raw_text.clone();
+                ui.add(
+                    egui::TextEdit::multiline(&mut raw_text)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(8)
+                        .font(egui::TextStyle::Monospace)
+                        .interactive(false),
+                );
+
+                ui.separator();
+
+                ui.label(RichText::new("显示文本").strong());
+                let mut display_text = detail.display_text.clone();
+                ui.add(
+                    egui::TextEdit::multiline(&mut display_text)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(6)
+                        .font(egui::TextStyle::Monospace)
+                        .interactive(false),
+                );
+
+                ui.separator();
+
+                ui.label(RichText::new("HEX").strong());
+                let mut hex_text = detail.hex_text.clone();
+                ui.add(
+                    egui::TextEdit::multiline(&mut hex_text)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(6)
+                        .font(egui::TextStyle::Monospace)
+                        .interactive(false),
+                );
+
+                ui.separator();
+
+                ui.label(RichText::new("ASCII 预览").strong());
+                let mut ascii_text = detail.ascii_text.clone();
+                ui.add(
+                    egui::TextEdit::multiline(&mut ascii_text)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(4)
+                        .font(egui::TextStyle::Monospace)
+                        .interactive(false),
+                );
+
+                ui.separator();
+
+                ui.label(RichText::new("HEX / ASCII 显示预览").strong());
+                let mut hex_preview = detail.hex_preview.clone();
+                ui.add(
+                    egui::TextEdit::multiline(&mut hex_preview)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(4)
+                        .font(egui::TextStyle::Monospace)
+                        .interactive(false),
+                );
+            });
+
+        if !open {
+            self.detail_entry_id = None;
         }
     }
 }
@@ -330,6 +520,100 @@ impl Default for PortData {
             show_tx: true,
         }
     }
+}
+
+fn render_rows_view(
+    ui: &mut egui::Ui,
+    scroll_key: &str,
+    height: f32,
+    rows: &[VisibleRow<'_>],
+    show_hex: bool,
+    stick_to_bottom: bool,
+    selected_entry_id: Option<u64>,
+) -> RenderOutcome {
+    let height = height.max(40.0);
+    let row_height = terminal_row_height(ui);
+
+    if rows.is_empty() {
+        let scroll_output = ScrollArea::vertical()
+            .max_height(height)
+            .auto_shrink([false, false])
+            .id_salt(scroll_key)
+            .show(ui, |ui| {
+                ui.label(RichText::new("暂无串口数据").color(theme::TEXT_SECONDARY));
+            });
+
+        return RenderOutcome {
+            inner_rect: scroll_output.inner_rect,
+            content_height: scroll_output.content_size.y,
+            offset_y: scroll_output.state.offset.y,
+            clicked_entry_id: None,
+            open_detail_entry_id: None,
+        };
+    }
+
+    let mut clicked_entry_id = None;
+    let mut open_detail_entry_id = None;
+
+    let scroll_output = ScrollArea::vertical()
+        .max_height(height)
+        .auto_shrink([false, false])
+        .stick_to_bottom(stick_to_bottom)
+        .id_salt(scroll_key)
+        .show_rows(ui, row_height, rows.len(), |ui, row_range| {
+            for row_index in row_range {
+                let row = &rows[row_index];
+                let selected = selected_entry_id == Some(row.entry.id);
+
+                let response =
+                    show_entry_fast(ui, row.port, row.entry, show_hex, row_height, selected);
+
+                if response.clicked() {
+                    clicked_entry_id = Some(row.entry.id);
+                }
+
+                if response.double_clicked() {
+                    clicked_entry_id = Some(row.entry.id);
+                    open_detail_entry_id = Some(row.entry.id);
+                }
+
+                response.context_menu(|ui| {
+                    if ui.button("复制内容").clicked() {
+                        ui.ctx().copy_text(row.entry.raw_text.clone());
+                        ui.close();
+                    }
+
+                    if ui.button("复制显示文本").clicked() {
+                        ui.ctx().copy_text(row.entry.display_text.clone());
+                        ui.close();
+                    }
+
+                    if ui.button("复制 HEX").clicked() {
+                        ui.ctx().copy_text(row.entry.hex_text.clone());
+                        ui.close();
+                    }
+
+                    ui.separator();
+
+                    if ui.button("查看详情").clicked() {
+                        open_detail_entry_id = Some(row.entry.id);
+                        ui.close();
+                    }
+                });
+            }
+        });
+
+    RenderOutcome {
+        inner_rect: scroll_output.inner_rect,
+        content_height: scroll_output.content_size.y,
+        offset_y: scroll_output.state.offset.y,
+        clicked_entry_id,
+        open_detail_entry_id,
+    }
+}
+
+fn terminal_row_height(ui: &egui::Ui) -> f32 {
+    (ui.text_style_height(&egui::TextStyle::Monospace).ceil() + 6.0).max(20.0)
 }
 
 fn entry_visible(direction: Direction, show_rx: bool, show_tx: bool) -> bool {
@@ -345,6 +629,7 @@ fn auto_scroll_button(ui: &mut egui::Ui, auto_scroll: &mut bool) -> bool {
         if ui.button("⏸").on_hover_text("暂停自动滚动").clicked() {
             *auto_scroll = false;
         }
+
         false
     } else if ui.button("↓").on_hover_text("滚动到底部").clicked() {
         *auto_scroll = true;
@@ -377,6 +662,7 @@ fn format_ascii(bytes: &[u8]) -> String {
 
 fn format_terminal_text(text: &str) -> String {
     let mut output = String::new();
+
     for ch in text.chars() {
         match ch {
             '\r' => output.push_str("\\r"),
@@ -386,17 +672,19 @@ fn format_terminal_text(text: &str) -> String {
             ch => output.push(ch),
         }
     }
+
     output
 }
 
 fn fmt_ts(ms: u64) -> String {
-    let secs = (ms / 1000) % 86_400;
-    format!(
-        "{:02}:{:02}:{:02}",
-        secs / 3_600,
-        (secs % 3_600) / 60,
-        secs % 60
-    )
+    let Some(dt_utc) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64) else {
+        return "--:--:--.---".to_owned();
+    };
+
+    dt_utc
+        .with_timezone(&chrono::Local)
+        .format("%H:%M:%S%.3f")
+        .to_string()
 }
 
 fn direction_label(direction: Direction) -> (&'static str, Color32) {
@@ -407,39 +695,89 @@ fn direction_label(direction: Direction) -> (&'static str, Color32) {
     }
 }
 
-fn show_entry_fast(ui: &mut egui::Ui, port: Option<&str>, entry: &TerminalEntry, show_hex: bool) {
+fn show_entry_fast(
+    ui: &mut egui::Ui,
+    port: Option<&str>,
+    entry: &TerminalEntry,
+    show_hex: bool,
+    row_height: f32,
+    selected: bool,
+) -> egui::Response {
+    let row_width = ui.available_width();
+
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(row_width, row_height), egui::Sense::click());
+
+    let bg = if selected {
+        theme::BG_SELECTION
+    } else if response.hovered() {
+        theme::WIDGET_HOVER
+    } else {
+        Color32::TRANSPARENT
+    };
+
+    let painter = ui.painter_at(rect);
+
+    if bg != Color32::TRANSPARENT {
+        painter.rect_filled(rect, 2.0, bg);
+    }
+
+    let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+    let text_y = rect.center().y;
+
+    let mut x = rect.left() + ROW_LEFT_PADDING;
+
+    painter.text(
+        egui::pos2(x, text_y),
+        egui::Align2::LEFT_CENTER,
+        &entry.timestamp_label,
+        font_id.clone(),
+        theme::TEXT_SECONDARY,
+    );
+    x += TIME_COL_WIDTH + COL_GAP;
+
+    if let Some(port) = port {
+        painter.text(
+            egui::pos2(x, text_y),
+            egui::Align2::LEFT_CENTER,
+            port,
+            font_id.clone(),
+            theme::YELLOW,
+        );
+        x += PORT_COL_WIDTH + COL_GAP;
+    }
+
     let (dir_label, dir_color) = direction_label(entry.direction);
 
-    ui.horizontal(|ui| {
-        ui.set_height(20.0);
+    painter.text(
+        egui::pos2(x, text_y),
+        egui::Align2::LEFT_CENTER,
+        dir_label,
+        font_id.clone(),
+        dir_color,
+    );
+    x += DIR_COL_WIDTH + COL_GAP;
 
-        ui.add_sized(
-            [82.0, 20.0],
-            egui::Label::new(
-                RichText::new(&entry.timestamp_label)
-                    .monospace()
-                    .color(theme::TEXT_SECONDARY),
-            ),
-        );
+    let payload = if show_hex {
+        &entry.hex_preview
+    } else {
+        &entry.display_text
+    };
 
-        if let Some(port) = port {
-            ui.add_sized(
-                [90.0, 20.0],
-                egui::Label::new(RichText::new(port).monospace().color(theme::YELLOW)),
-            );
-        }
+    let payload_clip = egui::Rect::from_min_max(
+        egui::pos2(x, rect.top()),
+        egui::pos2(rect.right(), rect.bottom()),
+    );
 
-        ui.add_sized(
-            [36.0, 20.0],
-            egui::Label::new(RichText::new(dir_label).strong().color(dir_color)),
-        );
+    let payload_painter = ui.painter().with_clip_rect(payload_clip);
 
-        let text = if show_hex {
-            &entry.hex_line
-        } else {
-            &entry.display_text
-        };
+    payload_painter.text(
+        egui::pos2(x, text_y),
+        egui::Align2::LEFT_CENTER,
+        payload,
+        font_id,
+        theme::TEXT_PRIMARY,
+    );
 
-        ui.add(egui::Label::new(RichText::new(text).monospace()).truncate());
-    });
+    response
 }

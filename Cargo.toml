@@ -33,7 +33,7 @@ wat = "1.251.0"
 
 # ── 发布优化：减小体积、提升性能 ──
 [profile.release]
-opt-level = "s"        # 优化体积
-lto = true             # 链接时优化
-codegen-units = 1      # 单代码生成单元，更好地内联
-strip = true           # 去除调试符号
+opt-level = "s"   # 优化体积
+lto = true        # 链接时优化
+codegen-units = 1 # 单代码生成单元，更好地内联
+strip = true      # 去除调试符号
