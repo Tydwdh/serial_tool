@@ -51,12 +51,7 @@ impl JsonlRecorder {
             while !stop_thread.load(Ordering::Relaxed) {
                 match subscription.recv_timeout(Duration::from_millis(100)) {
                     Ok(event) => {
-                        if !event
-                            .metadata
-                            .get("replay")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false)
-                        {
+                        if should_record_event(&event) {
                             let _ = write_event(&mut writer, &event);
                         }
                     }
@@ -66,7 +61,9 @@ impl JsonlRecorder {
             }
 
             for event in subscription.drain() {
-                let _ = write_event(&mut writer, &event);
+                if should_record_event(&event) {
+                    let _ = write_event(&mut writer, &event);
+                }
             }
 
             let _ = writer.flush();
@@ -118,6 +115,13 @@ impl Drop for JsonlRecorder {
 fn write_event(writer: &mut impl Write, event: &Event) -> io::Result<()> {
     serde_json::to_writer(&mut *writer, event)?;
     writer.write_all(b"\n")
+}
+fn should_record_event(event: &Event) -> bool {
+    !event
+        .metadata
+        .get("replay")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,21 +303,30 @@ impl ReplayManager {
         }
     }
 
-    /// 计算后退一步的目标位置（不发布事件）
     pub fn backward_position(&self) -> Option<u64> {
-        if self.cursor == 0 {
-            return None;
-        }
-        let base = self.base_timestamp_ms()?;
-        let prev = self.cursor - 1;
-        let pos = if prev == 0 {
-            0
-        } else {
-            self.events[prev - 1].timestamp_ms.saturating_sub(base)
-        };
-        Some(pos)
+        self.backward_position_by(1)
     }
 
+    pub fn backward_position_by(&self, steps: usize) -> Option<u64> {
+        if self.events.is_empty() || self.cursor == 0 {
+            return None;
+        }
+
+        let base = self.base_timestamp_ms()?;
+        let steps = steps.max(1);
+
+        // cursor 表示“下一个要发布的事件索引”。
+        // 回退 N 步，就是希望最终重放到 cursor - N 之前的位置。
+        let target_cursor = self.cursor.saturating_sub(steps);
+
+        if target_cursor == 0 {
+            return Some(0);
+        }
+
+        self.events
+            .get(target_cursor - 1)
+            .map(|event| event.timestamp_ms.saturating_sub(base))
+    }
     pub fn set_speed(&mut self, speed: f64) {
         self.position_at_start_ms = self.position_ms();
         self.replay_start = if self.state == ReplayState::Playing {

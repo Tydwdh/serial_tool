@@ -594,42 +594,39 @@ impl WorkbenchApp {
     }
 
     fn activity_bar(&mut self, ui: &mut egui::Ui) {
-        let mut new_rects = Vec::new();
-        let dragging = self.activity_drag_source;
         let pointer = ui.ctx().pointer_latest_pos();
-        let drag_target: Option<usize> = if let Some(s) = dragging
-            && let Some(p) = pointer
-        {
-            self.activity_rects_cache
-                .iter()
-                .enumerate()
-                .find(|(i, r)| *i != s && r.contains(p))
-                .map(|(i, _)| i)
-        } else {
-            None
-        };
+        let mut activity_rects = Vec::with_capacity(self.activity_order.len());
 
         ui.vertical_centered(|ui| {
             for (idx, &act) in self.activity_order.iter().enumerate() {
                 let selected = self.panels.activity == act;
                 let label = format!("{} {}", aicon(act), act.label());
-                let sh = ashortcut(act);
-                let hover = if sh.is_empty() {
+                let shortcut = ashortcut(act);
+
+                let hover = if shortcut.is_empty() {
                     act.label().to_owned()
                 } else {
-                    format!("{} ({})", act.label(), sh)
+                    format!("{} ({})", act.label(), shortcut)
                 };
-                let (rect, resp) = ui.allocate_exact_size(
+
+                let (rect, response) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), 28.0),
                     egui::Sense::click_and_drag(),
                 );
-                let is_src = dragging == Some(idx);
-                let is_tgt = drag_target == Some(idx);
-                let bg = if is_src {
+
+                if response.drag_started() {
+                    self.activity_drag_source = Some(idx);
+                }
+
+                if response.clicked() && self.activity_drag_source.is_none() {
+                    self.panels.select_activity(act);
+                }
+
+                let is_source = self.activity_drag_source == Some(idx);
+
+                let bg = if is_source {
                     theme::BG_TERTIARY
-                } else if is_tgt {
-                    theme::BG_SELECTION
-                } else if selected || resp.hovered() {
+                } else if selected || response.hovered() {
                     if selected {
                         theme::BG_SELECTION
                     } else {
@@ -638,75 +635,82 @@ impl WorkbenchApp {
                 } else {
                     theme::BG_SECONDARY
                 };
-                let p = ui.painter_at(rect);
-                p.rect_filled(rect, 4.0, bg);
-                if is_tgt {
-                    p.rect_stroke(
-                        rect,
-                        4.0,
-                        egui::Stroke::new(2.0, theme::BLUE),
-                        egui::StrokeKind::Inside,
-                    );
-                }
-                p.text(
+
+                let painter = ui.painter_at(rect);
+                painter.rect_filled(rect, 4.0, bg);
+
+                painter.text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
                     &label,
                     egui::FontId::proportional(12.0),
-                    if is_src {
+                    if is_source {
                         theme::TEXT_SECONDARY
                     } else {
                         theme::TEXT_PRIMARY
                     },
                 );
-                if resp.clicked() {
-                    self.panels.select_activity(act);
-                }
-                if resp.dragged() && self.activity_drag_source.is_none() {
-                    self.activity_drag_source = Some(idx);
-                }
-                resp.on_hover_text(hover);
-                new_rects.push(rect);
+
+                response.on_hover_text(hover);
+
+                activity_rects.push(rect);
             }
         });
-        self.activity_rects_cache = new_rects;
-        // 拖拽释放
+
+        let drag_insert_index = if self.activity_drag_source.is_some() {
+            pointer.and_then(|pos| activity_insert_index_from_pointer(&activity_rects, pos))
+        } else {
+            None
+        };
+
+        if let Some(insert_index) = drag_insert_index {
+            paint_activity_insert_line(ui, &activity_rects, insert_index);
+        }
+
         if self.activity_drag_source.is_some() && ui.input(|i| i.pointer.any_released()) {
-            if let Some(s) = self.activity_drag_source.take()
-                && pointer.is_some()
-            {
-                if let Some(t) = drag_target
-                    && t != s
-                {
-                    let item = self.activity_order.remove(s);
-                    let insert_at = if t > s { t - 1 } else { t };
-                    self.activity_order.insert(insert_at, item);
-                    self.save_config();
+            if let Some(source_index) = self.activity_drag_source.take() {
+                if let Some(mut insert_index) = drag_insert_index {
+                    insert_index = insert_index.min(self.activity_order.len());
+
+                    if insert_index > source_index {
+                        insert_index -= 1;
+                    }
+
+                    if insert_index != source_index {
+                        let item = self.activity_order.remove(source_index);
+                        let insert_index = insert_index.min(self.activity_order.len());
+                        self.activity_order.insert(insert_index, item);
+                        self.save_config();
+                    }
                 }
-            } else {
-                self.activity_drag_source = None;
             }
         }
+
         if self.activity_drag_source.is_some() && !ui.input(|i| i.pointer.primary_down()) {
             self.activity_drag_source = None;
         }
+
+        self.activity_rects_cache = activity_rects;
 
         // 动态面板（插件子条目）
         let ids: Vec<(String, String)> = self
             .panels
             .tabs
             .iter()
-            .filter_map(|k| k.dynamic_id().map(|id| id.to_owned()))
+            .filter_map(|kind| kind.dynamic_id().map(|id| id.to_owned()))
             .filter(|id| self.dynamic_panels.contains(id))
             .map(|id| {
-                let t = self.dynamic_panels.title(&id).unwrap_or(&id).to_owned();
-                (id, t)
+                let title = self.dynamic_panels.title(&id).unwrap_or(&id).to_owned();
+                (id, title)
             })
             .collect();
+
         if !ids.is_empty() {
             ui.separator();
+
             for (id, title) in &ids {
                 let active = self.panels.active_dynamic_id() == Some(id);
+
                 if ui.selectable_label(active, format!("  {title}")).clicked() {
                     self.panels.open_tab(PanelKind::Dynamic(id.clone()));
                 }
@@ -714,6 +718,7 @@ impl WorkbenchApp {
         }
 
         ui.separator();
+
         if ui
             .selectable_label(self.bottom_panel_visible, "▽ 终端区")
             .on_hover_text("Ctrl+B")
@@ -779,22 +784,16 @@ impl WorkbenchApp {
                 }
             });
         });
-        if so {
-            ui.add(
-                egui::TextEdit::multiline(&mut self.send_input)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(5)
-                    .hint_text("Ctrl+Enter 发送 | ⛶ 放大编辑"),
-            );
-        } else {
-            ui.add(
-                egui::TextEdit::multiline(&mut self.send_input)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(5)
-                    .interactive(false)
-                    .hint_text("请先打开串口"),
-            );
-        }
+        ui.add(
+            egui::TextEdit::multiline(&mut self.send_input)
+                .desired_width(f32::INFINITY)
+                .desired_rows(5)
+                .hint_text(if so {
+                    "Ctrl+Enter 发送 | ⛶ 放大编辑"
+                } else {
+                    "可先编辑内容，打开串口后发送"
+                }),
+        );
         let ctrl_enter = ui
             .ctx()
             .input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter));
@@ -942,18 +941,32 @@ impl WorkbenchApp {
         ui.separator();
 
         ui.heading("录制");
+
         ui.horizontal(|ui| {
             ui.label("路径");
-            ui.text_edit_singleline(&mut self.recorder_path);
+
+            let recording = self.recorder.is_running();
+
+            ui.add_enabled(
+                !recording,
+                egui::TextEdit::singleline(&mut self.recorder_path).desired_width(360.0),
+            );
 
             if ui
-                .button(if self.recorder.is_running() {
-                    "停止"
+                .add_enabled(!recording, egui::Button::new("浏览"))
+                .on_hover_text(if recording {
+                    "录制中不能修改保存路径"
                 } else {
-                    "录制"
+                    "选择录制保存路径"
                 })
                 .clicked()
             {
+                if let Some(path) = pick_recorder_path(&self.recorder_path) {
+                    self.recorder_path = path.display().to_string();
+                }
+            }
+
+            if ui.button(if recording { "停止" } else { "录制" }).clicked() {
                 self.start_or_stop_recording();
             }
         });
@@ -1179,14 +1192,18 @@ impl eframe::App for WorkbenchApp {
         if self.replay_panel.want_clear_on_play {
             self.replay_panel.want_clear_on_play = false;
             self.terminal_panel.clear();
+            self.bottom_log_panel.clear();
         }
-        if self.replay_panel.want_step_backward {
-            self.replay_panel.want_step_backward = false;
+
+        if let Some(steps) = self.replay_panel.want_step_backward.take() {
             self.terminal_panel.clear();
-            self.replay_panel.do_step_backward();
+            self.bottom_log_panel.clear();
+            self.replay_panel.do_step_backward(steps);
         }
+
         if let Some(p) = self.replay_panel.want_seek_replay.take() {
             self.terminal_panel.clear();
+            self.bottom_log_panel.clear();
             self.replay_panel.do_seek_replay(p);
         }
         if self.replay_panel.want_pick_file {
@@ -1307,10 +1324,11 @@ impl eframe::App for WorkbenchApp {
                 egui::Color32::from_rgba_premultiplied(255, 255, 255, 240),
             );
         }
-
+        self.bottom_log_panel.ingest_pending();
         self.detached_dynamic_panel_viewports(&ctx);
         self.send_popup(&ctx);
         self.terminal_popup(&ctx);
+
         ctx.request_repaint_after(std::time::Duration::from_millis(REPAINT_INTERVAL_MS));
     }
 }
@@ -1380,7 +1398,10 @@ impl WorkbenchApp {
                         ui.radio_value(&mut self.send_hex_mode, true, "HEX");
                         ui.checkbox(&mut self.send_append_lf, "LF");
                         if ui
-                            .add_enabled(so, egui::Button::new("发送 (Ctrl+Enter)"))
+                            .add_enabled(
+                                so && !self.send_input.is_empty(),
+                                egui::Button::new("发送 (Ctrl+Enter)"),
+                            )
                             .clicked()
                             || (ctrl_enter && so && !self.send_input.is_empty())
                         {
@@ -1529,13 +1550,44 @@ fn config_path() -> PathBuf {
         .join("workspace.json")
 }
 fn windows_open_dialog() -> Option<PathBuf> {
-    let output = std::process::Command::new("powershell").args(["-Command", r#"Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.OpenFileDialog; $d.Filter='JSONL (*.jsonl)|*.jsonl'; if($d.ShowDialog() -eq 'OK'){Write-Output $d.FileName}"#]).output().ok()?;
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if path.is_empty() {
-        None
+    rfd::FileDialog::new()
+        .add_filter("JSONL", &["jsonl"])
+        .set_directory("logs")
+        .pick_file()
+}
+fn pick_recorder_path(current: &str) -> Option<PathBuf> {
+    let current_path = PathBuf::from(current);
+
+    let mut dialog = rfd::FileDialog::new().add_filter("JSONL", &["jsonl"]);
+
+    if let Some(parent) = current_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        dialog = dialog.set_directory(parent);
     } else {
-        Some(PathBuf::from(path))
+        dialog = dialog.set_directory("logs");
     }
+
+    if let Some(file_name) = current_path.file_name().and_then(|name| name.to_str()) {
+        dialog = dialog.set_file_name(file_name);
+    } else {
+        dialog = dialog.set_file_name(format!("session-{}.jsonl", now_timestamp_ms()));
+    }
+
+    dialog.save_file().map(ensure_jsonl_extension)
+}
+
+fn ensure_jsonl_extension(mut path: PathBuf) -> PathBuf {
+    let is_jsonl = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"));
+
+    if !is_jsonl {
+        path.set_extension("jsonl");
+    }
+
+    path
 }
 fn default_recorder_path() -> String {
     format!("logs/session-{}.jsonl", now_timestamp_ms())
@@ -1569,4 +1621,71 @@ fn serial_action_button_enabled(ui: &mut egui::Ui, enabled: bool, text: &str) ->
         enabled,
         egui::Button::new(text).min_size(SERIAL_ACTION_BUTTON_SIZE),
     )
+}
+fn activity_insert_index_from_pointer(rects: &[egui::Rect], pointer: egui::Pos2) -> Option<usize> {
+    if rects.is_empty() {
+        return None;
+    }
+
+    let left = rects
+        .iter()
+        .map(|rect| rect.left())
+        .fold(f32::INFINITY, f32::min);
+
+    let right = rects
+        .iter()
+        .map(|rect| rect.right())
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    let top = rects.first()?.top() - 14.0;
+    let bottom = rects.last()?.bottom() + 14.0;
+
+    if pointer.x < left - 16.0 || pointer.x > right + 16.0 || pointer.y < top || pointer.y > bottom
+    {
+        return None;
+    }
+
+    for (index, rect) in rects.iter().enumerate() {
+        if pointer.y < rect.center().y {
+            return Some(index);
+        }
+    }
+
+    Some(rects.len())
+}
+
+fn paint_activity_insert_line(ui: &egui::Ui, rects: &[egui::Rect], insert_index: usize) {
+    if rects.is_empty() {
+        return;
+    }
+
+    let left = rects
+        .iter()
+        .map(|rect| rect.left())
+        .fold(f32::INFINITY, f32::min);
+
+    let right = rects
+        .iter()
+        .map(|rect| rect.right())
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    let y = if insert_index == 0 {
+        rects[0].top() - 3.0
+    } else if insert_index >= rects.len() {
+        rects[rects.len() - 1].bottom() + 3.0
+    } else {
+        let above = rects[insert_index - 1];
+        let below = rects[insert_index];
+        (above.bottom() + below.top()) * 0.5
+    };
+
+    let painter = ui.painter();
+
+    painter.line_segment(
+        [egui::pos2(left + 6.0, y), egui::pos2(right - 6.0, y)],
+        egui::Stroke::new(2.0, theme::BLUE),
+    );
+
+    painter.circle_filled(egui::pos2(left + 6.0, y), 3.0, theme::BLUE);
+    painter.circle_filled(egui::pos2(right - 6.0, y), 3.0, theme::BLUE);
 }

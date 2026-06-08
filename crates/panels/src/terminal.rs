@@ -49,7 +49,7 @@ struct TerminalEntry {
     display_text: String,
 
     hex_text: String,
-    ascii_text: String,
+    utf8_preview: String,
     hex_preview: String,
 }
 
@@ -66,12 +66,8 @@ struct EntryDetail {
 
     raw_text: String,
     display_text: String,
-
     hex_text: String,
-    ascii_text: String,
-    hex_preview: String,
 }
-
 struct RenderOutcome {
     inner_rect: egui::Rect,
     content_height: f32,
@@ -343,12 +339,14 @@ impl TerminalPanel {
         let display_text = format_terminal_text(&raw_text);
 
         let hex_text = format_hex(&bytes);
-        let ascii_text = format_ascii(&bytes);
+        let utf8_preview = format_utf8_preview(&bytes);
 
         let hex_preview = if hex_text.is_empty() {
             String::new()
+        } else if utf8_preview.is_empty() {
+            hex_text.clone()
         } else {
-            format!("{hex_text} [{ascii_text}]")
+            format!("{hex_text} [{utf8_preview}]")
         };
 
         let entry_id = self.next_entry_id;
@@ -366,7 +364,7 @@ impl TerminalPanel {
             display_text,
 
             hex_text,
-            ascii_text,
+            utf8_preview,
             hex_preview,
         });
 
@@ -398,8 +396,6 @@ impl TerminalPanel {
                         display_text: entry.display_text.clone(),
 
                         hex_text: entry.hex_text.clone(),
-                        ascii_text: entry.ascii_text.clone(),
-                        hex_preview: entry.hex_preview.clone(),
                     });
                 }
             }
@@ -453,8 +449,7 @@ impl TerminalPanel {
                     egui::TextEdit::multiline(&mut raw_text)
                         .desired_width(f32::INFINITY)
                         .desired_rows(8)
-                        .font(egui::TextStyle::Monospace)
-                        .interactive(false),
+                        .font(egui::TextStyle::Monospace),
                 );
 
                 ui.separator();
@@ -465,8 +460,7 @@ impl TerminalPanel {
                     egui::TextEdit::multiline(&mut display_text)
                         .desired_width(f32::INFINITY)
                         .desired_rows(6)
-                        .font(egui::TextStyle::Monospace)
-                        .interactive(false),
+                        .font(egui::TextStyle::Monospace),
                 );
 
                 ui.separator();
@@ -477,32 +471,7 @@ impl TerminalPanel {
                     egui::TextEdit::multiline(&mut hex_text)
                         .desired_width(f32::INFINITY)
                         .desired_rows(6)
-                        .font(egui::TextStyle::Monospace)
-                        .interactive(false),
-                );
-
-                ui.separator();
-
-                ui.label(RichText::new("ASCII 预览").strong());
-                let mut ascii_text = detail.ascii_text.clone();
-                ui.add(
-                    egui::TextEdit::multiline(&mut ascii_text)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(4)
-                        .font(egui::TextStyle::Monospace)
-                        .interactive(false),
-                );
-
-                ui.separator();
-
-                ui.label(RichText::new("HEX / ASCII 显示预览").strong());
-                let mut hex_preview = detail.hex_preview.clone();
-                ui.add(
-                    egui::TextEdit::multiline(&mut hex_preview)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(4)
-                        .font(egui::TextStyle::Monospace)
-                        .interactive(false),
+                        .font(egui::TextStyle::Monospace),
                 );
             });
 
@@ -780,4 +749,21 @@ fn show_entry_fast(
     );
 
     response
+}
+fn format_utf8_preview(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+
+    let mut output = String::new();
+
+    for ch in text.chars() {
+        match ch {
+            '\r' => output.push_str("\\r"),
+            '\n' => output.push_str("\\n"),
+            '\t' => output.push_str("\\t"),
+            ch if ch.is_control() => output.push('·'),
+            ch => output.push(ch),
+        }
+    }
+
+    output
 }

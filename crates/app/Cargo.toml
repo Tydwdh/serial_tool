@@ -15,3 +15,4 @@ tool-extension = { path = "../extension" }
 tool-panels = { path = "../panels" }
 tool-recorder = { path = "../recorder" }
 tool-transport = { path = "../transport" }
+rfd = "0.17.2"
