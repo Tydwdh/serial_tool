@@ -24,7 +24,7 @@ const INSPECTOR_WIDTH: f32 = 240.0;
 const DEFAULT_WINDOW_WIDTH: f32 = 1280.0;
 const DEFAULT_WINDOW_HEIGHT: f32 = 820.0;
 const REPAINT_INTERVAL_MS: u64 = 50;
-const PORT_REFRESH_INTERVAL_SECS: f64 = 2.0;
+const PORT_REFRESH_INTERVAL_SECS: f64 = 0.5;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -343,29 +343,83 @@ impl WorkbenchApp {
         self.bus.publish(Event::system_log(lv, "app", m.into()));
     }
     fn refresh_ports(&mut self) {
+        self.refresh_ports_impl(true);
+    }
+
+    fn refresh_ports_silent(&mut self) {
+        self.refresh_ports_impl(false);
+    }
+
+    fn refresh_ports_impl(&mut self, show_status: bool) {
+        let old_names: BTreeSet<String> = self
+            .ports
+            .iter()
+            .map(|port| port.port_name.clone())
+            .collect();
+
+        let old_selected = self.selected_port.clone();
+
         match self.transport.list_serial_ports() {
-            Ok(p) => {
-                self.ports = p;
-                if self
+            Ok(new_ports) => {
+                let new_names: BTreeSet<String> = new_ports
+                    .iter()
+                    .map(|port| port.port_name.clone())
+                    .collect();
+
+                let added_ports: Vec<String> = new_names.difference(&old_names).cloned().collect();
+
+                let removed_ports: Vec<String> =
+                    old_names.difference(&new_names).cloned().collect();
+
+                self.ports = new_ports;
+
+                let selected_still_exists = self
                     .selected_port
                     .as_ref()
-                    .is_none_or(|s| !self.ports.iter().any(|x| &x.port_name == s))
-                {
-                    self.selected_port = self.ports.first().map(|x| x.port_name.clone());
+                    .is_some_and(|selected| new_names.contains(selected));
+
+                // 关键：只在当前选中端口消失时清空选择，不自动切到新端口。
+                if !selected_still_exists {
+                    self.selected_port = None;
                 }
-                self.status_message = format!("{} 个串口", self.ports.len());
+
+                if show_status {
+                    self.status_message = format!("{} 个串口", self.ports.len());
+                    return;
+                }
+
+                if !added_ports.is_empty() {
+                    self.status_message = format!("发现串口 {}", added_ports.join(", "));
+                } else if !removed_ports.is_empty() {
+                    self.status_message = format!("移除串口 {}", removed_ports.join(", "));
+                } else if self.selected_port != old_selected {
+                    self.status_message = "请选择串口".into();
+                }
             }
-            Err(e) => {
-                self.status_message = e.to_string();
+            Err(error) => {
+                self.status_message = error.to_string();
             }
         }
     }
+
     fn open_selected_port(&mut self) {
-        let Some(ref p) = self.selected_port.clone() else {
+        self.refresh_ports_silent();
+
+        let Some(p) = self.selected_port.clone() else {
             self.log(LogLevel::Warn, "请选择串口");
+            self.status_message = "请选择串口".into();
             return;
         };
+
+        let selected_exists = self.ports.iter().any(|port| port.port_name == p);
+
+        if !selected_exists {
+            self.status_message = format!("串口 {p} 不存在，请重新选择");
+            return;
+        }
+
         let b = self.baud_rate.parse().unwrap_or(115200);
+
         let cfg = SerialConfig {
             port_name: p.clone(),
             baud_rate: b,
@@ -374,6 +428,7 @@ impl WorkbenchApp {
             parity: ppar(&self.parity),
             timeout_ms: self.timeout_ms.parse().unwrap_or(50),
         };
+
         match self.transport.open_serial(cfg) {
             Ok(()) => {
                 self.status_message = format!("{p} 已连接");
@@ -690,17 +745,7 @@ impl WorkbenchApp {
                 self.top_bar_serial_collapsed = !self.top_bar_serial_collapsed;
             }
             if !self.top_bar_serial_collapsed {
-                serial_combo(ui, "top-port", 130.0, &self.ports, &mut self.selected_port);
-                baud_combo(ui, "top-baud", 80.0, &mut self.baud_rate);
-                if ui.small_button("打开").clicked() {
-                    self.open_selected_port();
-                }
-                if ui.small_button("关闭").clicked() {
-                    if let Some(ref p) = self.selected_port {
-                        self.transport.close_port(p);
-                    }
-                    self.status_message = "已关闭".into();
-                }
+                self.serial_connect_controls(ui, "top-port", "top-baud", 130.0, 80.0, true);
             }
             ui.separator();
             let rec = self.recorder.is_running();
@@ -854,12 +899,11 @@ impl WorkbenchApp {
     }
     fn device_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("设备");
+
         ui.horizontal(|ui| {
-            ui.label("端口");
-            serial_combo(ui, "dev-port", 180.0, &self.ports, &mut self.selected_port);
-            ui.label("波特率");
-            baud_combo(ui, "dev-baud", 90.0, &mut self.baud_rate);
+            self.serial_connect_controls(ui, "dev-port", "dev-baud", 180.0, 90.0, false);
         });
+
         ui.horizontal(|ui| {
             ui.label("数据位");
             egui::ComboBox::from_id_salt("dev-db")
@@ -870,6 +914,7 @@ impl WorkbenchApp {
                         ui.selectable_value(&mut self.data_bits, v.to_owned(), v);
                     }
                 });
+
             ui.label("停止位");
             egui::ComboBox::from_id_salt("dev-sb")
                 .width(60.0)
@@ -879,6 +924,7 @@ impl WorkbenchApp {
                         ui.selectable_value(&mut self.stop_bits, v.to_owned(), v);
                     }
                 });
+
             ui.label("校验");
             egui::ComboBox::from_id_salt("dev-par")
                 .width(70.0)
@@ -888,42 +934,18 @@ impl WorkbenchApp {
                         ui.selectable_value(&mut self.parity, v.to_owned(), l);
                     }
                 });
+
             ui.label("超时(ms)");
             ui.add(egui::TextEdit::singleline(&mut self.timeout_ms).desired_width(50.0));
         });
-        let st = self
-            .transport
-            .status_port(self.selected_port.as_deref().unwrap_or(""));
-        ui.horizontal(|ui| {
-            if st.open {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "● {} @ {} {}N{}",
-                        st.port_name.as_deref().unwrap_or("?"),
-                        st.baud_rate.unwrap_or(0),
-                        &self.data_bits,
-                        &self.stop_bits
-                    ))
-                    .color(theme::GREEN),
-                );
-            } else {
-                ui.label(egui::RichText::new("○ 未连接").color(theme::TEXT_SECONDARY));
-            }
-            if ui.button("打开").clicked() {
-                self.open_selected_port();
-            }
-            if ui.add_enabled(st.open, egui::Button::new("关闭")).clicked() {
-                if let Some(ref p) = self.selected_port {
-                    self.transport.close_port(p);
-                }
-                self.status_message = "已关闭".into();
-            }
-        });
+
         ui.separator();
+
         ui.heading("录制");
         ui.horizontal(|ui| {
             ui.label("路径");
             ui.text_edit_singleline(&mut self.recorder_path);
+
             if ui
                 .button(if self.recorder.is_running() {
                     "停止"
@@ -935,11 +957,13 @@ impl WorkbenchApp {
                 self.start_or_stop_recording();
             }
         });
+
         ui.separator();
+
         ui.heading("可用端口");
         egui::ScrollArea::vertical().show(ui, |ui| {
             for port in &self.ports {
-                ui.monospace(&port.port_name);
+                ui.monospace(format!("{} {}", port.port_name, port.port_type));
             }
         });
     }
@@ -1063,6 +1087,76 @@ impl WorkbenchApp {
             }
         });
     }
+
+    fn serial_connect_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        port_combo_id: &'static str,
+        baud_combo_id: &'static str,
+        port_width: f32,
+        baud_width: f32,
+        compact: bool,
+    ) {
+        if !compact {
+            ui.label("端口");
+        }
+
+        serial_combo(
+            ui,
+            port_combo_id,
+            port_width,
+            &self.ports,
+            &mut self.selected_port,
+        );
+
+        if !compact {
+            ui.label("波特率");
+        }
+
+        baud_combo(ui, baud_combo_id, baud_width, &mut self.baud_rate);
+
+        let selected_open = self
+            .selected_port
+            .as_deref()
+            .is_some_and(|port| self.transport.status_port(port).open);
+
+        if serial_action_button(ui, "打开").clicked() {
+            self.open_selected_port();
+        }
+
+        if serial_action_button_enabled(ui, selected_open, "关闭").clicked() {
+            if let Some(ref port) = self.selected_port {
+                self.transport.close_port(port);
+                self.status_message = format!("{port} 已关闭");
+            }
+        }
+
+        if !compact {
+            match self.selected_port.as_deref() {
+                Some(port) => {
+                    let st = self.transport.status_port(port);
+
+                    if st.open {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "● {} @ {} {}N{}",
+                                port,
+                                st.baud_rate.unwrap_or(0),
+                                &self.data_bits,
+                                &self.stop_bits
+                            ))
+                            .color(theme::GREEN),
+                        );
+                    } else {
+                        ui.label(egui::RichText::new("○ 未连接").color(theme::TEXT_SECONDARY));
+                    }
+                }
+                None => {
+                    ui.label(egui::RichText::new("○ 未选择串口").color(theme::TEXT_SECONDARY));
+                }
+            }
+        }
+    }
 }
 
 // ══════════════════════════════════════════
@@ -1125,9 +1219,7 @@ impl eframe::App for WorkbenchApp {
         }
         if now - self.last_port_refresh > PORT_REFRESH_INTERVAL_SECS {
             self.last_port_refresh = now;
-            if let Ok(p) = self.transport.list_serial_ports() {
-                self.ports = p;
-            }
+            self.refresh_ports_silent();
         }
 
         // 面板
@@ -1359,15 +1451,26 @@ fn serial_combo(
     ports: &[SerialPortDescriptor],
     sel: &mut Option<String>,
 ) {
+    let selected_text = match sel.as_deref() {
+        Some(port) => port.to_owned(),
+        None if ports.is_empty() => "无端口".to_owned(),
+        None => "请选择串口".to_owned(),
+    };
+
     egui::ComboBox::from_id_salt(id)
         .width(w)
-        .selected_text(sel.clone().unwrap_or_else(|| "无端口".into()))
+        .selected_text(selected_text)
         .show_ui(ui, |ui| {
-            for p in ports {
-                ui.selectable_value(sel, Some(p.port_name.clone()), &p.port_name);
+            if ports.is_empty() {
+                ui.add_enabled(false, egui::Label::new("无可用串口"));
+            } else {
+                for port in ports {
+                    ui.selectable_value(sel, Some(port.port_name.clone()), &port.port_name);
+                }
             }
         });
 }
+
 fn baud_combo(ui: &mut egui::Ui, id: &'static str, w: f32, baud: &mut String) {
     let r = [
         "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600",
@@ -1453,4 +1556,17 @@ fn ashortcut(a: Activity) -> &'static str {
         Activity::Settings => "Ctrl+3",
         _ => "",
     }
+}
+
+const SERIAL_ACTION_BUTTON_SIZE: egui::Vec2 = egui::vec2(52.0, 26.0);
+
+fn serial_action_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.add_sized(SERIAL_ACTION_BUTTON_SIZE, egui::Button::new(text))
+}
+
+fn serial_action_button_enabled(ui: &mut egui::Ui, enabled: bool, text: &str) -> egui::Response {
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(text).min_size(SERIAL_ACTION_BUTTON_SIZE),
+    )
 }
