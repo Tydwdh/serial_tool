@@ -178,7 +178,8 @@ impl TerminalPanel {
                 self.height,
                 &rows,
                 show_hex,
-                auto_scroll || force_scroll_to_bottom,
+                auto_scroll,
+                force_scroll_to_bottom,
                 self.selected_entry_id,
             )
         };
@@ -260,7 +261,8 @@ impl TerminalPanel {
                 self.height,
                 &rows,
                 self.show_hex,
-                self.auto_scroll || force_scroll_to_bottom,
+                self.auto_scroll,
+                force_scroll_to_bottom,
                 self.selected_entry_id,
             )
         };
@@ -528,6 +530,7 @@ fn render_rows_view(
     rows: &[VisibleRow<'_>],
     show_hex: bool,
     stick_to_bottom: bool,
+    force_scroll_to_bottom: bool,
     selected_entry_id: Option<u64>,
 ) -> RenderOutcome {
     let height = height.max(40.0);
@@ -554,12 +557,17 @@ fn render_rows_view(
     let mut clicked_entry_id = None;
     let mut open_detail_entry_id = None;
 
-    let scroll_output = ScrollArea::vertical()
+    let mut scroll_area = ScrollArea::vertical()
         .max_height(height)
         .auto_shrink([false, false])
         .stick_to_bottom(stick_to_bottom)
-        .id_salt(scroll_key)
-        .show_rows(ui, row_height, rows.len(), |ui, row_range| {
+        .id_salt(scroll_key);
+
+    if force_scroll_to_bottom {
+        scroll_area = scroll_area.vertical_scroll_offset(1e9);
+    }
+
+    let scroll_output = scroll_area.show_rows(ui, row_height, rows.len(), |ui, row_range| {
             for row_index in row_range {
                 let row = &rows[row_index];
                 let selected = selected_entry_id == Some(row.entry.id);
