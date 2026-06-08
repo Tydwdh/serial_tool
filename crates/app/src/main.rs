@@ -1089,19 +1089,22 @@ impl WorkbenchApp {
 
         ui.horizontal(|ui| {
             ui.label("模式");
+            let recording = self.recorder.is_running();
             let mut mode = self.recorder.mode();
-            egui::ComboBox::from_id_salt("record-mode")
-                .width(160.0)
-                .selected_text(record_mode_label(mode))
-                .show_ui(ui, |ui| {
-                    for &m in &[
-                        RecordMode::StandardReplay,
-                        RecordMode::RawSerial,
-                        RecordMode::FullDebug,
-                    ] {
-                        ui.selectable_value(&mut mode, m, record_mode_label(m));
-                    }
-                });
+            ui.add_enabled_ui(!recording, |ui| {
+                egui::ComboBox::from_id_salt("record-mode")
+                    .width(160.0)
+                    .selected_text(record_mode_label(mode))
+                    .show_ui(ui, |ui| {
+                        for &m in &[
+                            RecordMode::StandardReplay,
+                            RecordMode::RawSerial,
+                            RecordMode::FullDebug,
+                        ] {
+                            ui.selectable_value(&mut mode, m, record_mode_label(m));
+                        }
+                    });
+            });
             self.recorder.set_mode(mode);
         });
 
@@ -1374,7 +1377,19 @@ impl eframe::App for WorkbenchApp {
                 Payload::Empty,
             ));
 
-            self.replay_panel.do_step_backward(steps);
+            let steps = steps.max(1);
+            let pos = self
+                .replay_panel
+                .manager()
+                .backward_position_by(steps);
+
+            if let Some(pos) = pos {
+                // 阶段 1：先发布 ui.panel.create 并创建图表面板
+                self.replay_panel.do_seek_panel_phase(pos);
+                self.dynamic_panels.ingest(&mut self.panels);
+                // 阶段 2：再发布数据事件
+                self.replay_panel.do_seek_data_phase(pos);
+            }
 
             let terminal_count = self.terminal_panel.ingest_all_pending();
             let log_count = self.bottom_log_panel.ingest_all_pending();
@@ -1398,7 +1413,11 @@ impl eframe::App for WorkbenchApp {
                 Payload::Empty,
             ));
 
-            self.replay_panel.do_seek_replay(p);
+            // 阶段 1：先发布 ui.panel.create 并创建图表面板
+            self.replay_panel.do_seek_panel_phase(p);
+            self.dynamic_panels.ingest(&mut self.panels);
+            // 阶段 2：再发布数据事件
+            self.replay_panel.do_seek_data_phase(p);
 
             let terminal_count = self.terminal_panel.ingest_all_pending();
             let log_count = self.bottom_log_panel.ingest_all_pending();

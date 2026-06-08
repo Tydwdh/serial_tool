@@ -75,6 +75,18 @@ impl ReplayPanel {
         self.manager.seek_with_replay(position_ms);
     }
 
+    /// 两阶段回放 - 阶段 1：只发布 ui.panel.create 事件。
+    /// 返回发布的事件数。调用方应在此之后调用 dynamic_panels.ingest() 创建图表面板。
+    pub fn do_seek_panel_phase(&mut self, position_ms: u64) -> usize {
+        self.manager.seek_panel_phase(position_ms)
+    }
+
+    /// 两阶段回放 - 阶段 2：发布剩余事件 + analyzer cache。
+    /// 返回发布的事件数。
+    pub fn do_seek_data_phase(&mut self, position_ms: u64) -> usize {
+        self.manager.seek_data_phase(position_ms)
+    }
+
     /// 执行步进退后：调用方需要先清空终端/日志
     pub fn do_step_backward(&mut self, steps: usize) {
         let steps = steps.max(1);

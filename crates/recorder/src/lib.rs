@@ -446,23 +446,78 @@ impl ReplayManager {
     /// 回退并重放到指定位置（用于拖动进度条）
     /// 返回重放的事件数，调用方应在调用前清空 UI 面板
     pub fn seek_with_replay(&mut self, position_ms: u64) -> usize {
+        let panel_count = self.seek_panel_phase(position_ms);
+        let data_count = self.seek_data_phase(position_ms);
+        panel_count + data_count
+    }
+
+    /// 第一阶段：重置位置，只发布 ui.panel.create 事件。
+    /// 调用方应在该阶段后处理面板创建，再调用 seek_data_phase。
+    pub fn seek_panel_phase(&mut self, position_ms: u64) -> usize {
         self.cursor = 0;
         self.analyzer_cursor = 0;
         self.position_at_start_ms = position_ms.min(self.duration_ms());
         self.replay_start = None;
         self.state = ReplayState::Paused;
+        self.publish_until_filtered(position_ms, |event| event.topic == tool_core::topics::UI_PANEL_CREATE)
+    }
 
-        let recorded_count = self.publish_until(position_ms);
+    /// 第二阶段：发布剩余事件（非 ui.panel.create）+ analyzer cache。
+    /// 必须在 seek_panel_phase 之后调用。
+    pub fn seek_data_phase(&mut self, position_ms: u64) -> usize {
+        let policy = self.effective_policy();
+        // 跳过 ui.panel.create（已在阶段 1 发布），ReparseRaw 下同时跳过 protocol.*
+        let data_count = self.publish_until_filtered(position_ms, |event| {
+            event.topic != tool_core::topics::UI_PANEL_CREATE
+                && (policy != ReplayPolicy::ReparseRaw
+                    || !event.topic.starts_with("protocol."))
+        });
 
-        // 在 ReparseRaw 模式下，额外发布 analyzer_cache 中 <= position_ms 的事件
         let analyzer_count =
-            if self.effective_policy() == ReplayPolicy::ReparseRaw && self.analyzer_cache_valid {
+            if policy == ReplayPolicy::ReparseRaw && self.analyzer_cache_valid {
                 self.publish_analyzer_cache_until(position_ms)
             } else {
                 0
             };
 
-        recorded_count + analyzer_count
+        data_count + analyzer_count
+    }
+
+    /// 按 predicate 过滤发布事件到指定位置。
+    fn publish_until_filtered(
+        &mut self,
+        target_position_ms: u64,
+        predicate: impl Fn(&Event) -> bool,
+    ) -> usize {
+        let Some(base) = self.base_timestamp_ms() else {
+            return 0;
+        };
+
+        // 从 cursor 开始遍历（seek_panel_phase 后 cursor 已到末尾，seek_data_phase 会重新从 0 开始）
+        // 所以这里从 0 重新扫描，避免状态依赖
+        let mut count = 0;
+        for index in 0..self.events.len() {
+            let event = &self.events[index];
+            let event_position = event.timestamp_ms.saturating_sub(base);
+            if event_position > target_position_ms {
+                break;
+            }
+            if predicate(event) {
+                self.bus.publish(mark_replay_event(event.clone()));
+                count += 1;
+            }
+        }
+
+        // 更新 cursor 到目标位置之后
+        self.cursor = self
+            .events
+            .iter()
+            .position(|event| {
+                event.timestamp_ms.saturating_sub(base) > target_position_ms
+            })
+            .unwrap_or(self.events.len());
+
+        count
     }
 
     /// 发布 analyzer_cache 中时间戳 <= target 的未发布事件。
