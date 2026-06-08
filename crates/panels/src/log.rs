@@ -8,7 +8,8 @@ const MAX_INGEST_PER_FRAME: usize = 500;
 
 const TIME_COL_WIDTH: f32 = 118.0;
 const LEVEL_COL_WIDTH: f32 = 52.0;
-const SOURCE_COL_WIDTH: f32 = 130.0;
+const SOURCE_COL_WIDTH: f32 = 190.0;
+const SOURCE_TEXT_MAX_CHARS: usize = 26;
 const ROW_LEFT_PADDING: f32 = 4.0;
 const COL_GAP: f32 = 6.0;
 
@@ -300,10 +301,18 @@ fn show_log_entry(ui: &mut egui::Ui, entry: &LogEntry, row_height: f32) -> egui:
 
     x += LEVEL_COL_WIDTH + COL_GAP;
 
-    painter.text(
+    let source_clip = egui::Rect::from_min_max(
+        egui::pos2(x, rect.top()),
+        egui::pos2((x + SOURCE_COL_WIDTH).min(rect.right()), rect.bottom()),
+    );
+
+    let source_painter = ui.painter().with_clip_rect(source_clip);
+    let source_text = compact_middle(&entry.source, SOURCE_TEXT_MAX_CHARS);
+
+    source_painter.text(
         egui::pos2(x, text_y),
         egui::Align2::LEFT_CENTER,
-        &entry.source,
+        source_text,
         font_id.clone(),
         theme::CYAN,
     );
@@ -351,4 +360,31 @@ fn level_color(level: LogLevel) -> Color32 {
         LogLevel::Warn => theme::YELLOW,
         LogLevel::Error => theme::RED,
     }
+}
+
+fn compact_middle(text: &str, max_chars: usize) -> String {
+    let char_count = text.chars().count();
+
+    if char_count <= max_chars {
+        return text.to_owned();
+    }
+
+    if max_chars <= 3 {
+        return "...".to_owned();
+    }
+
+    let left_count = (max_chars - 3) / 2;
+    let right_count = max_chars - 3 - left_count;
+
+    let left = text.chars().take(left_count).collect::<String>();
+    let right = text
+        .chars()
+        .rev()
+        .take(right_count)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+
+    format!("{left}...{right}")
 }
