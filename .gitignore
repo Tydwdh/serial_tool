@@ -1,23 +1,28 @@
-# Rust build
+# ── Rust build ──
 target/
 *.pdb
 
-# IDE
+# ── IDE ──
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# OS
+# ── OS ──
 .DS_Store
 Thumbs.db
 
-# App data (ignore runtime logs and generated config)
+# ── App runtime data ──
 logs/
 workspace.json
 
-# Claude
+# ── Claude ──
 .claude/
 
-# Dist
+# ── Dist ──
 dist/
+
+# ── 调试工具 / 临时脚本 ──
+code_dump.txt
+collect_code.ps1
+*.tmp

@@ -12,6 +12,7 @@ serde_json.workspace = true
 tool-core = { path = "../core" }
 tool-databus = { path = "../databus" }
 tool-extension = { path = "../extension" }
+tool-lua-host = { path = "../lua_host" }
 tool-panels = { path = "../panels" }
 tool-recorder = { path = "../recorder" }
 tool-transport = { path = "../transport" }

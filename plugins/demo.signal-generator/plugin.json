@@ -5,6 +5,16 @@
   "runtime": "lua",
   "main": "main.lua",
   "permissions": ["bus", "log", "serial", "ui", "storage", "timer"],
+  "live": {
+    "main": "main.lua",
+    "permissions": ["bus", "log", "serial", "ui", "storage", "timer"]
+  },
+  "replay": {
+    "main": "replay.lua",
+    "subscriptions": ["transport.serial.default.rx"],
+    "outputs": ["protocol.demo.sample"],
+    "permissions": ["log", "storage"]
+  },
   "contributes": {
     "panels": [
       { "id": "demo-signal-chart", "title": "信号波形", "kind": "chart" },

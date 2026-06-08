@@ -1804,6 +1804,7 @@ dependencies = [
  "tool-core",
  "tool-databus",
  "tool-extension",
+ "tool-lua-host",
  "tool-panels",
  "tool-recorder",
  "tool-transport",
@@ -4007,6 +4008,7 @@ name = "tool-recorder"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
+ "serde",
  "serde_json",
  "tool-core",
  "tool-databus",

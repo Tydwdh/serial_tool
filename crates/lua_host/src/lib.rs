@@ -100,6 +100,14 @@ impl LuaPluginRuntime {
         self.event_sender.try_send(event.clone()).is_ok()
     }
 
+    pub fn on_replay_event(&self, event: &Event) -> bool {
+        if !self.alive.load(Ordering::Relaxed) {
+            return false;
+        }
+
+        self.event_sender.send(event.clone()).is_ok()
+    }
+
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
     }
@@ -108,7 +116,6 @@ impl LuaPluginRuntime {
         self.alive.load(Ordering::Relaxed)
     }
 }
-
 impl Drop for LuaPluginRuntime {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -326,7 +333,6 @@ fn plugin_event_loop(
                 &config.source,
                 format!("failed to create lua: {error}"),
             ));
-
             alive.store(false, Ordering::Relaxed);
             return;
         }
@@ -338,7 +344,6 @@ fn plugin_event_loop(
             &config.source,
             format!("failed to install ctx: {error}"),
         ));
-
         alive.store(false, Ordering::Relaxed);
         return;
     }
@@ -349,7 +354,6 @@ fn plugin_event_loop(
             &config.source,
             format!("script error: {error}"),
         ));
-
         alive.store(false, Ordering::Relaxed);
         return;
     }
@@ -372,7 +376,6 @@ fn plugin_event_loop(
             &config.source,
             "plugin finished (no callbacks)",
         ));
-
         alive.store(false, Ordering::Relaxed);
         return;
     }
@@ -383,7 +386,11 @@ fn plugin_event_loop(
             break;
         }
 
-        match event_receiver.recv_timeout(Duration::from_millis(50)) {
+        process_timers(&lua, &bus, &config);
+
+        let wait_duration = next_timer_wait(&lua).unwrap_or_else(|| Duration::from_millis(50));
+
+        match event_receiver.recv_timeout(wait_duration.min(Duration::from_millis(50))) {
             Ok(event) => {
                 if let Some(callback) = get_callback(&lua, &event.topic) {
                     let event_table = lua.create_table().ok();
@@ -405,8 +412,6 @@ fn plugin_event_loop(
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         }
 
-        process_timers(&lua, &bus, &config);
-
         let timers_empty = lua
             .globals()
             .get::<Table>("__plugin_timers")
@@ -426,7 +431,6 @@ fn plugin_event_loop(
 
     alive.store(false, Ordering::Relaxed);
 }
-
 fn get_callback(lua: &Lua, topic: &str) -> Option<Function> {
     let callbacks: Table = lua.globals().get("__plugin_callbacks").ok()?;
 
@@ -442,7 +446,27 @@ fn get_callback(lua: &Lua, topic: &str) -> Option<Function> {
 
     None
 }
+fn next_timer_wait(lua: &Lua) -> Option<Duration> {
+    let timers: Table = lua.globals().get("__plugin_timers").ok()?;
+    let now_ms = tool_core::now_timestamp_ms();
 
+    let mut next_trigger_at = u64::MAX;
+
+    for (_, timer) in timers.pairs::<String, Table>().flatten() {
+        let trigger_at_ms: u64 = timer.get("trigger_at_ms").unwrap_or(u64::MAX);
+        next_trigger_at = next_trigger_at.min(trigger_at_ms);
+    }
+
+    if next_trigger_at == u64::MAX {
+        return None;
+    }
+
+    if next_trigger_at <= now_ms {
+        Some(Duration::from_millis(0))
+    } else {
+        Some(Duration::from_millis(next_trigger_at - now_ms))
+    }
+}
 fn process_timers(lua: &Lua, bus: &DataBus, config: &LuaRunConfig) {
     let timers: Table = match lua.globals().get("__plugin_timers") {
         Ok(timers) => timers,
@@ -963,10 +987,11 @@ fn create_timer_api(lua: &Lua) -> mlua::Result<Table> {
         "after",
         lua.create_function(move |lua, (ms, callback): (u64, Function)| {
             let timers: Table = lua.globals().get("__plugin_timers")?;
-            let id = format!("t{}", tool_core::now_timestamp_ms());
+            let now_ms = tool_core::now_timestamp_ms();
+            let id = format!("t{now_ms}-{}", timers.raw_len());
 
             let timer = lua.create_table()?;
-            timer.set("trigger_at_ms", tool_core::now_timestamp_ms() + ms)?;
+            timer.set("trigger_at_ms", now_ms + ms)?;
             timer.set("interval_ms", 0_u64)?;
             timer.set("callback", callback)?;
 
@@ -980,11 +1005,13 @@ fn create_timer_api(lua: &Lua) -> mlua::Result<Table> {
         "every",
         lua.create_function(move |lua, (ms, callback): (u64, Function)| {
             let timers: Table = lua.globals().get("__plugin_timers")?;
-            let id = format!("t{}", tool_core::now_timestamp_ms());
+            let now_ms = tool_core::now_timestamp_ms();
+            let interval_ms = ms.max(1);
+            let id = format!("t{now_ms}-{}", timers.raw_len());
 
             let timer = lua.create_table()?;
-            timer.set("trigger_at_ms", tool_core::now_timestamp_ms() + ms)?;
-            timer.set("interval_ms", ms)?;
+            timer.set("trigger_at_ms", now_ms + interval_ms)?;
+            timer.set("interval_ms", interval_ms)?;
             timer.set("callback", callback)?;
 
             timers.set(id.clone(), timer)?;
@@ -1004,7 +1031,6 @@ fn create_timer_api(lua: &Lua) -> mlua::Result<Table> {
 
     Ok(table)
 }
-
 fn create_ui_api(lua: &Lua, bus: DataBus, source: String) -> mlua::Result<Table> {
     let table = lua.create_table()?;
 
@@ -1602,6 +1628,215 @@ end
 _G.test = test
 "#;
 
+// ── Replay Analyzer ──
+
+/// Replay analyzer 运行配置。
+#[derive(Debug, Clone)]
+pub struct LuaReplayConfig {
+    pub script_name: String,
+    pub plugin_id: String,
+    pub plugin_version: String,
+    pub subscriptions: Vec<String>,
+    pub context: serde_json::Value,
+}
+
+/// Replay analyzer 输出。
+#[derive(Debug, Clone)]
+pub struct LuaReplayOutput {
+    pub events: Vec<Event>,
+    pub logs: Vec<String>,
+}
+
+/// 运行 Lua replay analyzer。
+///
+/// 创建一个受限 Lua 环境，只提供 `ctx.plugin`、`ctx.storage.get`、
+/// `ctx.replay.emit`、`ctx.replay.log`、`ctx.now_ms` 以及
+/// `ctx.replay.current_event`。
+///
+/// 不提供 `ctx.serial`、`ctx.timer`、`ctx.ui`、`ctx.bus.publish`、
+/// `ctx.bus.on`。
+///
+/// 执行流程：
+/// 1. `on_replay_begin(session_info)`
+/// 2. 对每个匹配 subscriptions 的 input_event 调用 `on_replay_event(event)`
+/// 3. `on_replay_end()`
+pub fn run_replay_analyzer(
+    source: String,
+    config: LuaReplayConfig,
+    input_events: &[Event],
+) -> LuaHostResult<LuaReplayOutput> {
+    let lua = Lua::new_with(
+        StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8,
+        LuaOptions::default(),
+    )?;
+
+    let emitted_events = Arc::new(ParkingMutex::new(Vec::new()));
+    let logs = Arc::new(ParkingMutex::new(Vec::new()));
+
+    install_replay_ctx(&lua, emitted_events.clone(), logs.clone(), &config)?;
+
+    // 加载并执行 Lua 源码
+    lua.load(&source).set_name(&config.script_name).exec()?;
+
+    // 构建 session 信息
+    let first_ts = input_events.first().map(|e| e.timestamp_ms).unwrap_or(0);
+    let last_ts = input_events.last().map(|e| e.timestamp_ms).unwrap_or(0);
+    let session = lua.create_table()?;
+    session.set("start_ms", first_ts)?;
+    session.set("end_ms", last_ts)?;
+    session.set("event_count", input_events.len())?;
+
+    // on_replay_begin
+    if let Ok(begin_fn) = lua.globals().get::<Function>("on_replay_begin")
+        && let Err(e) = begin_fn.call::<Value>(session)
+    {
+        logs.lock().push(format!("on_replay_begin error: {e}"));
+    }
+
+    // 遍历输入事件
+    for input_event in input_events {
+        // 只处理匹配 subscriptions 的事件
+        if !config
+            .subscriptions
+            .iter()
+            .any(|sub| input_event.topic.starts_with(sub.as_str()))
+        {
+            continue;
+        }
+
+        // 设置当前输入事件信息，供 ctx.replay.emit 使用
+        let current_input_ts = input_event.timestamp_ms;
+        let current_input_id = input_event.id;
+        lua.globals().set("__replay_current_ts", current_input_ts)?;
+        lua.globals().set("__replay_current_id", current_input_id)?;
+
+        if let Ok(callback) = lua.globals().get::<Function>("on_replay_event") {
+            let event_table = lua.create_table()?;
+            event_to_lua_table(&lua, &event_table, input_event)?;
+
+            // 设置当前事件，供 ctx.replay.current_event() 使用
+            lua.globals()
+                .set("__replay_current_event", event_table.clone())?;
+
+            if let Err(e) = callback.call::<Value>(event_table) {
+                logs.lock().push(format!("on_replay_event error: {e}"));
+            }
+        }
+    }
+
+    // on_replay_end 时清除 current 标记，emit 使用最后一个输入事件时间戳
+    lua.globals().set("__replay_current_ts", last_ts)?;
+    lua.globals().set("__replay_current_id", Value::Nil)?;
+
+    // on_replay_end
+    if let Ok(end_fn) = lua.globals().get::<Function>("on_replay_end")
+        && let Err(e) = end_fn.call::<()>(())
+    {
+        logs.lock().push(format!("on_replay_end error: {e}"));
+    }
+
+    let events = emitted_events.lock().clone();
+    let logs = logs.lock().clone();
+
+    Ok(LuaReplayOutput { events, logs })
+}
+
+fn install_replay_ctx(
+    lua: &Lua,
+    emitted_events: Arc<ParkingMutex<Vec<Event>>>,
+    logs: Arc<ParkingMutex<Vec<String>>>,
+    config: &LuaReplayConfig,
+) -> mlua::Result<()> {
+    let ctx = lua.create_table()?;
+
+    // ctx.plugin (只读)
+    ctx.set("plugin", json_to_lua_value(lua, &config.context)?)?;
+
+    // ctx.now_ms()
+    ctx.set(
+        "now_ms",
+        lua.create_function(|_lua, ()| Ok(tool_core::now_timestamp_ms()))?,
+    )?;
+
+    // ctx.storage.get (只读)
+    let storage = lua.create_table()?;
+    storage.set(
+        "get",
+        lua.create_function(|lua, key: String| {
+            let storage: Table = lua.globals().get("__plugin_storage")?;
+            let value: mlua::Result<String> = storage.get(key);
+            Ok(match value {
+                Ok(value) => Value::String(lua.create_string(&value)?),
+                Err(_) => Value::Nil,
+            })
+        })?,
+    )?;
+    ctx.set("storage", storage)?;
+
+    // ctx.replay
+    let replay = lua.create_table()?;
+
+    // ctx.replay.emit(topic, payload)
+    // 使用当前输入事件的时间戳（由外层在 Lua globals 中设置）
+    let emitted = emitted_events.clone();
+    let config_emit = config.clone();
+    replay.set(
+        "emit",
+        lua.create_function(move |lua, (topic, payload): (String, Value)| {
+            let payload = lua_value_to_payload(payload)?;
+            let source = format!("replay-analyzer:{}", config_emit.plugin_id);
+
+            // 读取当前输入事件时间戳
+            let ts: u64 = lua.globals().get("__replay_current_ts").unwrap_or(0);
+            let derived_from: u64 = lua.globals().get("__replay_current_id").unwrap_or(0);
+
+            let mut event = Event::new(topic, source, Direction::Internal, payload);
+            event.timestamp_ms = ts;
+            tool_core::mark_derived_event(
+                &mut event,
+                &config_emit.plugin_id,
+                &config_emit.plugin_version,
+                &[derived_from],
+            );
+
+            emitted.lock().push(event);
+            Ok(())
+        })?,
+    )?;
+
+    // ctx.replay.log(message)
+    let logs_for_fn = logs.clone();
+    replay.set(
+        "log",
+        lua.create_function(move |_lua, message: String| {
+            logs_for_fn.lock().push(message);
+            Ok(())
+        })?,
+    )?;
+
+    // ctx.replay.current_event() — 返回当前输入事件 table
+    replay.set(
+        "current_event",
+        lua.create_function(|lua, ()| {
+            let event: Value = lua
+                .globals()
+                .get("__replay_current_event")
+                .unwrap_or(Value::Nil);
+            Ok(event)
+        })?,
+    )?;
+
+    ctx.set("replay", replay)?;
+
+    // 安装全局存储表
+    lua.globals().set("__plugin_storage", lua.create_table()?)?;
+
+    // 注册 ctx 全局变量
+    lua.globals().set("ctx", ctx)?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1835,6 +2070,215 @@ mod tests {
         assert_eq!(
             report["cases"][0]["raw_packets"][0]["payload_text"],
             "OK\r\n"
+        );
+    }
+
+    // ── replay analyzer 测试 ──
+
+    #[test]
+    fn replay_analyzer_no_serial_access() {
+        let source = r#"
+function on_replay_begin(session)
+end
+function on_replay_event(event)
+    -- 尝试访问 ctx.serial 应该失败
+    local ok, _ = pcall(function()
+        ctx.serial.list()
+    end)
+    assert(not ok, "ctx.serial should not be available")
+end
+function on_replay_end()
+end
+"#;
+
+        let config = LuaReplayConfig {
+            script_name: "test.lua".to_owned(),
+            plugin_id: "test".to_owned(),
+            plugin_version: "1.0.0".to_owned(),
+            subscriptions: vec!["transport.serial.default.rx".to_owned()],
+            context: json!({"id": "test", "name": "Test"}),
+        };
+
+        let input = Event::new(
+            "transport.serial.default.rx",
+            "serial:COM2",
+            Direction::Rx,
+            Payload::Text("hello".to_owned()),
+        );
+
+        let output = run_replay_analyzer(source.to_owned(), config, &[input]).unwrap();
+        // assert 失败会报 error，这里验证没有致命错误
+        assert!(output.events.is_empty());
+    }
+
+    #[test]
+    fn replay_analyzer_no_timer_access() {
+        let source = r#"
+function on_replay_begin(session)
+end
+function on_replay_event(event)
+    local ok, _ = pcall(function()
+        ctx.timer.after(10, function() end)
+    end)
+    assert(not ok, "ctx.timer should not be available")
+end
+function on_replay_end()
+end
+"#;
+
+        let config = LuaReplayConfig {
+            script_name: "test.lua".to_owned(),
+            plugin_id: "test".to_owned(),
+            plugin_version: "1.0.0".to_owned(),
+            subscriptions: vec!["transport.serial.default.rx".to_owned()],
+            context: json!({"id": "test", "name": "Test"}),
+        };
+
+        let input = Event::new(
+            "transport.serial.default.rx",
+            "serial:COM2",
+            Direction::Rx,
+            Payload::Text("hello".to_owned()),
+        );
+
+        let output = run_replay_analyzer(source.to_owned(), config, &[input]).unwrap();
+        assert!(output.events.is_empty());
+    }
+
+    #[test]
+    fn replay_analyzer_emit_has_correct_metadata() {
+        let source = r#"
+function on_replay_begin(session)
+end
+function on_replay_event(event)
+    ctx.replay.emit("protocol.demo.sample", { t = 1, value = 100 })
+end
+function on_replay_end()
+end
+"#;
+
+        let config = LuaReplayConfig {
+            script_name: "test.lua".to_owned(),
+            plugin_id: "demo.plugin".to_owned(),
+            plugin_version: "2.0.0".to_owned(),
+            subscriptions: vec!["transport.serial.default.rx".to_owned()],
+            context: json!({"id": "demo.plugin", "name": "Demo", "version": "2.0.0"}),
+        };
+
+        let input = Event::new(
+            "transport.serial.default.rx",
+            "serial:COM2",
+            Direction::Rx,
+            Payload::Text("test".to_owned()),
+        );
+
+        let output = run_replay_analyzer(source.to_owned(), config, &[input.clone()]).unwrap();
+        assert_eq!(output.events.len(), 1);
+
+        let derived = &output.events[0];
+        assert_eq!(derived.topic, "protocol.demo.sample");
+        assert!(derived.is_replay());
+        assert_eq!(derived.origin(), Some("replay_derived"));
+        assert_eq!(derived.category(), Some("derived"));
+        assert!(derived.meta_bool("derived"));
+        assert_eq!(derived.meta_str("plugin_id"), Some("demo.plugin"));
+        assert_eq!(derived.meta_str("plugin_version"), Some("2.0.0"));
+        assert!(!derived.meta_bool("recordable"));
+        // source 应包含 replay-analyzer 前缀
+        assert!(derived.source.starts_with("replay-analyzer:"));
+        // timestamp_ms 应该等于输入事件的时间戳
+        assert_eq!(derived.timestamp_ms, input.timestamp_ms);
+    }
+
+    #[test]
+    fn replay_analyzer_lifecycle() {
+        let source = r#"
+local phases = {}
+function on_replay_begin(session)
+    table.insert(phases, "begin")
+    ctx.replay.log("started with " .. session.event_count .. " events")
+end
+function on_replay_event(event)
+    table.insert(phases, "event")
+    ctx.replay.emit("test.out", { phase = "event" })
+end
+function on_replay_end()
+    table.insert(phases, "end")
+    ctx.replay.emit("test.out", { phase = "end" })
+end
+"#;
+
+        let config = LuaReplayConfig {
+            script_name: "lifecycle.lua".to_owned(),
+            plugin_id: "test.lifecycle".to_owned(),
+            plugin_version: "1.0.0".to_owned(),
+            subscriptions: vec!["transport.serial.default.rx".to_owned()],
+            context: json!({"id": "test.lifecycle", "name": "Lifecycle"}),
+        };
+
+        let input1 = Event::new(
+            "transport.serial.default.rx",
+            "serial:COM2",
+            Direction::Rx,
+            Payload::Text("a".to_owned()),
+        );
+        let input2 = Event::new(
+            "transport.serial.default.rx",
+            "serial:COM2",
+            Direction::Rx,
+            Payload::Text("b".to_owned()),
+        );
+
+        let output = run_replay_analyzer(source.to_owned(), config, &[input1, input2]).unwrap();
+
+        // 应该有 2 个 event 阶段 + 1 个 end 阶段 = 3 个 emit
+        assert_eq!(output.events.len(), 3);
+        // 日志应该有 begin 消息
+        assert!(
+            output
+                .logs
+                .iter()
+                .any(|l| l.contains("started with 2 events"))
+        );
+    }
+
+    #[test]
+    fn replay_analyzer_skips_unmatched_events() {
+        let source = r#"
+function on_replay_begin(session) end
+function on_replay_event(event)
+    ctx.replay.emit("test.out", {})
+end
+function on_replay_end() end
+"#;
+
+        let config = LuaReplayConfig {
+            script_name: "skip.lua".to_owned(),
+            plugin_id: "test.skip".to_owned(),
+            plugin_version: "1.0.0".to_owned(),
+            subscriptions: vec!["transport.serial.default.rx".to_owned()],
+            context: json!({"id": "test.skip", "name": "Skip"}),
+        };
+
+        // 只有 1 个匹配的 RX 事件，另 1 个是 TX
+        let rx = Event::new(
+            "transport.serial.default.rx",
+            "serial:COM2",
+            Direction::Rx,
+            Payload::Text("rx".to_owned()),
+        );
+        let tx = Event::new(
+            "transport.serial.default.tx",
+            "serial:COM2",
+            Direction::Tx,
+            Payload::Text("tx".to_owned()),
+        );
+
+        let output = run_replay_analyzer(source.to_owned(), config, &[rx, tx]).unwrap();
+        assert_eq!(
+            output.events.len(),
+            1,
+            "should only emit for matched RX event"
         );
     }
 }

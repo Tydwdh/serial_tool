@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::fs::{File, create_dir_all};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -10,10 +11,37 @@ use std::time::{Duration, Instant};
 use tool_core::{Event, LogLevel};
 use tool_databus::{DataBus, TopicFilter};
 
+// ── RecordMode ──
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RecordMode {
+    /// 只记录 transport.serial.* 原始事件
+    RawSerial,
+    /// 默认：串口 + protocol.* + ui.panel.create
+    #[default]
+    StandardReplay,
+    /// 记录所有事件（除 replay/derived/recordable=false）
+    FullDebug,
+}
+
+// ── ReplayPolicy ──
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ReplayPolicy {
+    /// 默认：有 protocol.* 就用 Exact，否则尝试 ReparseRaw
+    #[default]
+    AutoPreferRecorded,
+    /// 使用录制的 protocol.*，不运行 analyzer
+    ExactRecorded,
+    /// 忽略录制的 protocol.*，使用 analyzer 输出
+    ReparseRaw,
+}
+
 pub struct JsonlRecorder {
     bus: DataBus,
     worker: Option<RecorderWorker>,
     current_path: Option<PathBuf>,
+    mode: RecordMode,
 }
 
 struct RecorderWorker {
@@ -27,7 +55,16 @@ impl JsonlRecorder {
             bus,
             worker: None,
             current_path: None,
+            mode: RecordMode::default(),
         }
+    }
+
+    pub fn set_mode(&mut self, mode: RecordMode) {
+        self.mode = mode;
+    }
+
+    pub fn mode(&self) -> RecordMode {
+        self.mode
     }
 
     pub fn start(&mut self, path: impl AsRef<Path>) -> io::Result<()> {
@@ -44,6 +81,7 @@ impl JsonlRecorder {
         let subscription = self.bus.subscribe(TopicFilter::All);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
+        let mode = self.mode;
 
         let join = thread::spawn(move || {
             let mut writer = BufWriter::new(file);
@@ -51,7 +89,7 @@ impl JsonlRecorder {
             while !stop_thread.load(Ordering::Relaxed) {
                 match subscription.recv_timeout(Duration::from_millis(100)) {
                     Ok(event) => {
-                        if should_record_event(&event) {
+                        if should_record_event_with_mode(&event, mode) {
                             let _ = write_event(&mut writer, &event);
                         }
                     }
@@ -61,7 +99,7 @@ impl JsonlRecorder {
             }
 
             for event in subscription.drain() {
-                if should_record_event(&event) {
+                if should_record_event_with_mode(&event, mode) {
                     let _ = write_event(&mut writer, &event);
                 }
             }
@@ -77,7 +115,7 @@ impl JsonlRecorder {
         self.bus.publish(Event::system_log(
             LogLevel::Info,
             "recorder",
-            format!("recording to {}", path.display()),
+            format!("recording to {} (mode: {:?})", path.display(), self.mode),
         ));
         Ok(())
     }
@@ -116,12 +154,40 @@ fn write_event(writer: &mut impl Write, event: &Event) -> io::Result<()> {
     serde_json::to_writer(&mut *writer, event)?;
     writer.write_all(b"\n")
 }
-fn should_record_event(event: &Event) -> bool {
-    !event
-        .metadata
-        .get("replay")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
+
+/// 所有 mode 都统一排除的事件。
+fn is_excluded_event(event: &Event) -> bool {
+    // 回放事件
+    if event.is_replay() {
+        return true;
+    }
+    // replay / replay_derived 来源
+    if let Some(origin) = event.origin()
+        && (origin == "replay" || origin == "replay_derived")
+    {
+        return true;
+    }
+    // recordable = false
+    if !event.meta_bool("recordable") && event.meta_get("recordable").is_some() {
+        return true;
+    }
+    false
+}
+
+fn should_record_event_with_mode(event: &Event, mode: RecordMode) -> bool {
+    if is_excluded_event(event) {
+        return false;
+    }
+
+    match mode {
+        RecordMode::RawSerial => event.topic.starts_with("transport.serial."),
+        RecordMode::StandardReplay => {
+            event.topic.starts_with("transport.serial.")
+                || event.topic.starts_with("protocol.")
+                || event.topic == "ui.panel.create"
+        }
+        RecordMode::FullDebug => true,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +208,11 @@ pub struct ReplayStatus {
     pub speed: f64,
     pub position_ms: u64,
     pub duration_ms: u64,
+    pub policy: ReplayPolicy,
+    pub effective_policy: ReplayPolicy,
+    pub has_recorded_protocol: bool,
+    pub analyzer_cache_entries: usize,
+    pub analyzer_error: Option<String>,
 }
 
 pub struct ReplayManager {
@@ -153,6 +224,14 @@ pub struct ReplayManager {
     speed: f64,
     replay_start: Option<Instant>,
     position_at_start_ms: u64,
+
+    // ── 新增 ──
+    policy: ReplayPolicy,
+    has_recorded_protocol: bool,
+    analyzer_cache: Vec<Event>,
+    analyzer_cache_valid: bool,
+    analyzer_error: Option<String>,
+    analyzer_cursor: usize,
 }
 
 impl ReplayManager {
@@ -166,6 +245,12 @@ impl ReplayManager {
             speed: 1.0,
             replay_start: None,
             position_at_start_ms: 0,
+            policy: ReplayPolicy::default(),
+            has_recorded_protocol: false,
+            analyzer_cache: Vec::new(),
+            analyzer_cache_valid: false,
+            analyzer_error: None,
+            analyzer_cursor: 0,
         }
     }
 
@@ -183,13 +268,25 @@ impl ReplayManager {
                 events.push(event);
             }
         }
-        events.sort_by_key(|event| event.timestamp_ms);
+        events.sort_by_key(|event| (event.timestamp_ms, event.id));
+
+        // 扫描是否存在录制的 protocol.*（非 replay 事件）
+        self.has_recorded_protocol = events
+            .iter()
+            .any(|e| e.topic.starts_with("protocol.") && !e.is_replay());
 
         self.events = events;
         self.path = Some(path.clone());
         self.cursor = 0;
         self.position_at_start_ms = 0;
         self.replay_start = None;
+
+        // load 时 invalidate analyzer cache（因为事件变了）
+        self.analyzer_cache.clear();
+        self.analyzer_cache_valid = false;
+        self.analyzer_error = None;
+        self.analyzer_cursor = 0;
+
         self.state = if self.events.is_empty() {
             ReplayState::Empty
         } else {
@@ -199,12 +296,88 @@ impl ReplayManager {
             LogLevel::Info,
             "replay",
             format!(
-                "loaded {} event(s) from {}",
+                "loaded {} event(s) from {} (recorded_protocol: {}, policy: {:?})",
                 self.events.len(),
-                path.display()
+                path.display(),
+                self.has_recorded_protocol,
+                self.policy,
             ),
         ));
         Ok(self.events.len())
+    }
+
+    // ── Policy ──
+
+    pub fn set_policy(&mut self, policy: ReplayPolicy) {
+        if self.policy != policy {
+            self.policy = policy;
+            // 切换 policy 时 invalidate cache
+            self.analyzer_cache.clear();
+            self.analyzer_cache_valid = false;
+            self.analyzer_error = None;
+            self.analyzer_cursor = 0;
+        }
+    }
+
+    pub fn policy(&self) -> ReplayPolicy {
+        self.policy
+    }
+
+    /// 解析当前实际执行的策略。
+    /// AutoPreferRecorded → 有 protocol.* 就 Exact，否则 ReparseRaw
+    pub fn effective_policy(&self) -> ReplayPolicy {
+        match self.policy {
+            ReplayPolicy::AutoPreferRecorded => {
+                if self.has_recorded_protocol {
+                    ReplayPolicy::ExactRecorded
+                } else {
+                    ReplayPolicy::ReparseRaw
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// 是否在 ReparseRaw 模式下需要 analyzer 输出
+    pub fn needs_analyzer(&self) -> bool {
+        self.effective_policy() == ReplayPolicy::ReparseRaw
+    }
+
+    // ── Analyzer cache ──
+
+    /// 获取所有原始串口事件（供 analyzer 使用）。
+    /// 返回的是录制文件中非 replay、topic 以 transport.serial. 开头的事件。
+    pub fn raw_serial_events(&self) -> Vec<Event> {
+        self.events
+            .iter()
+            .filter(|e| e.topic.starts_with("transport.serial.") && !e.is_replay())
+            .cloned()
+            .collect()
+    }
+
+    /// 设置 analyzer 输出缓存。内部会按 (timestamp_ms, id) 排序。
+    pub fn set_analyzer_cache(&mut self, mut events: Vec<Event>) {
+        events.sort_by_key(|event| (event.timestamp_ms, event.id));
+        self.analyzer_cache = events;
+        self.analyzer_cache_valid = true;
+        self.analyzer_error = None;
+        self.analyzer_cursor = 0;
+    }
+
+    /// 标记 analyzer 失败。
+    pub fn set_analyzer_error(&mut self, error: String) {
+        self.analyzer_cache.clear();
+        self.analyzer_cache_valid = false;
+        self.analyzer_error = Some(error);
+        self.analyzer_cursor = 0;
+    }
+
+    pub fn analyzer_cache_valid(&self) -> bool {
+        self.analyzer_cache_valid
+    }
+
+    pub fn analyzer_error(&self) -> Option<&str> {
+        self.analyzer_error.as_deref()
     }
 
     pub fn play(&mut self) {
@@ -240,6 +413,7 @@ impl ReplayManager {
 
     pub fn stop(&mut self) {
         self.cursor = 0;
+        self.analyzer_cursor = 0;
         self.position_at_start_ms = 0;
         self.replay_start = None;
         self.state = if self.events.is_empty() {
@@ -273,18 +447,80 @@ impl ReplayManager {
     /// 返回重放的事件数，调用方应在调用前清空 UI 面板
     pub fn seek_with_replay(&mut self, position_ms: u64) -> usize {
         self.cursor = 0;
+        self.analyzer_cursor = 0;
         self.position_at_start_ms = position_ms.min(self.duration_ms());
         self.replay_start = None;
         self.state = ReplayState::Paused;
-        self.publish_until(position_ms)
+
+        let recorded_count = self.publish_until(position_ms);
+
+        // 在 ReparseRaw 模式下，额外发布 analyzer_cache 中 <= position_ms 的事件
+        let analyzer_count =
+            if self.effective_policy() == ReplayPolicy::ReparseRaw && self.analyzer_cache_valid {
+                self.publish_analyzer_cache_until(position_ms)
+            } else {
+                0
+            };
+
+        recorded_count + analyzer_count
     }
 
-    /// 逐事件前进：发布当前事件
+    /// 发布 analyzer_cache 中时间戳 <= target 的未发布事件。
+    fn publish_analyzer_cache_until(&mut self, target_position_ms: u64) -> usize {
+        let base = self.base_timestamp_ms().unwrap_or_default();
+        let mut count = 0;
+
+        while let Some(event) = self.analyzer_cache.get(self.analyzer_cursor) {
+            let event_position = event.timestamp_ms.saturating_sub(base);
+            if event_position > target_position_ms {
+                break;
+            }
+
+            self.bus.publish(event.clone());
+            self.analyzer_cursor += 1;
+            count += 1;
+        }
+
+        count
+    }
+
+    /// 逐事件前进：发布当前事件，并同步更新位置。
     pub fn step_forward(&mut self) -> usize {
         if self.cursor < self.events.len() {
             self.publish_cursor_event();
+
+            let position_ms = self.cursor_position_ms().min(self.duration_ms());
+            self.position_at_start_ms = position_ms;
+
+            if self.state == ReplayState::Playing {
+                self.replay_start = Some(Instant::now());
+            } else {
+                self.replay_start = None;
+            }
+
+            if self.effective_policy() == ReplayPolicy::ReparseRaw
+                && self.analyzer_cache_valid
+            {
+                self.publish_analyzer_cache_until(position_ms);
+            }
         }
+
         self.cursor
+    }
+
+    fn cursor_position_ms(&self) -> u64 {
+        let Some(base) = self.base_timestamp_ms() else {
+            return 0;
+        };
+
+        if self.cursor == 0 {
+            return 0;
+        }
+
+        self.events
+            .get(self.cursor.saturating_sub(1))
+            .map(|event| event.timestamp_ms.saturating_sub(base))
+            .unwrap_or_else(|| self.duration_ms())
     }
 
     /// 逐事件后退：回到上一个事件位置
@@ -342,7 +578,13 @@ impl ReplayManager {
             return 0;
         }
         let target_position = self.position_ms();
-        let published = self.publish_until(target_position);
+        let mut published = self.publish_until(target_position);
+
+        // 播放模式也发布 analyzer_cache
+        if self.effective_policy() == ReplayPolicy::ReparseRaw && self.analyzer_cache_valid {
+            published += self.publish_analyzer_cache_until(target_position);
+        }
+
         if self.cursor >= self.events.len() {
             self.state = ReplayState::Finished;
             self.replay_start = None;
@@ -365,6 +607,11 @@ impl ReplayManager {
             speed: self.speed,
             position_ms: self.position_ms(),
             duration_ms: self.duration_ms(),
+            policy: self.policy,
+            effective_policy: self.effective_policy(),
+            has_recorded_protocol: self.has_recorded_protocol,
+            analyzer_cache_entries: self.analyzer_cache.len(),
+            analyzer_error: self.analyzer_error.clone(),
         }
     }
 
@@ -399,6 +646,14 @@ impl ReplayManager {
             return;
         };
         self.cursor += 1;
+
+        // ReparseRaw: 跳过录制的 protocol.* （由 analyzer_cache 替代）
+        if self.effective_policy() == ReplayPolicy::ReparseRaw
+            && event.topic.starts_with("protocol.")
+        {
+            return;
+        }
+
         self.bus.publish(mark_replay_event(event));
     }
 
@@ -431,19 +686,13 @@ impl ReplayManager {
 }
 
 fn mark_replay_event(mut event: Event) -> Event {
-    let metadata = event.metadata.as_object_mut();
-    if let Some(metadata) = metadata {
-        metadata.insert("replay".to_owned(), serde_json::Value::Bool(true));
-        metadata.insert(
-            "original_source".to_owned(),
-            serde_json::Value::String(event.source.clone()),
-        );
-    } else {
-        event.metadata = serde_json::json!({
-            "replay": true,
-            "original_source": event.source
-        });
-    }
+    let original_source = event.source.clone();
+    event.meta_set("replay", serde_json::Value::Bool(true));
+    event.meta_set(
+        "original_source",
+        serde_json::Value::String(original_source),
+    );
+    event.meta_set("origin", serde_json::Value::String("replay".to_owned()));
     event.source = format!("replay:{}", event.source);
     event
 }
@@ -452,7 +701,9 @@ fn mark_replay_event(mut event: Event) -> Event {
 mod tests {
     use super::*;
     use std::{fs, thread};
-    use tool_core::{Direction, Payload, now_timestamp_ms};
+    use tool_core::{Direction, Payload, now_timestamp_ms, topics};
+
+    // ── 旧测试（适配新 API） ──
 
     #[test]
     fn records_bus_events_as_jsonl() {
@@ -462,6 +713,7 @@ mod tests {
             now_timestamp_ms()
         ));
         let mut recorder = JsonlRecorder::new(bus.clone());
+        recorder.set_mode(RecordMode::FullDebug);
 
         recorder.start(&path).unwrap();
         bus.publish(Event::new(
@@ -516,26 +768,26 @@ mod tests {
         let events = rx.drain();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].payload.text_lossy(), "one");
-        assert_eq!(events[0].metadata["replay"], true);
+        assert!(events[0].is_replay());
         assert!(events[0].source.starts_with("replay:"));
     }
 
     #[test]
     fn replay_preserves_protocol_topics_for_panels() {
         let bus = DataBus::new();
-        let pid_rx = bus.subscribe(TopicFilter::exact(tool_core::topics::PROTOCOL_PID_SAMPLE));
-        let imu_rx = bus.subscribe(TopicFilter::exact(tool_core::topics::PROTOCOL_IMU_ATTITUDE));
+        let pid_rx = bus.subscribe(TopicFilter::exact(topics::PROTOCOL_PID_SAMPLE));
+        let imu_rx = bus.subscribe(TopicFilter::exact(topics::PROTOCOL_IMU_ATTITUDE));
         let path = std::env::temp_dir().join(format!(
             "hardware-workbench-replay-protocol-test-{}.jsonl",
             now_timestamp_ms()
         ));
         let pid = Event::json(
-            tool_core::topics::PROTOCOL_PID_SAMPLE,
+            topics::PROTOCOL_PID_SAMPLE,
             "fixture",
             serde_json::json!({ "t": 1, "target": 10, "actual": 9, "output": 0.2 }),
         );
         let mut imu = Event::json(
-            tool_core::topics::PROTOCOL_IMU_ATTITUDE,
+            topics::PROTOCOL_IMU_ATTITUDE,
             "fixture",
             serde_json::json!({ "roll": 1, "pitch": 2, "yaw": 3 }),
         );
@@ -553,5 +805,385 @@ mod tests {
 
         assert_eq!(pid_rx.drain().len(), 1);
         assert_eq!(imu_rx.drain().len(), 1);
+    }
+
+    // ── RecordMode 测试 ──
+
+    #[test]
+    fn raw_serial_mode_only_records_serial_topics() {
+        assert!(should_record_event_with_mode(
+            &Event::new(
+                topics::SERIAL_RX,
+                "test",
+                Direction::Rx,
+                Payload::Text("data".to_owned()),
+            ),
+            RecordMode::RawSerial
+        ));
+
+        assert!(!should_record_event_with_mode(
+            &Event::new(
+                topics::PROTOCOL_PID_SAMPLE,
+                "test",
+                Direction::Internal,
+                Payload::Json(serde_json::json!({"t": 1})),
+            ),
+            RecordMode::RawSerial
+        ));
+    }
+
+    #[test]
+    fn standard_replay_mode_records_serial_protocol_and_panel_create() {
+        let mode = RecordMode::StandardReplay;
+
+        assert!(should_record_event_with_mode(
+            &Event::new(
+                topics::SERIAL_RX,
+                "test",
+                Direction::Rx,
+                Payload::Text("data".to_owned()),
+            ),
+            mode
+        ));
+
+        assert!(should_record_event_with_mode(
+            &Event::new(
+                topics::PROTOCOL_PID_SAMPLE,
+                "test",
+                Direction::Internal,
+                Payload::Json(serde_json::json!({"t": 1})),
+            ),
+            mode
+        ));
+
+        assert!(should_record_event_with_mode(
+            &Event::new(
+                topics::UI_PANEL_CREATE,
+                "test",
+                Direction::Internal,
+                Payload::Json(serde_json::json!({"id": "chart"})),
+            ),
+            mode
+        ));
+
+        // 不记录 log.system
+        assert!(!should_record_event_with_mode(
+            &Event::new(
+                topics::LOG_SYSTEM,
+                "test",
+                Direction::Internal,
+                Payload::Text("msg".to_owned()),
+            ),
+            mode
+        ));
+    }
+
+    #[test]
+    fn full_debug_mode_records_all() {
+        let mode = RecordMode::FullDebug;
+
+        assert!(should_record_event_with_mode(
+            &Event::new(
+                topics::LOG_SYSTEM,
+                "test",
+                Direction::Internal,
+                Payload::Text("msg".to_owned()),
+            ),
+            mode
+        ));
+    }
+
+    #[test]
+    fn all_modes_exclude_replay_events() {
+        let mut event = Event::new(
+            topics::SERIAL_RX,
+            "test",
+            Direction::Rx,
+            Payload::Text("data".to_owned()),
+        );
+        event.meta_set("replay", serde_json::Value::Bool(true));
+
+        for mode in [
+            RecordMode::RawSerial,
+            RecordMode::StandardReplay,
+            RecordMode::FullDebug,
+        ] {
+            assert!(
+                !should_record_event_with_mode(&event, mode),
+                "mode {:?} should exclude replay events",
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn all_modes_exclude_recordable_false() {
+        let mut event = Event::new(
+            topics::SERIAL_RX,
+            "test",
+            Direction::Rx,
+            Payload::Text("data".to_owned()),
+        );
+        event.meta_set("recordable", serde_json::Value::Bool(false));
+
+        for mode in [
+            RecordMode::RawSerial,
+            RecordMode::StandardReplay,
+            RecordMode::FullDebug,
+        ] {
+            assert!(
+                !should_record_event_with_mode(&event, mode),
+                "mode {:?} should exclude recordable=false",
+                mode
+            );
+        }
+    }
+
+    // ── ReplayPolicy 测试 ──
+
+    #[test]
+    fn auto_prefer_recorded_detects_protocol() {
+        let bus = DataBus::new();
+        let path =
+            std::env::temp_dir().join(format!("hw-policy-auto-{}.jsonl", now_timestamp_ms()));
+
+        let serial = Event::new(
+            topics::SERIAL_RX,
+            "fixture",
+            Direction::Rx,
+            Payload::Text("data".to_owned()),
+        );
+        let protocol = Event::json(
+            topics::PROTOCOL_PID_SAMPLE,
+            "fixture",
+            serde_json::json!({"t": 1, "target": 50, "actual": 43, "output": 0.71}),
+        );
+        {
+            let mut file = File::create(&path).unwrap();
+            write_event(&mut file, &serial).unwrap();
+            write_event(&mut file, &protocol).unwrap();
+        }
+
+        let mut replay = ReplayManager::new(bus);
+        replay.load(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert!(replay.has_recorded_protocol);
+        assert_eq!(replay.effective_policy(), ReplayPolicy::ExactRecorded);
+        assert!(!replay.needs_analyzer());
+    }
+
+    #[test]
+    fn auto_prefer_recorded_falls_back_to_reparse() {
+        let bus = DataBus::new();
+        let path = std::env::temp_dir().join(format!(
+            "hw-policy-auto-noproto-{}.jsonl",
+            now_timestamp_ms()
+        ));
+
+        let serial = Event::new(
+            topics::SERIAL_RX,
+            "fixture",
+            Direction::Rx,
+            Payload::Text("data".to_owned()),
+        );
+        {
+            let mut file = File::create(&path).unwrap();
+            write_event(&mut file, &serial).unwrap();
+        }
+
+        let mut replay = ReplayManager::new(bus);
+        replay.load(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert!(!replay.has_recorded_protocol);
+        assert_eq!(replay.effective_policy(), ReplayPolicy::ReparseRaw);
+        assert!(replay.needs_analyzer());
+    }
+
+    #[test]
+    fn reparse_raw_skips_protocol_events() {
+        let bus = DataBus::new();
+        let rx = bus.subscribe(TopicFilter::exact(topics::PROTOCOL_PID_SAMPLE));
+        let path =
+            std::env::temp_dir().join(format!("hw-policy-reparse-{}.jsonl", now_timestamp_ms()));
+
+        let serial = Event::new(
+            topics::SERIAL_RX,
+            "fixture",
+            Direction::Rx,
+            Payload::Text("data".to_owned()),
+        );
+        let protocol = Event::json(
+            topics::PROTOCOL_PID_SAMPLE,
+            "fixture",
+            serde_json::json!({"t": 1}),
+        );
+        {
+            let mut file = File::create(&path).unwrap();
+            write_event(&mut file, &serial).unwrap();
+            write_event(&mut file, &protocol).unwrap();
+        }
+
+        let mut replay = ReplayManager::new(bus);
+        replay.set_policy(ReplayPolicy::ReparseRaw);
+        replay.load(&path).unwrap();
+        replay.publish_next_for_test(2);
+        let _ = fs::remove_file(&path);
+
+        // ReparseRaw 跳过 protocol.* → 不会发布 PID sample
+        let protocol_events: Vec<_> = rx.drain().into_iter().collect();
+        assert!(
+            protocol_events.is_empty(),
+            "ReparseRaw should skip recorded protocol.* events"
+        );
+    }
+
+    #[test]
+    fn exact_recorded_publishes_protocol_events() {
+        let bus = DataBus::new();
+        let rx = bus.subscribe(TopicFilter::exact(topics::PROTOCOL_PID_SAMPLE));
+        let path =
+            std::env::temp_dir().join(format!("hw-policy-exact-{}.jsonl", now_timestamp_ms()));
+
+        let protocol = Event::json(
+            topics::PROTOCOL_PID_SAMPLE,
+            "fixture",
+            serde_json::json!({"t": 1}),
+        );
+        {
+            let mut file = File::create(&path).unwrap();
+            write_event(&mut file, &protocol).unwrap();
+        }
+
+        let mut replay = ReplayManager::new(bus);
+        replay.set_policy(ReplayPolicy::ExactRecorded);
+        replay.load(&path).unwrap();
+        replay.publish_next_for_test(1);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(rx.drain().len(), 1);
+    }
+
+    #[test]
+    fn analyzer_cache_is_published_in_reparse_mode() {
+        let bus = DataBus::new();
+        let rx = bus.subscribe(TopicFilter::exact(topics::PROTOCOL_PID_SAMPLE));
+        let path =
+            std::env::temp_dir().join(format!("hw-cache-publish-{}.jsonl", now_timestamp_ms()));
+
+        let serial = Event::new(
+            topics::SERIAL_RX,
+            "fixture",
+            Direction::Rx,
+            Payload::Text("raw".to_owned()),
+        );
+        {
+            let mut file = File::create(&path).unwrap();
+            write_event(&mut file, &serial).unwrap();
+        }
+
+        let mut replay = ReplayManager::new(bus);
+        replay.set_policy(ReplayPolicy::ReparseRaw);
+        replay.load(&path).unwrap();
+
+        // 模拟 analyzer 输出
+        let mut derived = Event::json(
+            topics::PROTOCOL_PID_SAMPLE,
+            "replay-analyzer:demo",
+            serde_json::json!({"t": 1, "value": 100.0}),
+        );
+        derived.meta_set("replay", serde_json::Value::Bool(true));
+        derived.meta_set(
+            "origin",
+            serde_json::Value::String("replay_derived".to_owned()),
+        );
+        replay.set_analyzer_cache(vec![derived]);
+
+        // seek 应该发布 analyzer cache
+        replay.seek_with_replay(1000);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(rx.drain().len(), 1);
+    }
+
+    #[test]
+    fn no_duplicate_protocol_demo_sample() {
+        // 核心测试：确保不会同时吃到录制的 protocol.demo.sample 和 analyzer 生成的
+        let topic = "protocol.demo.sample";
+        let path = std::env::temp_dir().join(format!("hw-no-dup-{}.jsonl", now_timestamp_ms()));
+
+        let serial = Event::new(
+            topics::SERIAL_RX,
+            "fixture",
+            Direction::Rx,
+            Payload::Text("data".to_owned()),
+        );
+        let protocol = Event::json(topic, "fixture", serde_json::json!({"t": 1, "value": 50.0}));
+        {
+            let mut file = File::create(&path).unwrap();
+            write_event(&mut file, &serial).unwrap();
+            write_event(&mut file, &protocol).unwrap();
+        }
+
+        // 1. ExactRecorded: 只有录制的 protocol（1 条）
+        {
+            let bus = DataBus::new();
+            let rx = bus.subscribe(TopicFilter::exact(topic));
+            let mut replay = ReplayManager::new(bus);
+            replay.load(&path).unwrap();
+            replay.set_policy(ReplayPolicy::ExactRecorded);
+            replay.seek_with_replay(1000);
+            let count = rx.drain().len();
+            assert_eq!(
+                count, 1,
+                "ExactRecorded: should get exactly 1 protocol event"
+            );
+        }
+
+        // 2. ReparseRaw: 跳过录制的 protocol，只有 analyzer cache（1 条）
+        {
+            let bus = DataBus::new();
+            let rx = bus.subscribe(TopicFilter::exact(topic));
+            let mut replay = ReplayManager::new(bus);
+            replay.load(&path).unwrap();
+            replay.set_policy(ReplayPolicy::ReparseRaw);
+
+            let mut derived = Event::json(
+                topic,
+                "replay-analyzer:demo",
+                serde_json::json!({"t": 1, "value": 99.0}),
+            );
+            derived.meta_set("replay", serde_json::Value::Bool(true));
+            derived.meta_set(
+                "origin",
+                serde_json::Value::String("replay_derived".to_owned()),
+            );
+            replay.set_analyzer_cache(vec![derived]);
+
+            replay.seek_with_replay(1000);
+            let count = rx.drain().len();
+            assert_eq!(
+                count, 1,
+                "ReparseRaw: should get exactly 1 analyzer event, not 2"
+            );
+        }
+
+        // 3. AutoPreferRecorded: 有 protocol → ExactRecorded → 1 条
+        {
+            let bus = DataBus::new();
+            let rx = bus.subscribe(TopicFilter::exact(topic));
+            let mut replay = ReplayManager::new(bus);
+            replay.load(&path).unwrap();
+            // Auto is default
+            replay.seek_with_replay(1000);
+            let count = rx.drain().len();
+            assert_eq!(
+                count, 1,
+                "AutoPreferRecorded: should get exactly 1 protocol event"
+            );
+        }
+
+        let _ = fs::remove_file(&path);
     }
 }

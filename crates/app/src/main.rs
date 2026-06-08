@@ -2,17 +2,19 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui;
+use egui::Color32;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use tool_core::{Event, LogLevel, now_timestamp_ms};
+use tool_core::{Direction, Event, LogLevel, Payload, now_timestamp_ms};
 use tool_databus::DataBus;
 use tool_extension::PluginManager;
+use tool_lua_host::{LuaReplayConfig, run_replay_analyzer};
 use tool_panels::{
     Activity, DynamicPanels, LogPanel, PanelKind, PanelManager, PluginsPanel, ReplayPanel,
     TerminalPanel, theme,
 };
-use tool_recorder::JsonlRecorder;
+use tool_recorder::{JsonlRecorder, RecordMode};
 use tool_transport::{
     DataBits, Parity, SerialConfig, SerialPortDescriptor, StopBits, TransportManager,
 };
@@ -212,6 +214,7 @@ struct WorkbenchApp {
     last_rate_check_time: f64,
     last_event_count: u64,
     event_rate: f64,
+    dynamic_drag_source: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -324,6 +327,7 @@ impl WorkbenchApp {
             transport,
             plugin_manager: pm,
             recorder,
+            dynamic_drag_source: None,
         };
         app.refresh_ports();
         let enabled: Vec<String> = config
@@ -599,7 +603,8 @@ impl WorkbenchApp {
 
         ui.vertical_centered(|ui| {
             for (idx, &act) in self.activity_order.iter().enumerate() {
-                let selected = self.panels.activity == act;
+                let selected = self.panels.active_dynamic_id().is_none()
+                    && self.panels.activity == act;
                 let label = format!("{} {}", aicon(act), act.label());
                 let shortcut = ashortcut(act);
 
@@ -692,30 +697,7 @@ impl WorkbenchApp {
 
         self.activity_rects_cache = activity_rects;
 
-        // 动态面板（插件子条目）
-        let ids: Vec<(String, String)> = self
-            .panels
-            .tabs
-            .iter()
-            .filter_map(|kind| kind.dynamic_id().map(|id| id.to_owned()))
-            .filter(|id| self.dynamic_panels.contains(id))
-            .map(|id| {
-                let title = self.dynamic_panels.title(&id).unwrap_or(&id).to_owned();
-                (id, title)
-            })
-            .collect();
-
-        if !ids.is_empty() {
-            ui.separator();
-
-            for (id, title) in &ids {
-                let active = self.panels.active_dynamic_id() == Some(id);
-
-                if ui.selectable_label(active, format!("  {title}")).clicked() {
-                    self.panels.open_tab(PanelKind::Dynamic(id.clone()));
-                }
-            }
-        }
+        self.dynamic_panel_shortcuts(ui);
 
         ui.separator();
 
@@ -727,7 +709,141 @@ impl WorkbenchApp {
             self.toggle_bottom_panel();
         }
     }
+    fn dynamic_panel_shortcuts(&mut self, ui: &mut egui::Ui) {
+        let items: Vec<(String, String)> = self
+            .panels
+            .tabs
+            .iter()
+            .filter_map(|kind| kind.dynamic_id().map(|id| id.to_owned()))
+            .filter(|id| self.dynamic_panels.contains(id))
+            .map(|id| {
+                let title = self.dynamic_panels.title(&id).unwrap_or(&id).to_owned();
+                (id, title)
+            })
+            .collect();
 
+        if items.is_empty() {
+            return;
+        }
+
+        ui.separator();
+
+        let pointer = ui.ctx().pointer_latest_pos();
+        let mut rects = Vec::with_capacity(items.len());
+
+        for (index, (id, title)) in items.iter().enumerate() {
+            let active = self.panels.active_dynamic_id() == Some(id);
+            let is_source = self.dynamic_drag_source == Some(index);
+
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), 24.0),
+                egui::Sense::click_and_drag(),
+            );
+
+            if response.drag_started() {
+                self.dynamic_drag_source = Some(index);
+            }
+
+            if response.clicked() && self.dynamic_drag_source.is_none() {
+                self.panels.open_tab(PanelKind::Dynamic(id.clone()));
+            }
+
+            let bg = if is_source {
+                theme::BG_TERTIARY
+            } else if active || response.hovered() {
+                if active {
+                    theme::BG_SELECTION
+                } else {
+                    theme::WIDGET_HOVER
+                }
+            } else {
+                Color32::TRANSPARENT
+            };
+
+            let painter = ui.painter_at(rect);
+
+            if bg != Color32::TRANSPARENT {
+                painter.rect_filled(rect, 4.0, bg);
+            }
+
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("  {title}"),
+                egui::FontId::proportional(12.0),
+                if is_source {
+                    theme::TEXT_SECONDARY
+                } else {
+                    theme::TEXT_PRIMARY
+                },
+            );
+
+            response.on_hover_text("拖动调整插件标签顺序");
+
+            rects.push(rect);
+        }
+
+        let insert_index = if self.dynamic_drag_source.is_some() {
+            pointer.and_then(|pos| vertical_insert_index_from_pointer(&rects, pos))
+        } else {
+            None
+        };
+
+        if let Some(insert_index) = insert_index {
+            paint_vertical_insert_line(ui, &rects, insert_index);
+        }
+
+        if self.dynamic_drag_source.is_some() && ui.input(|input| input.pointer.any_released()) {
+            if let Some(source_index) = self.dynamic_drag_source.take() {
+                if let Some(insert_index) = insert_index {
+                    self.reorder_dynamic_tabs(source_index, insert_index);
+                }
+            }
+        }
+
+        if self.dynamic_drag_source.is_some() && !ui.input(|input| input.pointer.primary_down()) {
+            self.dynamic_drag_source = None;
+        }
+    }
+    fn reorder_dynamic_tabs(&mut self, source_index: usize, mut insert_index: usize) {
+        let mut dynamic_tabs: Vec<PanelKind> = self
+            .panels
+            .tabs
+            .iter()
+            .filter(|kind| kind.dynamic_id().is_some())
+            .cloned()
+            .collect();
+
+        if source_index >= dynamic_tabs.len() {
+            return;
+        }
+
+        insert_index = insert_index.min(dynamic_tabs.len());
+
+        if insert_index > source_index {
+            insert_index -= 1;
+        }
+
+        if insert_index == source_index {
+            return;
+        }
+
+        let item = dynamic_tabs.remove(source_index);
+        let insert_index = insert_index.min(dynamic_tabs.len());
+        dynamic_tabs.insert(insert_index, item);
+
+        let mut dynamic_iter = dynamic_tabs.into_iter();
+
+        for kind in &mut self.panels.tabs {
+            if kind.dynamic_id().is_some() {
+                if let Some(next) = dynamic_iter.next() {
+                    *kind = next;
+                }
+            }
+        }
+
+        self.save_config();
+    }
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let so = self.transport.status().open;
@@ -971,6 +1087,24 @@ impl WorkbenchApp {
             }
         });
 
+        ui.horizontal(|ui| {
+            ui.label("模式");
+            let mut mode = self.recorder.mode();
+            egui::ComboBox::from_id_salt("record-mode")
+                .width(160.0)
+                .selected_text(record_mode_label(mode))
+                .show_ui(ui, |ui| {
+                    for &m in &[
+                        RecordMode::StandardReplay,
+                        RecordMode::RawSerial,
+                        RecordMode::FullDebug,
+                    ] {
+                        ui.selectable_value(&mut mode, m, record_mode_label(m));
+                    }
+                });
+            self.recorder.set_mode(mode);
+        });
+
         ui.separator();
 
         ui.heading("可用端口");
@@ -1032,32 +1166,64 @@ impl WorkbenchApp {
 
     fn detached_dynamic_panel_viewports(&mut self, ctx: &egui::Context) {
         let ids: Vec<String> = self.detached_dynamic_panels.iter().cloned().collect();
+
         for id in ids {
             if !self.dynamic_panels.contains(&id) {
                 self.detached_dynamic_panels.remove(&id);
                 continue;
             }
+
             let title = self.dynamic_panels.title(&id).unwrap_or(&id).to_owned();
-            let vid = egui::ViewportId::from_hash_of(("dp", id.as_str()));
+            let viewport_id = egui::ViewportId::from_hash_of(("dynamic-panel", id.as_str()));
+
             let builder = egui::ViewportBuilder::default()
                 .with_title(format!("{title} - 硬件调试工作台"))
-                .with_inner_size([900.0, 640.0]);
-            let action = ctx.show_viewport_immediate(vid, builder, |ui, _| {
-                if ui.ctx().input(|i| i.viewport().close_requested()) {
-                    DetachedPanelAction::Close
-                } else {
-                    let mut act = DetachedPanelAction::None;
-                    ui.horizontal(|ui| {
-                        ui.heading(&title);
-                        if ui.button("↙").clicked() {
-                            act = DetachedPanelAction::Attach;
-                        }
-                    });
-                    ui.separator();
-                    self.dynamic_panels.ui_body(ui, &id);
-                    act
+                .with_inner_size([900.0, 640.0])
+                .with_min_inner_size([520.0, 360.0]);
+
+            let action = ctx.show_viewport_immediate(viewport_id, builder, |ctx, _class| {
+                let mut action = DetachedPanelAction::None;
+
+                if ctx.input(|input| input.viewport().close_requested()) {
+                    action = DetachedPanelAction::Attach;
                 }
+
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::default().fill(theme::BG_PRIMARY))
+                    .show(ctx, |ui| {
+                        // 再手动铺一层，避免某些平台 / resize 时出现未清屏黑边。
+                        let rect = ui.max_rect();
+                        ui.painter().rect_filled(rect, 0.0, theme::BG_PRIMARY);
+
+                        ui.horizontal(|ui| {
+                            ui.heading(&title);
+
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("关闭面板").clicked() {
+                                        action = DetachedPanelAction::Close;
+                                    }
+
+                                    if ui.button("↙ 回到标签栏").clicked() {
+                                        action = DetachedPanelAction::Attach;
+                                    }
+                                },
+                            );
+                        });
+
+                        ui.separator();
+
+                        egui::Frame::default()
+                            .fill(theme::BG_PRIMARY)
+                            .show(ui, |ui| {
+                                self.dynamic_panels.ui_body(ui, &id);
+                            });
+                    });
+
+                action
             });
+
             match action {
                 DetachedPanelAction::Attach => {
                     self.detached_dynamic_panels.remove(&id);
@@ -1193,18 +1359,55 @@ impl eframe::App for WorkbenchApp {
             self.replay_panel.want_clear_on_play = false;
             self.terminal_panel.clear();
             self.bottom_log_panel.clear();
+            self.dynamic_panels.clear_charts();
         }
 
         if let Some(steps) = self.replay_panel.want_step_backward.take() {
             self.terminal_panel.clear();
             self.bottom_log_panel.clear();
+            self.dynamic_panels.clear_charts();
+
+            self.bus.publish(Event::new(
+                "ui.replay.reset",
+                "ui.replay",
+                Direction::Internal,
+                Payload::Empty,
+            ));
+
             self.replay_panel.do_step_backward(steps);
+
+            let terminal_count = self.terminal_panel.ingest_all_pending();
+            let log_count = self.bottom_log_panel.ingest_all_pending();
+            let chart_count = self.dynamic_panels.ingest_all_pending();
+
+            self.status_message = format!(
+                "回放重建完成：接收 {terminal_count} 条，日志 {log_count} 条，图表 {chart_count} 条"
+            );
+            ctx.request_repaint();
         }
 
         if let Some(p) = self.replay_panel.want_seek_replay.take() {
             self.terminal_panel.clear();
             self.bottom_log_panel.clear();
+            self.dynamic_panels.clear_charts();
+
+            self.bus.publish(Event::new(
+                "ui.replay.reset",
+                "ui.replay",
+                Direction::Internal,
+                Payload::Empty,
+            ));
+
             self.replay_panel.do_seek_replay(p);
+
+            let terminal_count = self.terminal_panel.ingest_all_pending();
+            let log_count = self.bottom_log_panel.ingest_all_pending();
+            let chart_count = self.dynamic_panels.ingest_all_pending();
+
+            self.status_message = format!(
+                "回放重建完成：接收 {terminal_count} 条，日志 {log_count} 条，图表 {chart_count} 条"
+            );
+            ctx.request_repaint();
         }
         if self.replay_panel.want_pick_file {
             self.replay_panel.want_pick_file = false;
@@ -1213,6 +1416,11 @@ impl eframe::App for WorkbenchApp {
                 self.replay_panel.auto_load = true;
             }
         }
+        // 运行 replay analyzer（如果需要）
+        if self.replay_panel.want_run_analyzers {
+            self.run_replay_analyzers();
+        }
+
         self.dynamic_panels.ingest(&mut self.panels);
         let n = self.plugin_manager.process_pending();
         if n > 0 {
@@ -1430,6 +1638,99 @@ impl WorkbenchApp {
             self.send_popup_open = false;
         }
     }
+
+    /// 运行所有已发现插件的 replay analyzer，结果注入 ReplayManager。
+    fn run_replay_analyzers(&mut self) {
+        let entries = self.plugin_manager.replay_analyzer_entries();
+        if entries.is_empty() {
+            self.replay_panel
+                .set_analyzer_error("没有可用的 replay analyzer".to_owned());
+            self.status_message = "回放：没有可用的 replay analyzer".to_owned();
+            return;
+        }
+
+        let raw_events = self.replay_panel.manager().raw_serial_events();
+        if raw_events.is_empty() {
+            self.replay_panel
+                .set_analyzer_error("录制文件中没有原始串口事件".to_owned());
+            self.status_message = "回放：录制文件中没有原始串口事件".to_owned();
+            return;
+        }
+
+        let mut all_derived = Vec::new();
+        let mut error_count = 0;
+
+        for entry in &entries {
+            let replay_config = match &entry.manifest.replay {
+                Some(cfg) => cfg,
+                None => continue,
+            };
+
+            let script_path = entry.root.join(&replay_config.main);
+            let script = match std::fs::read_to_string(&script_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    error_count += 1;
+                    self.replay_panel
+                        .set_analyzer_error(format!("读取 {} 失败: {e}", script_path.display()));
+                    continue;
+                }
+            };
+
+            let config = LuaReplayConfig {
+                script_name: format!("replay:{}:{}", entry.plugin_id, replay_config.main),
+                plugin_id: entry.plugin_id.clone(),
+                plugin_version: entry.manifest.version.clone(),
+                subscriptions: replay_config.subscriptions.clone(),
+                context: serde_json::json!({
+                    "id": entry.manifest.id,
+                    "name": entry.manifest.name,
+                    "version": entry.manifest.version,
+                }),
+            };
+
+            match run_replay_analyzer(script, config, &raw_events) {
+                Ok(output) => {
+                    for log_msg in &output.logs {
+                        self.log(LogLevel::Info, log_msg);
+                    }
+                    all_derived.extend(output.events);
+                }
+                Err(e) => {
+                    error_count += 1;
+                    self.log(
+                        LogLevel::Warn,
+                        &format!("analyzer {} 失败: {e}", entry.plugin_id),
+                    );
+                }
+            }
+        }
+
+        if all_derived.is_empty() {
+            self.replay_panel
+                .set_analyzer_error("所有 analyzer 运行失败（终端可显示原始事件）".to_owned());
+            self.status_message = "回放：analyzer 运行失败（终端可显示原始事件）".to_owned();
+            return;
+        }
+
+        all_derived.sort_by_key(|e| (e.timestamp_ms, e.id));
+        let count = all_derived.len();
+        self.replay_panel.set_analyzer_cache(all_derived);
+
+        if error_count > 0 {
+            self.status_message = format!(
+                "回放 analyzer 部分完成：{count} 个派生事件，{error_count} 个 analyzer 失败"
+            );
+        } else {
+            self.status_message = format!("回放 analyzer 完成：{count} 个派生事件");
+        }
+        let msg = format!(
+            "replay analyzers produced {count} derived events from {} raw events ({} plugins)",
+            raw_events.len(),
+            entries.len()
+        );
+        self.log(LogLevel::Info, &msg);
+    }
 }
 
 impl Drop for WorkbenchApp {
@@ -1589,6 +1890,14 @@ fn ensure_jsonl_extension(mut path: PathBuf) -> PathBuf {
 
     path
 }
+fn record_mode_label(mode: RecordMode) -> &'static str {
+    match mode {
+        RecordMode::StandardReplay => "标准回放",
+        RecordMode::RawSerial => "原始串口",
+        RecordMode::FullDebug => "完整调试",
+    }
+}
+
 fn default_recorder_path() -> String {
     format!("logs/session-{}.jsonl", now_timestamp_ms())
 }
@@ -1655,6 +1964,73 @@ fn activity_insert_index_from_pointer(rects: &[egui::Rect], pointer: egui::Pos2)
 }
 
 fn paint_activity_insert_line(ui: &egui::Ui, rects: &[egui::Rect], insert_index: usize) {
+    if rects.is_empty() {
+        return;
+    }
+
+    let left = rects
+        .iter()
+        .map(|rect| rect.left())
+        .fold(f32::INFINITY, f32::min);
+
+    let right = rects
+        .iter()
+        .map(|rect| rect.right())
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    let y = if insert_index == 0 {
+        rects[0].top() - 3.0
+    } else if insert_index >= rects.len() {
+        rects[rects.len() - 1].bottom() + 3.0
+    } else {
+        let above = rects[insert_index - 1];
+        let below = rects[insert_index];
+        (above.bottom() + below.top()) * 0.5
+    };
+
+    let painter = ui.painter();
+
+    painter.line_segment(
+        [egui::pos2(left + 6.0, y), egui::pos2(right - 6.0, y)],
+        egui::Stroke::new(2.0, theme::BLUE),
+    );
+
+    painter.circle_filled(egui::pos2(left + 6.0, y), 3.0, theme::BLUE);
+    painter.circle_filled(egui::pos2(right - 6.0, y), 3.0, theme::BLUE);
+}
+fn vertical_insert_index_from_pointer(rects: &[egui::Rect], pointer: egui::Pos2) -> Option<usize> {
+    if rects.is_empty() {
+        return None;
+    }
+
+    let left = rects
+        .iter()
+        .map(|rect| rect.left())
+        .fold(f32::INFINITY, f32::min);
+
+    let right = rects
+        .iter()
+        .map(|rect| rect.right())
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    let top = rects.first()?.top() - 10.0;
+    let bottom = rects.last()?.bottom() + 10.0;
+
+    if pointer.x < left - 16.0 || pointer.x > right + 16.0 || pointer.y < top || pointer.y > bottom
+    {
+        return None;
+    }
+
+    for (index, rect) in rects.iter().enumerate() {
+        if pointer.y < rect.center().y {
+            return Some(index);
+        }
+    }
+
+    Some(rects.len())
+}
+
+fn paint_vertical_insert_line(ui: &egui::Ui, rects: &[egui::Rect], insert_index: usize) {
     if rects.is_empty() {
         return;
     }

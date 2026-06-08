@@ -128,6 +128,26 @@ impl DynamicPanels {
         self.panels.remove(id).is_some()
     }
 
+    pub fn clear_charts(&mut self) {
+        for panel in self.panels.values_mut() {
+            if let DynamicPanel::Chart { chart, .. } = panel {
+                chart.clear();
+            }
+        }
+    }
+
+    pub fn ingest_all_pending(&mut self) -> usize {
+        let mut count = 0;
+
+        for panel in self.panels.values_mut() {
+            if let DynamicPanel::Chart { chart, .. } = panel {
+                count += chart.ingest_all_pending();
+            }
+        }
+
+        count
+    }
+
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
     }

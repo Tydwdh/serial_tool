@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, VecDeque};
 use tool_core::{Event, Payload};
 use tool_databus::{DataBus, Subscription, TopicFilter};
 
+const MAX_CHART_EVENTS_PER_FRAME: usize = 1_000;
 pub struct ChartPanel {
     subscription: Subscription,
     series: BTreeMap<String, VecDeque<Sample>>,
@@ -80,7 +81,11 @@ impl ChartPanel {
             return;
         }
 
-        for event in self.subscription.drain() {
+        for _ in 0..MAX_CHART_EVENTS_PER_FRAME {
+            let Some(event) = self.subscription.try_recv() else {
+                break;
+            };
+
             self.push_event(event);
         }
     }
@@ -136,6 +141,25 @@ impl ChartPanel {
         for (name, y) in values {
             self.push_sample(&name, Sample { x, y });
         }
+    }
+
+    pub fn clear(&mut self) {
+        self.series.clear();
+    }
+
+    pub fn ingest_all_pending(&mut self) -> usize {
+        if self.paused {
+            return 0;
+        }
+
+        let mut count = 0;
+
+        while let Some(event) = self.subscription.try_recv() {
+            self.push_event(event);
+            count += 1;
+        }
+
+        count
     }
 
     fn push_sample(&mut self, name: &str, sample: Sample) {

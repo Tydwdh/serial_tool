@@ -1,7 +1,7 @@
 use crate::theme;
-use egui::{Color32, ProgressBar, RichText, Sense, TextEdit};
+use egui::{Color32, ComboBox, ProgressBar, RichText, Sense, TextEdit};
 use tool_databus::DataBus;
-use tool_recorder::{ReplayManager, ReplayState};
+use tool_recorder::{ReplayManager, ReplayPolicy, ReplayState};
 
 pub struct ReplayPanel {
     manager: ReplayManager,
@@ -24,6 +24,9 @@ pub struct ReplayPanel {
 
     /// Some(steps): main.rs 清空终端/日志后回退指定事件数
     pub want_step_backward: Option<usize>,
+
+    /// main.rs 消费后运行 replay analyzer
+    pub want_run_analyzers: bool,
 }
 
 impl ReplayPanel {
@@ -44,14 +47,22 @@ impl ReplayPanel {
             want_clear_on_play: false,
             want_seek_replay: None,
             want_step_backward: None,
+            want_run_analyzers: false,
         }
     }
 
     pub fn try_load(&mut self) {
         match self.manager.load(&self.path) {
             Ok(count) => {
-                self.message = Some(format!("已加载 {count} 个事件"));
+                let effective = self.manager.effective_policy();
+                let mut msg = format!("已加载 {count} 个事件");
+                if effective == ReplayPolicy::ReparseRaw {
+                    msg.push_str(" (需要运行 analyzer)");
+                }
+                self.message = Some(msg);
                 self.manager.set_speed(self.speed);
+                // 加载新文件后，标记需要运行 analyzer
+                self.want_run_analyzers = self.manager.needs_analyzer();
             }
             Err(error) => {
                 self.message = Some(error.to_string());
@@ -71,6 +82,26 @@ impl ReplayPanel {
         if let Some(position_ms) = self.manager.backward_position_by(steps) {
             self.manager.seek_with_replay(position_ms);
         }
+    }
+
+    // ── Coordinator accessors ──
+
+    pub fn manager(&self) -> &ReplayManager {
+        &self.manager
+    }
+
+    pub fn manager_mut(&mut self) -> &mut ReplayManager {
+        &mut self.manager
+    }
+
+    pub fn set_analyzer_cache(&mut self, events: Vec<tool_core::Event>) {
+        self.manager.set_analyzer_cache(events);
+        self.want_run_analyzers = false;
+    }
+
+    pub fn set_analyzer_error(&mut self, error: String) {
+        self.manager.set_analyzer_error(error);
+        self.want_run_analyzers = false;
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
@@ -96,6 +127,9 @@ impl ReplayPanel {
         ui.heading("会话回放");
 
         self.file_controls(ui);
+        ui.separator();
+
+        self.policy_controls(ui);
         ui.separator();
 
         self.playback_controls(ui, &status);
@@ -129,6 +163,59 @@ impl ReplayPanel {
                 self.try_load();
             }
         });
+    }
+
+    fn policy_controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("回放策略");
+
+            let mut policy = self.manager.policy();
+            let policy_changed = ComboBox::from_id_salt("replay-policy")
+                .width(160.0)
+                .selected_text(policy_label(policy))
+                .show_ui(ui, |ui| {
+                    let mut changed = false;
+                    for &p in &[
+                        ReplayPolicy::AutoPreferRecorded,
+                        ReplayPolicy::ExactRecorded,
+                        ReplayPolicy::ReparseRaw,
+                    ] {
+                        if ui
+                            .selectable_value(&mut policy, p, policy_label(p))
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    }
+                    changed
+                });
+
+            if policy_changed.inner.unwrap_or(false) {
+                self.manager.set_policy(policy);
+                self.want_run_analyzers = self.manager.needs_analyzer();
+            }
+        });
+
+        // 显示实际生效的策略
+        let effective = self.manager.effective_policy();
+        let status_text = match effective {
+            ReplayPolicy::AutoPreferRecorded => "自动 (使用录制解析结果)",
+            ReplayPolicy::ExactRecorded => "使用录制解析结果",
+            ReplayPolicy::ReparseRaw => {
+                if self.manager.analyzer_cache_valid() {
+                    "使用 Replay Analyzer 重新解析 (已缓存)"
+                } else if self.manager.analyzer_error().is_some() {
+                    "Replay Analyzer 失败"
+                } else {
+                    "需要运行 Replay Analyzer"
+                }
+            }
+        };
+        ui.label(RichText::new(status_text).color(theme::TEXT_SECONDARY));
+
+        if let Some(error) = self.manager.analyzer_error() {
+            ui.colored_label(theme::RED, format!("错误: {error}"));
+        }
     }
 
     fn playback_controls(&mut self, ui: &mut egui::Ui, status: &tool_recorder::ReplayStatus) {
@@ -335,6 +422,14 @@ fn ms_to_hms(ms: u64) -> String {
         format!("{h}:{m:02}:{s:02}.{ms_part:03}")
     } else {
         format!("{m}:{s:02}.{ms_part:03}")
+    }
+}
+
+fn policy_label(policy: ReplayPolicy) -> &'static str {
+    match policy {
+        ReplayPolicy::AutoPreferRecorded => "自动",
+        ReplayPolicy::ExactRecorded => "精确回放",
+        ReplayPolicy::ReparseRaw => "重新解析",
     }
 }
 

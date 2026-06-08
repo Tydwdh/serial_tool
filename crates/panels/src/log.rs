@@ -46,7 +46,16 @@ impl LogPanel {
             last_scroll_offset_y: 0.0,
         }
     }
+    pub fn ingest_all_pending(&mut self) -> usize {
+        let mut count = 0;
 
+        while let Some(event) = self.subscription.try_recv() {
+            self.push_event(event);
+            count += 1;
+        }
+
+        count
+    }
     pub fn clear(&mut self) {
         self.entries.clear();
         self.last_scroll_offset_y = 0.0;

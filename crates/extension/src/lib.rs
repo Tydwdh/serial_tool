@@ -50,6 +50,7 @@ pub struct PluginManifest {
     pub name: String,
     pub version: String,
     pub runtime: String,
+    /// 默认入口（live.replay 不存在时使用）
     pub main: String,
 
     #[serde(default)]
@@ -57,6 +58,91 @@ pub struct PluginManifest {
 
     #[serde(default)]
     pub contributes: PluginContributes,
+
+    /// 实时插件配置（可选，不填时回退到顶层 main/permissions）
+    #[serde(default)]
+    pub live: Option<LiveConfig>,
+
+    /// 回放解析器配置（可选）
+    #[serde(default)]
+    pub replay: Option<ReplayConfig>,
+}
+
+impl PluginManifest {
+    pub fn live_main(&self) -> &str {
+        self.live
+            .as_ref()
+            .and_then(|l| l.main.as_deref())
+            .unwrap_or(&self.main)
+    }
+
+    pub fn live_permissions(&self) -> &[String] {
+        self.live
+            .as_ref()
+            .and_then(|l| l.permissions.as_ref())
+            .unwrap_or(&self.permissions)
+    }
+
+    pub fn has_replay_analyzer(&self) -> bool {
+        self.replay.is_some()
+    }
+
+    pub fn replay_main(&self) -> Option<&str> {
+        self.replay.as_ref().map(|r| r.main.as_str())
+    }
+
+    pub fn replay_permissions(&self) -> &[String] {
+        self.replay
+            .as_ref()
+            .map(|r| r.permissions.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn replay_subscriptions(&self) -> &[String] {
+        self.replay
+            .as_ref()
+            .map(|r| r.subscriptions.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn replay_outputs(&self) -> &[String] {
+        self.replay
+            .as_ref()
+            .map(|r| r.outputs.as_slice())
+            .unwrap_or(&[])
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LiveConfig {
+    #[serde(default)]
+    pub main: Option<String>,
+
+    #[serde(default)]
+    pub permissions: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplayConfig {
+    pub main: String,
+
+    #[serde(default)]
+    pub subscriptions: Vec<String>,
+
+    #[serde(default)]
+    pub outputs: Vec<String>,
+
+    #[serde(default)]
+    pub permissions: Vec<String>,
+}
+
+/// 已发现插件中 replay analyzer 的元信息。
+/// 不需要插件处于 enabled 状态。
+#[derive(Debug, Clone)]
+pub struct ReplayAnalyzerEntry {
+    pub plugin_id: String,
+    pub manifest: PluginManifest,
+    pub root: PathBuf,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -124,6 +210,11 @@ pub struct PluginSummary {
     pub contributes: PluginContributes,
     pub path: PathBuf,
     pub last_error: Option<String>,
+
+    // ── replay analyzer ──
+    pub has_replay_analyzer: bool,
+    pub replay_subscriptions: Vec<String>,
+    pub replay_outputs: Vec<String>,
 }
 
 struct PluginRecord {
@@ -132,6 +223,9 @@ struct PluginRecord {
     state: PluginState,
     last_error: Option<String>,
 }
+
+/// Replay analyzer 只允许 log 和 storage 权限。
+const REPLAY_ALLOWED_PERMISSIONS: &[&str] = &["log", "storage"];
 
 pub struct PermissionManager {
     allowed: BTreeSet<String>,
@@ -145,8 +239,19 @@ impl PermissionManager {
     }
 
     pub fn check(&self, manifest: &PluginManifest) -> ExtensionResult<()> {
-        for permission in &manifest.permissions {
+        // 检查 live 权限（用 self.allowed）
+        for permission in manifest.live_permissions() {
             if !self.allowed.contains(permission) {
+                return Err(ExtensionError::PermissionDenied {
+                    plugin_id: manifest.id.clone(),
+                    permission: permission.clone(),
+                });
+            }
+        }
+
+        // 检查 replay 权限（只允许 log / storage）
+        for permission in manifest.replay_permissions() {
+            if !REPLAY_ALLOWED_PERMISSIONS.contains(&permission.as_str()) {
                 return Err(ExtensionError::PermissionDenied {
                     plugin_id: manifest.id.clone(),
                     permission: permission.clone(),
@@ -292,18 +397,19 @@ impl PluginManager {
             .get_mut(plugin_id)
             .ok_or_else(|| ExtensionError::NotFound(plugin_id.to_owned()))?;
 
-        let script_path = record.root.join(&record.manifest.main);
+        let main = record.manifest.live_main().to_owned();
+        let script_path = record.root.join(&main);
         let script = fs::read_to_string(&script_path)?;
         let context = manifest_context(&record.manifest, &record.root);
 
         let runtime = run_plugin(
             script,
             LuaRunConfig {
-                script_name: format!("plugin:{}:{}", record.manifest.id, record.manifest.main),
+                script_name: format!("plugin:{}:{}", record.manifest.id, main),
                 timeout_ms: 0,
                 source: format!("plugin:{}", record.manifest.id),
                 context,
-                permissions: record.manifest.permissions.clone(),
+                permissions: record.manifest.live_permissions().to_vec(),
             },
             self.bus.clone(),
             self.transport.clone(),
@@ -439,10 +545,27 @@ impl PluginManager {
                 version: record.manifest.version.clone(),
                 runtime: record.manifest.runtime.clone(),
                 state: record.state,
-                permissions: record.manifest.permissions.clone(),
+                permissions: record.manifest.live_permissions().to_vec(),
                 contributes: record.manifest.contributes.clone(),
                 path: record.root.clone(),
                 last_error: record.last_error.clone(),
+                has_replay_analyzer: record.manifest.has_replay_analyzer(),
+                replay_subscriptions: record.manifest.replay_subscriptions().to_vec(),
+                replay_outputs: record.manifest.replay_outputs().to_vec(),
+            })
+            .collect()
+    }
+
+    /// 列出所有已发现插件中有 replay analyzer 的配置。
+    /// 不需要插件处于 enabled 状态。
+    pub fn replay_analyzer_entries(&self) -> Vec<ReplayAnalyzerEntry> {
+        self.records
+            .iter()
+            .filter(|(_, r)| r.manifest.has_replay_analyzer())
+            .map(|(id, r)| ReplayAnalyzerEntry {
+                plugin_id: id.clone(),
+                manifest: r.manifest.clone(),
+                root: r.root.clone(),
             })
             .collect()
     }
@@ -466,6 +589,13 @@ impl PluginManager {
     }
 
     pub fn process_event(&mut self, event: &Event) -> usize {
+        // 关键：回放事件不再送进实时插件。
+        // 否则 replay RX 会被 Lua 插件再次解析，重新发布 protocol.demo.sample，
+        // 和录制文件里原有的 protocol.demo.sample 混在一起。
+        if is_replay_event(event) {
+            return 0;
+        }
+
         let ids = self
             .wasm_runtimes
             .iter()
@@ -593,9 +723,60 @@ ctx.bus.publish('protocol.pid.sample', { t = 1, target = 50, actual = 43, output
             main: "main.lua".to_owned(),
             permissions: vec!["filesystem".to_owned()],
             contributes: PluginContributes::default(),
+            live: None,
+            replay: None,
         };
 
         assert!(PermissionManager::default().check(&manifest).is_err());
+    }
+
+    #[test]
+    fn old_manifest_without_live_replay_is_compatible() {
+        let json = r#"{
+          "id": "demo.test",
+          "name": "Test",
+          "version": "1.0.0",
+          "runtime": "lua",
+          "main": "main.lua",
+          "permissions": ["bus", "log", "ui"]
+        }"#;
+
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.live_main(), "main.lua");
+        assert_eq!(manifest.live_permissions().len(), 3);
+        assert!(!manifest.has_replay_analyzer());
+        assert!(manifest.replay_main().is_none());
+    }
+
+    #[test]
+    fn new_manifest_with_live_and_replay() {
+        let json = r#"{
+          "id": "demo.test",
+          "name": "Test",
+          "version": "1.0.0",
+          "runtime": "lua",
+          "main": "main.lua",
+          "permissions": ["bus"],
+          "live": {
+            "main": "live.lua",
+            "permissions": ["bus", "log", "serial", "ui"]
+          },
+          "replay": {
+            "main": "replay.lua",
+            "subscriptions": ["transport.serial.default.rx"],
+            "outputs": ["protocol.demo.sample"],
+            "permissions": ["log", "storage"]
+          }
+        }"#;
+
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.live_main(), "live.lua");
+        assert_eq!(manifest.live_permissions().len(), 4);
+        assert!(manifest.has_replay_analyzer());
+        assert_eq!(manifest.replay_main(), Some("replay.lua"));
+        assert_eq!(manifest.replay_subscriptions().len(), 1);
+        assert_eq!(manifest.replay_outputs().len(), 1);
+        assert_eq!(manifest.replay_permissions().len(), 2);
     }
 
     fn create_test_plugin(id: &str, main_lua: &str) -> PathBuf {
@@ -631,4 +812,7 @@ ctx.bus.publish('protocol.pid.sample', { t = 1, target = 50, actual = 43, output
 
         root
     }
+}
+fn is_replay_event(event: &Event) -> bool {
+    event.is_replay()
 }

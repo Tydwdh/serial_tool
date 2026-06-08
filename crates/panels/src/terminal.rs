@@ -7,7 +7,7 @@ use tool_databus::{DataBus, Subscription, TopicFilter};
 const MAX_INGEST_PER_FRAME: usize = 500;
 
 const TIME_COL_WIDTH: f32 = 118.0;
-const PORT_COL_WIDTH: f32 = 54.0;
+const PORT_COL_WIDTH: f32 = 64.0;
 const DIR_COL_WIDTH: f32 = 28.0;
 const ROW_LEFT_PADDING: f32 = 4.0;
 const COL_GAP: f32 = 4.0;
@@ -40,7 +40,13 @@ struct PortData {
 }
 
 struct TerminalEntry {
+    /// TerminalPanel 内部使用的稳定 UI id。
     id: u64,
+
+    /// DataBus 分配的全局事件 id。
+    /// 全局接收区按这个排序，避免 BTreeMap 端口顺序导致 COM 分组。
+    event_id: u64,
+
     timestamp_ms: u64,
     timestamp_label: String,
     direction: Direction,
@@ -49,7 +55,6 @@ struct TerminalEntry {
     display_text: String,
 
     hex_text: String,
-    utf8_preview: String,
     hex_preview: String,
 }
 
@@ -68,6 +73,7 @@ struct EntryDetail {
     display_text: String,
     hex_text: String,
 }
+
 struct RenderOutcome {
     inner_rect: egui::Rect,
     content_height: f32,
@@ -99,7 +105,20 @@ impl TerminalPanel {
             detail_entry_id: None,
         }
     }
+    pub fn ingest_all_pending(&mut self) -> usize {
+        let mut count = 0;
 
+        while let Some(event) = self.subscription.try_recv() {
+            if !matches!(event.topic.as_str(), topics::SERIAL_RX | topics::SERIAL_TX) {
+                continue;
+            }
+
+            self.push_event(event);
+            count += 1;
+        }
+
+        count
+    }
     pub fn clear(&mut self) {
         self.ports.clear();
         self.last_scroll_offsets.clear();
@@ -118,6 +137,7 @@ impl TerminalPanel {
         let mut auto_scroll = self.auto_scroll;
         let mut maximize_clicked = false;
         let mut clear_selection = false;
+
         let scroll_key = format!("terminal-port-{port_name}");
 
         let render_outcome = {
@@ -178,8 +198,8 @@ impl TerminalPanel {
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let _new_entries = self.ingest();
-        let scroll_key = "terminal-all".to_owned();
 
+        let scroll_key = "terminal-all".to_owned();
         let mut force_scroll_to_bottom = false;
 
         ui.horizontal_wrapped(|ui| {
@@ -226,8 +246,13 @@ impl TerminalPanel {
                 }
             }
 
-            // 全局视图按时间排序，不按 COM 分组。
-            rows.sort_by_key(|row| (row.entry.timestamp_ms, row.entry.id));
+            // 关键修复：
+            // 全局视图按 DataBus 发布顺序显示，不按端口名分组，也不按毫秒时间排序。
+            //
+            // timestamp_ms 在高频串口下会大量相同；
+            // BTreeMap 遍历又会按 COM 名排序；
+            // 所以只按 timestamp_ms 或 (timestamp_ms, local_id) 都可能看起来像 COM 分组。
+            rows.sort_by_key(|row| row.entry.event_id);
 
             render_rows_view(
                 ui,
@@ -276,7 +301,6 @@ impl TerminalPanel {
             .is_some_and(|pos| inner_rect.contains(pos));
 
         let smooth_scroll_y = ui.input(|input| input.smooth_scroll_delta.y);
-
         let scrolling_away_from_bottom = pointer_inside && smooth_scroll_y > 0.0;
 
         let previous_offset_y = self
@@ -356,6 +380,8 @@ impl TerminalPanel {
 
         data.entries.push_back(TerminalEntry {
             id: entry_id,
+            event_id: event.id,
+
             timestamp_ms: event.timestamp_ms,
             timestamp_label: format!("[{}]", fmt_ts(event.timestamp_ms)),
             direction: event.direction,
@@ -364,7 +390,6 @@ impl TerminalPanel {
             display_text,
 
             hex_text,
-            utf8_preview,
             hex_preview,
         });
 
@@ -394,7 +419,6 @@ impl TerminalPanel {
 
                         raw_text: entry.raw_text.clone(),
                         display_text: entry.display_text.clone(),
-
                         hex_text: entry.hex_text.clone(),
                     });
                 }
@@ -419,7 +443,8 @@ impl TerminalPanel {
         egui::Window::new("接收详情")
             .open(&mut open)
             .resizable(true)
-            .default_size([760.0, 500.0])
+            .default_size([760.0, 520.0])
+            .min_size([520.0, 320.0])
             .show(ctx, |ui| {
                 let (dir_label, dir_color) = direction_label(detail.direction);
 
@@ -443,36 +468,41 @@ impl TerminalPanel {
 
                 ui.separator();
 
-                ui.label(RichText::new("原始内容").strong());
-                let mut raw_text = detail.raw_text.clone();
-                ui.add(
-                    egui::TextEdit::multiline(&mut raw_text)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(8)
-                        .font(egui::TextStyle::Monospace),
-                );
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .max_height(ui.available_height())
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("原始内容").strong());
+                        let mut raw_text = detail.raw_text.clone();
+                        ui.add(
+                            egui::TextEdit::multiline(&mut raw_text)
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(detail_text_rows(&detail.raw_text, 6, 14))
+                                .font(egui::TextStyle::Monospace),
+                        );
 
-                ui.separator();
+                        ui.separator();
 
-                ui.label(RichText::new("显示文本").strong());
-                let mut display_text = detail.display_text.clone();
-                ui.add(
-                    egui::TextEdit::multiline(&mut display_text)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(6)
-                        .font(egui::TextStyle::Monospace),
-                );
+                        ui.label(RichText::new("显示文本").strong());
+                        let mut display_text = detail.display_text.clone();
+                        ui.add(
+                            egui::TextEdit::multiline(&mut display_text)
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(detail_text_rows(&detail.display_text, 4, 10))
+                                .font(egui::TextStyle::Monospace),
+                        );
 
-                ui.separator();
+                        ui.separator();
 
-                ui.label(RichText::new("HEX").strong());
-                let mut hex_text = detail.hex_text.clone();
-                ui.add(
-                    egui::TextEdit::multiline(&mut hex_text)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(6)
-                        .font(egui::TextStyle::Monospace),
-                );
+                        ui.label(RichText::new("HEX").strong());
+                        let mut hex_text = detail.hex_text.clone();
+                        ui.add(
+                            egui::TextEdit::multiline(&mut hex_text)
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(detail_text_rows(&detail.hex_text, 4, 12))
+                                .font(egui::TextStyle::Monospace),
+                        );
+                    });
             });
 
         if !open {
@@ -616,17 +646,9 @@ fn format_hex(bytes: &[u8]) -> String {
         .join(" ")
 }
 
-fn format_ascii(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|byte| {
-            if byte.is_ascii_graphic() || *byte == b' ' {
-                char::from(*byte)
-            } else {
-                '.'
-            }
-        })
-        .collect()
+fn format_utf8_preview(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    format_terminal_text(&text)
 }
 
 fn format_terminal_text(text: &str) -> String {
@@ -750,20 +772,7 @@ fn show_entry_fast(
 
     response
 }
-fn format_utf8_preview(bytes: &[u8]) -> String {
-    let text = String::from_utf8_lossy(bytes);
-
-    let mut output = String::new();
-
-    for ch in text.chars() {
-        match ch {
-            '\r' => output.push_str("\\r"),
-            '\n' => output.push_str("\\n"),
-            '\t' => output.push_str("\\t"),
-            ch if ch.is_control() => output.push('·'),
-            ch => output.push(ch),
-        }
-    }
-
-    output
+fn detail_text_rows(text: &str, min_rows: usize, max_rows: usize) -> usize {
+    let line_count = text.lines().count().max(1);
+    line_count.clamp(min_rows, max_rows)
 }

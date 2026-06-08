@@ -192,6 +192,77 @@ impl Event {
             Payload::Json(value) => value.to_string().len(),
         }
     }
+
+    // ── metadata 工具方法 ──
+
+    /// 安全获取 metadata 字段的值。如果 metadata 不是 JSON object，返回 None。
+    pub fn meta_get(&self, key: &str) -> Option<&Value> {
+        self.metadata.as_object()?.get(key)
+    }
+
+    /// 获取 metadata bool 值，缺省 false。
+    pub fn meta_bool(&self, key: &str) -> bool {
+        self.meta_get(key)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// 获取 metadata 字符串值。
+    pub fn meta_str(&self, key: &str) -> Option<&str> {
+        self.meta_get(key).and_then(|v| v.as_str())
+    }
+
+    /// 安全写入 metadata 字段。如果 metadata 不是 JSON object，先替换为 `{}`。
+    pub fn meta_set(&mut self, key: &str, value: Value) {
+        if !self.metadata.is_object() {
+            self.metadata = json!({});
+        }
+        if let Some(obj) = self.metadata.as_object_mut() {
+            obj.insert(key.to_owned(), value);
+        }
+    }
+
+    /// 检查是否为回放事件。
+    pub fn is_replay(&self) -> bool {
+        self.meta_bool("replay")
+    }
+
+    /// 检查事件类别（raw / derived / ephemeral）。
+    pub fn category(&self) -> Option<&str> {
+        self.meta_str("category")
+    }
+
+    /// 检查事件来源（live / replay / replay_derived）。
+    pub fn origin(&self) -> Option<&str> {
+        self.meta_str("origin")
+    }
+}
+
+/// 给 analyzer 输出事件打 replay_derived 标记。
+/// `derived_from` 可以是一个或多个输入事件 id。
+pub fn mark_derived_event(
+    event: &mut Event,
+    plugin_id: &str,
+    plugin_version: &str,
+    derived_from: &[u64],
+) {
+    event.source = format!("replay-analyzer:{plugin_id}");
+    event.meta_set("replay", Value::Bool(true));
+    event.meta_set("origin", Value::String("replay_derived".to_owned()));
+    event.meta_set("category", Value::String("derived".to_owned()));
+    event.meta_set("derived", Value::Bool(true));
+    event.meta_set("plugin_id", Value::String(plugin_id.to_owned()));
+    event.meta_set("plugin_version", Value::String(plugin_version.to_owned()));
+    event.meta_set(
+        "derived_from",
+        Value::Array(
+            derived_from
+                .iter()
+                .map(|id| Value::Number((*id).into()))
+                .collect(),
+        ),
+    );
+    event.meta_set("recordable", Value::Bool(false));
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
