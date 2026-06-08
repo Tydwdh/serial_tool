@@ -1,0 +1,32 @@
+{
+  "id": "template.serial-chart",
+  "name": "串口图表插件模板",
+  "version": "0.1.0",
+  "runtime": "lua",
+  "main": "main.lua",
+  "permissions": ["bus", "log", "serial", "ui", "storage"],
+  "live": {
+    "main": "main.lua",
+    "permissions": ["bus", "log", "serial", "ui", "storage"]
+  },
+  "replay": {
+    "main": "replay.lua",
+    "subscriptions": ["transport.serial.default.rx"],
+    "outputs": ["protocol.template.sample"],
+    "permissions": ["log", "storage"]
+  },
+  "contributes": {
+    "panels": [
+      {
+        "id": "template.serial-chart.chart",
+        "title": "串口数据图表",
+        "kind": "chart"
+      },
+      {
+        "id": "template.serial-chart.form",
+        "title": "串口图表参数",
+        "kind": "form"
+      }
+    ]
+  }
+}
