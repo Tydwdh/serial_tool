@@ -149,16 +149,30 @@ impl DynamicPanels {
         // file browse 事件由 main.rs 处理
         let _ = self.file_browse_subscription.drain();
 
-        // file selected 事件：更新字段值
+        // file selected 事件：更新字段值，并触发 form.changed（视为用户输入）
         for event in self.file_selected_subscription.drain() {
             if let Payload::Json(val) = event.payload {
                 let panel_id = val.get("panel_id").and_then(Value::as_str).unwrap_or("");
                 let field_id = val.get("field_id").and_then(Value::as_str).unwrap_or("");
                 let path = val.get("path").and_then(Value::as_str).unwrap_or("");
                 if let Some(panel) = self.panels.get_mut(panel_id) {
+                    let auto = matches!(
+                        panel,
+                        DynamicPanel::Form {
+                            auto_apply: true,
+                            ..
+                        }
+                    );
                     if let DynamicPanel::Form { fields, .. } = panel {
                         if let Some(field) = fields.iter_mut().find(|f| f.id == field_id) {
                             field.value = Value::String(path.to_owned());
+                        }
+                    }
+                    if auto {
+                        let panel_id = panel_id.to_owned();
+                        if let Some(DynamicPanel::Form { fields, .. }) = self.panels.get(&panel_id)
+                        {
+                            publish_form_changed(&self.bus, &panel_id, fields);
                         }
                     }
                 }
@@ -180,17 +194,22 @@ impl DynamicPanels {
                 if let Some(field) = fields.iter_mut().find(|f| f.id == field_id) {
                     apply(field, new_value);
                 } else {
-                    self.last_error = Some(format!(
-                        "set field: field '{field_id}' not found in '{panel_id}'"
-                    ));
-                    let _bus = &self.bus;
-                    let _ = tool_core::LogLevel::Warn;
+                    let msg = format!("set field: field '{field_id}' not found in '{panel_id}'");
+                    self.last_error = Some(msg.clone());
+                    self.bus
+                        .publish(Event::system_log(LogLevel::Warn, "ui.dynamic", msg));
                 }
             } else {
-                self.last_error = Some(format!("set field: panel '{panel_id}' is not a form"));
+                let msg = format!("set field: panel '{panel_id}' is not a form");
+                self.last_error = Some(msg.clone());
+                self.bus
+                    .publish(Event::system_log(LogLevel::Warn, "ui.dynamic", msg));
             }
         } else {
-            self.last_error = Some(format!("set field: panel '{panel_id}' not found"));
+            let msg = format!("set field: panel '{panel_id}' not found");
+            self.last_error = Some(msg.clone());
+            self.bus
+                .publish(Event::system_log(LogLevel::Warn, "ui.dynamic", msg));
         }
     }
 
@@ -406,6 +425,12 @@ fn dynamic_form_ui(
 ) {
     let mut changed = false;
 
+    // 预收集所有字段值（供 button action 使用，避免 borrow 冲突）
+    let field_values: Vec<(String, Value)> = fields
+        .iter()
+        .map(|f| (f.id.clone(), f.value.clone()))
+        .collect();
+
     for field in fields.iter_mut() {
         if !field.visible {
             continue;
@@ -435,6 +460,10 @@ fn dynamic_form_ui(
                     .fill(fill)
                     .min_size(egui::vec2(80.0, 28.0));
                 if ui.add_enabled(enabled, btn).clicked() {
+                    let mut values = serde_json::Map::new();
+                    for (id, val) in &field_values {
+                        values.insert(id.clone(), val.clone());
+                    }
                     bus.publish(Event::new(
                         topics::UI_FORM_ACTION,
                         format!("ui.panel:{panel_id}"),
@@ -442,7 +471,8 @@ fn dynamic_form_ui(
                         Payload::Json(serde_json::json!({
                             "panel_id": panel_id,
                             "field_id": field.id,
-                            "kind": "button_clicked"
+                            "kind": "button_clicked",
+                            "values": values
                         })),
                     ));
                 }

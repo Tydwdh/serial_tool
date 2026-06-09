@@ -38,20 +38,26 @@ pub struct FileAccessBroker {
     authorized: parking_lot::Mutex<HashMap<String, HashSet<PathBuf>>>,
 }
 
+fn canonical_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 impl FileAccessBroker {
     pub fn authorize(&self, plugin_id: &str, path: PathBuf) {
+        let canonical = canonical_path(&path);
         self.authorized
             .lock()
             .entry(plugin_id.to_owned())
             .or_default()
-            .insert(path);
+            .insert(canonical);
     }
 
     pub fn is_authorized(&self, plugin_id: &str, path: &Path) -> bool {
+        let canonical = canonical_path(path);
         self.authorized
             .lock()
             .get(plugin_id)
-            .map(|paths| paths.iter().any(|p| p == path))
+            .map(|paths| paths.contains(&canonical))
             .unwrap_or(false)
     }
 
@@ -709,15 +715,12 @@ fn install_ctx(
     }
 
     if let Some(ref root) = host_services.plugin_root {
-        let root_str = root.display().to_string();
-        let root_str = root_str.replace('\\', "/");
+        let root_str = root.display().to_string().replace('\\', "/");
         let new_path = format!("{root_str}/lib/?.lua;{root_str}/?.lua");
-        lua.globals().set("package", {
-            let pkg = lua.create_table()?;
-            pkg.set("path", new_path)?;
-            pkg.set("cpath", "")?;
-            pkg
-        })?;
+        if let Ok(package) = lua.globals().get::<Table>("package") {
+            let _ = package.set("path", new_path);
+            let _ = package.set("cpath", "");
+        }
     }
 
     ctx.set(
@@ -2103,12 +2106,10 @@ fn install_replay_ctx(
     if let Some(ref root) = config.plugin_root {
         let root_str = root.display().to_string().replace('\\', "/");
         let new_path = format!("{root_str}/lib/?.lua;{root_str}/?.lua");
-        lua.globals().set("package", {
-            let pkg = lua.create_table()?;
-            pkg.set("path", new_path)?;
-            pkg.set("cpath", "")?;
-            pkg
-        })?;
+        if let Ok(package) = lua.globals().get::<Table>("package") {
+            let _ = package.set("path", new_path);
+            let _ = package.set("cpath", "");
+        }
     }
 
     // ctx.storage.get (只读)

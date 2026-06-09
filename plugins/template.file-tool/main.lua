@@ -2,8 +2,6 @@
 -- 演示 v0.2 新增的 file / textarea / button / progress / status 字段类型
 -- 以及 ctx.dialog.open_file / ctx.fs.read_text / ctx.ui.set_value
 
-local selected_file = ""
-
 ctx.ui.create_form({
     id = "file-tool-panel",
     title = "文件工具",
@@ -56,18 +54,18 @@ ctx.ui.create_form({
     }
 })
 
--- 点击按钮后加载文件
+-- 点击按钮后加载文件（从 event.payload.values 读取表单当前状态）
 ctx.bus.on("ui.form.action", function(event)
     if not event.payload or event.payload.panel_id ~= "file-tool-panel" then
         return
     end
     if event.payload.field_id == "load_btn" then
-        load_selected_file()
+        local values = event.payload.values or {}
+        load_selected_file(values.file_path)
     end
 end)
 
-function load_selected_file()
-    local path = selected_file
+function load_selected_file(path)
     if path == nil or path == "" then
         ctx.ui.set_value("file-tool-panel", "status", {
             text = "请先选择文件",
@@ -119,13 +117,4 @@ function load_selected_file()
 end
 
 -- 表单变化时记录选中的文件路径
-ctx.bus.on("ui.form.changed", function(event)
-    if not event.payload or event.payload.panel_id ~= "file-tool-panel" then
-        return
-    end
-    if event.payload.values and event.payload.values.file_path then
-        selected_file = event.payload.values.file_path
-    end
-end)
-
 ctx.log.info("文件工具插件已就绪")
