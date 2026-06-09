@@ -1,4 +1,4 @@
-use crossbeam_channel::{Sender, unbounded};
+use crossbeam_channel::{Sender, bounded};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serialport as sp;
@@ -28,6 +28,8 @@ pub enum TransportError {
     Io(#[from] std::io::Error),
     #[error("serial worker is closed")]
     WorkerClosed,
+    #[error("serial write queue is full — 发送过快，请降低频率")]
+    QueueFull,
 }
 
 pub type TransportResult<T> = Result<T, TransportError>;
@@ -156,7 +158,7 @@ impl TransportManager {
             TransportError::from(error)
         })?;
 
-        let (writer, write_rx) = unbounded::<Vec<u8>>();
+        let (writer, write_rx) = bounded::<Vec<u8>>(1024);
         let stop = Arc::new(AtomicBool::new(false));
         let alive = Arc::new(AtomicBool::new(true));
         let thread_stop = Arc::clone(&stop);
@@ -230,10 +232,10 @@ impl TransportManager {
         if !worker.alive.load(Ordering::Relaxed) {
             return Err(TransportError::WorkerClosed);
         }
-        worker
-            .writer
-            .send(bytes)
-            .map_err(|_| TransportError::WorkerClosed)
+        worker.writer.try_send(bytes).map_err(|e| match e {
+            crossbeam_channel::TrySendError::Full(_) => TransportError::QueueFull,
+            crossbeam_channel::TrySendError::Disconnected(_) => TransportError::WorkerClosed,
+        })
     }
 
     // ── 向后兼容：发送到第一个已打开端口 ──
@@ -248,6 +250,7 @@ impl TransportManager {
         self.send_to(&name, bytes)
     }
 
+    #[deprecated = "多串口场景不安全：请使用 send_text_to(port_name, text)"]
     pub fn send_text(&self, text: &str) -> TransportResult<()> {
         self.send(text.as_bytes().to_vec())
     }
@@ -256,6 +259,7 @@ impl TransportManager {
         self.send_to(port_name, text.as_bytes().to_vec())
     }
 
+    #[deprecated = "多串口场景不安全：请使用 send_hex_to(port_name, hex)"]
     pub fn send_hex(&self, input: &str) -> TransportResult<()> {
         self.send(parse_hex(input)?)
     }
@@ -265,6 +269,7 @@ impl TransportManager {
     }
 
     // ── 状态 ──
+    #[deprecated = "多串口场景语义不稳定：请使用 status_port(port_name)"]
     pub fn status(&self) -> TransportStatus {
         let guard = self.ports.lock();
         match guard.values().next() {
@@ -312,11 +317,9 @@ impl TransportManager {
     }
 }
 
-impl Drop for TransportManager {
-    fn drop(&mut self) {
-        self.close_serial();
-    }
-}
+// TransportManager 不再实现 Drop：
+// clone 被 Lua plugin/PluginManager 多处持有，任意 clone drop 会误关所有串口。
+// 关闭串口的唯一安全调用点是 WorkbenchApp::drop()。
 
 // ── 串口工作线程 ──
 

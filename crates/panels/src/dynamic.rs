@@ -68,6 +68,8 @@ struct DynamicField {
     filters: Vec<FieldFilter>,
     enabled: bool,
     visible: bool,
+    // ── v0.3 新增 ──
+    action: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,7 +123,7 @@ impl DynamicPanels {
     }
 
     pub fn ingest(&mut self, panel_manager: &mut PanelManager) {
-        for event in self.subscription.drain() {
+        for event in self.subscription.drain_limited(500) {
             match self.create_from_event(event) {
                 Ok(Some(id)) => panel_manager.add_tab(PanelKind::Dynamic(id)),
                 Ok(None) => {}
@@ -129,7 +131,7 @@ impl DynamicPanels {
             }
         }
 
-        for event in self.remove_subscription.drain() {
+        for event in self.remove_subscription.drain_limited(500) {
             match self.remove_from_event(event) {
                 Ok(Some(id)) => {
                     self.panels.remove(&id);
@@ -141,19 +143,19 @@ impl DynamicPanels {
         }
 
         // UI 状态更新事件
-        for event in self.set_value_subscription.drain() {
+        for event in self.set_value_subscription.drain_limited(500) {
             self.handle_field_update(event, |field, value| {
                 field.value = value;
             });
         }
-        for event in self.set_enabled_subscription.drain() {
+        for event in self.set_enabled_subscription.drain_limited(500) {
             self.handle_field_update(event, |field, val| {
                 if let Some(enabled) = val.as_bool() {
                     field.enabled = enabled;
                 }
             });
         }
-        for event in self.set_visible_subscription.drain() {
+        for event in self.set_visible_subscription.drain_limited(500) {
             self.handle_field_update(event, |field, val| {
                 if let Some(visible) = val.as_bool() {
                     field.visible = visible;
@@ -161,18 +163,27 @@ impl DynamicPanels {
             });
         }
         // log append 事件
-        for event in self.log_append_subscription.drain() {
+        for event in self.log_append_subscription.drain_limited(500) {
             if let Payload::Json(val) = event.payload {
                 let panel_id = val.get("panel_id").and_then(Value::as_str).unwrap_or("");
                 let level_str = val.get("level").and_then(Value::as_str).unwrap_or("info");
                 let msg = val.get("message").and_then(Value::as_str).unwrap_or("");
                 let level = LogLevel::parse_name(level_str).unwrap_or(LogLevel::Info);
+                let plugin_id = val.get("plugin_id").and_then(Value::as_str);
                 if let Some(DynamicPanel::Log {
                     entries,
                     max_entries,
+                    owner_plugin_id,
                     ..
                 }) = self.panels.get_mut(panel_id)
                 {
+                    // owner 校验：拒绝非 owner 插件的写入
+                    if let (Some(owner), Some(pid)) = (owner_plugin_id.as_deref(), plugin_id) {
+                        if owner != pid {
+                            // 拒绝：插件不能写其他插件的日志面板
+                            continue;
+                        }
+                    }
                     entries.push_back(LogEntry {
                         timestamp_ms: tool_core::now_timestamp_ms(),
                         level,
@@ -186,10 +197,14 @@ impl DynamicPanels {
         }
 
         // file browse 事件由 main.rs 处理
-        let _ = self.file_browse_subscription.drain();
+        let _ = self.file_browse_subscription.drain_limited(500);
 
         // file selected 事件：更新字段值，并触发 form.changed（视为用户输入）
-        for event in self.file_selected_subscription.drain() {
+        // 只接受来自 ui/app 的事件，防止插件伪造文件选择结果
+        for event in self.file_selected_subscription.drain_limited(500) {
+            if event.source != "ui" && event.source != "app" {
+                continue;
+            }
             if let Payload::Json(val) = event.payload {
                 let panel_id = val.get("panel_id").and_then(Value::as_str).unwrap_or("");
                 let field_id = val.get("field_id").and_then(Value::as_str).unwrap_or("");
@@ -220,6 +235,21 @@ impl DynamicPanels {
     }
 
     /// 处理通用字段更新事件（set_value / set_enabled / set_visible）
+    fn is_allowed(&self, panel_id: &str, source: &str) -> bool {
+        let owner = self.panel_owner(panel_id);
+        match owner {
+            None => {
+                // 无 owner 的系统面板：禁止插件修改，只允许 app / ui / test
+                !source.starts_with("plugin:")
+            }
+            Some(owner_id) => {
+                // 有 owner 的插件面板：只允许同 owner 修改
+                let expected = format!("plugin:{owner_id}");
+                source == expected
+            }
+        }
+    }
+
     fn handle_field_update(&mut self, event: Event, apply: impl Fn(&mut DynamicField, Value)) {
         let Payload::Json(value) = event.payload else {
             return;
@@ -227,6 +257,19 @@ impl DynamicPanels {
         let panel_id = value.get("panel_id").and_then(Value::as_str).unwrap_or("");
         let field_id = value.get("field_id").and_then(Value::as_str).unwrap_or("");
         let new_value = value.get("value").cloned().unwrap_or(Value::Null);
+
+        // owner 校验
+        if !self.is_allowed(panel_id, &event.source) {
+            self.bus.publish(Event::system_log(
+                LogLevel::Warn,
+                "ui.dynamic",
+                format!(
+                    "set field '{panel_id}.{field_id}' rejected: source '{}' not allowed",
+                    event.source
+                ),
+            ));
+            return;
+        }
 
         if let Some(panel) = self.panels.get_mut(panel_id) {
             if let DynamicPanel::Form { fields, .. } = panel {
@@ -277,8 +320,6 @@ impl DynamicPanels {
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
                         for entry in entries.iter() {
-                            let ts = tool_core::now_timestamp_ms(); // approximate
-                            let _ = ts;
                             let color = match entry.level {
                                 LogLevel::Error => theme::RED,
                                 LogLevel::Warn => theme::YELLOW,
@@ -286,7 +327,17 @@ impl DynamicPanels {
                                 LogLevel::Debug => theme::TEXT_SECONDARY,
                                 LogLevel::Trace => Color32::GRAY,
                             };
-                            ui.colored_label(color, &entry.message);
+                            // 格式化时间：HH:MM:SS
+                            let total_secs = entry.timestamp_ms / 1000;
+                            let h = total_secs / 3600;
+                            let m = (total_secs % 3600) / 60;
+                            let s = total_secs % 60;
+                            let text = format!(
+                                "[{h:02}:{m:02}:{s:02}] {} {}",
+                                entry.level.as_str(),
+                                entry.message
+                            );
+                            ui.colored_label(color, RichText::new(text));
                         }
                     });
             }
@@ -407,10 +458,10 @@ impl DynamicPanels {
             .and_then(Value::as_str)
             .unwrap_or("chart");
 
-        let owner_plugin_id = object
-            .get("plugin_id")
-            .and_then(Value::as_str)
-            .map(|s| s.to_owned());
+        // owner 从 event.source 推导，不信任 payload 中的 plugin_id
+        let owner_plugin_id: Option<String> =
+            event.source.strip_prefix("plugin:").map(|s| s.to_owned());
+        let owner_for_check = owner_plugin_id.clone();
 
         let panel = match kind {
             "chart" => {
@@ -466,6 +517,25 @@ impl DynamicPanels {
             other => return Err(format!("不支持的动态面板类型 '{other}'")),
         };
 
+        // 冲突检查：已有面板不能被不同 owner 覆盖，无 owner 面板不能被插件覆盖
+        if self.panels.contains_key(&id) {
+            let existing_owner = self.panel_owner(&id);
+            let new_owner = owner_for_check.as_deref();
+            match existing_owner {
+                Some(existing) if existing != new_owner.unwrap_or("") => {
+                    return Err(format!(
+                        "panel id '{id}' already owned by '{existing}', cannot be overwritten"
+                    ));
+                }
+                None if new_owner.is_some() => {
+                    return Err(format!(
+                        "panel id '{id}' is a system panel, cannot be overwritten by plugin"
+                    ));
+                }
+                _ => {}
+            }
+        }
+
         self.panels.insert(id.clone(), panel);
         self.last_error = None;
 
@@ -485,6 +555,19 @@ impl DynamicPanels {
 
         if id.is_empty() {
             return Err("ui.panel.remove requires id".to_owned());
+        }
+
+        // owner 校验：不允许跨插件删除面板
+        if !self.is_allowed(&id, &event.source) {
+            self.bus.publish(Event::system_log(
+                LogLevel::Warn,
+                "ui.dynamic",
+                format!(
+                    "remove panel '{id}' rejected: source '{}' not allowed",
+                    event.source
+                ),
+            ));
+            return Ok(None);
         }
 
         self.panels.remove(&id);
@@ -528,7 +611,11 @@ fn dynamic_form_ui(
             }
             // ── 按钮 ──
             DynamicFieldKind::Button => {
-                let text = field.text.as_deref().unwrap_or(&field.label);
+                let text = field
+                    .value
+                    .as_str()
+                    .or(field.text.as_deref())
+                    .unwrap_or(&field.label);
                 let fill = match field.variant.as_deref() {
                     Some("primary") => theme::BLUE,
                     Some("danger") => theme::RED,
@@ -550,6 +637,7 @@ fn dynamic_form_ui(
                             "panel_id": panel_id,
                             "field_id": field.id,
                             "kind": "button_clicked",
+                            "action": field.action,
                             "values": values
                         })),
                     ));
@@ -560,22 +648,48 @@ fn dynamic_form_ui(
                 if let Some(label) = field.text.as_deref() {
                     ui.label(label);
                 }
-                let v = field.value.as_f64().unwrap_or(0.0).clamp(0.0, 100.0);
+                // 兼容 number（百分比）和 {current, total}
+                let v = if field.value.is_number() {
+                    field.value.as_f64().unwrap_or(0.0).clamp(0.0, 100.0)
+                } else if let (Some(c), Some(t)) = (
+                    field.value.get("current").and_then(Value::as_f64),
+                    field.value.get("total").and_then(Value::as_f64),
+                ) {
+                    if t > 0.0 {
+                        (c / t * 100.0).clamp(0.0, 100.0)
+                    } else {
+                        0.0
+                    }
+                } else {
+                    field.value.as_f64().unwrap_or(0.0).clamp(0.0, 100.0)
+                };
                 ui.add(ProgressBar::new((v / 100.0) as f32).text(format!("{v:.0}%")));
             }
             // ── 状态 ──
             DynamicFieldKind::Status => {
-                let text = field
-                    .value
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let level = field
-                    .value
-                    .get("level")
-                    .and_then(Value::as_str)
-                    .unwrap_or("idle");
-                let color = status_color(level);
+                // 兼容 string 和 {text, level}
+                let (text, level) = if field.value.is_string() {
+                    (
+                        field.value.as_str().unwrap_or("").to_owned(),
+                        "running".to_owned(),
+                    )
+                } else {
+                    (
+                        field
+                            .value
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned(),
+                        field
+                            .value
+                            .get("level")
+                            .and_then(Value::as_str)
+                            .unwrap_or("idle")
+                            .to_owned(),
+                    )
+                };
+                let color = status_color(&level);
                 ui.label(RichText::new(text).color(color));
             }
             // ── TextArea ──
@@ -602,15 +716,17 @@ fn dynamic_form_ui(
                 ui.horizontal(|ui| {
                     ui.label(&field.label);
                     let path = field.value.as_str().unwrap_or("").to_owned();
-                    let mut display_path = path.clone();
-                    let resp = ui.add_enabled(
-                        enabled,
-                        TextEdit::singleline(&mut display_path).desired_width(200.0),
+                    let status = if path.is_empty() {
+                        "未选择".to_owned()
+                    } else if path.len() > 40 {
+                        format!("...{}", &path[path.len().saturating_sub(37)..])
+                    } else {
+                        path.clone()
+                    };
+                    ui.add_enabled(
+                        false,
+                        TextEdit::singleline(&mut status.clone()).desired_width(200.0),
                     );
-                    if resp.changed() {
-                        field.value = Value::String(display_path);
-                        changed = true;
-                    }
                     if ui.add_enabled(enabled, egui::Button::new("浏览")).clicked() {
                         bus.publish(Event::new(
                             topics::UI_FORM_FILE_BROWSE,
@@ -804,7 +920,13 @@ fn parse_fields(value: Option<&Value>) -> Result<Vec<DynamicField>, String> {
                 .ok_or_else(|| "form field must be an object".to_owned())?;
 
             // 先解析 kind，display-only 类型可以不提供 id
-            let kind = match object.get("kind").and_then(Value::as_str).unwrap_or("text") {
+            // kind 大小写不敏感
+            let kind_raw = object
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("text")
+                .to_ascii_lowercase();
+            let kind = match kind_raw.as_str() {
                 "number" => DynamicFieldKind::Number,
                 "boolean" | "bool" | "checkbox" => DynamicFieldKind::Boolean,
                 "select" | "choice" | "enum" | "dropdown" => DynamicFieldKind::Select,
@@ -844,9 +966,11 @@ fn parse_fields(value: Option<&Value>) -> Result<Vec<DynamicField>, String> {
             let options = parse_options(object.get("options"))?;
             let filters = parse_filters(object.get("filters"))?;
 
-            let default_value = object
-                .get("default")
+            // value 优先使用 value 字段，否则 default，否则按类型 fallback
+            let field_value = object
+                .get("value")
                 .cloned()
+                .or_else(|| object.get("default").cloned())
                 .or_else(|| {
                     if matches!(kind, DynamicFieldKind::Progress) {
                         Some(Value::Number(0.into()))
@@ -870,7 +994,7 @@ fn parse_fields(value: Option<&Value>) -> Result<Vec<DynamicField>, String> {
                 id,
                 label,
                 kind,
-                value: default_value,
+                value: field_value,
                 options,
                 min: object.get("min").and_then(Value::as_f64),
                 max: object.get("max").and_then(Value::as_f64),
@@ -897,6 +1021,10 @@ fn parse_fields(value: Option<&Value>) -> Result<Vec<DynamicField>, String> {
                     .get("visible")
                     .and_then(Value::as_bool)
                     .unwrap_or(true),
+                action: object
+                    .get("action")
+                    .and_then(Value::as_str)
+                    .map(String::from),
             })
         })
         .collect()

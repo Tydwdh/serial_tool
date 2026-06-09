@@ -3,7 +3,7 @@ use std::fs::{File, create_dir_all};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::thread::{self, JoinHandle};
@@ -46,6 +46,8 @@ pub struct JsonlRecorder {
 
 struct RecorderWorker {
     stop: Arc<AtomicBool>,
+    finished: Arc<AtomicBool>,
+    last_error: Arc<Mutex<Option<String>>>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -81,8 +83,13 @@ impl JsonlRecorder {
         let subscription = self.bus.subscribe(TopicFilter::All);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_thread = Arc::clone(&finished);
+        let last_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let last_error_thread = Arc::clone(&last_error);
         let mode = self.mode;
 
+        let bus = self.bus.clone();
         let join = thread::spawn(move || {
             let mut writer = BufWriter::new(file);
 
@@ -90,7 +97,17 @@ impl JsonlRecorder {
                 match subscription.recv_timeout(Duration::from_millis(100)) {
                     Ok(event) => {
                         if should_record_event_with_mode(&event, mode) {
-                            let _ = write_event(&mut writer, &event);
+                            if let Err(e) = write_event(&mut writer, &event) {
+                                *last_error_thread.lock().unwrap() =
+                                    Some(format!("write failed: {e}"));
+                                bus.publish(Event::system_log(
+                                    LogLevel::Error,
+                                    "recorder",
+                                    format!("write failed: {e}"),
+                                ));
+                                stop_thread.store(true, Ordering::SeqCst);
+                                break;
+                            }
                         }
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
@@ -100,15 +117,35 @@ impl JsonlRecorder {
 
             for event in subscription.drain() {
                 if should_record_event_with_mode(&event, mode) {
-                    let _ = write_event(&mut writer, &event);
+                    if let Err(e) = write_event(&mut writer, &event) {
+                        *last_error_thread.lock().unwrap() =
+                            Some(format!("drain write failed: {e}"));
+                        bus.publish(Event::system_log(
+                            LogLevel::Error,
+                            "recorder",
+                            format!("drain write failed: {e}"),
+                        ));
+                        break;
+                    }
                 }
             }
 
-            let _ = writer.flush();
+            if let Err(e) = writer.flush() {
+                *last_error_thread.lock().unwrap() = Some(format!("flush failed: {e}"));
+                bus.publish(Event::system_log(
+                    LogLevel::Error,
+                    "recorder",
+                    format!("flush failed: {e}"),
+                ));
+            }
+
+            finished_thread.store(true, Ordering::SeqCst);
         });
 
         self.worker = Some(RecorderWorker {
             stop,
+            finished,
+            last_error,
             join: Some(join),
         });
         self.current_path = Some(path.clone());
@@ -137,6 +174,25 @@ impl JsonlRecorder {
 
     pub fn is_running(&self) -> bool {
         self.worker.is_some()
+    }
+
+    /// 检查 worker 线程是否已结束，返回 error。UI 每帧调用。
+    /// 返回 None 表示 worker 未完成或已完成且无错误。
+    pub fn reap_error(&mut self) -> Option<String> {
+        let finished = self
+            .worker
+            .as_ref()
+            .is_some_and(|w| w.finished.load(Ordering::SeqCst));
+        if !finished {
+            return None;
+        }
+        let mut worker = self.worker.take()?;
+        let error = worker.last_error.lock().unwrap().clone();
+        if let Some(join) = worker.join.take() {
+            let _ = join.join();
+        }
+        self.current_path = None;
+        error
     }
 
     pub fn current_path(&self) -> Option<&Path> {

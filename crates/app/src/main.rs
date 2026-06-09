@@ -23,7 +23,7 @@ use tool_transport::{
 
 const ACTIVITY_BAR_WIDTH: f32 = 104.0;
 const BOTTOM_PANEL_HEIGHT: f32 = 350.0;
-const BOTTOM_PANEL_MIN: f32 = 550.0;
+const BOTTOM_PANEL_MIN: f32 = 180.0;
 const INSPECTOR_WIDTH: f32 = 240.0;
 const DEFAULT_WINDOW_WIDTH: f32 = 1280.0;
 const DEFAULT_WINDOW_HEIGHT: f32 = 820.0;
@@ -151,6 +151,49 @@ fn apply_theme(ctx: &egui::Context) {
 }
 
 // ── 数据结构 ──
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum StatusLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+impl StatusLevel {
+    fn ttl_ms(self) -> u64 {
+        match self {
+            Self::Info => 5_000,
+            Self::Warn => 8_000,
+            Self::Error => 15_000,
+        }
+    }
+}
+
+struct StatusState {
+    level: StatusLevel,
+    text: String,
+    deadline_ms: u64,
+}
+
+impl WorkbenchApp {
+    /// 统一状态入口。低级别不能覆盖未过期的高级消息。
+    fn set_status(&mut self, level: StatusLevel, text: impl Into<String>) {
+        let now = now_timestamp_ms();
+        if level as u8 >= self.status_level as u8 || now > self.status_deadline_ms {
+            self.status_level = level;
+            self.status_message = text.into();
+            self.status_deadline_ms = now + level.ttl_ms();
+        }
+    }
+
+    /// 过期后重置为就绪。每帧调用。
+    fn clear_status_if_expired(&mut self) {
+        if now_timestamp_ms() > self.status_deadline_ms {
+            self.status_level = StatusLevel::Info;
+            self.status_message = "就绪".into();
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DetachedPanelAction {
     None,
@@ -199,6 +242,8 @@ struct WorkbenchApp {
     timeout_ms: String,
     recorder_path: String,
     status_message: String,
+    status_level: StatusLevel,
+    status_deadline_ms: u64,
     last_port_refresh: f64,
     bottom_panel_visible: bool,
     bottom_tab: BottomTab,
@@ -220,7 +265,23 @@ struct WorkbenchApp {
     file_broker: Arc<FileAccessBroker>,
     dialog_receiver: crossbeam_channel::Receiver<DialogRequest>,
     file_browse_subscription: tool_databus::Subscription,
-    file_selected_subscription: tool_databus::Subscription,
+    replay_analyzer_job: Option<ReplayAnalyzerJob>,
+    replay_analyzer_generation: u64,
+}
+
+struct ReplayAnalyzerJob {
+    generation: u64,
+    source_path: String,
+    handle: std::thread::JoinHandle<ReplayAnalyzerResult>,
+}
+
+struct ReplayAnalyzerResult {
+    total: usize,
+    succeeded: usize,
+    failed: usize,
+    derived_events: Vec<Event>,
+    errors: Vec<String>,
+    logs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -315,6 +376,8 @@ impl WorkbenchApp {
                 .unwrap_or_else(default_recorder_path),
             panels: rp.clone(),
             status_message: "就绪".into(),
+            status_level: StatusLevel::Info,
+            status_deadline_ms: 0,
             last_port_refresh: 0.0,
             bottom_panel_visible: rp.bottom_logs_visible,
             bottom_tab: BottomTab::Terminal,
@@ -345,9 +408,8 @@ impl WorkbenchApp {
             file_browse_subscription: bus.subscribe(tool_databus::TopicFilter::exact(
                 tool_core::topics::UI_FORM_FILE_BROWSE,
             )),
-            file_selected_subscription: bus.subscribe(tool_databus::TopicFilter::exact(
-                tool_core::topics::UI_FORM_FILE_SELECTED,
-            )),
+            replay_analyzer_job: None,
+            replay_analyzer_generation: 0,
         };
         app.refresh_ports();
         let enabled: Vec<String> = config
@@ -478,7 +540,7 @@ impl WorkbenchApp {
             }
         }
     }
-    fn save_config(&mut self) {
+    fn save_config(&mut self) -> Result<(), String> {
         self.panels.bottom_logs_visible = self.bottom_panel_visible;
         let mut p = self.panels.clone();
         p.discard_dynamic_tabs();
@@ -506,9 +568,8 @@ impl WorkbenchApp {
                 .map(|s| s.id)
                 .collect(),
         };
-        if let Ok(t) = serde_json::to_string_pretty(&cfg) {
-            let _ = std::fs::write(config_path(), t);
-        }
+        let t = serde_json::to_string_pretty(&cfg).map_err(|e| format!("序列化失败：{e}"))?;
+        std::fs::write(config_path(), t).map_err(|e| format!("写入失败：{e}"))
     }
     fn available_bottom_tabs(&self) -> Vec<BottomTab> {
         BottomTab::ALL
@@ -548,7 +609,11 @@ impl WorkbenchApp {
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
         ui.heading("检查器");
-        let st = self.transport.status();
+        let st = self
+            .selected_port
+            .as_deref()
+            .map(|p| self.transport.status_port(p))
+            .unwrap_or_else(tool_transport::TransportStatus::closed);
         ui.label(egui::RichText::new("串口").strong());
         if st.open {
             ui.colored_label(
@@ -589,9 +654,13 @@ impl WorkbenchApp {
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
-        let st = self.transport.status();
+        let st = self
+            .selected_port
+            .as_deref()
+            .map(|p| self.transport.status_port(p))
+            .unwrap_or_else(tool_transport::TransportStatus::closed);
         ui.horizontal(|ui| {
-            let (d, l) = if let (Some(p), Some(b)) = (st.port_name.clone(), st.baud_rate) {
+            let (d, l) = if let (Some(p), Some(b)) = (self.selected_port.clone(), st.baud_rate) {
                 (if st.open { "●" } else { "○" }, format!("{p} @ {b}"))
             } else {
                 ("○", "串口已关闭".into())
@@ -705,7 +774,7 @@ impl WorkbenchApp {
                         let item = self.activity_order.remove(source_index);
                         let insert_index = insert_index.min(self.activity_order.len());
                         self.activity_order.insert(insert_index, item);
-                        self.save_config();
+                        let _ = self.save_config();
                     }
                 }
             }
@@ -862,16 +931,16 @@ impl WorkbenchApp {
             }
         }
 
-        self.save_config();
+        let _ = self.save_config();
     }
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let so = self.transport.status().open;
+            let so = self
+                .selected_port
+                .as_deref()
+                .is_some_and(|p| self.transport.status_port(p).open);
             let sl = if so {
-                format!(
-                    "串口 ▸ {}",
-                    self.transport.status().port_name.as_deref().unwrap_or("?")
-                )
+                format!("串口 ▸ {}", self.selected_port.as_deref().unwrap_or("?"))
             } else {
                 "串口 ▸ 未连接".into()
             };
@@ -901,14 +970,19 @@ impl WorkbenchApp {
                 self.start_or_stop_recording();
             }
             if ui.small_button("保存布局").clicked() {
-                self.save_config();
-                self.status_message = "布局已保存".into();
+                match self.save_config() {
+                    Ok(()) => self.status_message = "布局已保存".into(),
+                    Err(e) => self.status_message = format!("保存布局失败：{e}"),
+                }
             }
         });
     }
 
     fn send_bar(&mut self, ui: &mut egui::Ui) {
-        let so = self.transport.status().open;
+        let so = self
+            .selected_port
+            .as_deref()
+            .is_some_and(|p| self.transport.status_port(p).open);
         ui.horizontal(|ui| {
             ui.label("发送");
             ui.radio_value(&mut self.send_hex_mode, false, "文本");
@@ -955,7 +1029,12 @@ impl WorkbenchApp {
     }
 
     fn do_send(&mut self) {
-        self.send_error = send_impl(
+        let Some(port) = self.selected_port.as_deref() else {
+            self.send_error = Some("请选择串口".into());
+            return;
+        };
+        self.send_error = send_impl_to(
+            port,
             &self.send_input,
             self.send_hex_mode,
             self.send_append_lf,
@@ -1372,6 +1451,7 @@ impl eframe::App for WorkbenchApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.clear_status_if_expired();
         // 终端放大按钮
         if self.terminal_panel.maximize_clicked {
             self.terminal_panel.maximize_clicked = false;
@@ -1452,9 +1532,16 @@ impl eframe::App for WorkbenchApp {
                 self.replay_panel.auto_load = true;
             }
         }
-        // 运行 replay analyzer（如果需要）
+        // 运行 replay analyzer（后台线程，不卡 UI）
         if self.replay_panel.want_run_analyzers {
-            self.run_replay_analyzers();
+            self.launch_replay_analyzer_background();
+        }
+        // 检查后台 analyzer 是否完成
+        self.poll_replay_analyzer_result();
+
+        // 录制状态检测：worker 线程因错误退出时反馈给 UI
+        if let Some(error) = self.recorder.reap_error() {
+            self.set_status(StatusLevel::Error, format!("录制失败：{error}"));
         }
 
         // 处理 dialog 请求（Lua ctx.dialog.open_file）
@@ -1650,7 +1737,10 @@ impl WorkbenchApp {
             }
             egui::CentralPanel::default()
                 .show_inside(ui, |ui| {
-                    let so = self.transport.status().open;
+                    let so = self
+                        .selected_port
+                        .as_deref()
+                        .is_some_and(|p| self.transport.status_port(p).open);
                     let ctrl_enter = ui
                         .ctx()
                         .input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter));
@@ -1794,8 +1884,17 @@ impl WorkbenchApp {
         }
     }
 
-    /// 运行所有已发现插件的 replay analyzer，结果注入 ReplayManager。
-    fn run_replay_analyzers(&mut self) {
+    /// 启动后台线程运行 replay analyzer，不阻塞 UI。已有任务运行时拒绝重复触发。
+    fn launch_replay_analyzer_background(&mut self) {
+        self.replay_panel.want_run_analyzers = false;
+
+        if let Some(ref job) = self.replay_analyzer_job {
+            if !job.handle.is_finished() {
+                self.status_message = "回放：analyzer 正在运行中，请等待完成".to_owned();
+                return;
+            }
+        }
+
         let entries = self.plugin_manager.replay_analyzer_entries();
         if entries.is_empty() {
             self.replay_panel
@@ -1812,86 +1911,155 @@ impl WorkbenchApp {
             return;
         }
 
-        let mut all_derived = Vec::new();
-        let mut error_count = 0;
+        let total_entries = entries.len();
+        let generation = self.replay_analyzer_generation.wrapping_add(1);
+        self.replay_analyzer_generation = generation;
+        let source_path = self.replay_panel.path.clone();
+        self.status_message = format!("回放：正在运行 {total_entries} 个 analyzer ...");
 
-        for entry in &entries {
-            let replay_config = match &entry.manifest.replay {
-                Some(cfg) => cfg,
-                None => continue,
-            };
+        let handle = std::thread::spawn(move || {
+            let mut all_derived = Vec::new();
+            let mut errors = Vec::new();
+            let mut logs = Vec::new();
+            let mut succeeded = 0usize;
+            let mut failed = 0usize;
 
-            let script_path = entry.root.join(&replay_config.main);
-            let script = match std::fs::read_to_string(&script_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    error_count += 1;
-                    self.replay_panel
-                        .set_analyzer_error(format!("读取 {} 失败: {e}", script_path.display()));
-                    continue;
-                }
-            };
-
-            let config = LuaReplayConfig {
-                script_name: format!("replay:{}:{}", entry.plugin_id, replay_config.main),
-                plugin_id: entry.plugin_id.clone(),
-                plugin_version: entry.manifest.version.clone(),
-                subscriptions: replay_config.subscriptions.clone(),
-                context: serde_json::json!({
-                    "id": entry.manifest.id,
-                    "name": entry.manifest.name,
-                    "version": entry.manifest.version,
-                }),
-                plugin_root: Some(entry.root.clone()),
-            };
-
-            match run_replay_analyzer(script, config, &raw_events) {
-                Ok(output) => {
-                    for log_msg in &output.logs {
-                        self.log(LogLevel::Info, log_msg);
+            for entry in &entries {
+                let replay_config = match &entry.manifest.replay {
+                    Some(cfg) => cfg,
+                    None => {
+                        failed += 1;
+                        continue;
                     }
-                    all_derived.extend(output.events);
-                }
-                Err(e) => {
-                    error_count += 1;
-                    self.log(
-                        LogLevel::Warn,
-                        &format!("analyzer {} 失败: {e}", entry.plugin_id),
-                    );
+                };
+
+                let script_path = entry.root.join(&replay_config.main);
+                let script = match std::fs::read_to_string(&script_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        failed += 1;
+                        errors.push(format!("读取 {} 失败: {e}", script_path.display()));
+                        continue;
+                    }
+                };
+
+                let config = LuaReplayConfig {
+                    script_name: format!("replay:{}:{}", entry.plugin_id, replay_config.main),
+                    plugin_id: entry.plugin_id.clone(),
+                    plugin_version: entry.manifest.version.clone(),
+                    subscriptions: replay_config.subscriptions.clone(),
+                    context: serde_json::json!({
+                        "id": entry.manifest.id,
+                        "name": entry.manifest.name,
+                        "version": entry.manifest.version,
+                    }),
+                    plugin_root: Some(entry.root.clone()),
+                };
+
+                match run_replay_analyzer(script, config, &raw_events) {
+                    Ok(output) => {
+                        succeeded += 1;
+                        logs.push(format!(
+                            "analyzer {} 产生了 {} 个事件",
+                            entry.plugin_id,
+                            output.events.len()
+                        ));
+                        all_derived.extend(output.events);
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        errors.push(format!("analyzer {} 失败: {e}", entry.plugin_id));
+                    }
                 }
             }
-        }
 
-        if all_derived.is_empty() {
-            self.replay_panel
-                .set_analyzer_error("所有 analyzer 运行失败（终端可显示原始事件）".to_owned());
-            self.status_message = "回放：analyzer 运行失败（终端可显示原始事件）".to_owned();
+            all_derived.sort_by_key(|e| (e.timestamp_ms, e.id));
+            ReplayAnalyzerResult {
+                total: total_entries,
+                succeeded,
+                failed,
+                derived_events: all_derived,
+                errors,
+                logs,
+            }
+        });
+
+        self.replay_analyzer_job = Some(ReplayAnalyzerJob {
+            generation,
+            source_path,
+            handle,
+        });
+    }
+
+    fn poll_replay_analyzer_result(&mut self) {
+        let Some(mut job) = self.replay_analyzer_job.take() else {
+            return;
+        };
+        if !job.handle.is_finished() {
+            self.replay_analyzer_job = Some(job);
+            return;
+        }
+        let result = job.handle.join().unwrap_or(ReplayAnalyzerResult {
+            total: 0,
+            succeeded: 0,
+            failed: 1,
+            derived_events: vec![],
+            errors: vec!["analyzer thread panicked".into()],
+            logs: vec![],
+        });
+
+        // 忽略过期 generation 的结果（用户已重新触发）
+        if job.generation < self.replay_analyzer_generation {
+            return;
+        }
+        // 忽略回放文件已改变的结果
+        if job.source_path != self.replay_panel.path {
+            self.status_message = "回放：忽略过期 analyzer 结果，录制文件已改变".into();
             return;
         }
 
-        all_derived.sort_by_key(|e| (e.timestamp_ms, e.id));
-        let count = all_derived.len();
-        self.replay_panel.set_analyzer_cache(all_derived);
-
-        if error_count > 0 {
-            self.status_message = format!(
-                "回放 analyzer 部分完成：{count} 个派生事件，{error_count} 个 analyzer 失败"
-            );
-        } else {
-            self.status_message = format!("回放 analyzer 完成：{count} 个派生事件");
+        for msg in &result.logs {
+            self.log(LogLevel::Info, msg);
         }
-        let msg = format!(
-            "replay analyzers produced {count} derived events from {} raw events ({} plugins)",
-            raw_events.len(),
-            entries.len()
-        );
-        self.log(LogLevel::Info, &msg);
+
+        if result.derived_events.is_empty() && result.succeeded == 0 {
+            let msg = if result.errors.is_empty() {
+                "所有 analyzer 运行完成但未生成派生事件".to_owned()
+            } else {
+                format!(
+                    "{} 个 analyzer 全部失败: {}",
+                    result.total,
+                    result.errors.first().unwrap()
+                )
+            };
+            self.replay_panel.set_analyzer_error(msg.clone());
+            self.status_message = format!("回放：{msg}");
+        } else {
+            self.replay_panel
+                .set_analyzer_cache(result.derived_events.clone());
+            // 显示详细结果
+            let summary = format!(
+                "{} 个派生事件，{} 成功",
+                result.derived_events.len(),
+                result.succeeded
+            );
+            let msg = if result.failed > 0 {
+                let err_detail = result.errors.join("; ");
+                self.replay_panel
+                    .set_analyzer_error(format!("{summary}，{} 失败: {err_detail}", result.failed));
+                format!("回放：{summary}，{} 失败", result.failed)
+            } else {
+                self.replay_panel.set_analyzer_error(String::new());
+                format!("回放：{summary}")
+            };
+            self.status_message = msg;
+        }
     }
 }
 
 impl Drop for WorkbenchApp {
     fn drop(&mut self) {
-        self.save_config();
+        let _ = self.save_config();
         self.recorder.stop();
         self.transport.close_serial();
     }
@@ -1962,7 +2130,8 @@ fn baud_combo(ui: &mut egui::Ui, id: &'static str, w: f32, baud: &mut String) {
             }
         });
 }
-fn send_impl(
+fn send_impl_to(
+    port: &str,
     input: &str,
     hex: bool,
     lf: bool,
@@ -1977,7 +2146,7 @@ fn send_impl(
             if x.is_empty() {
                 continue;
             }
-            t.send_hex(x)?;
+            t.send_hex_to(port, x)?;
         }
         Ok(())
     } else {
@@ -1985,7 +2154,7 @@ fn send_impl(
         if lf {
             text.push('\n');
         }
-        t.send_text(&text)
+        t.send_text_to(port, &text)
     }
 }
 fn translate_error(m: &str) -> String {
@@ -2002,6 +2171,12 @@ fn load_config() -> Option<PersistedConfig> {
     serde_json::from_str(&t).ok()
 }
 fn config_path() -> PathBuf {
+    // 优先使用平台配置目录，避免 CWD 变化导致配置"丢失"
+    if let Some(dir) = dirs_next::config_dir() {
+        let app_dir = dir.join("HardwareWorkbench");
+        let _ = std::fs::create_dir_all(&app_dir);
+        return app_dir.join("workspace.json");
+    }
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("workspace.json")

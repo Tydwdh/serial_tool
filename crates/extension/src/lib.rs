@@ -8,7 +8,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tool_core::{Direction, Event, LogLevel, Payload, topics};
 use tool_databus::{DataBus, Subscription, TopicFilter};
-use tool_lua_host::{LuaPluginRuntime, LuaRunConfig, run_plugin};
+use tool_lua_host::{ConfigStore, LineBufferMap, LuaPluginRuntime, LuaRunConfig, run_plugin};
 use tool_transport::TransportManager;
 use tool_wasm_host::{WasmPluginConfig, WasmPluginRuntime};
 
@@ -297,11 +297,17 @@ pub struct PluginManager {
     subscription: Subscription,
     dialog_request_sender: Option<crossbeam_channel::Sender<DialogRequest>>,
     file_broker: Option<Arc<FileAccessBroker>>,
+    line_buffers: LineBufferMap,
+    config_store: Arc<ConfigStore>,
+    dropped_events: u64,
 }
 
 impl PluginManager {
     pub fn new(bus: DataBus, transport: TransportManager) -> Self {
         let subscription = bus.subscribe(TopicFilter::All);
+        let default_config_root = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("plugin-config");
 
         Self {
             bus,
@@ -314,7 +320,21 @@ impl PluginManager {
             subscription,
             dialog_request_sender: None,
             file_broker: None,
+            line_buffers: Arc::new(Mutex::new(HashMap::new())),
+            config_store: Arc::new(ConfigStore::new(default_config_root)),
+            dropped_events: 0,
         }
+    }
+
+    pub fn set_workspace(&self, workspace: &Path) {
+        // ConfigStore 在构造时已设置 root，后续可通过此方法通知。
+        // 当前版本 ConfigStore 不动态迁移，新路径仅用于日志。
+        let config_root = workspace.join("plugin-config");
+        self.bus.publish(Event::system_log(
+            LogLevel::Info,
+            "extension",
+            format!("config workspace: {}", config_root.display()),
+        ));
     }
 
     pub fn set_host_services(
@@ -438,6 +458,8 @@ impl PluginManager {
             dialog_sender: self.dialog_request_sender.clone(),
             file_broker: self.file_broker.clone(),
             stop_flag: None,
+            line_buffers: Some(self.line_buffers.clone()),
+            config_store: Some(self.config_store.clone()),
         };
 
         let runtime = run_plugin(
@@ -672,9 +694,33 @@ impl PluginManager {
             }
         }
 
-        for runtime in self.lua_runtimes.values() {
-            if runtime.is_alive() && runtime.on_event(event) {
-                count += 1;
+        for (plugin_id, runtime) in &self.lua_runtimes {
+            if runtime.is_alive() {
+                // 按插件 ID 检查订阅，不是全局 any
+                let subscribed = self.records.get(plugin_id).is_some_and(|r| {
+                    r.manifest
+                        .contributes
+                        .subscriptions
+                        .iter()
+                        .any(|s| event.topic.starts_with(&s.topic))
+                });
+                // ui.* / log.* 始终允许（系统事件）
+                let is_system = event.topic.starts_with("ui.") || event.topic.starts_with("log.");
+                if !is_system && !subscribed {
+                    continue;
+                }
+                if runtime.on_event(event) {
+                    count += 1;
+                } else {
+                    self.dropped_events += 1;
+                    if self.dropped_events % 1000 == 0 {
+                        self.bus.publish(Event::system_log(
+                            LogLevel::Warn,
+                            "extension",
+                            format!("dropped {} Lua events (queue full)", self.dropped_events),
+                        ));
+                    }
+                }
             }
         }
 

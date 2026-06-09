@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 crossbeam-channel.workspace = true
+dirs-next.workspace = true
 eframe.workspace = true
 egui.workspace = true
 serde.workspace = true

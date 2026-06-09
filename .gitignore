@@ -24,5 +24,4 @@ dist/
 
 # ── 调试工具 / 临时脚本 ──
 code_dump.txt
-collect_code.ps1
 *.tmp

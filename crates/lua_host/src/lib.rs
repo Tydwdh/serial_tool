@@ -1,9 +1,9 @@
 use crossbeam_channel::{Receiver, Sender, bounded};
-use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value, VmState};
+use mlua::{Function, Lua, LuaOptions, StdLib, Table, Thread, Value, VmState};
 use parking_lot::Mutex as ParkingMutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -16,6 +16,8 @@ use tool_core::{Direction, Event, LogLevel, Payload, topics};
 use tool_databus::{DataBus, TopicFilter};
 
 pub mod codec;
+pub mod config;
+pub use config::ConfigStore;
 use tool_testing::TestPacketLog;
 use tool_transport::{SerialConfig, TransportManager};
 
@@ -68,6 +70,74 @@ impl FileAccessBroker {
     }
 }
 
+/// 按 plugin_id + port_name 隔离的行缓冲区
+#[derive(Debug, Clone)]
+pub struct LineBuffer {
+    pub lines: VecDeque<String>,
+    raw: Vec<u8>,
+    pub max_buffer_bytes: usize,
+    pub max_line_bytes: usize,
+}
+
+impl Default for LineBuffer {
+    fn default() -> Self {
+        Self {
+            lines: VecDeque::new(),
+            raw: Vec::new(),
+            max_buffer_bytes: 256 * 1024,
+            max_line_bytes: 16 * 1024,
+        }
+    }
+}
+
+impl LineBuffer {
+    /// 喂入原始字节，拆分完整行。超出容量时丢弃最老的行。
+    fn feed(&mut self, data: &[u8]) {
+        // 防止无换行长流撑爆 raw buffer
+        if self.raw.len() + data.len() > self.max_buffer_bytes {
+            // 先尝试丢弃已解析的完整行
+            while self.raw.len() + data.len() > self.max_buffer_bytes && !self.lines.is_empty() {
+                self.lines.pop_front();
+            }
+            // 如果仍然超限，截断 raw 头部
+            if self.raw.len() + data.len() > self.max_buffer_bytes {
+                let excess = self.raw.len() + data.len() - self.max_buffer_bytes;
+                let drain_pos = excess.min(self.raw.len());
+                self.raw.drain(..drain_pos);
+            }
+        }
+        self.raw.extend_from_slice(data);
+
+        // 按 \n 拆行
+        while let Some(pos) = self.raw.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = self.raw.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line_bytes).to_string();
+            let trimmed = line
+                .trim_end_matches('\r')
+                .trim_end_matches('\n')
+                .to_owned();
+            if trimmed.len() <= self.max_line_bytes {
+                self.lines.push_back(trimmed);
+            } else {
+                // UTF-8 安全截断：使用 chars() 迭代器
+                let truncated: String = trimmed.chars().take(self.max_line_bytes).collect();
+                self.lines.push_back(truncated);
+            }
+        }
+    }
+
+    fn next_line(&mut self) -> Option<String> {
+        self.lines.pop_front()
+    }
+}
+
+/// 跨组件共享的行缓冲区映射。
+pub type LineBufferMap = Arc<ParkingMutex<HashMap<String, LineBuffer>>>;
+
+fn line_buffer_key(plugin_id: &str, port_name: &str) -> String {
+    format!("{plugin_id}:{port_name}")
+}
+
 /// 传递给 Lua runtime 的宿主服务。
 pub struct LuaHostServices {
     pub plugin_root: Option<PathBuf>,
@@ -75,6 +145,8 @@ pub struct LuaHostServices {
     pub dialog_sender: Option<crossbeam_channel::Sender<DialogRequest>>,
     pub file_broker: Option<Arc<FileAccessBroker>>,
     pub stop_flag: Option<Arc<AtomicBool>>,
+    pub line_buffers: Option<LineBufferMap>,
+    pub config_store: Option<Arc<ConfigStore>>,
 }
 
 const LUA_PLUGIN_EVENT_QUEUE_CAPACITY: usize = 4096;
@@ -391,7 +463,12 @@ fn plugin_event_loop(
     host_services: LuaHostServices,
 ) {
     let lua = match Lua::new_with(
-        StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8 | StdLib::PACKAGE,
+        StdLib::TABLE
+            | StdLib::STRING
+            | StdLib::MATH
+            | StdLib::UTF8
+            | StdLib::PACKAGE
+            | StdLib::COROUTINE,
         LuaOptions::default(),
     ) {
         Ok(lua) => lua,
@@ -406,11 +483,42 @@ fn plugin_event_loop(
         }
     };
 
+    // 安装指令 hook：防止死循环卡死禁用/退出
+    let hook_stop = stop.clone();
+    if let Err(e) = lua.set_hook(
+        mlua::HookTriggers::new().every_nth_instruction(10_000),
+        move |_lua, _debug| {
+            if hook_stop.load(Ordering::Relaxed) {
+                return Err(mlua::Error::RuntimeError("plugin stopped".into()));
+            }
+            Ok(VmState::Continue)
+        },
+    ) {
+        bus.publish(Event::system_log(
+            LogLevel::Error,
+            &config.source,
+            format!("failed to set hook: {e}"),
+        ));
+        alive.store(false, Ordering::Relaxed);
+        return;
+    }
+
     if let Err(error) = install_ctx(&lua, bus.clone(), transport, &config, &host_services) {
         bus.publish(Event::system_log(
             LogLevel::Error,
             &config.source,
             format!("failed to install ctx: {error}"),
+        ));
+        alive.store(false, Ordering::Relaxed);
+        return;
+    }
+
+    // 注入 task 辅助函数（必须在用户脚本之前）
+    if let Err(error) = install_task_helpers(&lua) {
+        bus.publish(Event::system_log(
+            LogLevel::Error,
+            &config.source,
+            format!("failed to install task helpers: {error}"),
         ));
         alive.store(false, Ordering::Relaxed);
         return;
@@ -438,7 +546,17 @@ fn plugin_event_loop(
         .map(|table| !table.is_empty())
         .unwrap_or(false);
 
-    if !has_callbacks && !has_timers {
+    let has_tasks = lua
+        .globals()
+        .get::<Table>("__plugin_tasks")
+        .map(|t| {
+            t.pairs::<String, Table>()
+                .filter_map(|p| p.ok())
+                .any(|(_, state)| !state.get::<bool>("finished").unwrap_or(true))
+        })
+        .unwrap_or(false);
+
+    if !has_callbacks && !has_timers && !has_tasks {
         bus.publish(Event::system_log(
             LogLevel::Info,
             &config.source,
@@ -455,11 +573,15 @@ fn plugin_event_loop(
         }
 
         process_timers(&lua, &bus, &config);
+        process_tasks(&lua, &bus, &config, &host_services);
 
         let wait_duration = next_timer_wait(&lua).unwrap_or_else(|| Duration::from_millis(50));
 
         match event_receiver.recv_timeout(wait_duration.min(Duration::from_millis(50))) {
             Ok(event) => {
+                // 将 serial_rx 数据喂入行缓冲区
+                drain_serial_rx_to_buffers(&event, &host_services);
+
                 if let Some(callback) = get_callback(&lua, &event.topic) {
                     let event_table = lua.create_table().ok();
 
@@ -492,7 +614,17 @@ fn plugin_event_loop(
             .map(|table| table.is_empty())
             .unwrap_or(true);
 
-        if timers_empty && callbacks_empty && event_receiver.is_empty() {
+        let tasks_all_done = lua
+            .globals()
+            .get::<Table>("__plugin_tasks")
+            .map(|t| {
+                t.pairs::<String, Table>()
+                    .filter_map(|p| p.ok())
+                    .all(|(_, state)| state.get::<bool>("finished").unwrap_or(true))
+            })
+            .unwrap_or(true);
+
+        if timers_empty && callbacks_empty && tasks_all_done && event_receiver.is_empty() {
             break;
         }
     }
@@ -573,7 +705,654 @@ fn process_timers(lua: &Lua, bus: &DataBus, config: &LuaRunConfig) {
     }
 }
 
+/// 简单 Lua pattern 匹配：支持 ^ 锚点和子串匹配。
+fn match_pat(line: &str, pat: &str) -> bool {
+    if let Some(suffix) = pat.strip_prefix('^') {
+        line.starts_with(suffix)
+    } else {
+        line.contains(pat)
+    }
+}
+
+// ── Line Buffer ──
+
+fn drain_serial_rx_to_buffers(event: &Event, host_services: &LuaHostServices) {
+    if event.topic != topics::SERIAL_RX {
+        return;
+    }
+    let Some(ref line_buffers) = host_services.line_buffers else {
+        return;
+    };
+    let port = event
+        .metadata
+        .as_object()
+        .and_then(|m| m.get("port"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let key = line_buffer_key(&host_services.plugin_id, port);
+    let data = match &event.payload {
+        Payload::Bytes(b) => b.clone(),
+        Payload::Text(t) => t.as_bytes().to_vec(),
+        _ => return,
+    };
+    line_buffers.lock().entry(key).or_default().feed(&data);
+}
+
+// ── Task Coroutine 调度 ──
+
+const MAX_TASK_RESUMES_PER_TICK: usize = 50;
+
+/// 注入 task 辅助函数（供 coroutine 内调用 yield）
+fn install_task_helpers(lua: &Lua) -> mlua::Result<()> {
+    lua.load(
+        r#"
+    -- 内部 yield 辅助：所有阻塞操作都通过这个函数 yield
+    function __task_yield(yield_op)
+        coroutine.yield(yield_op)
+    end
+"#,
+    )
+    .set_name("task-helpers")
+    .exec()?;
+    Ok(())
+}
+
+/// 每帧恢复可运行的 task coroutine。
+fn process_tasks(
+    lua: &Lua,
+    _bus: &DataBus,
+    _config: &LuaRunConfig,
+    host_services: &LuaHostServices,
+) {
+    let tasks: Table = match lua.globals().get("__plugin_tasks") {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+
+    let now_ms = tool_core::now_timestamp_ms();
+    let mut resume_count = 0usize;
+
+    // 先收集需要恢复的 task id
+    let mut ready_ids: Vec<String> = Vec::new();
+    for pair in tasks.pairs::<String, Table>() {
+        if let Ok((id, state)) = pair {
+            if state.get::<bool>("finished").unwrap_or(true) {
+                continue;
+            }
+
+            // ── cancelled 优先：打断 sleep/read_line/expect/paused 等一切等待 ──
+            let cancelled: bool = state.get("cancelled").unwrap_or(false);
+            if cancelled {
+                let yield_op: Option<Table> = state.get("yield_op").ok();
+                if let Some(ref op) = yield_op {
+                    let kind: String = op.get("kind").unwrap_or_default();
+                    match kind.as_str() {
+                        "read_line" => {
+                            let _ = state.set("_read_result", Value::Nil);
+                            let _ = state.set(
+                                "_read_result_err",
+                                lua.create_string("cancelled")
+                                    .map(Value::String)
+                                    .unwrap_or(Value::Nil),
+                            );
+                        }
+                        "write_line_and_expect" => {
+                            let _ = state.set("_expect_result", Value::Nil);
+                            let _ = state.set(
+                                "_expect_err",
+                                lua.create_string("cancelled")
+                                    .map(Value::String)
+                                    .unwrap_or(Value::Nil),
+                            );
+                        }
+                        _ => {
+                            // sleep / wait_paused / unknown: 直接恢复
+                        }
+                    }
+                }
+                ready_ids.push(id);
+                continue;
+            }
+
+            // ── 非 cancelled：正常调度 ──
+            let paused: bool = state.get("paused").unwrap_or(false);
+            if paused {
+                continue;
+            }
+
+            let yield_op: Option<Table> = state.get("yield_op").ok();
+            if let Some(ref op) = yield_op {
+                let kind: String = op.get("kind").unwrap_or_default();
+                match kind.as_str() {
+                    "sleep" => {
+                        let wake_at_ms: u64 = state.get("wake_at_ms").unwrap_or(0);
+                        if now_ms < wake_at_ms {
+                            continue;
+                        }
+                    }
+                    "wait_paused" => {
+                        continue;
+                    }
+                    "read_line" => {
+                        let port: String = op.get("port").unwrap_or_default();
+                        let deadline_ms: u64 = op.get("deadline_ms").unwrap_or(0);
+                        if deadline_ms > 0 && now_ms > deadline_ms {
+                            let _ = state.set("_read_result", Value::Nil);
+                            let _ = state.set(
+                                "_read_result_err",
+                                lua.create_string("timeout")
+                                    .map(Value::String)
+                                    .unwrap_or(Value::Nil),
+                            );
+                        } else if let Some(ref map) = host_services.line_buffers {
+                            let key = line_buffer_key(&host_services.plugin_id, &port);
+                            let mut map_lock = map.lock();
+                            if let Some(buffer) = map_lock.get_mut(&key) {
+                                if let Some(line) = buffer.next_line() {
+                                    let _ = state.set(
+                                        "_read_result",
+                                        lua.create_string(&line)
+                                            .map(Value::String)
+                                            .unwrap_or(Value::Nil),
+                                    );
+                                    let _ = state.set("_read_result_err", Value::Nil);
+                                } else {
+                                    continue;
+                                }
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                    }
+                    "write_line_and_expect" => {
+                        let port: String = op.get("port").unwrap_or_default();
+                        let deadline_ms: u64 = op.get("deadline_ms").unwrap_or(0);
+                        if deadline_ms > 0 && now_ms > deadline_ms {
+                            let _ = state.set("_expect_result", Value::Nil);
+                            let _ = state.set(
+                                "_expect_err",
+                                lua.create_string("timeout")
+                                    .map(Value::String)
+                                    .unwrap_or(Value::Nil),
+                            );
+                        } else if let Some(ref map) = host_services.line_buffers {
+                            let key = line_buffer_key(&host_services.plugin_id, &port);
+                            let mut map_lock = map.lock();
+                            if let Some(buffer) = map_lock.get_mut(&key) {
+                                let mut matched = None;
+                                while let Some(line) = buffer.next_line() {
+                                    let patterns: Option<Table> = op.get("patterns").ok();
+                                    if let Some(ref pts) = patterns {
+                                        for pair in pts.pairs::<Value, Table>().flatten() {
+                                            let p: Table = pair.1;
+                                            let pat: String = p.get("pattern").unwrap_or_default();
+                                            let action: String = p
+                                                .get("action")
+                                                .unwrap_or_else(|_| "return".to_owned());
+                                            let pname: String = p.get("name").unwrap_or_default();
+                                            let hit = match_pat(&line, &pat);
+                                            if hit {
+                                                if action == "continue" {
+                                                    let _ = state.set(
+                                                        "status",
+                                                        format!("设备忙: {pname}: {line}"),
+                                                    );
+                                                    break;
+                                                }
+                                                matched = Some((
+                                                    p.get::<String>("name").unwrap_or_default(),
+                                                    line.clone(),
+                                                ));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if matched.is_some() {
+                                        break;
+                                    }
+                                }
+                                if let Some((name, line)) = matched {
+                                    let result = lua.create_table().ok();
+                                    if let Some(ref r) = result {
+                                        let _ = r.set("name", name.as_str());
+                                        let _ = r.set("line", line.as_str());
+                                        let _ = r.set("elapsed_ms", 0_u64);
+                                    }
+                                    let _ = state.set(
+                                        "_expect_result",
+                                        result.map(Value::Table).unwrap_or(Value::Nil),
+                                    );
+                                } else {
+                                    continue;
+                                }
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                    }
+                    _ => {
+                        continue;
+                    }
+                }
+            }
+            ready_ids.push(id);
+        }
+    }
+
+    for id in &ready_ids {
+        if resume_count >= MAX_TASK_RESUMES_PER_TICK {
+            break;
+        }
+
+        let state: Table = match tasks.get(id.as_str()) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        let thread: Thread = match state.get("thread") {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        // 清除 yield_op 标记
+        let _ = state.set("yield_op", Value::Nil);
+
+        // 设置当前 task id，供 read_line 等函数使用
+        let _ = lua.globals().set("__current_task_id", id.as_str());
+
+        // resume coroutine
+        match thread.resume::<Value>(()) {
+            Ok(_values) => {
+                // coroutine 可能 yield 了或返回了，检查状态
+                match thread.status() {
+                    mlua::ThreadStatus::Resumable => {
+                        // coroutine yielded，yield_op 已在 Lua 侧设置
+                    }
+                    _ => {
+                        // Finished 或 Error — 标记完成
+                        let _ = state.set("finished", true);
+                    }
+                }
+            }
+            Err(_e) => {
+                // CoroutineUnresumable — 已完成
+                let _ = state.set("finished", true);
+            }
+        }
+
+        resume_count += 1;
+    }
+
+    // 清除当前 task id
+    let _ = lua.globals().set("__current_task_id", Value::Nil);
+}
+
+/// 从 task 对象获取 state table
+fn get_state_for_task(lua: &Lua, task: &Table) -> mlua::Result<Table> {
+    let id: String = task.get("id")?;
+    let tasks: Table = lua.globals().get("__plugin_tasks")?;
+    tasks.get(id.as_str())
+}
+
+/// 注入 task 对象方法，每个方法通过 task.id 查找 __plugin_tasks 中的实际 state
+fn create_task_methods_table(lua: &Lua) -> mlua::Result<Table> {
+    let tbl = lua.create_table()?;
+
+    // task:is_cancelled() → bool
+    tbl.set(
+        "is_cancelled",
+        lua.create_function(|lua, task: Table| {
+            let state = get_state_for_task(&lua, &task)?;
+            Ok(state.get::<bool>("cancelled").unwrap_or(false))
+        })?,
+    )?;
+
+    // task:is_paused() → bool
+    tbl.set(
+        "is_paused",
+        lua.create_function(|lua, task: Table| {
+            let state = get_state_for_task(&lua, &task)?;
+            Ok(state.get::<bool>("paused").unwrap_or(false))
+        })?,
+    )?;
+
+    // task:sleep_ms(ms) — yield {kind="sleep", ms=N}
+    tbl.set(
+        "sleep_ms",
+        lua.create_function(|lua, (task, ms): (Table, u64)| {
+            let state = get_state_for_task(&lua, &task)?;
+            let _ = state.set("wake_at_ms", tool_core::now_timestamp_ms() + ms);
+            let op = lua.create_table()?;
+            op.set("kind", "sleep")?;
+            op.set("ms", ms)?;
+            let _ = state.set("yield_op", op.clone());
+            let yield_fn: Function = lua.globals().get("__task_yield")?;
+            yield_fn.call::<Value>(op)?;
+            Ok(())
+        })?,
+    )?;
+
+    // task:wait_if_paused() — yield {kind="wait_paused"}
+    tbl.set(
+        "wait_if_paused",
+        lua.create_function(|lua, task: Table| {
+            let state = get_state_for_task(&lua, &task)?;
+            if !state.get::<bool>("paused").unwrap_or(false) {
+                return Ok(());
+            }
+            let op = lua.create_table()?;
+            op.set("kind", "wait_paused")?;
+            let _ = state.set("yield_op", op.clone());
+            let yield_fn: Function = lua.globals().get("__task_yield")?;
+            yield_fn.call::<Value>(op)?;
+            Ok(())
+        })?,
+    )?;
+
+    // task:set_progress(current, total)
+    tbl.set(
+        "set_progress",
+        lua.create_function(|lua, (task, current, total): (Table, u64, u64)| {
+            let state = get_state_for_task(&lua, &task)?;
+            let _ = state.set("progress_current", current);
+            let _ = state.set("progress_total", total);
+            Ok(())
+        })?,
+    )?;
+
+    // task:set_progress_percent(percent)
+    tbl.set(
+        "set_progress_percent",
+        lua.create_function(|lua, (task, percent): (Table, f64)| {
+            let state = get_state_for_task(&lua, &task)?;
+            let _ = state.set("progress_percent", percent.clamp(0.0, 100.0));
+            Ok(())
+        })?,
+    )?;
+
+    // task:set_status(text)
+    tbl.set(
+        "set_status",
+        lua.create_function(|lua, (task, text): (Table, String)| {
+            let state = get_state_for_task(&lua, &task)?;
+            let _ = state.set("status", text);
+            Ok(())
+        })?,
+    )?;
+
+    // task:log(level, message)
+    tbl.set(
+        "log",
+        lua.create_function(|lua, (task, level, message): (Table, String, String)| {
+            let state = get_state_for_task(&lua, &task)?;
+            let logs: Table = state
+                .get("logs")
+                .unwrap_or_else(|_| lua.create_table().unwrap());
+            let idx = logs.raw_len() + 1;
+            let entry = lua.create_table()?;
+            entry.set("level", level)?;
+            entry.set("message", message)?;
+            entry.set("timestamp_ms", tool_core::now_timestamp_ms())?;
+            logs.set(idx, entry)?;
+            let _ = state.set("logs", logs);
+            Ok(())
+        })?,
+    )?;
+
+    Ok(tbl)
+}
+
+/// ctx.task API
+fn create_task_api(
+    lua: &Lua,
+    bus: DataBus,
+    source: String,
+    plugin_id: String,
+) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+
+    // ctx.task.start(config, fn)
+    let bus_start = bus.clone();
+    let src_start = source.clone();
+    let pid_start = plugin_id.clone();
+    let methods = create_task_methods_table(lua)?;
+    table.set(
+        "start",
+        lua.create_function(move |lua, (config, func): (Table, Function)| {
+            let id: String = config.get("id")?;
+            let title: String = config.get("title").unwrap_or_else(|_| id.clone());
+            let cancellable: bool = config.get("cancellable").unwrap_or(true);
+            let pausable: bool = config.get("pausable").unwrap_or(true);
+
+            // 创建 coroutine
+            let thread = lua.create_thread(func)?;
+
+            // 创建 task 内部状态表
+            let state = lua.create_table()?;
+            state.set("id", id.clone())?;
+            state.set("title", title.clone())?;
+            state.set("thread", &thread)?;
+            state.set("cancelled", false)?;
+            state.set("paused", false)?;
+            state.set("cancellable", cancellable)?;
+            state.set("pausable", pausable)?;
+            state.set("progress_current", 0_u64)?;
+            state.set("progress_total", 0_u64)?;
+            state.set("progress_percent", Value::Nil)?;
+            state.set("status", "running")?;
+            state.set("wake_at_ms", 0_u64)?;
+            state.set("yield_op", Value::Nil)?;
+            state.set("finished", false)?;
+            state.set("error", Value::Nil)?;
+            state.set("logs", lua.create_table()?)?;
+
+            // 存入全局任务表
+            let tasks: Table = lua.globals().get("__plugin_tasks")?;
+            tasks.set(id.clone(), &state)?;
+
+            // 创建用户可见的 task 对象
+            let task_obj = lua.create_table()?;
+            task_obj.set("id", id.clone())?;
+
+            // __index: 先查方法表，再查 state
+            let mt = lua.create_table()?;
+            let m_ref = methods.clone();
+            mt.set(
+                "__index",
+                lua.create_function(move |lua, (tbl, key): (Table, String)| {
+                    // 先查方法
+                    if let Ok(v) = m_ref.get::<Value>(key.as_str())
+                        && !v.is_nil()
+                    {
+                        return Ok(v);
+                    }
+                    // 再查 state
+                    let task_id: String = tbl.get("id")?;
+                    let tasks: Table = lua.globals().get("__plugin_tasks")?;
+                    if let Ok(s) = tasks.get::<Table>(task_id.as_str())
+                        && let Ok(v) = s.get::<Value>(key.as_str())
+                    {
+                        return Ok(v);
+                    }
+                    Ok(Value::Nil)
+                })?,
+            )?;
+            let _ = task_obj.set_metatable(Some(mt));
+
+            bus_start.publish(Event::system_log(
+                LogLevel::Info,
+                &src_start,
+                format!("[plugin:{}] task {} started", pid_start, id),
+            ));
+
+            // 首次 resume：把 task_obj 传给 function(task)
+            // 如果 task 立即 yield（如 sleep），resume 返回 yield 值
+            // coroutine 的 yield_op / wake_at_ms 已在 sleep_ms 等函数中设置
+            match thread.resume::<Value>(task_obj.clone()) {
+                Ok(_) => {
+                    // coroutine 正常返回（未 yield，函数执行完毕）
+                    match thread.status() {
+                        mlua::ThreadStatus::Resumable => {
+                            // yielded — yield_op 已由 Lua 侧设置
+                        }
+                        _ => {
+                            let _ = state.set("finished", true);
+                        }
+                    }
+                }
+                Err(_) => {
+                    let _ = state.set("finished", true);
+                }
+            }
+
+            Ok(Value::Table(task_obj))
+        })?,
+    )?;
+
+    // ctx.task.cancel(id)
+    let tasks_ref = bus.clone();
+    let src_cancel = source.clone();
+    table.set(
+        "cancel",
+        lua.create_function(move |lua, id: String| {
+            let tasks: Table = lua.globals().get("__plugin_tasks")?;
+            if let Ok(state) = tasks.get::<Table>(id.as_str()) {
+                let _ = state.set("cancelled", true);
+                let _ = state.set("paused", false);
+                tasks_ref.publish(Event::system_log(
+                    LogLevel::Info,
+                    &src_cancel,
+                    format!("task {} cancelled", id),
+                ));
+            }
+            Ok(())
+        })?,
+    )?;
+
+    // ctx.task.pause(id)
+    table.set(
+        "pause",
+        lua.create_function(move |lua, id: String| {
+            let tasks: Table = lua.globals().get("__plugin_tasks")?;
+            if let Ok(state) = tasks.get::<Table>(id.as_str()) {
+                let pausable: bool = state.get("pausable").unwrap_or(false);
+                if pausable {
+                    let _ = state.set("paused", true);
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    // ctx.task.resume(id)
+    table.set(
+        "resume",
+        lua.create_function(move |lua, id: String| {
+            let tasks: Table = lua.globals().get("__plugin_tasks")?;
+            if let Ok(state) = tasks.get::<Table>(id.as_str()) {
+                let _ = state.set("paused", false);
+            }
+            Ok(())
+        })?,
+    )?;
+
+    // ctx.task.list() → 返回所有 task 摘要
+    table.set(
+        "list",
+        lua.create_function(move |lua, ()| {
+            let tasks: Table = lua.globals().get("__plugin_tasks")?;
+            let result = lua.create_table()?;
+            let mut idx = 0_u32;
+            for pair in tasks.pairs::<String, Table>() {
+                if let Ok((_id, state)) = pair {
+                    idx += 1;
+                    let summary = lua.create_table()?;
+                    summary.set("id", state.get::<String>("id").unwrap_or_default())?;
+                    summary.set("title", state.get::<String>("title").unwrap_or_default())?;
+                    summary.set("cancelled", state.get::<bool>("cancelled").unwrap_or(false))?;
+                    summary.set("paused", state.get::<bool>("paused").unwrap_or(false))?;
+                    summary.set("finished", state.get::<bool>("finished").unwrap_or(false))?;
+                    summary.set(
+                        "progress_current",
+                        state.get::<u64>("progress_current").unwrap_or(0),
+                    )?;
+                    summary.set(
+                        "progress_total",
+                        state.get::<u64>("progress_total").unwrap_or(0),
+                    )?;
+                    summary.set(
+                        "progress_percent",
+                        state.get::<f64>("progress_percent").unwrap_or(0.0),
+                    )?;
+                    summary.set("status", state.get::<String>("status").unwrap_or_default())?;
+                    summary.set("error", state.get::<String>("error").unwrap_or_default())?;
+                    result.set(idx, summary)?;
+                }
+            }
+            Ok(Value::Table(result))
+        })?,
+    )?;
+
+    Ok(table)
+}
+
+/// 取消所有 task（插件 disable 时调用），唤醒所有 waiting task 让它们检测取消
+fn cancel_all_tasks(lua: &Lua, bus: &DataBus, config: &LuaRunConfig) {
+    let tasks: Table = match lua.globals().get("__plugin_tasks") {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+
+    let mut task_ids: Vec<String> = Vec::new();
+    for pair in tasks.pairs::<String, Table>() {
+        if let Ok((id, state)) = pair {
+            let _ = state.set("cancelled", true);
+            let _ = state.set("paused", false);
+            task_ids.push(id);
+        }
+    }
+
+    // 唤醒所有 task coroutine 让它们发现 cancelled
+    for _ in 0..MAX_TASK_RESUMES_PER_TICK {
+        let mut any_resumed = false;
+        for id in &task_ids {
+            let state: Table = match tasks.get(id.as_str()) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if state.get::<bool>("finished").unwrap_or(true) {
+                continue;
+            }
+            let thread: Thread = match state.get("thread") {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let _ = state.set("yield_op", Value::Nil);
+            // 强制 resume，忽略结果，标记为 finished
+            let _ = thread.resume::<Value>(());
+            let _ = state.set("finished", true);
+            any_resumed = true;
+        }
+        if !any_resumed {
+            break;
+        }
+    }
+
+    bus.publish(Event::system_log(
+        LogLevel::Info,
+        &config.source,
+        format!("cancelled {} task(s)", task_ids.len()),
+    ));
+}
+
 fn call_disable(lua: &Lua, bus: &DataBus, config: &LuaRunConfig) {
+    // 先取消所有 task，让它们检测 cancelled 并退出
+    cancel_all_tasks(lua, bus, config);
+
     if let Ok(function) = lua.globals().get::<Function>("__plugin_disable")
         && let Err(error) = function.call::<()>(())
     {
@@ -607,7 +1386,12 @@ fn run_script_blocking(
     stop: Arc<AtomicBool>,
 ) -> LuaHostResult<()> {
     let lua = Lua::new_with(
-        StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8 | StdLib::PACKAGE,
+        StdLib::TABLE
+            | StdLib::STRING
+            | StdLib::MATH
+            | StdLib::UTF8
+            | StdLib::PACKAGE
+            | StdLib::COROUTINE,
         LuaOptions::default(),
     )?;
 
@@ -617,6 +1401,8 @@ fn run_script_blocking(
         dialog_sender: None,
         file_broker: None,
         stop_flag: None,
+        line_buffers: None,
+        config_store: None,
     };
     install_ctx(&lua, bus, transport, &config, &test_services)?;
     install_budget_hook(&lua, config.timeout_ms, stop)?;
@@ -658,6 +1444,7 @@ fn install_ctx(
         .set("__plugin_callbacks", lua.create_table()?)?;
     lua.globals().set("__plugin_timers", lua.create_table()?)?;
     lua.globals().set("__plugin_storage", lua.create_table()?)?;
+    lua.globals().set("__plugin_tasks", lua.create_table()?)?;
 
     if has_permission(config, "log") {
         ctx.set(
@@ -669,12 +1456,20 @@ fn install_ctx(
     if has_permission(config, "bus") {
         ctx.set(
             "bus",
-            create_bus_api(lua, bus.clone(), config.source.clone())?,
+            create_bus_api(
+                lua,
+                bus.clone(),
+                config.source.clone(),
+                host_services.stop_flag.clone(),
+            )?,
         )?;
     }
 
     if has_permission(config, "serial") {
-        ctx.set("serial", create_serial_api(lua, bus.clone(), transport)?)?;
+        ctx.set(
+            "serial",
+            create_serial_api(lua, bus.clone(), transport, host_services)?,
+        )?;
     }
 
     if has_permission(config, "ui") {
@@ -713,6 +1508,27 @@ fn install_ctx(
         ctx.set(
             "fs",
             create_fs_api(lua, broker, host_services.plugin_id.clone())?,
+        )?;
+    }
+
+    if has_permission(config, "task") {
+        ctx.set(
+            "task",
+            create_task_api(
+                lua,
+                bus.clone(),
+                config.source.clone(),
+                host_services.plugin_id.clone(),
+            )?,
+        )?;
+    }
+
+    if has_permission(config, "config")
+        && let Some(ref store) = host_services.config_store
+    {
+        ctx.set(
+            "config",
+            create_config_api(lua, store.clone(), host_services.plugin_id.clone())?,
         )?;
     }
 
@@ -775,7 +1591,12 @@ fn create_log_api(lua: &Lua, bus: DataBus, source: String) -> mlua::Result<Table
     Ok(table)
 }
 
-fn create_bus_api(lua: &Lua, bus: DataBus, source: String) -> mlua::Result<Table> {
+fn create_bus_api(
+    lua: &Lua,
+    bus: DataBus,
+    source: String,
+    stop_flag: Option<Arc<AtomicBool>>,
+) -> mlua::Result<Table> {
     let table = lua.create_table()?;
 
     let publish_bus = bus.clone();
@@ -783,6 +1604,15 @@ fn create_bus_api(lua: &Lua, bus: DataBus, source: String) -> mlua::Result<Table
     table.set(
         "publish",
         lua.create_function(move |_lua, (topic, payload): (String, Value)| {
+            // 阻止插件通过裸 bus 发布保留前缀，应使用 ctx.ui.* / ctx.serial.*
+            if topic.starts_with("ui.")
+                || topic.starts_with("transport.")
+                || topic.starts_with("log.")
+            {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "bus.publish: topic '{topic}' 是保留前缀，请使用 ctx.ui.* / ctx.serial.* 等专用 API"
+                )));
+            }
             let payload = lua_value_to_payload(payload)?;
 
             publish_bus.publish(Event::new(
@@ -829,15 +1659,23 @@ fn create_bus_api(lua: &Lua, bus: DataBus, source: String) -> mlua::Result<Table
     )?;
 
     let wait_bus = bus.clone();
+    let wait_stop = stop_flag.clone();
 
     table.set(
         "wait",
         lua.create_function(move |lua, (topic, timeout_ms): (String, Option<u64>)| {
-            wait_for_event(lua, wait_bus.clone(), TopicFilter::exact(topic), timeout_ms)
+            wait_for_event(
+                lua,
+                wait_bus.clone(),
+                TopicFilter::exact(topic),
+                timeout_ms,
+                wait_stop.clone(),
+            )
         })?,
     )?;
 
     let subscribe_bus = bus.clone();
+    let sub_stop = stop_flag;
 
     table.set(
         "subscribe",
@@ -848,6 +1686,7 @@ fn create_bus_api(lua: &Lua, bus: DataBus, source: String) -> mlua::Result<Table
                     subscribe_bus.clone(),
                     TopicFilter::prefix(topic_prefix),
                     timeout_ms,
+                    sub_stop.clone(),
                 )
             },
         )?,
@@ -874,7 +1713,12 @@ fn create_bus_api(lua: &Lua, bus: DataBus, source: String) -> mlua::Result<Table
     Ok(table)
 }
 
-fn create_serial_api(lua: &Lua, bus: DataBus, transport: TransportManager) -> mlua::Result<Table> {
+fn create_serial_api(
+    lua: &Lua,
+    bus: DataBus,
+    transport: TransportManager,
+    host_services: &LuaHostServices,
+) -> mlua::Result<Table> {
     let table = lua.create_table()?;
 
     let transport_for_list = transport.clone();
@@ -929,6 +1773,13 @@ fn create_serial_api(lua: &Lua, bus: DataBus, transport: TransportManager) -> ml
     table.set(
         "send",
         lua.create_function(move |_lua, text: String| {
+            let open = transport_for_send.open_ports();
+            if open.len() > 1 {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "ctx.serial.send 在多串口打开时语义不明确（已打开 {} 个端口），请使用 send_to(port, text)",
+                    open.len()
+                )));
+            }
             transport_for_send
                 .send_text(&text)
                 .map_err(mlua::Error::external)
@@ -951,6 +1802,13 @@ fn create_serial_api(lua: &Lua, bus: DataBus, transport: TransportManager) -> ml
     table.set(
         "send_hex",
         lua.create_function(move |_lua, text: String| {
+            let open = transport_for_send_hex.open_ports();
+            if open.len() > 1 {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "ctx.serial.send_hex 在多串口打开时语义不明确（已打开 {} 个端口），请使用 send_hex_to(port, hex)",
+                    open.len()
+                )));
+            }
             transport_for_send_hex
                 .send_hex(&text)
                 .map_err(mlua::Error::external)
@@ -1011,8 +1869,57 @@ fn create_serial_api(lua: &Lua, bus: DataBus, transport: TransportManager) -> ml
         lua.create_function(move |_lua, ()| Ok(transport_for_open_ports.open_ports()))?,
     )?;
 
+    // ctx.serial.expect_from(port, pattern, timeout_ms) — 端口级 API
+    let expect_from_bus = bus.clone();
+    let expect_from_stop = host_services.stop_flag.clone();
+    table.set(
+        "expect_from",
+        lua.create_function(
+            move |lua, (port, pattern, timeout_ms): (String, String, Option<u64>)| {
+                let subscription = expect_from_bus.subscribe(TopicFilter::exact(topics::SERIAL_RX));
+                let deadline = Instant::now() + Duration::from_millis(timeout_ms.unwrap_or(1_000));
+
+                loop {
+                    if let Some(ref stop) = expect_from_stop {
+                        if stop.load(Ordering::Relaxed) {
+                            return Ok(Value::Nil);
+                        }
+                    }
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Ok(Value::Nil);
+                    }
+                    let remaining = deadline
+                        .saturating_duration_since(now)
+                        .min(Duration::from_millis(50));
+                    match subscription.recv_timeout(remaining) {
+                        Ok(event) => {
+                            let event_port = event
+                                .metadata
+                                .get("port")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            if event_port != port {
+                                continue;
+                            }
+                            let text = event.payload.text_lossy();
+                            if text.contains(&pattern) {
+                                return Ok(Value::String(lua.create_string(&text)?));
+                            }
+                        }
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                            return Ok(Value::Nil);
+                        }
+                    }
+                }
+            },
+        )?,
+    )?;
+
     let expect_bus = bus.clone();
 
+    let expect_stop = host_services.stop_flag.clone();
     table.set(
         "expect",
         lua.create_function(move |lua, (pattern, timeout_ms): (String, Option<u64>)| {
@@ -1020,6 +1927,12 @@ fn create_serial_api(lua: &Lua, bus: DataBus, transport: TransportManager) -> ml
             let deadline = Instant::now() + Duration::from_millis(timeout_ms.unwrap_or(1_000));
 
             loop {
+                if let Some(ref stop) = expect_stop {
+                    if stop.load(Ordering::Relaxed) {
+                        return Ok(Value::Nil);
+                    }
+                }
+
                 let now = Instant::now();
 
                 if now >= deadline {
@@ -1042,6 +1955,249 @@ fn create_serial_api(lua: &Lua, bus: DataBus, transport: TransportManager) -> ml
                     }
                 }
             }
+        })?,
+    )?;
+
+    // ── 行缓冲区操作 ──
+
+    // ctx.serial.flush_rx(port_name)
+    let lb_flush = host_services.line_buffers.clone();
+    let pid_flush = host_services.plugin_id.clone();
+    table.set(
+        "flush_rx",
+        lua.create_function(move |_lua, port_name: String| {
+            if let Some(ref map) = lb_flush {
+                let key = line_buffer_key(&pid_flush, &port_name);
+                map.lock().remove(&key);
+            }
+            Ok(())
+        })?,
+    )?;
+
+    // ctx.serial.write_line(port_name, line)
+    let transport_wl = transport.clone();
+    table.set(
+        "write_line",
+        lua.create_function(move |_lua, (port, line): (String, String)| {
+            let text = if line.ends_with('\n') {
+                line
+            } else {
+                format!("{line}\n")
+            };
+            transport_wl
+                .send_text_to(&port, &text)
+                .map_err(mlua::Error::external)
+        })?,
+    )?;
+
+    // ctx.serial.read_line(port_name, opts)
+    // 只能在 task coroutine 内调用（coroutine.yield）
+    let lb_read = host_services.line_buffers.clone();
+    let pid_read = host_services.plugin_id.clone();
+    table.set(
+        "read_line",
+        lua.create_function(move |lua, (port, opts): (String, Table)| {
+            let timeout_ms: u64 = opts.get("timeout_ms").unwrap_or(5_000);
+            let delimiter: String = opts.get("delimiter").unwrap_or_else(|_| "\n".to_owned());
+            if delimiter != "\n" {
+                return Err(mlua::Error::RuntimeError(
+                    "v0.3 只支持 delimiter=\"\\n\"".into(),
+                ));
+            }
+
+            // 先检查行缓冲区是否已有数据
+            let key = line_buffer_key(&pid_read, &port);
+            if let Some(ref map) = lb_read {
+                if let Some(line) = map.lock().get_mut(&key).and_then(|b| b.next_line()) {
+                    let result = lua.create_table()?;
+                    result.set("line", lua.create_string(&line)?)?;
+                    result.set("err", Value::Nil)?;
+                    return Ok(Value::Table(result));
+                }
+            }
+
+            // 无数据，yield 等待
+            let task_id: String = lua
+                .globals()
+                .get::<String>("__current_task_id")
+                .unwrap_or_default();
+            if task_id.is_empty() {
+                return Err(mlua::Error::RuntimeError(
+                    "ctx.serial.read_line 必须在 ctx.task 协程内调用".into(),
+                ));
+            }
+
+            let op = lua.create_table()?;
+            op.set("kind", "read_line")?;
+            op.set("port", port)?;
+            op.set("delimiter", delimiter)?;
+            op.set("timeout_ms", timeout_ms)?;
+            op.set("deadline_ms", tool_core::now_timestamp_ms() + timeout_ms)?;
+
+            let tasks: Table = lua.globals().get("__plugin_tasks")?;
+            if let Ok(state) = tasks.get::<Table>(task_id.as_str()) {
+                let _ = state.set("yield_op", op.clone());
+            }
+
+            let yield_fn: Function = lua.globals().get("__task_yield")?;
+            yield_fn.call::<Value>(op)?;
+
+            // 恢复后，从 state 中读取结果。返回 table { line = ..., err = ... }
+            let tasks: Table = lua.globals().get("__plugin_tasks")?;
+            if let Ok(state) = tasks.get::<Table>(task_id.as_str()) {
+                let line: Option<String> = state.get("_read_result").ok();
+                let err: Option<String> = state.get("_read_result_err").ok();
+                let _ = state.set("_read_result", Value::Nil);
+                let _ = state.set("_read_result_err", Value::Nil);
+                let result = lua.create_table()?;
+                if let Some(l) = line {
+                    result.set("line", lua.create_string(&l)?)?;
+                    result.set("err", Value::Nil)?;
+                    return Ok(Value::Table(result));
+                }
+                if let Some(e) = err {
+                    result.set("line", Value::Nil)?;
+                    result.set("err", lua.create_string(&e)?)?;
+                    return Ok(Value::Table(result));
+                }
+            }
+            // 默认：超时
+            let result = lua.create_table()?;
+            result.set("line", Value::Nil)?;
+            result.set("err", lua.create_string("timeout")?)?;
+            Ok(Value::Table(result))
+        })?,
+    )?;
+
+    // ctx.serial.write_line_and_expect(port, line, opts)
+    // 只能在 task coroutine 内调用
+    let lb_expect = host_services.line_buffers.clone();
+    let pid_expect = host_services.plugin_id.clone();
+    let transport_expect = transport;
+    table.set(
+        "write_line_and_expect",
+        lua.create_function(move |lua, (port, line, opts): (String, String, Table)| {
+            let timeout_ms: u64 = opts.get("timeout_ms").unwrap_or(300_000);
+            let delimiter: String = opts.get("delimiter").unwrap_or_else(|_| "\n".to_owned());
+            if delimiter != "\n" {
+                return Err(mlua::Error::RuntimeError(
+                    "v0.3 只支持 delimiter=\"\\n\"".into(),
+                ));
+            }
+            let patterns: Table = opts.get("patterns").unwrap_or_else(|_| {
+                let t = lua.create_table().unwrap();
+                let entry = lua.create_table().unwrap();
+                entry.set("pattern", "^ok").unwrap();
+                entry.set("action", "return").unwrap();
+                t.set(1, entry).unwrap();
+                t
+            });
+
+            // 发送
+            let text = if line.ends_with('\n') {
+                line
+            } else {
+                format!("{line}\n")
+            };
+            transport_expect
+                .send_text_to(&port, &text)
+                .map_err(mlua::Error::external)?;
+
+            // 先检查缓冲区是否有立即匹配
+            let key = line_buffer_key(&pid_expect, &port);
+            if let Some(ref map) = lb_expect {
+                let mut map_lock = map.lock();
+                if let Some(buffer) = map_lock.get_mut(&key) {
+                    while let Some(candidate) = buffer.next_line() {
+                        for pair in patterns.pairs::<Value, Table>().flatten() {
+                            let p: Table = pair.1;
+                            let pat: String = p.get("pattern").unwrap_or_default();
+                            let action: String =
+                                p.get("action").unwrap_or_else(|_| "return".to_owned());
+                            if match_pat(&candidate, &pat) {
+                                if action == "continue" {
+                                    // 更新 task status 让用户看到设备忙碌
+                                    let tid: String = lua
+                                        .globals()
+                                        .get::<String>("__current_task_id")
+                                        .unwrap_or_default();
+                                    if !tid.is_empty() {
+                                        let tasks: Table = lua.globals().get("__plugin_tasks")?;
+                                        if let Ok(s) = tasks.get::<Table>(tid.as_str()) {
+                                            let pname: String = p.get("name").unwrap_or_default();
+                                            let _ = s.set(
+                                                "status",
+                                                format!("设备忙: {pname}: {candidate}"),
+                                            );
+                                        }
+                                    }
+                                    break;
+                                }
+                                let r = lua.create_table()?;
+                                r.set("name", p.get::<String>("name").unwrap_or_default())?;
+                                r.set("line", candidate)?;
+                                r.set("elapsed_ms", 0_u64)?;
+                                let wrapper = lua.create_table()?;
+                                wrapper.set("result", r)?;
+                                wrapper.set("err", Value::Nil)?;
+                                return Ok(Value::Table(wrapper));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 无匹配，yield
+            let task_id: String = lua
+                .globals()
+                .get::<String>("__current_task_id")
+                .unwrap_or_default();
+            if task_id.is_empty() {
+                return Err(mlua::Error::RuntimeError(
+                    "ctx.serial.write_line_and_expect 必须在 ctx.task 协程内调用".into(),
+                ));
+            }
+
+            // 构造 yield_op（包含 deadline_ms 供 process_tasks 判断超时）
+            let yield_data = lua.create_table()?;
+            yield_data.set("kind", "write_line_and_expect")?;
+            yield_data.set("port", port.as_str())?;
+            yield_data.set("delimiter", delimiter.as_str())?;
+            yield_data.set("timeout_ms", timeout_ms)?;
+            yield_data.set("deadline_ms", tool_core::now_timestamp_ms() + timeout_ms)?;
+            let _ = yield_data.set("patterns", patterns);
+
+            let tasks: Table = lua.globals().get("__plugin_tasks")?;
+            if let Ok(state) = tasks.get::<Table>(task_id.as_str()) {
+                let _ = state.set("yield_op", yield_data.clone());
+            }
+
+            let yield_fn: Function = lua.globals().get("__task_yield")?;
+            yield_fn.call::<Value>(yield_data)?;
+
+            // 恢复后读取结果。返回 table { result = {name,line,elapsed_ms}, err = ... }
+            let tasks: Table = lua.globals().get("__plugin_tasks")?;
+            if let Ok(state) = tasks.get::<Table>(task_id.as_str()) {
+                let matched: Option<Table> = state.get("_expect_result").ok();
+                let err: Option<String> = state.get("_expect_err").ok();
+                let _ = state.set("_expect_result", Value::Nil);
+                let _ = state.set("_expect_err", Value::Nil);
+                let wrapper = lua.create_table()?;
+                if let Some(t) = matched {
+                    wrapper.set("result", t)?;
+                    wrapper.set("err", Value::Nil)?;
+                    return Ok(Value::Table(wrapper));
+                }
+                if let Some(e) = err {
+                    wrapper.set("result", Value::Nil)?;
+                    wrapper.set("err", lua.create_string(&e)?)?;
+                    return Ok(Value::Table(wrapper));
+                }
+            }
+            let wrapper = lua.create_table()?;
+            wrapper.set("result", Value::Nil)?;
+            wrapper.set("err", lua.create_string("timeout")?)?;
+            Ok(Value::Table(wrapper))
         })?,
     )?;
 
@@ -1303,6 +2459,119 @@ fn create_fs_api(
     Ok(table)
 }
 
+fn create_config_api(lua: &Lua, store: Arc<ConfigStore>, plugin_id: String) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+
+    // ctx.config.get(key, default)
+    let store_get = store.clone();
+    let pid_get = plugin_id.clone();
+    table.set(
+        "get",
+        lua.create_function(move |lua, (key, default): (String, Value)| {
+            let default_json = lua_value_to_json(default).unwrap_or(serde_json::Value::Null);
+            let value = store_get.get(&pid_get, &key, default_json);
+            json_to_lua_value(&lua, &value)
+        })?,
+    )?;
+
+    // ctx.config.set(key, value)
+    let store_set = store.clone();
+    let pid_set = plugin_id.clone();
+    table.set(
+        "set",
+        lua.create_function(move |_lua, (key, value): (String, Value)| {
+            let json_value = lua_value_to_json(value).unwrap_or(serde_json::Value::Null);
+            store_set
+                .set(&pid_set, &key, json_value)
+                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
+        })?,
+    )?;
+
+    // ctx.config.remove(key)
+    let store_remove = store.clone();
+    let pid_remove = plugin_id.clone();
+    table.set(
+        "remove",
+        lua.create_function(move |_lua, key: String| {
+            store_remove
+                .remove(&pid_remove, &key)
+                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
+        })?,
+    )?;
+
+    // ctx.config.keys()
+    let store_keys = store.clone();
+    let pid_keys = plugin_id.clone();
+    table.set(
+        "keys",
+        lua.create_function(move |lua, ()| {
+            let keys = store_keys.keys(&pid_keys);
+            let arr = lua.create_table()?;
+            for (i, k) in keys.iter().enumerate() {
+                arr.set(i + 1, k.as_str())?;
+            }
+            Ok(Value::Table(arr))
+        })?,
+    )?;
+
+    // ── profile API ──
+
+    // ctx.config.profile_list()
+    let store_pl = store.clone();
+    let pid_pl = plugin_id.clone();
+    table.set(
+        "profile_list",
+        lua.create_function(move |lua, ()| {
+            let names = store_pl.profile_list(&pid_pl);
+            let arr = lua.create_table()?;
+            for (i, name) in names.iter().enumerate() {
+                arr.set(i + 1, name.as_str())?;
+            }
+            Ok(Value::Table(arr))
+        })?,
+    )?;
+
+    // ctx.config.profile_load(name)
+    let store_pload = store.clone();
+    let pid_pload = plugin_id.clone();
+    table.set(
+        "profile_load",
+        lua.create_function(move |lua, name: String| {
+            match store_pload.profile_load(&pid_pload, &name) {
+                Some(data) => json_to_lua_value(&lua, &data),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
+    // ctx.config.profile_save(name, data)
+    let store_psave = store.clone();
+    let pid_psave = plugin_id.clone();
+    table.set(
+        "profile_save",
+        lua.create_function(move |_lua, (name, data): (String, Value)| {
+            let json_data = lua_value_to_json(data).unwrap_or(serde_json::Value::Null);
+            store_psave
+                .profile_save(&pid_psave, &name, json_data)
+                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
+        })?,
+    )?;
+
+    // ctx.config.profile_delete(name)
+    let store_pdel = store;
+    let pid_pdel = plugin_id;
+    table.set(
+        "profile_delete",
+        lua.create_function(move |_lua, name: String| {
+            store_pdel
+                .profile_delete(&pid_pdel, &name)
+                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
+        })?,
+    )?;
+
+    Ok(table)
+}
+
 fn create_ui_api(
     lua: &Lua,
     bus: DataBus,
@@ -1441,6 +2710,7 @@ fn create_ui_api(
     // ctx.ui.log_append(panel_id, { level = "info", message = "..." })
     let bus_log = bus.clone();
     let src_log = source.clone();
+    let pid_log = plugin_id.clone();
     table.set(
         "log_append",
         lua.create_function(move |_lua, (panel_id, entry): (String, Table)| {
@@ -1454,6 +2724,7 @@ fn create_ui_api(
                     "panel_id": panel_id,
                     "level": level,
                     "message": message,
+                    "plugin_id": pid_log,
                 })),
             ));
             Ok(())
@@ -1885,17 +3156,33 @@ fn wait_for_event(
     bus: DataBus,
     filter: TopicFilter,
     timeout_ms: Option<u64>,
+    stop_flag: Option<Arc<AtomicBool>>,
 ) -> mlua::Result<Value> {
     let subscription = bus.subscribe(filter);
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms.unwrap_or(1_000));
 
-    match subscription.recv_timeout(Duration::from_millis(timeout_ms.unwrap_or(1_000))) {
-        Ok(event) => {
-            let table = lua.create_table()?;
-            event_to_lua_table(lua, &table, &event)?;
-            Ok(Value::Table(table))
+    loop {
+        if let Some(ref stop) = stop_flag {
+            if stop.load(Ordering::Relaxed) {
+                return Ok(Value::Nil);
+            }
         }
-        Err(crossbeam_channel::RecvTimeoutError::Timeout) => Ok(Value::Nil),
-        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => Ok(Value::Nil),
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(Value::Nil);
+        }
+        let remaining = deadline
+            .saturating_duration_since(now)
+            .min(Duration::from_millis(50));
+        match subscription.recv_timeout(remaining) {
+            Ok(event) => {
+                let table = lua.create_table()?;
+                event_to_lua_table(lua, &table, &event)?;
+                return Ok(Value::Table(table));
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return Ok(Value::Nil),
+        }
     }
 }
 
@@ -2037,9 +3324,18 @@ pub fn run_replay_analyzer(
     input_events: &[Event],
 ) -> LuaHostResult<LuaReplayOutput> {
     let lua = Lua::new_with(
-        StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8 | StdLib::PACKAGE,
+        StdLib::TABLE
+            | StdLib::STRING
+            | StdLib::MATH
+            | StdLib::UTF8
+            | StdLib::PACKAGE
+            | StdLib::COROUTINE,
         LuaOptions::default(),
     )?;
+
+    // 安装 budget hook：防止 analyzer 死循环或卡死
+    let replay_stop = Arc::new(AtomicBool::new(false));
+    install_budget_hook(&lua, 30_000, replay_stop.clone())?;
 
     let emitted_events = Arc::new(ParkingMutex::new(Vec::new()));
     let logs = Arc::new(ParkingMutex::new(Vec::new()));

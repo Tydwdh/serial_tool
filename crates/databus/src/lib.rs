@@ -68,6 +68,11 @@ impl Subscription {
     pub fn drain(&self) -> Vec<Event> {
         self.receiver.try_iter().collect()
     }
+
+    /// 有限消费，防止单帧消费过多事件导致卡顿。
+    pub fn drain_limited(&self, max: usize) -> Vec<Event> {
+        self.receiver.try_iter().take(max).collect()
+    }
 }
 
 impl DataBus {
@@ -102,7 +107,8 @@ impl DataBus {
         let mut subscribers = self.inner.subscribers.lock();
         subscribers.retain(|subscriber| {
             if subscriber.filter.matches(&event.topic) {
-                subscriber.sender.send(event.clone()).is_ok()
+                // try_send：bounded 满时丢弃最老事件，避免阻塞
+                subscriber.sender.try_send(event.clone()).is_ok()
             } else {
                 true
             }
@@ -113,6 +119,16 @@ impl DataBus {
 
     pub fn subscribe(&self, filter: TopicFilter) -> Subscription {
         let (sender, receiver) = unbounded();
+        self.inner
+            .subscribers
+            .lock()
+            .push(Subscriber { filter, sender });
+        Subscription { receiver }
+    }
+
+    /// 有界订阅：背压保护，超过容量时丢弃最老事件。
+    pub fn subscribe_bounded(&self, filter: TopicFilter, capacity: usize) -> Subscription {
+        let (sender, receiver) = crossbeam_channel::bounded(capacity);
         self.inner
             .subscribers
             .lock()

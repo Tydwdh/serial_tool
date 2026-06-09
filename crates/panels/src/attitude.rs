@@ -46,7 +46,7 @@ impl AttitudePanel {
     }
 
     fn ingest(&mut self) {
-        for event in self.subscription.drain() {
+        for event in self.subscription.drain_limited(500) {
             self.push_event(event);
         }
     }
