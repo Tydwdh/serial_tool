@@ -1796,6 +1796,7 @@ dependencies = [
 name = "hardware-workbench-app"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
  "eframe",
  "egui",
  "rfd",
@@ -3962,6 +3963,8 @@ dependencies = [
 name = "tool-extension"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-channel",
+ "parking_lot",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

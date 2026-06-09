@@ -4,12 +4,14 @@
 use eframe::egui;
 use egui::Color32;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tool_core::{Direction, Event, LogLevel, Payload, now_timestamp_ms};
 use tool_databus::DataBus;
 use tool_extension::PluginManager;
-use tool_lua_host::{LuaReplayConfig, run_replay_analyzer};
+use tool_lua_host::{DialogRequest, FileAccessBroker, LuaReplayConfig, run_replay_analyzer};
 use tool_panels::{
     Activity, DynamicPanels, LogPanel, PanelKind, PanelManager, PluginsPanel, ReplayPanel,
     TerminalPanel, theme,
@@ -215,6 +217,10 @@ struct WorkbenchApp {
     last_event_count: u64,
     event_rate: f64,
     dynamic_drag_source: Option<usize>,
+    file_broker: Arc<FileAccessBroker>,
+    dialog_receiver: crossbeam_channel::Receiver<DialogRequest>,
+    file_browse_subscription: tool_databus::Subscription,
+    file_selected_subscription: tool_databus::Subscription,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,7 +258,13 @@ impl WorkbenchApp {
         cc.egui_ctx.set_embed_viewports(false);
         let bus = DataBus::new();
         let transport = TransportManager::new(bus.clone());
+
+        let (dialog_sender, dialog_receiver) = crossbeam_channel::unbounded::<DialogRequest>();
+        let file_broker = Arc::new(FileAccessBroker::default());
+
         let mut pm = PluginManager::new(bus.clone(), transport.clone());
+        pm.set_host_services(dialog_sender, file_broker.clone());
+
         if let Err(e) = pm.discover_roots([PathBuf::from("plugins")]) {
             bus.publish(Event::system_log(
                 LogLevel::Error,
@@ -323,11 +335,19 @@ impl WorkbenchApp {
             last_rate_check_time: 0.0,
             last_event_count: 0,
             event_rate: 0.0,
-            bus,
+            bus: bus.clone(),
             transport,
             plugin_manager: pm,
             recorder,
             dynamic_drag_source: None,
+            file_broker,
+            dialog_receiver,
+            file_browse_subscription: bus.subscribe(tool_databus::TopicFilter::exact(
+                tool_core::topics::UI_FORM_FILE_BROWSE,
+            )),
+            file_selected_subscription: bus.subscribe(tool_databus::TopicFilter::exact(
+                tool_core::topics::UI_FORM_FILE_SELECTED,
+            )),
         };
         app.refresh_ports();
         let enabled: Vec<String> = config
@@ -603,8 +623,8 @@ impl WorkbenchApp {
 
         ui.vertical_centered(|ui| {
             for (idx, &act) in self.activity_order.iter().enumerate() {
-                let selected = self.panels.active_dynamic_id().is_none()
-                    && self.panels.activity == act;
+                let selected =
+                    self.panels.active_dynamic_id().is_none() && self.panels.activity == act;
                 let label = format!("{} {}", aicon(act), act.label());
                 let shortcut = ashortcut(act);
 
@@ -1378,10 +1398,7 @@ impl eframe::App for WorkbenchApp {
             ));
 
             let steps = steps.max(1);
-            let pos = self
-                .replay_panel
-                .manager()
-                .backward_position_by(steps);
+            let pos = self.replay_panel.manager().backward_position_by(steps);
 
             if let Some(pos) = pos {
                 // 阶段 1：先发布 ui.panel.create 并创建图表面板
@@ -1438,6 +1455,23 @@ impl eframe::App for WorkbenchApp {
         // 运行 replay analyzer（如果需要）
         if self.replay_panel.want_run_analyzers {
             self.run_replay_analyzers();
+        }
+
+        // 处理 dialog 请求（Lua ctx.dialog.open_file）
+        self.poll_dialog_requests();
+
+        // 处理 file 字段浏览请求
+        self.handle_file_browse_requests();
+
+        // 处理插件禁用后的资源清理
+        for plugin_id in self.plugins_panel.take_recently_disabled() {
+            let removed = self.dynamic_panels.remove_by_plugin(&plugin_id);
+            for id in &removed {
+                self.detached_dynamic_panels.remove(id);
+                self.panels
+                    .close_tab(tool_panels::PanelKind::Dynamic(id.clone()));
+            }
+            self.file_broker.clear(&plugin_id);
         }
 
         self.dynamic_panels.ingest(&mut self.panels);
@@ -1658,6 +1692,108 @@ impl WorkbenchApp {
         }
     }
 
+    /// 处理 Lua ctx.dialog.open_file 请求。每帧最多处理一个。
+    fn poll_dialog_requests(&mut self) {
+        if let Ok(request) = self.dialog_receiver.try_recv() {
+            let mut dialog = rfd::FileDialog::new().set_title(&request.title);
+            for filter in &request.filters {
+                if !filter.extensions.is_empty() && filter.extensions[0] != "*" {
+                    dialog = dialog.add_filter(
+                        &filter.name,
+                        &filter
+                            .extensions
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>(),
+                    );
+                }
+            }
+            let result = dialog.pick_file();
+            // 授权路径
+            if let Some(ref path) = result {
+                self.file_broker.authorize(&request.plugin_id, path.clone());
+            }
+            // 发送结果回 Lua
+            let _ = request.response_sender.send(result);
+        }
+    }
+
+    /// 处理 ui.form.file_browse 请求。
+    fn handle_file_browse_requests(&mut self) {
+        for event in self.file_browse_subscription.drain() {
+            if let Payload::Json(value) = event.payload {
+                let panel_id = value.get("panel_id").and_then(Value::as_str).unwrap_or("");
+                let field_id = value.get("field_id").and_then(Value::as_str).unwrap_or("");
+                let filters: Vec<tool_lua_host::FileFilter> = value
+                    .get("filters")
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|f| tool_lua_host::FileFilter {
+                                name: f
+                                    .get("name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_owned(),
+                                extensions: f
+                                    .get("extensions")
+                                    .and_then(Value::as_array)
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|v| v.as_str().map(String::from))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let mut dialog = rfd::FileDialog::new().set_title("选择文件");
+                for filter in &filters {
+                    if !filter.extensions.is_empty() && filter.extensions[0] != "*" {
+                        dialog = dialog.add_filter(
+                            &filter.name,
+                            &filter
+                                .extensions
+                                .iter()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>(),
+                        );
+                    }
+                }
+                let result = dialog.pick_file();
+                let path = result
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+
+                // 授权路径给 panel owner
+                if let Some(ref selected_path) = result {
+                    if let Some(owner) = self.dynamic_panels.panel_owner(panel_id) {
+                        self.file_broker.authorize(owner, selected_path.clone());
+                    } else {
+                        self.log(
+                            LogLevel::Warn,
+                            &format!("file 字段 {panel_id}/{field_id} 没有 owner plugin，跳过授权"),
+                        );
+                    }
+                }
+
+                self.bus.publish(Event::new(
+                    tool_core::topics::UI_FORM_FILE_SELECTED,
+                    "ui",
+                    Direction::Internal,
+                    Payload::Json(serde_json::json!({
+                        "panel_id": panel_id,
+                        "field_id": field_id,
+                        "path": path,
+                    })),
+                ));
+            }
+        }
+    }
+
     /// 运行所有已发现插件的 replay analyzer，结果注入 ReplayManager。
     fn run_replay_analyzers(&mut self) {
         let entries = self.plugin_manager.replay_analyzer_entries();
@@ -1706,6 +1842,7 @@ impl WorkbenchApp {
                     "name": entry.manifest.name,
                     "version": entry.manifest.version,
                 }),
+                plugin_root: Some(entry.root.clone()),
             };
 
             match run_replay_analyzer(script, config, &raw_events) {

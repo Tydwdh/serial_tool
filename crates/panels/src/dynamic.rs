@@ -1,14 +1,20 @@
 use crate::{AttitudePanel, ChartPanel, PanelKind, PanelManager, theme};
-use egui::{ComboBox, DragValue, Slider, TextEdit};
+use egui::{Color32, ComboBox, DragValue, ProgressBar, RichText, Slider, TextEdit};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use tool_core::{Direction, Event, Payload, topics};
+use tool_core::{Direction, Event, LogLevel, Payload, topics};
 use tool_databus::{DataBus, Subscription, TopicFilter};
 
 pub struct DynamicPanels {
     bus: DataBus,
     subscription: Subscription,
     remove_subscription: Subscription,
+    // UI 状态更新订阅
+    set_value_subscription: Subscription,
+    set_enabled_subscription: Subscription,
+    set_visible_subscription: Subscription,
+    file_browse_subscription: Subscription,
+    file_selected_subscription: Subscription,
     panels: BTreeMap<String, DynamicPanel>,
     last_error: Option<String>,
 }
@@ -17,15 +23,18 @@ enum DynamicPanel {
     Chart {
         title: String,
         chart: ChartPanel,
+        owner_plugin_id: Option<String>,
     },
     Form {
         title: String,
         fields: Vec<DynamicField>,
         auto_apply: bool,
+        owner_plugin_id: Option<String>,
     },
     Attitude {
         title: String,
         attitude: AttitudePanel,
+        owner_plugin_id: Option<String>,
     },
 }
 
@@ -33,11 +42,19 @@ struct DynamicField {
     id: String,
     label: String,
     kind: DynamicFieldKind,
-    value: String,
+    value: Value,
     options: Vec<FieldOption>,
     min: Option<f64>,
     max: Option<f64>,
     step: Option<f64>,
+    // ── v0.2 新增 ──
+    rows: Option<usize>,
+    variant: Option<String>,
+    level: Option<String>,
+    text: Option<String>,
+    filters: Vec<FieldFilter>,
+    enabled: bool,
+    visible: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +64,14 @@ enum DynamicFieldKind {
     Boolean,
     Select,
     Slider,
+    // ── v0.2 新增 ──
+    Button,
+    TextArea,
+    File,
+    Progress,
+    Status,
+    Separator,
+    Label,
 }
 
 #[derive(Debug, Clone)]
@@ -55,12 +80,27 @@ struct FieldOption {
     value: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct FieldFilter {
+    pub name: String,
+    pub extensions: Vec<String>,
+}
+
 impl DynamicPanels {
     pub fn new(bus: &DataBus) -> Self {
         Self {
             bus: bus.clone(),
             subscription: bus.subscribe(TopicFilter::exact(topics::UI_PANEL_CREATE)),
             remove_subscription: bus.subscribe(TopicFilter::exact(topics::UI_PANEL_REMOVE)),
+            set_value_subscription: bus.subscribe(TopicFilter::exact(topics::UI_FORM_SET_VALUE)),
+            set_enabled_subscription: bus
+                .subscribe(TopicFilter::exact(topics::UI_FORM_SET_ENABLED)),
+            set_visible_subscription: bus
+                .subscribe(TopicFilter::exact(topics::UI_FORM_SET_VISIBLE)),
+            file_browse_subscription: bus
+                .subscribe(TopicFilter::exact(topics::UI_FORM_FILE_BROWSE)),
+            file_selected_subscription: bus
+                .subscribe(TopicFilter::exact(topics::UI_FORM_FILE_SELECTED)),
             panels: BTreeMap::new(),
             last_error: None,
         }
@@ -84,6 +124,73 @@ impl DynamicPanels {
                 Ok(None) => {}
                 Err(error) => self.last_error = Some(error),
             }
+        }
+
+        // UI 状态更新事件
+        for event in self.set_value_subscription.drain() {
+            self.handle_field_update(event, |field, value| {
+                field.value = value;
+            });
+        }
+        for event in self.set_enabled_subscription.drain() {
+            self.handle_field_update(event, |field, val| {
+                if let Some(enabled) = val.as_bool() {
+                    field.enabled = enabled;
+                }
+            });
+        }
+        for event in self.set_visible_subscription.drain() {
+            self.handle_field_update(event, |field, val| {
+                if let Some(visible) = val.as_bool() {
+                    field.visible = visible;
+                }
+            });
+        }
+        // file browse 事件由 main.rs 处理
+        let _ = self.file_browse_subscription.drain();
+
+        // file selected 事件：更新字段值
+        for event in self.file_selected_subscription.drain() {
+            if let Payload::Json(val) = event.payload {
+                let panel_id = val.get("panel_id").and_then(Value::as_str).unwrap_or("");
+                let field_id = val.get("field_id").and_then(Value::as_str).unwrap_or("");
+                let path = val.get("path").and_then(Value::as_str).unwrap_or("");
+                if let Some(panel) = self.panels.get_mut(panel_id) {
+                    if let DynamicPanel::Form { fields, .. } = panel {
+                        if let Some(field) = fields.iter_mut().find(|f| f.id == field_id) {
+                            field.value = Value::String(path.to_owned());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 处理通用字段更新事件（set_value / set_enabled / set_visible）
+    fn handle_field_update(&mut self, event: Event, apply: impl Fn(&mut DynamicField, Value)) {
+        let Payload::Json(value) = event.payload else {
+            return;
+        };
+        let panel_id = value.get("panel_id").and_then(Value::as_str).unwrap_or("");
+        let field_id = value.get("field_id").and_then(Value::as_str).unwrap_or("");
+        let new_value = value.get("value").cloned().unwrap_or(Value::Null);
+
+        if let Some(panel) = self.panels.get_mut(panel_id) {
+            if let DynamicPanel::Form { fields, .. } = panel {
+                if let Some(field) = fields.iter_mut().find(|f| f.id == field_id) {
+                    apply(field, new_value);
+                } else {
+                    self.last_error = Some(format!(
+                        "set field: field '{field_id}' not found in '{panel_id}'"
+                    ));
+                    let _bus = &self.bus;
+                    let _ = tool_core::LogLevel::Warn;
+                }
+            } else {
+                self.last_error = Some(format!("set field: panel '{panel_id}' is not a form"));
+            }
+        } else {
+            self.last_error = Some(format!("set field: panel '{panel_id}' not found"));
         }
     }
 
@@ -126,6 +233,43 @@ impl DynamicPanels {
 
     pub fn remove(&mut self, id: &str) -> bool {
         self.panels.remove(id).is_some()
+    }
+
+    pub fn remove_by_plugin(&mut self, plugin_id: &str) -> Vec<String> {
+        let ids: Vec<String> = self
+            .panels
+            .iter()
+            .filter(|(_, panel)| match panel {
+                DynamicPanel::Chart {
+                    owner_plugin_id, ..
+                }
+                | DynamicPanel::Form {
+                    owner_plugin_id, ..
+                }
+                | DynamicPanel::Attitude {
+                    owner_plugin_id, ..
+                } => owner_plugin_id.as_deref() == Some(plugin_id),
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &ids {
+            self.panels.remove(id);
+        }
+        ids
+    }
+
+    pub fn panel_owner(&self, panel_id: &str) -> Option<&str> {
+        self.panels.get(panel_id).and_then(|panel| match panel {
+            DynamicPanel::Chart {
+                owner_plugin_id, ..
+            }
+            | DynamicPanel::Form {
+                owner_plugin_id, ..
+            }
+            | DynamicPanel::Attitude {
+                owner_plugin_id, ..
+            } => owner_plugin_id.as_deref(),
+        })
     }
 
     pub fn clear_charts(&mut self) {
@@ -178,6 +322,11 @@ impl DynamicPanels {
             .and_then(Value::as_str)
             .unwrap_or("chart");
 
+        let owner_plugin_id = object
+            .get("plugin_id")
+            .and_then(Value::as_str)
+            .map(|s| s.to_owned());
+
         let panel = match kind {
             "chart" => {
                 let topic_prefix = object
@@ -189,6 +338,7 @@ impl DynamicPanels {
                 DynamicPanel::Chart {
                     title,
                     chart: ChartPanel::new_for_topic_prefix(&self.bus, topic_prefix),
+                    owner_plugin_id,
                 }
             }
             "form" => {
@@ -201,6 +351,7 @@ impl DynamicPanels {
                     title,
                     fields: parse_fields(object.get("fields"))?,
                     auto_apply,
+                    owner_plugin_id,
                 }
             }
             "attitude" | "attitude3d" => {
@@ -212,6 +363,7 @@ impl DynamicPanels {
                 DynamicPanel::Attitude {
                     title,
                     attitude: AttitudePanel::new_for_topic(&self.bus, topic),
+                    owner_plugin_id,
                 }
             }
             other => return Err(format!("不支持的动态面板类型 '{other}'")),
@@ -255,100 +407,243 @@ fn dynamic_form_ui(
     let mut changed = false;
 
     for field in fields.iter_mut() {
-        ui.horizontal(|ui| {
-            ui.label(&field.label);
+        if !field.visible {
+            continue;
+        }
 
-            let field_changed = match field.kind {
-                DynamicFieldKind::Text => ui
-                    .add(TextEdit::singleline(&mut field.value).desired_width(220.0))
-                    .changed(),
+        let enabled = field.enabled;
 
-                DynamicFieldKind::Number => {
-                    let mut value = field.value.parse::<f64>().unwrap_or_default();
-                    let response = ui.add(
-                        DragValue::new(&mut value)
-                            .speed(field.step.unwrap_or(1.0))
-                            .range(
-                                field.min.unwrap_or(f64::NEG_INFINITY)
-                                    ..=field.max.unwrap_or(f64::INFINITY),
-                            ),
+        match field.kind {
+            // ── 分隔符 ──
+            DynamicFieldKind::Separator => {
+                ui.separator();
+            }
+            // ── 标签 ──
+            DynamicFieldKind::Label => {
+                let text = field.text.as_deref().unwrap_or(&field.label);
+                ui.label(RichText::new(text).color(theme::TEXT_SECONDARY));
+            }
+            // ── 按钮 ──
+            DynamicFieldKind::Button => {
+                let text = field.text.as_deref().unwrap_or(&field.label);
+                let fill = match field.variant.as_deref() {
+                    Some("primary") => theme::BLUE,
+                    Some("danger") => theme::RED,
+                    _ => theme::BG_TERTIARY,
+                };
+                let btn = egui::Button::new(RichText::new(text).color(theme::TEXT_WHITE))
+                    .fill(fill)
+                    .min_size(egui::vec2(80.0, 28.0));
+                if ui.add_enabled(enabled, btn).clicked() {
+                    bus.publish(Event::new(
+                        topics::UI_FORM_ACTION,
+                        format!("ui.panel:{panel_id}"),
+                        Direction::Internal,
+                        Payload::Json(serde_json::json!({
+                            "panel_id": panel_id,
+                            "field_id": field.id,
+                            "kind": "button_clicked"
+                        })),
+                    ));
+                }
+            }
+            // ── 进度条 ──
+            DynamicFieldKind::Progress => {
+                if let Some(label) = field.text.as_deref() {
+                    ui.label(label);
+                }
+                let v = field.value.as_f64().unwrap_or(0.0).clamp(0.0, 100.0);
+                ui.add(ProgressBar::new((v / 100.0) as f32).text(format!("{v:.0}%")));
+            }
+            // ── 状态 ──
+            DynamicFieldKind::Status => {
+                let text = field
+                    .value
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let level = field
+                    .value
+                    .get("level")
+                    .and_then(Value::as_str)
+                    .unwrap_or("idle");
+                let color = status_color(level);
+                ui.label(RichText::new(text).color(color));
+            }
+            // ── TextArea ──
+            DynamicFieldKind::TextArea => {
+                let rows = field.rows.unwrap_or(6);
+                let mut text = field.value.as_str().unwrap_or("").to_owned();
+                ui.vertical(|ui| {
+                    ui.label(&field.label);
+                    let resp = ui.add_enabled(
+                        enabled,
+                        TextEdit::multiline(&mut text)
+                            .desired_rows(rows)
+                            .desired_width(f32::INFINITY),
                     );
-
-                    if response.changed() {
-                        field.value = compact_number(value);
-                        true
-                    } else {
-                        false
+                    if resp.changed() {
+                        field.value = Value::String(text);
+                        changed = true;
                     }
-                }
-
-                DynamicFieldKind::Boolean => {
-                    let mut value = parse_bool(&field.value);
-                    let response = ui.checkbox(&mut value, "");
-
-                    if response.changed() {
-                        field.value = value.to_string();
-                        true
-                    } else {
-                        false
+                });
+                continue; // 跳过下面 horizontal 逻辑
+            }
+            // ── File ──
+            DynamicFieldKind::File => {
+                ui.horizontal(|ui| {
+                    ui.label(&field.label);
+                    let path = field.value.as_str().unwrap_or("").to_owned();
+                    let mut display_path = path.clone();
+                    let resp = ui.add_enabled(
+                        enabled,
+                        TextEdit::singleline(&mut display_path).desired_width(200.0),
+                    );
+                    if resp.changed() {
+                        field.value = Value::String(display_path);
+                        changed = true;
                     }
-                }
+                    if ui.add_enabled(enabled, egui::Button::new("浏览")).clicked() {
+                        bus.publish(Event::new(
+                            topics::UI_FORM_FILE_BROWSE,
+                            format!("ui.panel:{panel_id}"),
+                            Direction::Internal,
+                            Payload::Json(serde_json::json!({
+                                "panel_id": panel_id,
+                                "field_id": field.id,
+                                "filters": field.filters.iter().map(|f| serde_json::json!({
+                                    "name": f.name,
+                                    "extensions": f.extensions,
+                                })).collect::<Vec<_>>(),
+                            })),
+                        ));
+                    }
+                });
+            }
+            // ── 原有类型 ──
+            _ => {
+                ui.horizontal(|ui| {
+                    ui.label(&field.label);
 
-                DynamicFieldKind::Select => {
-                    let selected_text = field
-                        .options
-                        .iter()
-                        .find(|option| option.value == field.value)
-                        .map(|option| option.label.clone())
-                        .unwrap_or_else(|| field.value.clone());
-
-                    let options = field.options.clone();
-                    let mut field_changed = false;
-
-                    ComboBox::from_id_salt((panel_id, field.id.as_str()))
-                        .width(180.0)
-                        .selected_text(selected_text)
-                        .show_ui(ui, |ui| {
-                            for option in options {
-                                if ui
-                                    .selectable_value(&mut field.value, option.value, option.label)
-                                    .changed()
-                                {
-                                    field_changed = true;
-                                }
+                    let field_changed = match field.kind {
+                        DynamicFieldKind::Text => {
+                            let mut text = field.value.as_str().unwrap_or("").to_owned();
+                            let resp = ui.add_enabled(
+                                enabled,
+                                TextEdit::singleline(&mut text).desired_width(220.0),
+                            );
+                            if resp.changed() {
+                                field.value = Value::String(text);
+                                true
+                            } else {
+                                false
                             }
-                        });
+                        }
 
-                    field_changed
-                }
+                        DynamicFieldKind::Number => {
+                            let mut value = field.value.as_f64().unwrap_or_default();
+                            let resp = ui.add_enabled(
+                                enabled,
+                                DragValue::new(&mut value)
+                                    .speed(field.step.unwrap_or(1.0))
+                                    .range(
+                                        field.min.unwrap_or(f64::NEG_INFINITY)
+                                            ..=field.max.unwrap_or(f64::INFINITY),
+                                    ),
+                            );
+                            if resp.changed() {
+                                field.value = serde_json::Number::from_f64(value)
+                                    .map(Value::Number)
+                                    .unwrap_or(Value::String(compact_number(value)));
+                                true
+                            } else {
+                                false
+                            }
+                        }
 
-                DynamicFieldKind::Slider => {
-                    let min = field.min.unwrap_or(0.0);
-                    let max = field.max.unwrap_or(100.0);
-                    let mut value = field.value.parse::<f64>().unwrap_or(min).clamp(min, max);
+                        DynamicFieldKind::Boolean => {
+                            let mut value = field.value.as_bool().unwrap_or(false);
+                            let resp = ui.add_enabled(enabled, egui::Checkbox::new(&mut value, ""));
+                            if resp.changed() {
+                                field.value = Value::Bool(value);
+                                true
+                            } else {
+                                false
+                            }
+                        }
 
-                    let response = ui.add(
-                        Slider::new(&mut value, min..=max)
-                            .step_by(field.step.unwrap_or(1.0))
-                            .show_value(true),
-                    );
+                        DynamicFieldKind::Select => {
+                            let current = field.value.as_str().unwrap_or("").to_owned();
+                            let selected_text = field
+                                .options
+                                .iter()
+                                .find(|o| o.value == current)
+                                .map(|o| o.label.clone())
+                                .unwrap_or_else(|| current.clone());
 
-                    if response.changed() {
-                        field.value = compact_number(value);
-                        true
-                    } else {
-                        false
-                    }
-                }
-            };
+                            let options = field.options.clone();
+                            let mut new_value = current;
+                            let mut field_changed = false;
 
-            changed |= field_changed;
-        });
+                            ComboBox::from_id_salt((panel_id, &field.id))
+                                .width(180.0)
+                                .selected_text(selected_text)
+                                .show_ui(ui, |ui| {
+                                    for option in options {
+                                        if ui
+                                            .selectable_value(
+                                                &mut new_value,
+                                                option.value.clone(),
+                                                &option.label,
+                                            )
+                                            .changed()
+                                        {
+                                            field_changed = true;
+                                        }
+                                    }
+                                });
+
+                            if field_changed {
+                                field.value = Value::String(new_value);
+                                true
+                            } else {
+                                false
+                            }
+                        }
+
+                        DynamicFieldKind::Slider => {
+                            let min = field.min.unwrap_or(0.0);
+                            let max = field.max.unwrap_or(100.0);
+                            let mut value = field.value.as_f64().unwrap_or(min).clamp(min, max);
+
+                            let resp = ui.add_enabled(
+                                enabled,
+                                Slider::new(&mut value, min..=max)
+                                    .step_by(field.step.unwrap_or(1.0))
+                                    .show_value(true),
+                            );
+
+                            if resp.changed() {
+                                field.value = serde_json::Number::from_f64(value)
+                                    .map(Value::Number)
+                                    .unwrap_or(Value::String(compact_number(value)));
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        _ => false, // Button, TextArea 等已在上面处理
+                    };
+
+                    changed |= field_changed;
+                });
+            }
+        }
     }
 
     if auto_apply {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("变更会立即应用").color(theme::TEXT_SECONDARY));
+            ui.label(RichText::new("变更会立即应用").color(theme::TEXT_SECONDARY));
         });
 
         if changed {
@@ -363,7 +658,7 @@ fn publish_form_changed(bus: &DataBus, panel_id: &str, fields: &[DynamicField]) 
     let mut values = serde_json::Map::new();
 
     for field in fields {
-        values.insert(field.id.clone(), field_value_to_json(field));
+        values.insert(field.id.clone(), field.value.clone());
     }
 
     bus.publish(Event::new(
@@ -377,19 +672,13 @@ fn publish_form_changed(bus: &DataBus, panel_id: &str, fields: &[DynamicField]) 
     ));
 }
 
-fn field_value_to_json(field: &DynamicField) -> Value {
-    match field.kind {
-        DynamicFieldKind::Number | DynamicFieldKind::Slider => field
-            .value
-            .parse::<f64>()
-            .ok()
-            .and_then(serde_json::Number::from_f64)
-            .map(Value::Number)
-            .unwrap_or_else(|| Value::String(field.value.clone())),
-
-        DynamicFieldKind::Boolean => Value::Bool(parse_bool(&field.value)),
-
-        DynamicFieldKind::Text | DynamicFieldKind::Select => Value::String(field.value.clone()),
+fn status_color(level: &str) -> Color32 {
+    match level {
+        "running" => theme::BLUE,
+        "success" => theme::GREEN,
+        "warn" => theme::YELLOW,
+        "error" => theme::RED,
+        _ => theme::TEXT_SECONDARY, // idle
     }
 }
 
@@ -423,16 +712,41 @@ fn parse_fields(value: Option<&Value>) -> Result<Vec<DynamicField>, String> {
                 "boolean" | "bool" | "checkbox" => DynamicFieldKind::Boolean,
                 "select" | "choice" | "enum" | "dropdown" => DynamicFieldKind::Select,
                 "slider" | "range" => DynamicFieldKind::Slider,
+                // ── v0.2 新增 ──
+                "button" => DynamicFieldKind::Button,
+                "textarea" => DynamicFieldKind::TextArea,
+                "file" => DynamicFieldKind::File,
+                "progress" => DynamicFieldKind::Progress,
+                "status" => DynamicFieldKind::Status,
+                "separator" => DynamicFieldKind::Separator,
+                "label" => DynamicFieldKind::Label,
                 _ => DynamicFieldKind::Text,
             };
 
             let options = parse_options(object.get("options"))?;
+            let filters = parse_filters(object.get("filters"))?;
 
             let default_value = object
                 .get("default")
-                .map(value_to_string)
-                .or_else(|| options.first().map(|option| option.value.clone()))
-                .unwrap_or_default();
+                .cloned()
+                .or_else(|| {
+                    if matches!(kind, DynamicFieldKind::Progress) {
+                        Some(Value::Number(0.into()))
+                    } else if matches!(kind, DynamicFieldKind::Status) {
+                        Some(serde_json::json!({"text": "空闲", "level": "idle"}))
+                    } else if matches!(
+                        kind,
+                        DynamicFieldKind::Boolean
+                            | DynamicFieldKind::Button
+                            | DynamicFieldKind::Separator
+                            | DynamicFieldKind::Label
+                    ) {
+                        None
+                    } else {
+                        options.first().map(|o| Value::String(o.value.clone()))
+                    }
+                })
+                .unwrap_or(Value::String(String::new()));
 
             Ok(DynamicField {
                 id,
@@ -443,9 +757,62 @@ fn parse_fields(value: Option<&Value>) -> Result<Vec<DynamicField>, String> {
                 min: object.get("min").and_then(Value::as_f64),
                 max: object.get("max").and_then(Value::as_f64),
                 step: object.get("step").and_then(Value::as_f64),
+                rows: object
+                    .get("rows")
+                    .and_then(Value::as_u64)
+                    .map(|v| v as usize),
+                variant: object
+                    .get("variant")
+                    .and_then(Value::as_str)
+                    .map(String::from),
+                level: object
+                    .get("level")
+                    .and_then(Value::as_str)
+                    .map(String::from),
+                text: object.get("text").and_then(Value::as_str).map(String::from),
+                filters,
+                enabled: object
+                    .get("enabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                visible: object
+                    .get("visible")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
             })
         })
         .collect()
+}
+
+fn parse_filters(value: Option<&Value>) -> Result<Vec<FieldFilter>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let Value::Array(filters) = value else {
+        return Err("filters must be an array".to_owned());
+    };
+    let mut result = Vec::new();
+    for filter in filters {
+        let obj = filter
+            .as_object()
+            .ok_or_else(|| "filter must be an object".to_owned())?;
+        let name = obj
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let extensions = obj
+            .get("extensions")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        result.push(FieldFilter { name, extensions });
+    }
+    Ok(result)
 }
 
 fn parse_options(value: Option<&Value>) -> Result<Vec<FieldOption>, String> {

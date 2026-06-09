@@ -1,14 +1,19 @@
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use thiserror::Error;
 use tool_core::{Direction, Event, LogLevel, Payload, topics};
 use tool_databus::{DataBus, Subscription, TopicFilter};
 use tool_lua_host::{LuaPluginRuntime, LuaRunConfig, run_plugin};
 use tool_transport::TransportManager;
 use tool_wasm_host::{WasmPluginConfig, WasmPluginRuntime};
+
+pub mod host_services;
+use host_services::{DialogRequest, FileAccessBroker};
 
 const MAX_PLUGIN_EVENTS_PER_FRAME: usize = 500;
 
@@ -265,7 +270,17 @@ impl PermissionManager {
 
 impl Default for PermissionManager {
     fn default() -> Self {
-        Self::new(["bus", "log", "serial", "ui", "storage", "timer", "testing"])
+        Self::new([
+            "bus",
+            "log",
+            "serial",
+            "ui",
+            "storage",
+            "timer",
+            "testing",
+            "dialog",
+            "fs.read.user_selected",
+        ])
     }
 }
 
@@ -278,6 +293,8 @@ pub struct PluginManager {
     wasm_runtimes: HashMap<String, WasmPluginRuntime>,
     roots: Vec<PathBuf>,
     subscription: Subscription,
+    dialog_request_sender: Option<crossbeam_channel::Sender<DialogRequest>>,
+    file_broker: Option<Arc<FileAccessBroker>>,
 }
 
 impl PluginManager {
@@ -293,7 +310,18 @@ impl PluginManager {
             wasm_runtimes: HashMap::new(),
             roots: Vec::new(),
             subscription,
+            dialog_request_sender: None,
+            file_broker: None,
         }
+    }
+
+    pub fn set_host_services(
+        &mut self,
+        dialog_sender: crossbeam_channel::Sender<DialogRequest>,
+        broker: Arc<FileAccessBroker>,
+    ) {
+        self.dialog_request_sender = Some(dialog_sender);
+        self.file_broker = Some(broker);
     }
 
     pub fn discover_roots(
@@ -402,6 +430,14 @@ impl PluginManager {
         let script = fs::read_to_string(&script_path)?;
         let context = manifest_context(&record.manifest, &record.root);
 
+        let host_services = tool_lua_host::LuaHostServices {
+            plugin_root: Some(record.root.clone()),
+            plugin_id: record.manifest.id.clone(),
+            dialog_sender: self.dialog_request_sender.clone(),
+            file_broker: self.file_broker.clone(),
+            stop_flag: None,
+        };
+
         let runtime = run_plugin(
             script,
             LuaRunConfig {
@@ -413,6 +449,7 @@ impl PluginManager {
             },
             self.bus.clone(),
             self.transport.clone(),
+            host_services,
         )?;
 
         record.state = PluginState::Running;

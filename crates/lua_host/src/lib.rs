@@ -3,6 +3,8 @@ use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value, VmState};
 use parking_lot::Mutex as ParkingMutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, json};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -14,6 +16,58 @@ use tool_core::{Direction, Event, LogLevel, Payload, topics};
 use tool_databus::{DataBus, TopicFilter};
 use tool_testing::TestPacketLog;
 use tool_transport::{SerialConfig, TransportManager};
+
+// ── Host Services ──
+
+#[derive(Debug, Clone)]
+pub struct FileFilter {
+    pub name: String,
+    pub extensions: Vec<String>,
+}
+
+pub struct DialogRequest {
+    pub plugin_id: String,
+    pub title: String,
+    pub filters: Vec<FileFilter>,
+    pub response_sender: crossbeam_channel::Sender<Option<PathBuf>>,
+}
+
+/// 跨组件共享的文件访问授权管理器。
+#[derive(Debug, Default)]
+pub struct FileAccessBroker {
+    authorized: parking_lot::Mutex<HashMap<String, HashSet<PathBuf>>>,
+}
+
+impl FileAccessBroker {
+    pub fn authorize(&self, plugin_id: &str, path: PathBuf) {
+        self.authorized
+            .lock()
+            .entry(plugin_id.to_owned())
+            .or_default()
+            .insert(path);
+    }
+
+    pub fn is_authorized(&self, plugin_id: &str, path: &Path) -> bool {
+        self.authorized
+            .lock()
+            .get(plugin_id)
+            .map(|paths| paths.iter().any(|p| p == path))
+            .unwrap_or(false)
+    }
+
+    pub fn clear(&self, plugin_id: &str) {
+        self.authorized.lock().remove(plugin_id);
+    }
+}
+
+/// 传递给 Lua runtime 的宿主服务。
+pub struct LuaHostServices {
+    pub plugin_root: Option<PathBuf>,
+    pub plugin_id: String,
+    pub dialog_sender: Option<crossbeam_channel::Sender<DialogRequest>>,
+    pub file_broker: Option<Arc<FileAccessBroker>>,
+    pub stop_flag: Option<Arc<AtomicBool>>,
+}
 
 const LUA_PLUGIN_EVENT_QUEUE_CAPACITY: usize = 4096;
 
@@ -276,6 +330,7 @@ pub fn run_plugin(
     config: LuaRunConfig,
     bus: DataBus,
     transport: TransportManager,
+    host_services: LuaHostServices,
 ) -> LuaHostResult<LuaPluginRuntime> {
     let (event_sender, event_receiver) = bounded(LUA_PLUGIN_EVENT_QUEUE_CAPACITY);
 
@@ -286,6 +341,9 @@ pub fn run_plugin(
     let thread_alive = Arc::clone(&alive);
 
     let plugin_source = config.source.clone();
+
+    let mut host_services = host_services;
+    host_services.stop_flag = Some(Arc::clone(&thread_stop));
 
     bus.publish(Event::system_log(
         LogLevel::Info,
@@ -302,6 +360,7 @@ pub fn run_plugin(
             event_receiver,
             thread_stop,
             thread_alive,
+            host_services,
         );
     });
 
@@ -321,9 +380,10 @@ fn plugin_event_loop(
     event_receiver: Receiver<Event>,
     stop: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
+    host_services: LuaHostServices,
 ) {
     let lua = match Lua::new_with(
-        StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8,
+        StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8 | StdLib::PACKAGE,
         LuaOptions::default(),
     ) {
         Ok(lua) => lua,
@@ -338,7 +398,7 @@ fn plugin_event_loop(
         }
     };
 
-    if let Err(error) = install_ctx(&lua, bus.clone(), transport, &config) {
+    if let Err(error) = install_ctx(&lua, bus.clone(), transport, &config, &host_services) {
         bus.publish(Event::system_log(
             LogLevel::Error,
             &config.source,
@@ -539,11 +599,18 @@ fn run_script_blocking(
     stop: Arc<AtomicBool>,
 ) -> LuaHostResult<()> {
     let lua = Lua::new_with(
-        StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8,
+        StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8 | StdLib::PACKAGE,
         LuaOptions::default(),
     )?;
 
-    install_ctx(&lua, bus, transport, &config)?;
+    let test_services = LuaHostServices {
+        plugin_root: None,
+        plugin_id: "test".to_owned(),
+        dialog_sender: None,
+        file_broker: None,
+        stop_flag: None,
+    };
+    install_ctx(&lua, bus, transport, &config, &test_services)?;
     install_budget_hook(&lua, config.timeout_ms, stop)?;
 
     lua.load(&source).set_name(&config.script_name).exec()?;
@@ -575,6 +642,7 @@ fn install_ctx(
     bus: DataBus,
     transport: TransportManager,
     config: &LuaRunConfig,
+    host_services: &LuaHostServices,
 ) -> mlua::Result<()> {
     let ctx = lua.create_table()?;
 
@@ -604,7 +672,12 @@ fn install_ctx(
     if has_permission(config, "ui") {
         ctx.set(
             "ui",
-            create_ui_api(lua, bus.clone(), config.source.clone())?,
+            create_ui_api(
+                lua,
+                bus.clone(),
+                config.source.clone(),
+                host_services.plugin_id.clone(),
+            )?,
         )?;
     }
 
@@ -614,6 +687,37 @@ fn install_ctx(
 
     if has_permission(config, "storage") {
         ctx.set("storage", create_storage_api(lua)?)?;
+    }
+
+    if has_permission(config, "dialog")
+        && let Some(sender) = host_services.dialog_sender.clone()
+    {
+        let stop = host_services.stop_flag.clone();
+        ctx.set(
+            "dialog",
+            create_dialog_api(lua, sender, host_services.plugin_id.clone(), stop)?,
+        )?;
+    }
+
+    if has_permission(config, "fs.read.user_selected")
+        && let Some(broker) = host_services.file_broker.clone()
+    {
+        ctx.set(
+            "fs",
+            create_fs_api(lua, broker, host_services.plugin_id.clone())?,
+        )?;
+    }
+
+    if let Some(ref root) = host_services.plugin_root {
+        let root_str = root.display().to_string();
+        let root_str = root_str.replace('\\', "/");
+        let new_path = format!("{root_str}/lib/?.lua;{root_str}/?.lua");
+        lua.globals().set("package", {
+            let pkg = lua.create_table()?;
+            pkg.set("path", new_path)?;
+            pkg.set("cpath", "")?;
+            pkg
+        })?;
     }
 
     ctx.set(
@@ -1031,7 +1135,173 @@ fn create_timer_api(lua: &Lua) -> mlua::Result<Table> {
 
     Ok(table)
 }
-fn create_ui_api(lua: &Lua, bus: DataBus, source: String) -> mlua::Result<Table> {
+fn create_dialog_api(
+    lua: &Lua,
+    dialog_sender: crossbeam_channel::Sender<DialogRequest>,
+    plugin_id: String,
+    stop_flag: Option<Arc<AtomicBool>>,
+) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+
+    table.set(
+        "open_file",
+        lua.create_function(move |cb_lua, config: Value| {
+            let obj = match config {
+                Value::Table(t) => t,
+                _ => return Ok(Value::Nil),
+            };
+
+            let title: String = obj.get("title").unwrap_or_else(|_| "选择文件".to_owned());
+            let filters: Vec<FileFilter> = parse_lua_filters(&obj)?;
+
+            let (response_sender, response_receiver) =
+                crossbeam_channel::bounded::<Option<PathBuf>>(1);
+
+            let _ = dialog_sender.send(DialogRequest {
+                plugin_id: plugin_id.clone(),
+                title,
+                filters,
+                response_sender,
+            });
+
+            // 100ms 轮询，支持插件停止时及时返回
+            let result = loop {
+                if let Some(ref stop) = stop_flag {
+                    if stop.load(Ordering::Relaxed) {
+                        break None;
+                    }
+                }
+                match response_receiver.recv_timeout(Duration::from_millis(100)) {
+                    Ok(Some(path)) => {
+                        break Some(path.display().to_string());
+                    }
+                    Ok(None) => break None,
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break None,
+                }
+            };
+
+            match result {
+                Some(path_str) => {
+                    let s = cb_lua.create_string(&path_str)?;
+                    Ok(Value::String(s))
+                }
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
+    Ok(table)
+}
+
+fn parse_lua_filters(obj: &Table) -> mlua::Result<Vec<FileFilter>> {
+    let filters_table: Option<Table> = obj.get("filters").ok();
+    let Some(filters_table) = filters_table else {
+        return Ok(vec![FileFilter {
+            name: "所有文件".to_owned(),
+            extensions: vec!["*".to_owned()],
+        }]);
+    };
+
+    let mut result = Vec::new();
+    for pair in filters_table.pairs::<Value, Value>() {
+        let (_, value) = pair?;
+        if let Value::Table(ft) = value {
+            let name: String = ft.get("name").unwrap_or_default();
+            let exts: Vec<String> = ft
+                .get::<Table>("extensions")
+                .map(|t| {
+                    t.sequence_values::<String>()
+                        .filter_map(|v| v.ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            result.push(FileFilter {
+                name,
+                extensions: exts,
+            });
+        }
+    }
+    if result.is_empty() {
+        result.push(FileFilter {
+            name: "所有文件".to_owned(),
+            extensions: vec!["*".to_owned()],
+        });
+    }
+    Ok(result)
+}
+
+fn create_fs_api(
+    lua: &Lua,
+    broker: Arc<FileAccessBroker>,
+    plugin_id: String,
+) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+
+    let broker_read = broker.clone();
+    let pid_read = plugin_id.clone();
+    table.set(
+        "read_text",
+        lua.create_function(move |_lua, path: String| {
+            let p = PathBuf::from(&path);
+            if !broker_read.is_authorized(&pid_read, &p) {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "文件未授权: {path}. 请先通过文件选择对话框选择文件。"
+                )));
+            }
+            let content = std::fs::read_to_string(&p)
+                .map_err(|e| mlua::Error::RuntimeError(format!("读取文件失败: {e}")))?;
+            // 16 MiB 上限
+            if content.len() > 16 * 1024 * 1024 {
+                return Err(mlua::Error::RuntimeError("文件超过 16 MiB 上限".to_owned()));
+            }
+            Ok(content)
+        })?,
+    )?;
+
+    let broker_lines = broker;
+    let pid_lines = plugin_id;
+    table.set(
+        "read_lines",
+        lua.create_function(move |lua, path: String| {
+            let p = PathBuf::from(&path);
+            if !broker_lines.is_authorized(&pid_lines, &p) {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "文件未授权: {path}. 请先通过文件选择对话框选择文件。"
+                )));
+            }
+            let content = std::fs::read_to_string(&p)
+                .map_err(|e| mlua::Error::RuntimeError(format!("读取文件失败: {e}")))?;
+            if content.len() > 16 * 1024 * 1024 {
+                return Err(mlua::Error::RuntimeError("文件超过 16 MiB 上限".to_owned()));
+            }
+            let lines: Arc<Vec<String>> = Arc::new(content.lines().map(String::from).collect());
+            let index = Arc::new(ParkingMutex::new(0usize));
+            let lines_len = lines.len();
+
+            // 返回迭代函数：每次调用返回下一行，结束时返回 nil
+            let iter_fn = lua.create_function(move |lua, ()| {
+                let mut i = index.lock();
+                if *i >= lines_len {
+                    return Ok(Value::Nil);
+                }
+                let line = lines[*i].clone();
+                *i += 1;
+                Ok(Value::String(lua.create_string(&line)?))
+            })?;
+            Ok(Value::Function(iter_fn))
+        })?,
+    )?;
+
+    Ok(table)
+}
+
+fn create_ui_api(
+    lua: &Lua,
+    bus: DataBus,
+    source: String,
+    plugin_id: String,
+) -> mlua::Result<Table> {
     let table = lua.create_table()?;
 
     for (name, kind) in [
@@ -1041,6 +1311,7 @@ fn create_ui_api(lua: &Lua, bus: DataBus, source: String) -> mlua::Result<Table>
     ] {
         let bus = bus.clone();
         let source = source.clone();
+        let pid = plugin_id.clone();
 
         table.set(
             name,
@@ -1050,6 +1321,11 @@ fn create_ui_api(lua: &Lua, bus: DataBus, source: String) -> mlua::Result<Table>
                 config.insert(
                     "kind".to_owned(),
                     serde_json::Value::String(kind.to_owned()),
+                );
+
+                config.insert(
+                    "plugin_id".to_owned(),
+                    serde_json::Value::String(pid.clone()),
                 );
 
                 ensure_panel_defaults(&mut config, kind)?;
@@ -1083,7 +1359,7 @@ fn create_ui_api(lua: &Lua, bus: DataBus, source: String) -> mlua::Result<Table>
         })?,
     )?;
 
-    let bus_for_get = bus;
+    let bus_for_get = bus.clone();
 
     table.set(
         "get_panel",
@@ -1109,6 +1385,70 @@ fn create_ui_api(lua: &Lua, bus: DataBus, source: String) -> mlua::Result<Table>
 
             json_to_lua_value(lua, &panel)
         })?,
+    )?;
+
+    // ctx.ui.set_value(panel_id, field_id, value)
+    let bus_set = bus.clone();
+    let src_set = source.clone();
+    table.set(
+        "set_value",
+        lua.create_function(
+            move |_lua, (panel_id, field_id, value): (String, String, Value)| {
+                bus_set.publish(Event::new(
+                    topics::UI_FORM_SET_VALUE,
+                    src_set.clone(),
+                    Direction::Internal,
+                    Payload::Json(serde_json::json!({
+                        "panel_id": panel_id,
+                        "field_id": field_id,
+                        "value": lua_value_to_json(value).unwrap_or(serde_json::Value::Null),
+                    })),
+                ));
+                Ok(())
+            },
+        )?,
+    )?;
+
+    let bus_enabled = bus.clone();
+    let src_enabled = source.clone();
+    table.set(
+        "set_enabled",
+        lua.create_function(
+            move |_lua, (panel_id, field_id, enabled): (String, String, bool)| {
+                bus_enabled.publish(Event::new(
+                    topics::UI_FORM_SET_ENABLED,
+                    src_enabled.clone(),
+                    Direction::Internal,
+                    Payload::Json(serde_json::json!({
+                        "panel_id": panel_id,
+                        "field_id": field_id,
+                        "value": enabled,
+                    })),
+                ));
+                Ok(())
+            },
+        )?,
+    )?;
+
+    let bus_visible = bus;
+    let src_visible = source;
+    table.set(
+        "set_visible",
+        lua.create_function(
+            move |_lua, (panel_id, field_id, visible): (String, String, bool)| {
+                bus_visible.publish(Event::new(
+                    topics::UI_FORM_SET_VISIBLE,
+                    src_visible.clone(),
+                    Direction::Internal,
+                    Payload::Json(serde_json::json!({
+                        "panel_id": panel_id,
+                        "field_id": field_id,
+                        "value": visible,
+                    })),
+                ));
+                Ok(())
+            },
+        )?,
     )?;
 
     Ok(table)
@@ -1638,6 +1978,7 @@ pub struct LuaReplayConfig {
     pub plugin_version: String,
     pub subscriptions: Vec<String>,
     pub context: serde_json::Value,
+    pub plugin_root: Option<PathBuf>,
 }
 
 /// Replay analyzer 输出。
@@ -1666,7 +2007,7 @@ pub fn run_replay_analyzer(
     input_events: &[Event],
 ) -> LuaHostResult<LuaReplayOutput> {
     let lua = Lua::new_with(
-        StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8,
+        StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8 | StdLib::PACKAGE,
         LuaOptions::default(),
     )?;
 
@@ -1757,6 +2098,18 @@ fn install_replay_ctx(
         "now_ms",
         lua.create_function(|_lua, ()| Ok(tool_core::now_timestamp_ms()))?,
     )?;
+
+    // 本地 require：只能加载插件根目录和 lib 子目录
+    if let Some(ref root) = config.plugin_root {
+        let root_str = root.display().to_string().replace('\\', "/");
+        let new_path = format!("{root_str}/lib/?.lua;{root_str}/?.lua");
+        lua.globals().set("package", {
+            let pkg = lua.create_table()?;
+            pkg.set("path", new_path)?;
+            pkg.set("cpath", "")?;
+            pkg
+        })?;
+    }
 
     // ctx.storage.get (只读)
     let storage = lua.create_table()?;
@@ -2097,6 +2450,7 @@ end
             plugin_version: "1.0.0".to_owned(),
             subscriptions: vec!["transport.serial.default.rx".to_owned()],
             context: json!({"id": "test", "name": "Test"}),
+            plugin_root: None,
         };
 
         let input = Event::new(
@@ -2132,6 +2486,7 @@ end
             plugin_version: "1.0.0".to_owned(),
             subscriptions: vec!["transport.serial.default.rx".to_owned()],
             context: json!({"id": "test", "name": "Test"}),
+            plugin_root: None,
         };
 
         let input = Event::new(
@@ -2163,6 +2518,7 @@ end
             plugin_version: "2.0.0".to_owned(),
             subscriptions: vec!["transport.serial.default.rx".to_owned()],
             context: json!({"id": "demo.plugin", "name": "Demo", "version": "2.0.0"}),
+            plugin_root: None,
         };
 
         let input = Event::new(
@@ -2214,6 +2570,7 @@ end
             plugin_version: "1.0.0".to_owned(),
             subscriptions: vec!["transport.serial.default.rx".to_owned()],
             context: json!({"id": "test.lifecycle", "name": "Lifecycle"}),
+            plugin_root: None,
         };
 
         let input1 = Event::new(
@@ -2258,6 +2615,7 @@ function on_replay_end() end
             plugin_version: "1.0.0".to_owned(),
             subscriptions: vec!["transport.serial.default.rx".to_owned()],
             context: json!({"id": "test.skip", "name": "Skip"}),
+            plugin_root: None,
         };
 
         // 只有 1 个匹配的 RX 事件，另 1 个是 TX

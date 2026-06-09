@@ -13,6 +13,12 @@ pub mod topics {
     pub const UI_PANEL_CREATE: &str = "ui.panel.create";
     pub const UI_PANEL_REMOVE: &str = "ui.panel.remove";
     pub const UI_FORM_CHANGED: &str = "ui.form.changed";
+    pub const UI_FORM_ACTION: &str = "ui.form.action";
+    pub const UI_FORM_SET_VALUE: &str = "ui.form.set_value";
+    pub const UI_FORM_SET_ENABLED: &str = "ui.form.set_enabled";
+    pub const UI_FORM_SET_VISIBLE: &str = "ui.form.set_visible";
+    pub const UI_FORM_FILE_BROWSE: &str = "ui.form.file_browse";
+    pub const UI_FORM_FILE_SELECTED: &str = "ui.form.file_selected";
     pub const TEST_RESULT: &str = "test.result";
 }
 

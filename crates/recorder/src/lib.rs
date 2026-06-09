@@ -459,7 +459,9 @@ impl ReplayManager {
         self.position_at_start_ms = position_ms.min(self.duration_ms());
         self.replay_start = None;
         self.state = ReplayState::Paused;
-        self.publish_until_filtered(position_ms, |event| event.topic == tool_core::topics::UI_PANEL_CREATE)
+        self.publish_until_filtered(position_ms, |event| {
+            event.topic == tool_core::topics::UI_PANEL_CREATE
+        })
     }
 
     /// 第二阶段：发布剩余事件（非 ui.panel.create）+ analyzer cache。
@@ -469,16 +471,14 @@ impl ReplayManager {
         // 跳过 ui.panel.create（已在阶段 1 发布），ReparseRaw 下同时跳过 protocol.*
         let data_count = self.publish_until_filtered(position_ms, |event| {
             event.topic != tool_core::topics::UI_PANEL_CREATE
-                && (policy != ReplayPolicy::ReparseRaw
-                    || !event.topic.starts_with("protocol."))
+                && (policy != ReplayPolicy::ReparseRaw || !event.topic.starts_with("protocol."))
         });
 
-        let analyzer_count =
-            if policy == ReplayPolicy::ReparseRaw && self.analyzer_cache_valid {
-                self.publish_analyzer_cache_until(position_ms)
-            } else {
-                0
-            };
+        let analyzer_count = if policy == ReplayPolicy::ReparseRaw && self.analyzer_cache_valid {
+            self.publish_analyzer_cache_until(position_ms)
+        } else {
+            0
+        };
 
         data_count + analyzer_count
     }
@@ -512,9 +512,7 @@ impl ReplayManager {
         self.cursor = self
             .events
             .iter()
-            .position(|event| {
-                event.timestamp_ms.saturating_sub(base) > target_position_ms
-            })
+            .position(|event| event.timestamp_ms.saturating_sub(base) > target_position_ms)
             .unwrap_or(self.events.len());
 
         count
@@ -553,9 +551,7 @@ impl ReplayManager {
                 self.replay_start = None;
             }
 
-            if self.effective_policy() == ReplayPolicy::ReparseRaw
-                && self.analyzer_cache_valid
-            {
+            if self.effective_policy() == ReplayPolicy::ReparseRaw && self.analyzer_cache_valid {
                 self.publish_analyzer_cache_until(position_ms);
             }
         }

@@ -568,47 +568,46 @@ fn render_rows_view(
     }
 
     let scroll_output = scroll_area.show_rows(ui, row_height, rows.len(), |ui, row_range| {
-            for row_index in row_range {
-                let row = &rows[row_index];
-                let selected = selected_entry_id == Some(row.entry.id);
+        for row_index in row_range {
+            let row = &rows[row_index];
+            let selected = selected_entry_id == Some(row.entry.id);
 
-                let response =
-                    show_entry_fast(ui, row.port, row.entry, show_hex, row_height, selected);
+            let response = show_entry_fast(ui, row.port, row.entry, show_hex, row_height, selected);
 
-                if response.clicked() {
-                    clicked_entry_id = Some(row.entry.id);
-                }
-
-                if response.double_clicked() {
-                    clicked_entry_id = Some(row.entry.id);
-                    open_detail_entry_id = Some(row.entry.id);
-                }
-
-                response.context_menu(|ui| {
-                    if ui.button("复制内容").clicked() {
-                        ui.ctx().copy_text(row.entry.raw_text.clone());
-                        ui.close();
-                    }
-
-                    if ui.button("复制显示文本").clicked() {
-                        ui.ctx().copy_text(row.entry.display_text.clone());
-                        ui.close();
-                    }
-
-                    if ui.button("复制 HEX").clicked() {
-                        ui.ctx().copy_text(row.entry.hex_text.clone());
-                        ui.close();
-                    }
-
-                    ui.separator();
-
-                    if ui.button("查看详情").clicked() {
-                        open_detail_entry_id = Some(row.entry.id);
-                        ui.close();
-                    }
-                });
+            if response.clicked() {
+                clicked_entry_id = Some(row.entry.id);
             }
-        });
+
+            if response.double_clicked() {
+                clicked_entry_id = Some(row.entry.id);
+                open_detail_entry_id = Some(row.entry.id);
+            }
+
+            response.context_menu(|ui| {
+                if ui.button("复制内容").clicked() {
+                    ui.ctx().copy_text(row.entry.raw_text.clone());
+                    ui.close();
+                }
+
+                if ui.button("复制显示文本").clicked() {
+                    ui.ctx().copy_text(row.entry.display_text.clone());
+                    ui.close();
+                }
+
+                if ui.button("复制 HEX").clicked() {
+                    ui.ctx().copy_text(row.entry.hex_text.clone());
+                    ui.close();
+                }
+
+                ui.separator();
+
+                if ui.button("查看详情").clicked() {
+                    open_detail_entry_id = Some(row.entry.id);
+                    ui.close();
+                }
+            });
+        }
+    });
 
     RenderOutcome {
         inner_rect: scroll_output.inner_rect,

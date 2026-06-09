@@ -6,6 +6,7 @@ use tool_extension::{PluginManager, PluginState, PluginSummary};
 pub struct PluginsPanel {
     root: String,
     last_error: Option<String>,
+    recently_disabled: Vec<String>,
 }
 
 impl PluginsPanel {
@@ -13,7 +14,12 @@ impl PluginsPanel {
         Self {
             root: "plugins".to_owned(),
             last_error: None,
+            recently_disabled: Vec::new(),
         }
+    }
+
+    pub fn take_recently_disabled(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.recently_disabled)
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, manager: &mut PluginManager) {
@@ -127,7 +133,10 @@ impl PluginsPanel {
                 .clicked()
             {
                 match manager.disable(&summary.id) {
-                    Ok(()) => self.last_error = None,
+                    Ok(()) => {
+                        self.last_error = None;
+                        self.recently_disabled.push(summary.id.clone());
+                    }
                     Err(error) => self.last_error = Some(error.to_string()),
                 }
             }
