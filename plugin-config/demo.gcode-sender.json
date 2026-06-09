@@ -1,0 +1,10 @@
+{
+  "ack_timeout_ms": 300000,
+  "baud_rate": 115200,
+  "busy_pattern": "busy",
+  "error_pattern": "^Error",
+  "ok_pattern": "^ok",
+  "port": "com3",
+  "resend_pattern": "^Resend:",
+  "send_delay_ms": 10
+}
