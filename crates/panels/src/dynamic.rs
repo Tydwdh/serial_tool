@@ -689,24 +689,13 @@ fn parse_fields(value: Option<&Value>) -> Result<Vec<DynamicField>, String> {
 
     fields
         .iter()
-        .map(|field| {
+        .enumerate()
+        .map(|(index, field)| {
             let object = field
                 .as_object()
                 .ok_or_else(|| "form field must be an object".to_owned())?;
 
-            let id = object
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "form field requires id".to_owned())?
-                .to_owned();
-
-            let label = object
-                .get("label")
-                .or_else(|| object.get("title"))
-                .and_then(Value::as_str)
-                .unwrap_or(&id)
-                .to_owned();
-
+            // 先解析 kind，display-only 类型可以不提供 id
             let kind = match object.get("kind").and_then(Value::as_str).unwrap_or("text") {
                 "number" => DynamicFieldKind::Number,
                 "boolean" | "bool" | "checkbox" => DynamicFieldKind::Boolean,
@@ -722,6 +711,27 @@ fn parse_fields(value: Option<&Value>) -> Result<Vec<DynamicField>, String> {
                 "label" => DynamicFieldKind::Label,
                 _ => DynamicFieldKind::Text,
             };
+
+            // separator 和 label 不强制要求 id，自动生成 fallback
+            let id = object
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| {
+                    if matches!(kind, DynamicFieldKind::Separator | DynamicFieldKind::Label) {
+                        Some(format!("__field_{index}"))
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| "form field requires id".to_owned())?;
+
+            let label = object
+                .get("label")
+                .or_else(|| object.get("title"))
+                .and_then(Value::as_str)
+                .unwrap_or(&id)
+                .to_owned();
 
             let options = parse_options(object.get("options"))?;
             let filters = parse_filters(object.get("filters"))?;
@@ -1034,5 +1044,34 @@ mod tests {
                 .tabs
                 .contains(&PanelKind::Dynamic("pid-chart".to_owned()))
         );
+    }
+
+    #[test]
+    fn creates_form_with_label_and_separator_without_id() {
+        let bus = DataBus::new();
+        let mut panels = DynamicPanels::new(&bus);
+        let mut manager = PanelManager::default();
+
+        bus.publish(Event::new(
+            topics::UI_PANEL_CREATE,
+            "test",
+            Direction::Internal,
+            Payload::Json(serde_json::json!({
+                "id": "file-tool-panel",
+                "title": "文件工具",
+                "kind": "form",
+                "fields": [
+                    { "kind": "label", "text": "请选择文件" },
+                    { "kind": "separator" },
+                    { "id": "file_path", "label": "文件", "kind": "file" },
+                    { "id": "load", "label": "加载", "kind": "button" }
+                ]
+            })),
+        ));
+
+        panels.ingest(&mut manager);
+
+        assert_eq!(panels.count(), 1);
+        assert_eq!(panels.title("file-tool-panel"), Some("文件工具"));
     }
 }
