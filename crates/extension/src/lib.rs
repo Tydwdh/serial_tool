@@ -280,6 +280,8 @@ impl Default for PermissionManager {
             "testing",
             "dialog",
             "fs.read.user_selected",
+            "task",
+            "config",
         ])
     }
 }

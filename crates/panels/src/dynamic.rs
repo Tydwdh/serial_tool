@@ -1,7 +1,7 @@
 use crate::{AttitudePanel, ChartPanel, PanelKind, PanelManager, theme};
 use egui::{Color32, ComboBox, DragValue, ProgressBar, RichText, Slider, TextEdit};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use tool_core::{Direction, Event, LogLevel, Payload, topics};
 use tool_databus::{DataBus, Subscription, TopicFilter};
 
@@ -15,8 +15,15 @@ pub struct DynamicPanels {
     set_visible_subscription: Subscription,
     file_browse_subscription: Subscription,
     file_selected_subscription: Subscription,
+    log_append_subscription: Subscription,
     panels: BTreeMap<String, DynamicPanel>,
     last_error: Option<String>,
+}
+
+struct LogEntry {
+    timestamp_ms: u64,
+    level: LogLevel,
+    message: String,
 }
 
 enum DynamicPanel {
@@ -34,6 +41,12 @@ enum DynamicPanel {
     Attitude {
         title: String,
         attitude: AttitudePanel,
+        owner_plugin_id: Option<String>,
+    },
+    Log {
+        title: String,
+        entries: VecDeque<LogEntry>,
+        max_entries: usize,
         owner_plugin_id: Option<String>,
     },
 }
@@ -101,6 +114,7 @@ impl DynamicPanels {
                 .subscribe(TopicFilter::exact(topics::UI_FORM_FILE_BROWSE)),
             file_selected_subscription: bus
                 .subscribe(TopicFilter::exact(topics::UI_FORM_FILE_SELECTED)),
+            log_append_subscription: bus.subscribe(TopicFilter::exact(topics::UI_LOG_APPEND)),
             panels: BTreeMap::new(),
             last_error: None,
         }
@@ -146,6 +160,31 @@ impl DynamicPanels {
                 }
             });
         }
+        // log append 事件
+        for event in self.log_append_subscription.drain() {
+            if let Payload::Json(val) = event.payload {
+                let panel_id = val.get("panel_id").and_then(Value::as_str).unwrap_or("");
+                let level_str = val.get("level").and_then(Value::as_str).unwrap_or("info");
+                let msg = val.get("message").and_then(Value::as_str).unwrap_or("");
+                let level = LogLevel::parse_name(level_str).unwrap_or(LogLevel::Info);
+                if let Some(DynamicPanel::Log {
+                    entries,
+                    max_entries,
+                    ..
+                }) = self.panels.get_mut(panel_id)
+                {
+                    entries.push_back(LogEntry {
+                        timestamp_ms: tool_core::now_timestamp_ms(),
+                        level,
+                        message: msg.to_owned(),
+                    });
+                    while entries.len() > *max_entries {
+                        entries.pop_front();
+                    }
+                }
+            }
+        }
+
         // file browse 事件由 main.rs 处理
         let _ = self.file_browse_subscription.drain();
 
@@ -231,14 +270,35 @@ impl DynamicPanels {
             DynamicPanel::Attitude { attitude, .. } => {
                 attitude.ui(ui);
             }
+            DynamicPanel::Log { title, entries, .. } => {
+                ui.label(RichText::new(title.as_str()).strong());
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        for entry in entries.iter() {
+                            let ts = tool_core::now_timestamp_ms(); // approximate
+                            let _ = ts;
+                            let color = match entry.level {
+                                LogLevel::Error => theme::RED,
+                                LogLevel::Warn => theme::YELLOW,
+                                LogLevel::Info => theme::TEXT_PRIMARY,
+                                LogLevel::Debug => theme::TEXT_SECONDARY,
+                                LogLevel::Trace => Color32::GRAY,
+                            };
+                            ui.colored_label(color, &entry.message);
+                        }
+                    });
+            }
         }
     }
 
     pub fn title(&self, id: &str) -> Option<&str> {
         self.panels.get(id).map(|panel| match panel {
-            DynamicPanel::Chart { title, .. } => title.as_str(),
-            DynamicPanel::Form { title, .. } => title.as_str(),
-            DynamicPanel::Attitude { title, .. } => title.as_str(),
+            DynamicPanel::Chart { title, .. }
+            | DynamicPanel::Form { title, .. }
+            | DynamicPanel::Attitude { title, .. }
+            | DynamicPanel::Log { title, .. } => title.as_str(),
         })
     }
 
@@ -267,6 +327,9 @@ impl DynamicPanels {
                 }
                 | DynamicPanel::Attitude {
                     owner_plugin_id, ..
+                }
+                | DynamicPanel::Log {
+                    owner_plugin_id, ..
                 } => owner_plugin_id.as_deref() == Some(plugin_id),
             })
             .map(|(id, _)| id.clone())
@@ -286,6 +349,9 @@ impl DynamicPanels {
                 owner_plugin_id, ..
             }
             | DynamicPanel::Attitude {
+                owner_plugin_id, ..
+            }
+            | DynamicPanel::Log {
                 owner_plugin_id, ..
             } => owner_plugin_id.as_deref(),
         })
@@ -382,6 +448,18 @@ impl DynamicPanels {
                 DynamicPanel::Attitude {
                     title,
                     attitude: AttitudePanel::new_for_topic(&self.bus, topic),
+                    owner_plugin_id,
+                }
+            }
+            "log" => {
+                let max_entries = object
+                    .get("max_entries")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(5000) as usize;
+                DynamicPanel::Log {
+                    title,
+                    entries: VecDeque::new(),
+                    max_entries,
                     owner_plugin_id,
                 }
             }

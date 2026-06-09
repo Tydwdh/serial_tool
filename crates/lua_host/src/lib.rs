@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use tool_core::{Direction, Event, LogLevel, Payload, topics};
 use tool_databus::{DataBus, TopicFilter};
+
+pub mod codec;
 use tool_testing::TestPacketLog;
 use tool_transport::{SerialConfig, TransportManager};
 
@@ -730,6 +732,8 @@ fn install_ctx(
 
     ctx.set("plugin", json_to_lua_value(lua, &config.context)?)?;
 
+    let _ = codec::register_codec(lua);
+
     lua.globals().set("ctx", &ctx)?;
 
     lua.globals().set(
@@ -1311,6 +1315,7 @@ fn create_ui_api(
         ("create_chart", "chart"),
         ("create_form", "form"),
         ("create_attitude", "attitude"),
+        ("create_log", "log"),
     ] {
         let bus = bus.clone();
         let source = source.clone();
@@ -1431,6 +1436,28 @@ fn create_ui_api(
                 Ok(())
             },
         )?,
+    )?;
+
+    // ctx.ui.log_append(panel_id, { level = "info", message = "..." })
+    let bus_log = bus.clone();
+    let src_log = source.clone();
+    table.set(
+        "log_append",
+        lua.create_function(move |_lua, (panel_id, entry): (String, Table)| {
+            let level: String = entry.get("level").unwrap_or_else(|_| "info".to_owned());
+            let message: String = entry.get("message").unwrap_or_default();
+            bus_log.publish(Event::new(
+                topics::UI_LOG_APPEND,
+                src_log.clone(),
+                Direction::Internal,
+                Payload::Json(serde_json::json!({
+                    "panel_id": panel_id,
+                    "level": level,
+                    "message": message,
+                })),
+            ));
+            Ok(())
+        })?,
     )?;
 
     let bus_visible = bus;
@@ -2184,6 +2211,8 @@ fn install_replay_ctx(
 
     // 安装全局存储表
     lua.globals().set("__plugin_storage", lua.create_table()?)?;
+
+    let _ = codec::register_codec(lua);
 
     // 注册 ctx 全局变量
     lua.globals().set("ctx", ctx)?;
