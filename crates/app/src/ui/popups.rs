@@ -1,6 +1,5 @@
 use crate::app::WorkbenchApp;
-use crate::bootstrap::REPAINT_INTERVAL_MS;
-use crate::state::{DetachedPanelAction, StatusLevel};
+use crate::state::DetachedPanelAction;
 use crate::ui::bottom_panel::translate_error;
 use eframe::egui;
 use serde_json::Value;

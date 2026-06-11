@@ -1,9 +1,6 @@
 use crate::app::WorkbenchApp;
 use crate::config::{pick_recorder_path, record_mode_label};
 use crate::state::StatusLevel;
-use crate::ui::top_bar::{
-    baud_combo, serial_action_button, serial_action_button_enabled, serial_combo,
-};
 use eframe::egui;
 use std::collections::BTreeSet;
 use tool_panels::theme;

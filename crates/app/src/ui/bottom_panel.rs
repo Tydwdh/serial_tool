@@ -1,6 +1,5 @@
 use crate::app::WorkbenchApp;
-use crate::state::{BottomTab, StatusLevel};
-use crate::ui::top_bar::{serial_action_button, serial_action_button_enabled};
+use crate::state::BottomTab;
 use eframe::egui;
 use tool_panels::theme;
 
@@ -142,7 +141,6 @@ impl WorkbenchApp {
     }
 }
 
-use tool_transport::TransportError;
 use tool_transport::TransportManager;
 
 pub(crate) fn send_impl_to(

@@ -1,6 +1,4 @@
-use eframe::egui;
-use std::thread;
-use tool_core::{Direction, Event, LogLevel, Payload};
+use tool_core::LogLevel;
 use tool_lua_host::{LuaReplayConfig, run_replay_analyzer};
 
 use crate::app::{ReplayAnalyzerJob, ReplayAnalyzerResult, WorkbenchApp};
@@ -117,7 +115,7 @@ impl WorkbenchApp {
     }
 
     pub(crate) fn poll_replay_analyzer_result(&mut self) {
-        let Some(mut job) = self.replay_analyzer_job.take() else {
+        let Some(job) = self.replay_analyzer_job.take() else {
             return;
         };
         if !job.handle.is_finished() {

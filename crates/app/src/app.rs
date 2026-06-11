@@ -1,41 +1,25 @@
-use crate::config::{PersistedConfig, default_activity_order};
-use crate::config::{
-    config_path, default_recorder_path, ensure_jsonl_extension, load_config, pick_recorder_path,
-    record_mode_label, windows_open_dialog,
-};
-use crate::state::{BottomTab, DetachedPanelAction, SendUiState, StatusLevel, StatusState};
-use crate::ui::activity_bar::{
-    activity_insert_index_from_pointer, aicon, ashortcut, paint_activity_insert_line,
-    paint_vertical_insert_line, vertical_insert_index_from_pointer,
-};
-use crate::ui::bottom_panel::{send_impl_to, translate_error};
-use crate::ui::top_bar::{pdb, ppar, psb};
+use crate::config::default_activity_order;
+use crate::config::{default_recorder_path, load_config, windows_open_dialog};
+use crate::state::{BottomTab, SendUiState, StatusLevel, StatusState};
+use crate::ui::activity_bar::aicon;
 use eframe::egui;
-use egui::Color32;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tool_core::{Direction, Event, LogLevel, Payload, now_timestamp_ms, topic_matches, topics};
+use tool_core::{Direction, Event, LogLevel, Payload};
 use tool_databus::DataBus;
 use tool_extension::PluginManager;
-use tool_lua_host::{DialogRequest, FileAccessBroker, LuaReplayConfig, run_replay_analyzer};
+use tool_lua_host::{DialogRequest, FileAccessBroker};
 use tool_panels::{
-    Activity, DynamicPanels, LogPanel, PanelKind, PanelManager, PluginsPanel, ReplayPanel,
-    TerminalPanel, theme,
+    Activity, DynamicPanels, LogPanel, PanelManager, PluginsPanel, ReplayPanel, TerminalPanel,
+    theme,
 };
-use tool_recorder::{JsonlRecorder, RecordMode};
-use tool_transport::{
-    DataBits, Parity, SerialConfig, SerialPortDescriptor, StopBits, TransportManager,
-};
+use tool_recorder::JsonlRecorder;
+use tool_transport::{SerialPortDescriptor, TransportManager};
 
 use crate::bootstrap::{
-    ACTIVITY_BAR_WIDTH, BOTTOM_PANEL_HEIGHT, BOTTOM_PANEL_MIN, DEFAULT_WINDOW_HEIGHT,
-    DEFAULT_WINDOW_WIDTH, INSPECTOR_WIDTH, REPAINT_INTERVAL_MS, app_dir, apply_theme, setup_fonts,
-};
-use crate::ui::top_bar::{
-    baud_combo, serial_action_button, serial_action_button_enabled, serial_combo,
+    ACTIVITY_BAR_WIDTH, BOTTOM_PANEL_HEIGHT, BOTTOM_PANEL_MIN, INSPECTOR_WIDTH,
+    REPAINT_INTERVAL_MS, app_dir, apply_theme, setup_fonts,
 };
 
 // ── 数据结构 ──

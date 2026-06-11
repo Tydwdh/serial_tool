@@ -2,10 +2,9 @@ use crate::app::WorkbenchApp;
 use crate::config::{PersistedConfig, config_path};
 use crate::state::{BottomTab, StatusLevel};
 use crate::ui::top_bar::{pdb, ppar, psb};
-use eframe::egui;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use tool_core::{Event, LogLevel, now_timestamp_ms};
+use tool_core::{LogLevel, now_timestamp_ms};
 use tool_transport::SerialConfig;
 
 impl WorkbenchApp {
