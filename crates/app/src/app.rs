@@ -101,50 +101,50 @@ impl BottomTab {
 }
 
 pub(crate) struct WorkbenchApp {
-    bus: DataBus,
-    transport: TransportManager,
-    plugin_manager: PluginManager,
-    recorder: JsonlRecorder,
-    panels: PanelManager,
-    terminal_panel: TerminalPanel,
-    dynamic_panels: DynamicPanels,
-    plugins_panel: PluginsPanel,
-    replay_panel: ReplayPanel,
-    bottom_log_panel: LogPanel,
-    ports: Vec<SerialPortDescriptor>,
-    selected_port: Option<String>,
-    baud_rate: String,
-    data_bits: String,
-    stop_bits: String,
-    parity: String,
-    timeout_ms: String,
-    recorder_path: String,
-    status_message: String,
-    status_level: StatusLevel,
-    status_deadline_ms: u64,
-    last_port_refresh: f64,
-    bottom_panel_visible: bool,
-    bottom_tab: BottomTab,
-    send_input: String,
-    send_hex_mode: bool,
-    send_append_lf: bool,
-    send_error: Option<String>,
-    send_popup_open: bool,
-    terminal_popup_open: bool,
-    detached_dynamic_panels: BTreeSet<String>,
-    top_bar_serial_collapsed: bool,
-    activity_order: Vec<Activity>,
-    activity_drag_source: Option<usize>,
-    activity_rects_cache: Vec<egui::Rect>,
-    last_rate_check_time: f64,
-    last_event_count: u64,
-    event_rate: f64,
-    dynamic_drag_source: Option<usize>,
-    file_broker: Arc<FileAccessBroker>,
-    dialog_receiver: crossbeam_channel::Receiver<DialogRequest>,
-    file_browse_subscription: tool_databus::Subscription,
-    replay_analyzer_job: Option<ReplayAnalyzerJob>,
-    replay_analyzer_generation: u64,
+    pub(crate) bus: DataBus,
+    pub(crate) transport: TransportManager,
+    pub(crate) plugin_manager: PluginManager,
+    pub(crate) recorder: JsonlRecorder,
+    pub(crate) panels: PanelManager,
+    pub(crate) terminal_panel: TerminalPanel,
+    pub(crate) dynamic_panels: DynamicPanels,
+    pub(crate) plugins_panel: PluginsPanel,
+    pub(crate) replay_panel: ReplayPanel,
+    pub(crate) bottom_log_panel: LogPanel,
+    pub(crate) ports: Vec<SerialPortDescriptor>,
+    pub(crate) selected_port: Option<String>,
+    pub(crate) baud_rate: String,
+    pub(crate) data_bits: String,
+    pub(crate) stop_bits: String,
+    pub(crate) parity: String,
+    pub(crate) timeout_ms: String,
+    pub(crate) recorder_path: String,
+    pub(crate) status_message: String,
+    pub(crate) status_level: StatusLevel,
+    pub(crate) status_deadline_ms: u64,
+    pub(crate) last_port_refresh: f64,
+    pub(crate) bottom_panel_visible: bool,
+    pub(crate) bottom_tab: BottomTab,
+    pub(crate) send_input: String,
+    pub(crate) send_hex_mode: bool,
+    pub(crate) send_append_lf: bool,
+    pub(crate) send_error: Option<String>,
+    pub(crate) send_popup_open: bool,
+    pub(crate) terminal_popup_open: bool,
+    pub(crate) detached_dynamic_panels: BTreeSet<String>,
+    pub(crate) top_bar_serial_collapsed: bool,
+    pub(crate) activity_order: Vec<Activity>,
+    pub(crate) activity_drag_source: Option<usize>,
+    pub(crate) activity_rects_cache: Vec<egui::Rect>,
+    pub(crate) last_rate_check_time: f64,
+    pub(crate) last_event_count: u64,
+    pub(crate) event_rate: f64,
+    pub(crate) dynamic_drag_source: Option<usize>,
+    pub(crate) file_broker: Arc<FileAccessBroker>,
+    pub(crate) dialog_receiver: crossbeam_channel::Receiver<DialogRequest>,
+    pub(crate) file_browse_subscription: tool_databus::Subscription,
+    pub(crate) replay_analyzer_job: Option<ReplayAnalyzerJob>,
+    pub(crate) replay_analyzer_generation: u64,
 }
 
 pub(crate) struct ReplayAnalyzerJob {
@@ -560,49 +560,6 @@ impl WorkbenchApp {
             self.bus.history_len(),
             self.event_rate
         ));
-    }
-
-    fn status_bar(&mut self, ui: &mut egui::Ui) {
-        let st = self
-            .selected_port
-            .as_deref()
-            .map(|p| self.transport.status_port(p))
-            .unwrap_or_else(tool_transport::TransportStatus::closed);
-        ui.horizontal(|ui| {
-            let (d, l) = if let (Some(p), Some(b)) = (self.selected_port.clone(), st.baud_rate) {
-                (if st.open { "●" } else { "○" }, format!("{p} @ {b}"))
-            } else {
-                ("○", "串口已关闭".into())
-            };
-            ui.label(egui::RichText::new(d).color(if st.open {
-                theme::GREEN
-            } else {
-                theme::TEXT_SECONDARY
-            }));
-            ui.label(l);
-            ui.separator();
-            let rec = self.recorder.is_running();
-            ui.label(egui::RichText::new("●").color(if rec {
-                theme::RED
-            } else {
-                theme::TEXT_SECONDARY
-            }));
-            ui.label(if rec { "录制中" } else { "未录制" });
-            ui.separator();
-            ui.label(format!("{:.0} 事件/秒", self.event_rate));
-            ui.separator();
-            // 截断过长状态，hover 显示完整内容
-            let shown = {
-                let mut chars = self.status_message.chars();
-                let head: String = chars.by_ref().take(80).collect();
-                if chars.next().is_some() {
-                    format!("{head}…")
-                } else {
-                    head
-                }
-            };
-            ui.label(&shown).on_hover_text(&self.status_message);
-        });
     }
 
     fn activity_bar(&mut self, ui: &mut egui::Ui) {
