@@ -1,6 +1,9 @@
 // Release 模式下不显示控制台窗口
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod bootstrap;
+pub(crate) use bootstrap::*;
+
 use eframe::egui;
 use egui::Color32;
 use serde::{Deserialize, Serialize};
@@ -21,15 +24,6 @@ use tool_transport::{
     DataBits, Parity, SerialConfig, SerialPortDescriptor, StopBits, TransportManager,
 };
 
-const ACTIVITY_BAR_WIDTH: f32 = 104.0;
-const BOTTOM_PANEL_HEIGHT: f32 = 350.0;
-const BOTTOM_PANEL_MIN: f32 = 350.0;
-const INSPECTOR_WIDTH: f32 = 240.0;
-const DEFAULT_WINDOW_WIDTH: f32 = 1280.0;
-const DEFAULT_WINDOW_HEIGHT: f32 = 820.0;
-const REPAINT_INTERVAL_MS: u64 = 50;
-const PORT_REFRESH_INTERVAL_SECS: f64 = 0.5;
-
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -47,107 +41,6 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| Ok(Box::new(WorkbenchApp::new(cc)))),
     )
-}
-
-// ── 字体 ──
-fn setup_fonts(cc: &eframe::CreationContext<'_>) {
-    for path in &[
-        "assets/NotoSansSC-VF.ttf".to_owned(),
-        "C:\\Windows\\Fonts\\msyh.ttc".to_owned(),
-    ] {
-        if let Ok(fb) = std::fs::read(path) {
-            let mut f = egui::FontDefinitions::default();
-            f.font_data
-                .insert("zh".into(), egui::FontData::from_owned(fb).into());
-            if let Ok(eb) = std::fs::read("assets/seguiemj.ttf") {
-                f.font_data
-                    .insert("emoji".into(), egui::FontData::from_owned(eb).into());
-            }
-            let p = f
-                .families
-                .entry(egui::FontFamily::Proportional)
-                .or_default();
-            p.insert(0, "zh".into());
-            if f.font_data.contains_key("emoji") {
-                p.insert(0, "emoji".into());
-            }
-            f.families
-                .entry(egui::FontFamily::Monospace)
-                .or_default()
-                .push("zh".into());
-            cc.egui_ctx.set_fonts(f);
-            return;
-        }
-    }
-}
-
-// ── 主题 ──
-fn apply_theme(ctx: &egui::Context) {
-    ctx.set_theme(egui::Theme::Dark);
-    ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
-    let mut s = (*ctx.global_style()).clone();
-    s.spacing.item_spacing = egui::vec2(8.0, 6.0);
-    s.spacing.button_padding = egui::vec2(10.0, 5.0);
-    s.spacing.interact_size = egui::vec2(40.0, 28.0);
-    s.spacing.slider_width = 180.0;
-    s.spacing.combo_width = 140.0;
-    s.spacing.text_edit_width = 220.0;
-    s.interaction.resize_grab_radius_side = 6.0;
-    s.interaction.resize_grab_radius_corner = 10.0;
-    s.animation_time = 0.0;
-    #[cfg(debug_assertions)]
-    {
-        s.debug.show_interactive_widgets = false;
-        s.debug.show_focused_widget = false;
-        s.debug.show_unaligned = false;
-        s.debug.warn_if_rect_changes_id = false;
-        s.debug.show_resize = false;
-        s.debug.show_widget_hits = false;
-    }
-    let mut v = egui::Visuals::dark();
-    v.panel_fill = theme::BG_PRIMARY;
-    v.window_fill = theme::BG_SECONDARY;
-    v.extreme_bg_color = theme::BG_SECONDARY;
-    v.faint_bg_color = theme::BG_TERTIARY;
-    v.code_bg_color = theme::BG_INPUT;
-    v.text_edit_bg_color = Some(theme::BG_INPUT);
-    v.override_text_color = Some(theme::TEXT_PRIMARY);
-    v.weak_text_color = Some(theme::TEXT_SECONDARY);
-    v.warn_fg_color = theme::YELLOW;
-    v.error_fg_color = theme::RED;
-    v.selection.bg_fill = theme::BG_SELECTION;
-    v.selection.stroke = egui::Stroke::new(1.0, theme::BLUE);
-    v.hyperlink_color = theme::CYAN;
-    v.window_stroke = egui::Stroke::new(1.0, theme::BORDER_LIGHT);
-    v.resize_corner_size = 8.0;
-    v.striped = true;
-    v.collapsing_header_frame = false;
-    v.window_highlight_topmost = false;
-    v.button_frame = true;
-    v.indent_has_left_vline = false;
-    let w = &mut v.widgets;
-    w.noninteractive.bg_fill = theme::BG_INPUT;
-    w.noninteractive.bg_stroke = egui::Stroke::new(1.0, theme::BORDER);
-    w.noninteractive.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_PRIMARY);
-    w.noninteractive.weak_bg_fill = theme::BG_SECONDARY;
-    w.inactive.bg_fill = theme::BG_TERTIARY;
-    w.inactive.weak_bg_fill = theme::BG_INPUT;
-    w.inactive.bg_stroke = egui::Stroke::new(1.0, theme::BORDER_LIGHT);
-    w.inactive.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_PRIMARY);
-    w.hovered.bg_fill = theme::WIDGET_HOVER;
-    w.hovered.weak_bg_fill = theme::BG_TERTIARY;
-    w.hovered.bg_stroke = egui::Stroke::new(1.0, theme::BLUE);
-    w.hovered.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_PRIMARY);
-    w.active.bg_fill = theme::WIDGET_ACTIVE_WEAK;
-    w.active.weak_bg_fill = theme::WIDGET_ACTIVE_WEAK;
-    w.active.bg_stroke = egui::Stroke::new(1.0, theme::BLUE);
-    w.active.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_WHITE);
-    w.open.bg_fill = theme::WIDGET_OPEN;
-    w.open.weak_bg_fill = theme::BG_INPUT;
-    w.open.bg_stroke = egui::Stroke::new(1.0, theme::BLUE);
-    w.open.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_PRIMARY);
-    s.visuals = v;
-    ctx.set_global_style(s);
 }
 
 // ── 数据结构 ──
@@ -328,7 +221,8 @@ impl WorkbenchApp {
         let mut pm = PluginManager::new(bus.clone(), transport.clone());
         pm.set_host_services(dialog_sender, file_broker.clone());
 
-        if let Err(e) = pm.discover_roots([PathBuf::from("plugins")]) {
+        let plugin_dir = app_dir().join("plugins");
+        if let Err(e) = pm.discover_roots([plugin_dir, PathBuf::from("plugins")]) {
             bus.publish(Event::system_log(
                 LogLevel::Error,
                 "ext",
@@ -337,6 +231,13 @@ impl WorkbenchApp {
         }
         let recorder = JsonlRecorder::new(bus.clone());
         let config = load_config();
+        if config.is_none() {
+            bus.publish(Event::system_log(
+                LogLevel::Warn,
+                "app",
+                "未找到或无法加载配置，使用默认设置",
+            ));
+        }
         apply_theme(&cc.egui_ctx);
         let mut rp = config
             .as_ref()
@@ -480,9 +381,15 @@ impl WorkbenchApp {
                 }
 
                 if !added_ports.is_empty() {
-                    self.set_status(StatusLevel::Info, format!("发现串口 {}", added_ports.join(", ")));
+                    self.set_status(
+                        StatusLevel::Info,
+                        format!("发现串口 {}", added_ports.join(", ")),
+                    );
                 } else if !removed_ports.is_empty() {
-                    self.set_status(StatusLevel::Info, format!("移除串口 {}", removed_ports.join(", ")));
+                    self.set_status(
+                        StatusLevel::Info,
+                        format!("移除串口 {}", removed_ports.join(", ")),
+                    );
                 } else if self.selected_port != old_selected {
                     self.set_status(StatusLevel::Info, "请选择串口");
                 }
@@ -701,7 +608,17 @@ impl WorkbenchApp {
             ui.separator();
             ui.label(format!("{:.0} 事件/秒", self.event_rate));
             ui.separator();
-            ui.label(&self.status_message);
+            // 截断过长状态，hover 显示完整内容
+            let shown = {
+                let mut chars = self.status_message.chars();
+                let head: String = chars.by_ref().take(80).collect();
+                if chars.next().is_some() {
+                    format!("{head}…")
+                } else {
+                    head
+                }
+            };
+            ui.label(&shown).on_hover_text(&self.status_message);
         });
     }
 
@@ -1178,8 +1095,12 @@ impl WorkbenchApp {
         // 显示已打开但不在系统端口列表中的 stale 连接
         let transport_open = self.transport.open_ports();
         if !transport_open.is_empty() {
-            let system_names: BTreeSet<&str> = self.ports.iter().map(|d| d.port_name.as_str()).collect();
-            let stale: Vec<&String> = transport_open.iter().filter(|p| !system_names.contains(p.as_str())).collect();
+            let system_names: BTreeSet<&str> =
+                self.ports.iter().map(|d| d.port_name.as_str()).collect();
+            let stale: Vec<&String> = transport_open
+                .iter()
+                .filter(|p| !system_names.contains(p.as_str()))
+                .collect();
             if !stale.is_empty() {
                 ui.separator();
                 ui.colored_label(theme::ORANGE, "⚠ 以下端口已打开但可能已拔出：");
@@ -1445,7 +1366,11 @@ impl WorkbenchApp {
             .as_deref()
             .is_some_and(|port| self.transport.status_port(port).open);
 
-        if serial_action_button(ui, "打开").clicked() {
+        if selected_open {
+            if serial_action_button(ui, "重连").clicked() {
+                self.open_selected_port();
+            }
+        } else if serial_action_button(ui, "打开").clicked() {
             self.open_selected_port();
         }
 
@@ -1497,7 +1422,9 @@ impl eframe::App for WorkbenchApp {
         let ctx = ui.ctx().clone();
         self.clear_status_if_expired();
         match self.recorder.reap_stopping() {
-            Some(Ok(path)) => self.set_status_force(StatusLevel::Info, format!("录制已保存: {}", path.display())),
+            Some(Ok(path)) => {
+                self.set_status_force(StatusLevel::Info, format!("录制已保存: {}", path.display()))
+            }
             Some(Err(e)) => self.set_status_force(StatusLevel::Error, format!("录制失败: {e}")),
             None => {}
         }
@@ -1631,7 +1558,12 @@ impl eframe::App for WorkbenchApp {
             self.last_rate_check_time = now;
             self.last_event_count = self.bus.published_count();
         }
-        if now - self.last_port_refresh > PORT_REFRESH_INTERVAL_SECS {
+        let refresh_interval = if ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
+            0.5
+        } else {
+            2.0
+        };
+        if now - self.last_port_refresh > refresh_interval {
             self.last_port_refresh = now;
             self.refresh_ports_silent();
         }
@@ -1796,7 +1728,10 @@ impl WorkbenchApp {
                     ui.horizontal(|ui| {
                         ui.radio_value(&mut self.send_hex_mode, false, "文本");
                         ui.radio_value(&mut self.send_hex_mode, true, "HEX");
-                        ui.checkbox(&mut self.send_append_lf, "LF");
+                        ui.add_enabled_ui(!self.send_hex_mode, |ui| {
+                            ui.checkbox(&mut self.send_append_lf, "LF")
+                                .on_disabled_hover_text("HEX 模式请手动添加 0A");
+                        });
                         if ui
                             .add_enabled(
                                 so && !self.send_input.is_empty(),
@@ -1961,7 +1896,10 @@ impl WorkbenchApp {
         let generation = self.replay_analyzer_generation.wrapping_add(1);
         self.replay_analyzer_generation = generation;
         let source_path = self.replay_panel.path.clone();
-        self.set_status(StatusLevel::Info, format!("回放：正在运行 {total_entries} 个 analyzer ..."));
+        self.set_status(
+            StatusLevel::Info,
+            format!("回放：正在运行 {total_entries} 个 analyzer ..."),
+        );
 
         let handle = std::thread::spawn(move || {
             let mut all_derived = Vec::new();
@@ -2060,7 +1998,10 @@ impl WorkbenchApp {
         }
         // 忽略回放文件已改变的结果
         if job.source_path != self.replay_panel.path {
-            self.set_status(StatusLevel::Warn, "回放：忽略过期 analyzer 结果，录制文件已改变");
+            self.set_status(
+                StatusLevel::Warn,
+                "回放：忽略过期 analyzer 结果，录制文件已改变",
+            );
             return;
         }
 
@@ -2082,7 +2023,10 @@ impl WorkbenchApp {
             self.set_status(StatusLevel::Error, format!("回放：{msg}"));
         } else if result.derived_events.is_empty() && result.failed == 0 {
             // 成功运行但 0 输出：降级为 Warn
-            let msg = format!("{} 个 analyzer 运行成功但未生成任何派生事件", result.succeeded);
+            let msg = format!(
+                "{} 个 analyzer 运行成功但未生成任何派生事件",
+                result.succeeded
+            );
             self.replay_panel.set_analyzer_warning(msg.clone());
             self.set_status(StatusLevel::Warn, format!("回放：{msg}"));
         } else {
@@ -2096,9 +2040,14 @@ impl WorkbenchApp {
             );
             if result.failed > 0 {
                 let err_detail = result.errors.join("; ");
-                self.replay_panel
-                    .set_analyzer_warning(format!("{summary}，{} 失败: {err_detail}", result.failed));
-                self.set_status(StatusLevel::Warn, format!("回放：{summary}，{} 失败", result.failed));
+                self.replay_panel.set_analyzer_warning(format!(
+                    "{summary}，{} 失败: {err_detail}",
+                    result.failed
+                ));
+                self.set_status(
+                    StatusLevel::Warn,
+                    format!("回放：{summary}，{} 失败", result.failed),
+                );
             } else {
                 self.replay_panel.clear_analyzer_error();
                 self.set_status(StatusLevel::Info, format!("回放：{summary}"));
@@ -2147,11 +2096,21 @@ fn serial_combo(
     ports: &[SerialPortDescriptor],
     sel: &mut Option<String>,
 ) {
-    let selected_text = match sel.as_deref() {
-        Some(port) => port.to_owned(),
-        None if ports.is_empty() => "无端口".to_owned(),
-        None => "请选择串口".to_owned(),
-    };
+    let selected_text = sel
+        .as_deref()
+        .and_then(|name| {
+            ports
+                .iter()
+                .find(|p| p.port_name == name)
+                .map(|p| format!("{}  {}", p.port_name, p.port_type))
+        })
+        .unwrap_or_else(|| {
+            if ports.is_empty() {
+                "无端口".to_owned()
+            } else {
+                "请选择串口".to_owned()
+            }
+        });
 
     egui::ComboBox::from_id_salt(id)
         .width(w)
@@ -2161,7 +2120,11 @@ fn serial_combo(
                 ui.add_enabled(false, egui::Label::new("无可用串口"));
             } else {
                 for port in ports {
-                    ui.selectable_value(sel, Some(port.port_name.clone()), &port.port_name);
+                    ui.selectable_value(
+                        sel,
+                        Some(port.port_name.clone()),
+                        format!("{}  {}", port.port_name, port.port_type),
+                    );
                 }
             }
         });
@@ -2217,8 +2180,31 @@ fn translate_error(m: &str) -> String {
     }
 }
 fn load_config() -> Option<PersistedConfig> {
-    let t = std::fs::read_to_string(config_path()).ok()?;
-    serde_json::from_str(&t).ok()
+    let primary = config_path();
+
+    // 尝试读主路径
+    match std::fs::read_to_string(&primary) {
+        Ok(t) => match serde_json::from_str(&t) {
+            Ok(cfg) => return Some(cfg),
+            Err(e) => {
+                eprintln!("配置解析失败 {}: {e}，尝试降级", primary.display());
+            }
+        },
+        Err(_) => {}
+    }
+
+    // 从旧路径 (CWD/workspace.json) 迁移
+    let legacy = std::env::current_dir().ok()?.join("workspace.json");
+    if let Ok(t) = std::fs::read_to_string(&legacy) {
+        if let Ok(cfg) = serde_json::from_str::<PersistedConfig>(&t) {
+            if let Some(parent) = primary.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::copy(&legacy, &primary);
+            return Some(cfg);
+        }
+    }
+    None
 }
 fn config_path() -> PathBuf {
     // 优先使用平台配置目录，避免 CWD 变化导致配置"丢失"

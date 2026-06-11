@@ -1,0 +1,122 @@
+use eframe::egui;
+use std::path::PathBuf;
+use tool_panels::theme;
+
+pub const ACTIVITY_BAR_WIDTH: f32 = 104.0;
+pub const BOTTOM_PANEL_HEIGHT: f32 = 350.0;
+pub const BOTTOM_PANEL_MIN: f32 = 350.0;
+pub const INSPECTOR_WIDTH: f32 = 240.0;
+pub const DEFAULT_WINDOW_WIDTH: f32 = 1280.0;
+pub const DEFAULT_WINDOW_HEIGHT: f32 = 820.0;
+pub const REPAINT_INTERVAL_MS: u64 = 50;
+
+/// 应用所在目录（基于 exe 路径，不依赖 CWD）。
+pub fn app_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(PathBuf::from))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+// ── 字体 ──
+pub fn setup_fonts(cc: &eframe::CreationContext<'_>) {
+    let dir = app_dir();
+    for path in &[
+        dir.join("assets/NotoSansSC-VF.ttf"),
+        PathBuf::from("assets/NotoSansSC-VF.ttf"), // 开发期 fallback
+        PathBuf::from("C:\\Windows\\Fonts\\msyh.ttc"), // 系统字体 fallback
+    ] {
+        if let Ok(fb) = std::fs::read(path) {
+            let mut f = egui::FontDefinitions::default();
+            f.font_data
+                .insert("zh".into(), egui::FontData::from_owned(fb).into());
+            if let Ok(eb) = std::fs::read(dir.join("assets/seguiemj.ttf")) {
+                f.font_data
+                    .insert("emoji".into(), egui::FontData::from_owned(eb).into());
+            }
+            let p = f
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default();
+            p.insert(0, "zh".into());
+            if f.font_data.contains_key("emoji") {
+                p.insert(0, "emoji".into());
+            }
+            f.families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .push("zh".into());
+            cc.egui_ctx.set_fonts(f);
+            return;
+        }
+    }
+}
+
+// ── 主题 ──
+pub fn apply_theme(ctx: &egui::Context) {
+    ctx.set_theme(egui::Theme::Dark);
+    ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
+    let mut s = (*ctx.global_style()).clone();
+    s.spacing.item_spacing = egui::vec2(8.0, 6.0);
+    s.spacing.button_padding = egui::vec2(10.0, 5.0);
+    s.spacing.interact_size = egui::vec2(40.0, 28.0);
+    s.spacing.slider_width = 180.0;
+    s.spacing.combo_width = 140.0;
+    s.spacing.text_edit_width = 220.0;
+    s.interaction.resize_grab_radius_side = 6.0;
+    s.interaction.resize_grab_radius_corner = 10.0;
+    s.animation_time = 0.0;
+    #[cfg(debug_assertions)]
+    {
+        s.debug.show_interactive_widgets = false;
+        s.debug.show_focused_widget = false;
+        s.debug.show_unaligned = false;
+        s.debug.warn_if_rect_changes_id = false;
+        s.debug.show_resize = false;
+        s.debug.show_widget_hits = false;
+    }
+    let mut v = egui::Visuals::dark();
+    v.panel_fill = theme::BG_PRIMARY;
+    v.window_fill = theme::BG_SECONDARY;
+    v.extreme_bg_color = theme::BG_SECONDARY;
+    v.faint_bg_color = theme::BG_TERTIARY;
+    v.code_bg_color = theme::BG_INPUT;
+    v.text_edit_bg_color = Some(theme::BG_INPUT);
+    v.override_text_color = Some(theme::TEXT_PRIMARY);
+    v.weak_text_color = Some(theme::TEXT_SECONDARY);
+    v.warn_fg_color = theme::YELLOW;
+    v.error_fg_color = theme::RED;
+    v.selection.bg_fill = theme::BG_SELECTION;
+    v.selection.stroke = egui::Stroke::new(1.0, theme::BLUE);
+    v.hyperlink_color = theme::CYAN;
+    v.window_stroke = egui::Stroke::new(1.0, theme::BORDER_LIGHT);
+    v.resize_corner_size = 8.0;
+    v.striped = true;
+    v.collapsing_header_frame = false;
+    v.window_highlight_topmost = false;
+    v.button_frame = true;
+    v.indent_has_left_vline = false;
+    let w = &mut v.widgets;
+    w.noninteractive.bg_fill = theme::BG_INPUT;
+    w.noninteractive.bg_stroke = egui::Stroke::new(1.0, theme::BORDER);
+    w.noninteractive.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_PRIMARY);
+    w.noninteractive.weak_bg_fill = theme::BG_SECONDARY;
+    w.inactive.bg_fill = theme::BG_TERTIARY;
+    w.inactive.weak_bg_fill = theme::BG_INPUT;
+    w.inactive.bg_stroke = egui::Stroke::new(1.0, theme::BORDER_LIGHT);
+    w.inactive.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_PRIMARY);
+    w.hovered.bg_fill = theme::WIDGET_HOVER;
+    w.hovered.weak_bg_fill = theme::BG_TERTIARY;
+    w.hovered.bg_stroke = egui::Stroke::new(1.0, theme::BLUE);
+    w.hovered.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_PRIMARY);
+    w.active.bg_fill = theme::WIDGET_ACTIVE_WEAK;
+    w.active.weak_bg_fill = theme::WIDGET_ACTIVE_WEAK;
+    w.active.bg_stroke = egui::Stroke::new(1.0, theme::BLUE);
+    w.active.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_WHITE);
+    w.open.bg_fill = theme::WIDGET_OPEN;
+    w.open.weak_bg_fill = theme::BG_INPUT;
+    w.open.bg_stroke = egui::Stroke::new(1.0, theme::BLUE);
+    w.open.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_PRIMARY);
+    s.visuals = v;
+    ctx.set_global_style(s);
+}
