@@ -2,6 +2,7 @@ use crate::config::{
     config_path, default_recorder_path, ensure_jsonl_extension, load_config, pick_recorder_path,
     record_mode_label, windows_open_dialog,
 };
+use crate::state::StatusState;
 use eframe::egui;
 use egui::Color32;
 use serde::{Deserialize, Serialize};
@@ -52,26 +53,26 @@ impl WorkbenchApp {
     /// 统一状态入口。低级别不能覆盖未过期的高级消息。
     pub(crate) fn set_status(&mut self, level: StatusLevel, text: impl Into<String>) {
         let now = now_timestamp_ms();
-        if level as u8 >= self.status_level as u8 || now > self.status_deadline_ms {
-            self.status_level = level;
-            self.status_message = text.into();
-            self.status_deadline_ms = now + level.ttl_ms();
+        if level as u8 >= self.status.level as u8 || now > self.status.deadline_ms {
+            self.status.level = level;
+            self.status.message = text.into();
+            self.status.deadline_ms = now + level.ttl_ms();
         }
     }
 
     /// 用户主动操作：总是更新状态（不被旧错误阻塞）。
     pub(crate) fn set_status_force(&mut self, level: StatusLevel, text: impl Into<String>) {
         let now = now_timestamp_ms();
-        self.status_level = level;
-        self.status_message = text.into();
-        self.status_deadline_ms = now + level.ttl_ms();
+        self.status.level = level;
+        self.status.message = text.into();
+        self.status.deadline_ms = now + level.ttl_ms();
     }
 
     /// 过期后重置为就绪。每帧调用。
     pub(crate) fn clear_status_if_expired(&mut self) {
-        if now_timestamp_ms() > self.status_deadline_ms {
-            self.status_level = StatusLevel::Info;
-            self.status_message = "就绪".into();
+        if now_timestamp_ms() > self.status.deadline_ms {
+            self.status.level = StatusLevel::Info;
+            self.status.message = "就绪".into();
         }
     }
 }
@@ -123,9 +124,7 @@ pub(crate) struct WorkbenchApp {
     pub(crate) parity: String,
     pub(crate) timeout_ms: String,
     pub(crate) recorder_path: String,
-    pub(crate) status_message: String,
-    pub(crate) status_level: StatusLevel,
-    pub(crate) status_deadline_ms: u64,
+    pub(crate) status: StatusState,
     pub(crate) last_port_refresh: f64,
     pub(crate) bottom_panel_visible: bool,
     pub(crate) bottom_tab: BottomTab,
@@ -265,9 +264,7 @@ impl WorkbenchApp {
                 .map(|c| c.recorder_path.clone())
                 .unwrap_or_else(default_recorder_path),
             panels: rp.clone(),
-            status_message: "就绪".into(),
-            status_level: StatusLevel::Info,
-            status_deadline_ms: 0,
+            status: StatusState::default(),
             last_port_refresh: 0.0,
             bottom_panel_visible: rp.bottom_logs_visible,
             bottom_tab: BottomTab::Terminal,

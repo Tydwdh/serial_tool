@@ -34,7 +34,7 @@ impl WorkbenchApp {
             ui.label(format!("{:.0} 事件/秒", self.event_rate));
             ui.separator();
             let shown = {
-                let mut chars = self.status_message.chars();
+                let mut chars = self.status.message.chars();
                 let head: String = chars.by_ref().take(80).collect();
                 if chars.next().is_some() {
                     format!("{head}…")
@@ -42,7 +42,7 @@ impl WorkbenchApp {
                     head
                 }
             };
-            ui.label(&shown).on_hover_text(&self.status_message);
+            ui.label(&shown).on_hover_text(&self.status.message);
         });
     }
 }
