@@ -3,6 +3,7 @@
 
 mod app;
 mod bootstrap;
+mod ui;
 pub(crate) use bootstrap::*;
 
 use app::WorkbenchApp;

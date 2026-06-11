@@ -22,6 +22,9 @@ use crate::bootstrap::{
     ACTIVITY_BAR_WIDTH, BOTTOM_PANEL_HEIGHT, BOTTOM_PANEL_MIN, DEFAULT_WINDOW_HEIGHT,
     DEFAULT_WINDOW_WIDTH, INSPECTOR_WIDTH, REPAINT_INTERVAL_MS, app_dir, apply_theme, setup_fonts,
 };
+use crate::ui::top_bar::{
+    baud_combo, serial_action_button, serial_action_button_enabled, serial_combo,
+};
 
 // ── 数据结构 ──
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2069,60 +2072,6 @@ fn ppar(v: &str) -> Parity {
         _ => Parity::None,
     }
 }
-fn serial_combo(
-    ui: &mut egui::Ui,
-    id: &'static str,
-    w: f32,
-    ports: &[SerialPortDescriptor],
-    sel: &mut Option<String>,
-) {
-    let selected_text = sel
-        .as_deref()
-        .and_then(|name| {
-            ports
-                .iter()
-                .find(|p| p.port_name == name)
-                .map(|p| format!("{}  {}", p.port_name, p.port_type))
-        })
-        .unwrap_or_else(|| {
-            if ports.is_empty() {
-                "无端口".to_owned()
-            } else {
-                "请选择串口".to_owned()
-            }
-        });
-
-    egui::ComboBox::from_id_salt(id)
-        .width(w)
-        .selected_text(selected_text)
-        .show_ui(ui, |ui| {
-            if ports.is_empty() {
-                ui.add_enabled(false, egui::Label::new("无可用串口"));
-            } else {
-                for port in ports {
-                    ui.selectable_value(
-                        sel,
-                        Some(port.port_name.clone()),
-                        format!("{}  {}", port.port_name, port.port_type),
-                    );
-                }
-            }
-        });
-}
-
-fn baud_combo(ui: &mut egui::Ui, id: &'static str, w: f32, baud: &mut String) {
-    let r = [
-        "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600",
-    ];
-    egui::ComboBox::from_id_salt(id)
-        .width(w)
-        .selected_text(baud.clone())
-        .show_ui(ui, |ui| {
-            for x in r {
-                ui.selectable_value(baud, x.to_owned(), x);
-            }
-        });
-}
 fn send_impl_to(
     port: &str,
     input: &str,
@@ -2267,18 +2216,6 @@ fn ashortcut(a: Activity) -> &'static str {
     }
 }
 
-const SERIAL_ACTION_BUTTON_SIZE: egui::Vec2 = egui::vec2(52.0, 26.0);
-
-fn serial_action_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    ui.add_sized(SERIAL_ACTION_BUTTON_SIZE, egui::Button::new(text))
-}
-
-fn serial_action_button_enabled(ui: &mut egui::Ui, enabled: bool, text: &str) -> egui::Response {
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(text).min_size(SERIAL_ACTION_BUTTON_SIZE),
-    )
-}
 fn activity_insert_index_from_pointer(rects: &[egui::Rect], pointer: egui::Pos2) -> Option<usize> {
     if rects.is_empty() {
         return None;
