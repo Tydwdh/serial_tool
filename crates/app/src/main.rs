@@ -6,6 +6,7 @@ mod bootstrap;
 mod config;
 mod replay_task;
 mod state;
+mod tick;
 mod ui;
 pub(crate) use bootstrap::*;
 
