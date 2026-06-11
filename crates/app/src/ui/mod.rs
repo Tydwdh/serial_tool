@@ -1,5 +1,4 @@
 use crate::ui::activity_bar::aicon;
-use tool_core::now_timestamp_ms;
 pub mod activity_bar;
 pub mod bottom_panel;
 pub mod device_panel;
@@ -14,7 +13,7 @@ use crate::bootstrap::{
     ACTIVITY_BAR_WIDTH, BOTTOM_PANEL_HEIGHT, BOTTOM_PANEL_MIN, INSPECTOR_WIDTH,
 };
 use eframe::egui;
-use tool_panels::{Activity, PanelKind, theme};
+use tool_panels::{Activity, theme};
 
 impl WorkbenchApp {
     pub(crate) fn draw_shell(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {

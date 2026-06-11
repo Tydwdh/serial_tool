@@ -1,12 +1,11 @@
 use crate::config::default_activity_order;
-use crate::config::{default_recorder_path, load_config, windows_open_dialog};
-use crate::state::{BottomTab, SendUiState, StatusLevel, StatusState};
-use crate::ui::activity_bar::aicon;
+use crate::config::{default_recorder_path, load_config};
+use crate::state::{BottomTab, SendUiState, StatusState};
 use eframe::egui;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tool_core::{Direction, Event, LogLevel, Payload};
+use tool_core::{Event, LogLevel};
 use tool_databus::DataBus;
 use tool_extension::PluginManager;
 use tool_lua_host::{DialogRequest, FileAccessBroker};
@@ -17,10 +16,7 @@ use tool_panels::{
 use tool_recorder::JsonlRecorder;
 use tool_transport::{SerialPortDescriptor, TransportManager};
 
-use crate::bootstrap::{
-    ACTIVITY_BAR_WIDTH, BOTTOM_PANEL_HEIGHT, BOTTOM_PANEL_MIN, INSPECTOR_WIDTH,
-    REPAINT_INTERVAL_MS, app_dir, apply_theme, setup_fonts,
-};
+use crate::bootstrap::{REPAINT_INTERVAL_MS, app_dir, apply_theme, setup_fonts};
 
 // ── 数据结构 ──
 

@@ -1,16 +1,9 @@
 use crate::app::WorkbenchApp;
-use crate::app::{ReplayAnalyzerJob, ReplayAnalyzerResult};
-use crate::bootstrap::REPAINT_INTERVAL_MS;
 use crate::config::windows_open_dialog;
 use crate::state::StatusLevel;
 use eframe::egui;
-use serde_json::Value;
-use std::path::PathBuf;
-use tool_core::{Direction, Event, LogLevel, Payload};
-use tool_databus::TopicFilter;
-use tool_lua_host::{LuaReplayConfig, run_replay_analyzer};
+use tool_core::{Direction, Event, Payload};
 use tool_panels::Activity;
-use tool_panels::theme;
 impl WorkbenchApp {
     pub(crate) fn handle_keys(&mut self, ctx: &egui::Context) {
         ctx.input(|i| {

@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
-use thiserror::Error;
 
 pub mod topics {
     pub const SERIAL_RX: &str = "transport.serial.default.rx";
