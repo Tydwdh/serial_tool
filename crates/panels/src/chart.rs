@@ -71,10 +71,10 @@ impl ChartPanel {
                 self.series.clear();
             }
             if self.dropped_while_paused > 0 {
-                ui.label(RichText::new(format!(
-                    "暂停期间跳过 {} 个样本",
-                    self.dropped_while_paused
-                )).color(theme::TEXT_SECONDARY));
+                ui.label(
+                    RichText::new(format!("暂停期间跳过 {} 个样本", self.dropped_while_paused))
+                        .color(theme::TEXT_SECONDARY),
+                );
             }
             let dropped = self.subscription.dropped_count();
             if dropped > 0 {

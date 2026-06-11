@@ -134,10 +134,11 @@ impl DataBus {
     pub fn subscribe(&self, filter: TopicFilter) -> Subscription {
         let (sender, receiver) = unbounded();
         let dropped = Arc::new(AtomicU64::new(0));
-        self.inner
-            .subscribers
-            .lock()
-            .push(Subscriber { filter, sender, dropped: Arc::clone(&dropped) });
+        self.inner.subscribers.lock().push(Subscriber {
+            filter,
+            sender,
+            dropped: Arc::clone(&dropped),
+        });
         Subscription { receiver, dropped }
     }
 
@@ -146,10 +147,11 @@ impl DataBus {
     pub fn subscribe_bounded(&self, filter: TopicFilter, capacity: usize) -> Subscription {
         let (sender, receiver) = crossbeam_channel::bounded(capacity);
         let dropped = Arc::new(AtomicU64::new(0));
-        self.inner
-            .subscribers
-            .lock()
-            .push(Subscriber { filter, sender, dropped: Arc::clone(&dropped) });
+        self.inner.subscribers.lock().push(Subscriber {
+            filter,
+            sender,
+            dropped: Arc::clone(&dropped),
+        });
         Subscription { receiver, dropped }
     }
 

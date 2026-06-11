@@ -744,7 +744,12 @@ fn dynamic_form_ui(
                     ui.add_enabled(
                         false,
                         TextEdit::singleline(&mut status.clone()).desired_width(200.0),
-                    ).on_hover_text(if path.is_empty() { String::new() } else { format!("完整路径: {path}") });
+                    )
+                    .on_hover_text(if path.is_empty() {
+                        String::new()
+                    } else {
+                        format!("完整路径: {path}")
+                    });
                     if ui.add_enabled(enabled, egui::Button::new("浏览")).clicked() {
                         bus.publish(Event::new(
                             topics::UI_FORM_FILE_BROWSE,

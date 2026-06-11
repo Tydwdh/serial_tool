@@ -16,6 +16,9 @@ use host_services::{DialogRequest, FileAccessBroker};
 
 const MAX_PLUGIN_EVENTS_PER_FRAME: usize = 500;
 
+// topic_matches 已移至 tool_core，此处保持向后兼容 re-export
+pub use tool_core::topic_matches;
+
 #[derive(Debug, Error)]
 pub enum ExtensionError {
     #[error("io error: {0}")]
@@ -84,6 +87,13 @@ impl PluginManifest {
             .unwrap_or(&self.permissions)
     }
 
+    pub fn live_subscriptions(&self) -> &[String] {
+        self.live
+            .as_ref()
+            .map(|l| l.subscriptions.as_slice())
+            .unwrap_or(&[])
+    }
+
     pub fn has_replay_analyzer(&self) -> bool {
         self.replay.is_some()
     }
@@ -121,6 +131,9 @@ pub struct LiveConfig {
 
     #[serde(default)]
     pub permissions: Option<Vec<String>>,
+
+    #[serde(default)]
+    pub subscriptions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -646,22 +659,43 @@ impl PluginManager {
 
         let mut count = 0;
 
-        // 所有非回放事件都转发给 Lua 插件。Lua 插件通过 ctx.bus.on()
-        // 在 __plugin_callbacks 中按 topic 注册回调，由 Lua worker 侧决定
-        // 是否处理（不再依赖 manifest contributes.subscriptions）。
-        for (_plugin_id, runtime) in &self.lua_runtimes {
-            if runtime.is_alive() {
-                if runtime.on_event(event) {
-                    count += 1;
-                } else {
-                    self.dropped_events += 1;
-                    if self.dropped_events % 1000 == 0 {
-                        self.bus.publish(Event::system_log(
-                            LogLevel::Warn,
-                            "extension",
-                            format!("dropped {} Lua events (queue full)", self.dropped_events),
-                        ));
-                    }
+        // 按插件 manifest 声明的 subscription 做 Rust 层过滤，
+        // 避免串口 RX/TX 等高频事件无意义复制到所有 Lua 插件。
+        for (plugin_id, runtime) in &self.lua_runtimes {
+            if !runtime.is_alive() {
+                continue;
+            }
+            // 检查订阅：live.subscriptions + 兼容旧 contributes.subscriptions
+            let wants = self.records.get(plugin_id).is_some_and(|record| {
+                let live = record
+                    .manifest
+                    .live_subscriptions()
+                    .iter()
+                    .map(String::as_str);
+                let legacy = record
+                    .manifest
+                    .contributes
+                    .subscriptions
+                    .iter()
+                    .map(|s| s.topic.as_str());
+                live.chain(legacy)
+                    .any(|sub| topic_matches(sub, &event.topic))
+            });
+            // ui.* / log.* 系统事件始终接收
+            let is_sys = event.topic.starts_with("ui.") || event.topic.starts_with("log.");
+            if !is_sys && !wants {
+                continue;
+            }
+            if runtime.on_event(event) {
+                count += 1;
+            } else {
+                self.dropped_events += 1;
+                if self.dropped_events % 1000 == 0 {
+                    self.bus.publish(Event::system_log(
+                        LogLevel::Warn,
+                        "extension",
+                        format!("dropped {} Lua events (queue full)", self.dropped_events),
+                    ));
                 }
             }
         }
@@ -823,6 +857,34 @@ ctx.bus.publish('protocol.pid.sample', { t = 1, target = 50, actual = 43, output
         assert_eq!(manifest.replay_subscriptions().len(), 1);
         assert_eq!(manifest.replay_outputs().len(), 1);
         assert_eq!(manifest.replay_permissions().len(), 2);
+    }
+
+    #[test]
+    fn manifest_parses_live_subscriptions() {
+        let json = r#"{
+          "id": "demo.test",
+          "name": "Test",
+          "version": "1.0.0",
+          "runtime": "lua",
+          "main": "main.lua",
+          "permissions": ["bus"],
+          "live": {
+            "main": "live.lua",
+            "permissions": ["bus"],
+            "subscriptions": ["transport.serial.default.rx"]
+          }
+        }"#;
+
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            manifest.live_subscriptions(),
+            &["transport.serial.default.rx".to_owned()]
+        );
+        // 不填 subscriptions 时返回空
+        let manifest2: PluginManifest =
+            serde_json::from_str(r#"{"id":"t","name":"T","version":"1","runtime":"lua","main":"m.lua","permissions":[]}"#)
+                .unwrap();
+        assert!(manifest2.live_subscriptions().is_empty());
     }
 
     fn create_test_plugin(id: &str, main_lua: &str) -> PathBuf {

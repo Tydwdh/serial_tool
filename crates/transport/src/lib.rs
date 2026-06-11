@@ -134,6 +134,26 @@ impl TransportManager {
         }
     }
 
+    /// 大小写不敏感解析已打开端口名。先在 HashMap 精确查找，再大小写宽松匹配。
+    fn resolve_open_port_name_locked(
+        ports: &HashMap<String, PortHandle>,
+        requested: &str,
+    ) -> Option<String> {
+        if ports.contains_key(requested) {
+            return Some(requested.to_owned());
+        }
+        ports
+            .keys()
+            .find(|name| name.eq_ignore_ascii_case(requested))
+            .cloned()
+    }
+
+    /// 公开版本：返回已打开端口的规范名称，供 Lua API 等调用。
+    pub fn canonical_open_port_name(&self, requested: &str) -> Option<String> {
+        let guard = self.ports.lock();
+        Self::resolve_open_port_name_locked(&guard, requested)
+    }
+
     /// 清理已完成关闭的 worker 线程（join 并移除）。
     fn reap_closing(&self) {
         let mut closing = self.closing.lock();
@@ -169,10 +189,29 @@ impl TransportManager {
     }
 
     // ── 打开端口 ──
-    pub fn open_serial(&self, config: SerialConfig) -> TransportResult<()> {
+    pub fn open_serial(&self, mut config: SerialConfig) -> TransportResult<()> {
+        // 大小写不敏感端口名解析（用户可能输入 "com3" 而实际是 "COM3"）
+        let available = sp::available_ports().unwrap_or_default();
+        let resolved = available
+            .iter()
+            .find(|p| p.port_name.eq_ignore_ascii_case(&config.port_name));
+        if let Some(p) = resolved {
+            config.port_name = p.port_name.clone();
+        }
         // 先收割已完成关闭的旧 worker
         self.reap_closing();
-        // 如果同名端口正在关闭中，等不及就返回错误
+
+        // 同配置重复打开：直接成功
+        {
+            let guard = self.ports.lock();
+            if let Some(existing) = guard.get(&config.port_name) {
+                if existing.alive.load(Ordering::Relaxed) && existing.config == config {
+                    return Ok(());
+                }
+            }
+        }
+
+        // 同名端口正在关闭中，返回错误
         {
             let closing = self.closing.lock();
             if closing.iter().any(|h| h.port_name == config.port_name) {
@@ -182,8 +221,12 @@ impl TransportManager {
                 )));
             }
         }
-        // 如果同名端口已打开，先异步关掉旧的（不阻塞）
-        self.close_port(&config.port_name);
+
+        // 配置变化时：同步等待旧 worker 退出再打开
+        self.close_port_blocking(
+            &config.port_name,
+            Duration::from_millis(config.timeout_ms + 100),
+        )?;
 
         let builder = sp::new(&config.port_name, config.baud_rate)
             .data_bits(config.data_bits.into())
@@ -247,9 +290,12 @@ impl TransportManager {
         for name in names {
             self.close_port(&name);
         }
-        // shutdown 路径：阻塞直到所有 worker 完成
-        let mut remaining = self.closing.lock();
-        while let Some(h) = remaining.pop() {
+        // shutdown 路径：取出所有 closing handle，释放锁后再 join
+        let handles = {
+            let mut remaining = self.closing.lock();
+            std::mem::take(&mut *remaining)
+        };
+        for h in handles {
             let _ = h.join.join();
             self.bus.publish(Event::system_log(
                 LogLevel::Info,
@@ -261,7 +307,10 @@ impl TransportManager {
 
     // ── 关闭指定端口（异步：设 stop 并移入 closing，不 join）──
     pub fn close_port(&self, port_name: &str) {
-        if let Some(mut worker) = self.ports.lock().remove(port_name) {
+        let mut guard = self.ports.lock();
+        let key = Self::resolve_open_port_name_locked(&guard, port_name)
+            .unwrap_or_else(|| port_name.to_owned());
+        if let Some(mut worker) = guard.remove(&key) {
             worker.stop.store(true, Ordering::Relaxed);
             if let Some(join) = worker.join.take() {
                 self.closing.lock().push(ClosingHandle {
@@ -281,12 +330,55 @@ impl TransportManager {
         }
     }
 
+    /// 同步关闭端口，等待 worker 线程完全退出。仅在重连等场景使用。
+    /// 超时时将 JoinHandle 放入 closing 队列回收，避免线程泄漏。
+    pub fn close_port_blocking(&self, port_name: &str, timeout: Duration) -> TransportResult<()> {
+        let key = self
+            .canonical_open_port_name(port_name)
+            .unwrap_or_else(|| port_name.to_owned());
+        let (old_name, old_baud, join) = {
+            let mut guard = self.ports.lock();
+            let Some(mut worker) = guard.remove(&key) else {
+                return Ok(());
+            };
+            worker.stop.store(true, Ordering::Relaxed);
+            let join = worker.join.take();
+            (
+                worker.config.port_name.clone(),
+                worker.config.baud_rate,
+                join,
+            )
+        };
+        let Some(join) = join else {
+            return Ok(());
+        };
+        let deadline = std::time::Instant::now() + timeout;
+        while !join.is_finished() {
+            if std::time::Instant::now() > deadline {
+                self.closing.lock().push(ClosingHandle {
+                    port_name: old_name,
+                    baud_rate: old_baud,
+                    join,
+                });
+                return Err(TransportError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("{port_name} 正在关闭中"),
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = join.join();
+        Ok(())
+    }
+
     // ── 发送到指定端口 ──
     pub fn send_to(&self, port_name: &str, bytes: Vec<u8>) -> TransportResult<()> {
         self.reap_closing();
         let guard = self.ports.lock();
+        let resolved = Self::resolve_open_port_name_locked(&guard, port_name)
+            .ok_or_else(|| TransportError::PortNotOpen(port_name.to_owned()))?;
         let worker = guard
-            .get(port_name)
+            .get(&resolved)
             .ok_or_else(|| TransportError::PortNotOpen(port_name.to_owned()))?;
         if !worker.alive.load(Ordering::Relaxed) {
             return Err(TransportError::WorkerClosed);
@@ -345,7 +437,9 @@ impl TransportManager {
         self.reap_closing();
         self.reap_dead_ports();
         let guard = self.ports.lock();
-        match guard.get(port_name) {
+        let key = Self::resolve_open_port_name_locked(&guard, port_name)
+            .unwrap_or_else(|| port_name.to_owned());
+        match guard.get(&key) {
             Some(w) if w.alive.load(Ordering::Relaxed) => TransportStatus {
                 open: true,
                 port_name: Some(w.config.port_name.clone()),
@@ -384,7 +478,9 @@ impl TransportManager {
     /// 清理已退出 worker 的 stale port handle（alive == false）。
     /// 可在 status 查询、list/open/close 或定时刷新时调用。
     pub fn reap_dead_ports(&self) {
-        self.ports.lock().retain(|_, handle| handle.alive.load(Ordering::Relaxed));
+        self.ports
+            .lock()
+            .retain(|_, handle| handle.alive.load(Ordering::Relaxed));
     }
 }
 

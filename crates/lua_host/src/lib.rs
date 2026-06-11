@@ -12,7 +12,7 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use tool_core::{Direction, Event, LogLevel, Payload, topics};
+use tool_core::{Direction, Event, LogLevel, Payload, topic_matches, topics};
 use tool_databus::{DataBus, TopicFilter};
 
 pub mod codec;
@@ -659,8 +659,9 @@ fn get_callback(lua: &Lua, topic: &str) -> Option<Function> {
         return Some(callback);
     }
 
-    for (prefix, function) in callbacks.pairs::<String, Function>().flatten() {
-        if topic.starts_with(&prefix) {
+    // 遍历注册的模式：显式 `*` 后缀才按前缀匹配，否则必须精确
+    for (pattern, function) in callbacks.pairs::<String, Function>().flatten() {
+        if topic_matches(&pattern, topic) {
             return Some(function);
         }
     }
@@ -725,6 +726,8 @@ fn process_timers(lua: &Lua, bus: &DataBus, config: &LuaRunConfig) {
         let _ = timers.set(id, Value::Nil);
     }
 }
+
+// topic_matches 统一使用 tool_core::topic_matches
 
 /// 简单 Lua pattern 匹配：支持 ^ 锚点和子串匹配。
 fn match_pat(line: &str, pat: &str) -> bool {
@@ -1902,10 +1905,14 @@ fn create_serial_api(
     // ctx.serial.expect_from(port, pattern, timeout_ms) — 端口级 API
     let expect_from_bus = bus.clone();
     let expect_from_stop = host_services.stop_flag.clone();
+    let expect_from_transport = transport.clone();
     table.set(
         "expect_from",
         lua.create_function(
             move |lua, (port, pattern, timeout_ms): (String, String, Option<u64>)| {
+                let port = expect_from_transport
+                    .canonical_open_port_name(&port)
+                    .unwrap_or(port);
                 let subscription = expect_from_bus.subscribe(TopicFilter::exact(topics::SERIAL_RX));
                 let deadline = Instant::now() + Duration::from_millis(timeout_ms.unwrap_or(1_000));
 
@@ -2003,59 +2010,57 @@ fn create_serial_api(
     let rq_stop = host_services.stop_flag.clone();
     table.set(
         "request",
-        lua.create_function(
-            move |lua, opts: Table| {
-                let port: String = opts.get("port")?;
-                let tx: String = opts.get("tx")?;
-                let expect: String = opts.get("expect")?;
-                let timeout_ms: u64 = opts.get("timeout_ms").unwrap_or(1_000);
+        lua.create_function(move |lua, opts: Table| {
+            let port: String = opts.get("port")?;
+            let tx: String = opts.get("tx")?;
+            let expect: String = opts.get("expect")?;
+            let timeout_ms: u64 = opts.get("timeout_ms").unwrap_or(1_000);
 
-                // 1. 先注册 subscriber
-                let subscription = rq_bus.subscribe(TopicFilter::exact(topics::SERIAL_RX));
-                let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+            // 1. 先注册 subscriber
+            let subscription = rq_bus.subscribe(TopicFilter::exact(topics::SERIAL_RX));
+            let deadline = Instant::now() + Duration::from_millis(timeout_ms);
 
-                // 2. 发送
-                rq_transport
-                    .send_text_to(&port, &tx)
-                    .map_err(mlua::Error::external)?;
+            // 2. 发送
+            rq_transport
+                .send_text_to(&port, &tx)
+                .map_err(mlua::Error::external)?;
 
-                // 3. 匹配响应
-                loop {
-                    if let Some(ref stop) = rq_stop {
-                        if stop.load(Ordering::Relaxed) {
-                            return Ok(Value::Nil);
-                        }
-                    }
-                    let now = Instant::now();
-                    if now >= deadline {
+            // 3. 匹配响应
+            loop {
+                if let Some(ref stop) = rq_stop {
+                    if stop.load(Ordering::Relaxed) {
                         return Ok(Value::Nil);
                     }
-                    let remaining = deadline
-                        .saturating_duration_since(now)
-                        .min(Duration::from_millis(50));
-                    match subscription.recv_timeout(remaining) {
-                        Ok(event) => {
-                            let event_port = event
-                                .metadata
-                                .get("port")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            if event_port != port {
-                                continue;
-                            }
-                            let text = event.payload.text_lossy();
-                            if text.contains(&expect) {
-                                return Ok(Value::String(lua.create_string(&text)?));
-                            }
+                }
+                let now = Instant::now();
+                if now >= deadline {
+                    return Ok(Value::Nil);
+                }
+                let remaining = deadline
+                    .saturating_duration_since(now)
+                    .min(Duration::from_millis(50));
+                match subscription.recv_timeout(remaining) {
+                    Ok(event) => {
+                        let event_port = event
+                            .metadata
+                            .get("port")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if event_port != port {
+                            continue;
                         }
-                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                            return Ok(Value::Nil);
+                        let text = event.payload.text_lossy();
+                        if text.contains(&expect) {
+                            return Ok(Value::String(lua.create_string(&text)?));
                         }
                     }
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                        return Ok(Value::Nil);
+                    }
                 }
-            },
-        )?,
+            }
+        })?,
     )?;
 
     // ── 行缓冲区操作 ──
@@ -2063,9 +2068,13 @@ fn create_serial_api(
     // ctx.serial.flush_rx(port_name)
     let lb_flush = host_services.line_buffers.clone();
     let pid_flush = host_services.plugin_id.clone();
+    let transport_flush = transport.clone();
     table.set(
         "flush_rx",
         lua.create_function(move |_lua, port_name: String| {
+            let port_name = transport_flush
+                .canonical_open_port_name(&port_name)
+                .unwrap_or(port_name);
             if let Some(ref map) = lb_flush {
                 let key = line_buffer_key(&pid_flush, &port_name);
                 map.lock().remove(&key);
@@ -2079,6 +2088,7 @@ fn create_serial_api(
     table.set(
         "write_line",
         lua.create_function(move |_lua, (port, line): (String, String)| {
+            let port = transport_wl.canonical_open_port_name(&port).unwrap_or(port);
             let text = if line.ends_with('\n') {
                 line
             } else {
@@ -2094,9 +2104,13 @@ fn create_serial_api(
     // 只能在 task coroutine 内调用（coroutine.yield）
     let lb_read = host_services.line_buffers.clone();
     let pid_read = host_services.plugin_id.clone();
+    let transport_read = transport.clone();
     table.set(
         "read_line",
         lua.create_function(move |lua, (port, opts): (String, Table)| {
+            let port = transport_read
+                .canonical_open_port_name(&port)
+                .unwrap_or(port);
             let timeout_ms: u64 = opts.get("timeout_ms").unwrap_or(5_000);
             let delimiter: String = opts.get("delimiter").unwrap_or_else(|_| "\n".to_owned());
             if delimiter != "\n" {
@@ -2177,6 +2191,9 @@ fn create_serial_api(
     table.set(
         "write_line_and_expect",
         lua.create_function(move |lua, (port, line, opts): (String, String, Table)| {
+            let port = transport_expect
+                .canonical_open_port_name(&port)
+                .unwrap_or(port);
             let timeout_ms: u64 = opts.get("timeout_ms").unwrap_or(300_000);
             let delimiter: String = opts.get("delimiter").unwrap_or_else(|_| "\n".to_owned());
             if delimiter != "\n" {
@@ -2192,6 +2209,15 @@ fn create_serial_api(
                 t.set(1, entry).unwrap();
                 t
             });
+
+            // 发送前清空旧缓冲，避免 stale ok/error 误匹配当前命令
+            let flush_before: bool = opts.get("flush_before_send").unwrap_or(true);
+            if flush_before {
+                let key = line_buffer_key(&pid_expect, &port);
+                if let Some(ref map) = lb_expect {
+                    map.lock().remove(&key);
+                }
+            }
 
             // 发送
             let text = if line.ends_with('\n') {
@@ -3463,10 +3489,11 @@ pub fn run_replay_analyzer(
     // 遍历输入事件
     for input_event in input_events {
         // 只处理匹配 subscriptions 的事件
+        // 使用与实时插件一致的 topic_matches 语义（* 前缀，无 * 精确）
         if !config
             .subscriptions
             .iter()
-            .any(|sub| input_event.topic.starts_with(sub.as_str()))
+            .any(|sub| topic_matches(sub.as_str(), &input_event.topic))
         {
             continue;
         }

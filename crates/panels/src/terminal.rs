@@ -164,10 +164,7 @@ impl TerminalPanel {
 
                 let dropped = self.subscription.dropped_count();
                 if dropped > 0 {
-                    ui.colored_label(
-                        theme::YELLOW,
-                        format!("已丢弃 {dropped} 条，数据不完整"),
-                    );
+                    ui.colored_label(theme::YELLOW, format!("已丢弃 {dropped} 条，数据不完整"));
                 }
             });
 

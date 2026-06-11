@@ -7,7 +7,8 @@
   "permissions": ["bus", "log", "serial", "ui", "storage"],
   "live": {
     "main": "main.lua",
-    "permissions": ["bus", "log", "serial", "ui", "storage"]
+    "permissions": ["bus", "log", "serial", "ui", "storage"],
+    "subscriptions": ["transport.serial.default.rx"]
   },
   "replay": {
     "main": "replay.lua",

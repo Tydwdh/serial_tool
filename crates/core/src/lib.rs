@@ -293,9 +293,35 @@ pub fn now_timestamp_ms() -> u64 {
         .unwrap_or_default()
 }
 
+/// Topic 匹配：`*` 后缀按前缀匹配，不带 `*` 精确匹配。
+/// 供实时事件路由、replay analyzer、Lua callback 统一使用。
+pub fn topic_matches(pattern: &str, topic: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        topic.starts_with(prefix)
+    } else {
+        topic == pattern
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn topic_matches_exact() {
+        assert!(topic_matches("transport.serial.rx", "transport.serial.rx"));
+        assert!(!topic_matches(
+            "transport.serial.rx",
+            "transport.serial.rx2"
+        ));
+    }
+
+    #[test]
+    fn topic_matches_prefix() {
+        assert!(topic_matches("protocol.*", "protocol.demo.sample"));
+        assert!(topic_matches("protocol.*", "protocol.foo"));
+        assert!(!topic_matches("protocol.*", "other.thing"));
+    }
 
     #[test]
     fn bytes_payload_has_lossy_text() {
