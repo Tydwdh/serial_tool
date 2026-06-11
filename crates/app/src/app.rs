@@ -100,121 +100,123 @@ pub(crate) struct ReplayAnalyzerResult {
 //  WorkbenchApp impl
 // ══════════════════════════════════════════
 
-pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
-    setup_fonts(cc);
-    cc.egui_ctx.set_embed_viewports(false);
-    let bus = DataBus::new();
-    let transport = TransportManager::new(bus.clone());
+impl WorkbenchApp {
+    pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        setup_fonts(cc);
+        cc.egui_ctx.set_embed_viewports(false);
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
 
-    let (dialog_sender, dialog_receiver) = crossbeam_channel::unbounded::<DialogRequest>();
-    let file_broker = Arc::new(FileAccessBroker::default());
+        let (dialog_sender, dialog_receiver) = crossbeam_channel::unbounded::<DialogRequest>();
+        let file_broker = Arc::new(FileAccessBroker::default());
 
-    let mut pm = PluginManager::new(bus.clone(), transport.clone());
-    pm.set_host_services(dialog_sender, file_broker.clone());
+        let mut pm = PluginManager::new(bus.clone(), transport.clone());
+        pm.set_host_services(dialog_sender, file_broker.clone());
 
-    let plugin_dir = app_dir().join("plugins");
-    if let Err(e) = pm.discover_roots([plugin_dir, PathBuf::from("plugins")]) {
-        bus.publish(Event::system_log(
-            LogLevel::Error,
-            "ext",
-            format!("plugin discover: {e}"),
-        ));
-    }
-    let recorder = JsonlRecorder::new(bus.clone());
-    let config = load_config();
-    if config.is_none() {
-        bus.publish(Event::system_log(
-            LogLevel::Warn,
-            "app",
-            "未找到或无法加载配置，使用默认设置",
-        ));
-    }
-    apply_theme(&cc.egui_ctx);
-    let mut rp = config
-        .as_ref()
-        .map(|c| c.panels.clone())
-        .unwrap_or_default();
-    rp.discard_dynamic_tabs();
-
-    let mut app = Self {
-        terminal_panel: TerminalPanel::new(&bus),
-        dynamic_panels: DynamicPanels::new(&bus),
-        plugins_panel: PluginsPanel::new(),
-        replay_panel: ReplayPanel::new(&bus),
-        bottom_log_panel: LogPanel::new(&bus),
-        ports: Vec::new(),
-        selected_port: config.as_ref().and_then(|c| c.selected_port.clone()),
-        baud_rate: config
-            .as_ref()
-            .map(|c| c.baud_rate.clone())
-            .unwrap_or_else(|| "115200".into()),
-        data_bits: config
-            .as_ref()
-            .map(|c| c.data_bits.clone())
-            .unwrap_or_else(|| "8".into()),
-        stop_bits: config
-            .as_ref()
-            .map(|c| c.stop_bits.clone())
-            .unwrap_or_else(|| "1".into()),
-        parity: config
-            .as_ref()
-            .map(|c| c.parity.clone())
-            .unwrap_or_else(|| "none".into()),
-        timeout_ms: config
-            .as_ref()
-            .map(|c| c.timeout_ms.clone())
-            .unwrap_or_else(|| "50".into()),
-        recorder_path: config
-            .as_ref()
-            .map(|c| c.recorder_path.clone())
-            .unwrap_or_else(default_recorder_path),
-        panels: rp.clone(),
-        status: StatusState::default(),
-        last_port_refresh: 0.0,
-        bottom_panel_visible: rp.bottom_logs_visible,
-        bottom_tab: BottomTab::Terminal,
-        send: SendUiState::default(),
-        terminal_popup_open: false,
-        detached_dynamic_panels: BTreeSet::new(),
-        top_bar_serial_collapsed: false,
-        activity_order: config
-            .as_ref()
-            .map(|c| c.activity_order.clone())
-            .unwrap_or_else(default_activity_order),
-        activity_drag_source: None,
-        activity_rects_cache: Vec::new(),
-        last_rate_check_time: 0.0,
-        last_event_count: 0,
-        event_rate: 0.0,
-        bus: bus.clone(),
-        transport,
-        plugin_manager: pm,
-        recorder,
-        dynamic_drag_source: None,
-        file_broker,
-        dialog_receiver,
-        file_browse_subscription: bus.subscribe(tool_databus::TopicFilter::exact(
-            tool_core::topics::UI_FORM_FILE_BROWSE,
-        )),
-        replay_analyzer_job: None,
-        replay_analyzer_generation: 0,
-    };
-    app.refresh_ports();
-    let enabled: Vec<String> = config
-        .as_ref()
-        .map(|c| c.enabled_plugins.clone())
-        .unwrap_or_default();
-    for id in &enabled {
-        if let Err(e) = app.plugin_manager.enable(id) {
-            app.log(LogLevel::Warn, format!("restore plugin {id}: {e}"));
+        let plugin_dir = app_dir().join("plugins");
+        if let Err(e) = pm.discover_roots([plugin_dir, PathBuf::from("plugins")]) {
+            bus.publish(Event::system_log(
+                LogLevel::Error,
+                "ext",
+                format!("plugin discover: {e}"),
+            ));
         }
-    }
-    app.log(LogLevel::Info, "就绪");
-    app
-}
+        let recorder = JsonlRecorder::new(bus.clone());
+        let config = load_config();
+        if config.is_none() {
+            bus.publish(Event::system_log(
+                LogLevel::Warn,
+                "app",
+                "未找到或无法加载配置，使用默认设置",
+            ));
+        }
+        apply_theme(&cc.egui_ctx);
+        let mut rp = config
+            .as_ref()
+            .map(|c| c.panels.clone())
+            .unwrap_or_default();
+        rp.discard_dynamic_tabs();
 
-pub(crate) fn log(&self, lv: LogLevel, m: impl Into<String>) {
-    self.bus.publish(Event::system_log(lv, "app", m.into()));
+        let mut app = Self {
+            terminal_panel: TerminalPanel::new(&bus),
+            dynamic_panels: DynamicPanels::new(&bus),
+            plugins_panel: PluginsPanel::new(),
+            replay_panel: ReplayPanel::new(&bus),
+            bottom_log_panel: LogPanel::new(&bus),
+            ports: Vec::new(),
+            selected_port: config.as_ref().and_then(|c| c.selected_port.clone()),
+            baud_rate: config
+                .as_ref()
+                .map(|c| c.baud_rate.clone())
+                .unwrap_or_else(|| "115200".into()),
+            data_bits: config
+                .as_ref()
+                .map(|c| c.data_bits.clone())
+                .unwrap_or_else(|| "8".into()),
+            stop_bits: config
+                .as_ref()
+                .map(|c| c.stop_bits.clone())
+                .unwrap_or_else(|| "1".into()),
+            parity: config
+                .as_ref()
+                .map(|c| c.parity.clone())
+                .unwrap_or_else(|| "none".into()),
+            timeout_ms: config
+                .as_ref()
+                .map(|c| c.timeout_ms.clone())
+                .unwrap_or_else(|| "50".into()),
+            recorder_path: config
+                .as_ref()
+                .map(|c| c.recorder_path.clone())
+                .unwrap_or_else(default_recorder_path),
+            panels: rp.clone(),
+            status: StatusState::default(),
+            last_port_refresh: 0.0,
+            bottom_panel_visible: rp.bottom_logs_visible,
+            bottom_tab: BottomTab::Terminal,
+            send: SendUiState::default(),
+            terminal_popup_open: false,
+            detached_dynamic_panels: BTreeSet::new(),
+            top_bar_serial_collapsed: false,
+            activity_order: config
+                .as_ref()
+                .map(|c| c.activity_order.clone())
+                .unwrap_or_else(default_activity_order),
+            activity_drag_source: None,
+            activity_rects_cache: Vec::new(),
+            last_rate_check_time: 0.0,
+            last_event_count: 0,
+            event_rate: 0.0,
+            bus: bus.clone(),
+            transport,
+            plugin_manager: pm,
+            recorder,
+            dynamic_drag_source: None,
+            file_broker,
+            dialog_receiver,
+            file_browse_subscription: bus.subscribe(tool_databus::TopicFilter::exact(
+                tool_core::topics::UI_FORM_FILE_BROWSE,
+            )),
+            replay_analyzer_job: None,
+            replay_analyzer_generation: 0,
+        };
+        app.refresh_ports();
+        let enabled: Vec<String> = config
+            .as_ref()
+            .map(|c| c.enabled_plugins.clone())
+            .unwrap_or_default();
+        for id in &enabled {
+            if let Err(e) = app.plugin_manager.enable(id) {
+                app.log(LogLevel::Warn, format!("restore plugin {id}: {e}"));
+            }
+        }
+        app.log(LogLevel::Info, "就绪");
+        app
+    }
+
+    pub(crate) fn log(&self, lv: LogLevel, m: impl Into<String>) {
+        self.bus.publish(Event::system_log(lv, "app", m.into()));
+    }
 }
 
 // ── UI 组件 ──

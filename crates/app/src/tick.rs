@@ -1,5 +1,6 @@
 use crate::app::WorkbenchApp;
 use eframe::egui;
+use tool_panels::Activity;
 impl WorkbenchApp {
     pub(crate) fn handle_keys(&mut self, ctx: &egui::Context) {
         ctx.input(|i| {

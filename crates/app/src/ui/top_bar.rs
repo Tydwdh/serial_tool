@@ -96,3 +96,133 @@ pub(crate) fn ppar(v: &str) -> Parity {
         _ => Parity::None,
     }
 }
+
+use crate::app::WorkbenchApp;
+use crate::state::StatusLevel;
+use tool_panels::theme;
+
+impl WorkbenchApp {
+    pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let so = self
+                .selected_port
+                .as_deref()
+                .is_some_and(|p| self.transport.status_port(p).open);
+            let sl = if so {
+                format!("串口 ▸ {}", self.selected_port.as_deref().unwrap_or("?"))
+            } else {
+                "串口 ▸ 未连接".into()
+            };
+            if ui
+                .selectable_label(
+                    !self.top_bar_serial_collapsed,
+                    egui::RichText::new(format!("{} {sl}", if so { "●" } else { "○" }))
+                        .color(if so { theme::GREEN } else { theme::RED }),
+                )
+                .clicked()
+            {
+                self.top_bar_serial_collapsed = !self.top_bar_serial_collapsed;
+            }
+            if !self.top_bar_serial_collapsed {
+                self.serial_connect_controls(ui, "top-port", "top-baud", 130.0, 80.0, true);
+            }
+            ui.separator();
+            let rec = self.recorder.is_running();
+            if ui
+                .button(if rec {
+                    egui::RichText::new("⏹ 停止").color(theme::RED)
+                } else {
+                    egui::RichText::new("⏺ 录制").color(theme::TEXT_SECONDARY)
+                })
+                .clicked()
+            {
+                self.start_or_stop_recording();
+            }
+            if ui.small_button("保存布局").clicked() {
+                match self.save_config() {
+                    Ok(()) => self.set_status(StatusLevel::Info, "布局已保存"),
+                    Err(e) => self.set_status(StatusLevel::Error, format!("保存布局失败：{e}")),
+                }
+            }
+        });
+    }
+
+    pub(crate) fn serial_connect_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        port_combo_id: &'static str,
+        baud_combo_id: &'static str,
+        port_width: f32,
+        baud_width: f32,
+        compact: bool,
+    ) {
+        if !compact {
+            ui.label("端口");
+        }
+
+        serial_combo(
+            ui,
+            port_combo_id,
+            port_width,
+            &self.ports,
+            &mut self.selected_port,
+        );
+
+        if compact {
+            // 顶栏只显示连接状态，详细参数统一在设备页
+        } else {
+            ui.label("波特率");
+            baud_combo(ui, baud_combo_id, baud_width, &mut self.baud_rate);
+        }
+
+        let selected_open = self
+            .selected_port
+            .as_deref()
+            .is_some_and(|port| self.transport.status_port(port).open);
+
+        if selected_open {
+            if serial_action_button(ui, "重连").clicked() {
+                self.open_selected_port();
+            }
+        } else if serial_action_button(ui, "打开").clicked() {
+            self.open_selected_port();
+        }
+
+        if serial_action_button_enabled(ui, selected_open, "关闭").clicked() {
+            if let Some(ref port) = self.selected_port {
+                self.transport.close_port(port);
+                self.set_status(StatusLevel::Info, format!("{port} 已关闭"));
+            }
+        }
+
+        if !compact {
+            match self.selected_port.as_deref() {
+                Some(port) => {
+                    let st = self.transport.status_port(port);
+
+                    if st.open {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "● {} @ {} {}N{}",
+                                port,
+                                st.baud_rate.unwrap_or(0),
+                                &self.data_bits,
+                                &self.stop_bits
+                            ))
+                            .color(theme::GREEN),
+                        );
+                    } else {
+                        ui.label(egui::RichText::new("○ 未连接").color(theme::TEXT_SECONDARY));
+                    }
+                }
+                None => {
+                    ui.label(egui::RichText::new("○ 未选择串口").color(theme::TEXT_SECONDARY));
+                }
+            }
+        }
+    }
+}
+
+// ══════════════════════════════════════════
+//  eframe::App
+// ══════════════════════════════════════════

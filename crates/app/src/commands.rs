@@ -1,5 +1,5 @@
-use crate::app::{PersistedConfig, WorkbenchApp};
-use crate::config::{config_path, default_activity_order, default_recorder_path};
+use crate::app::WorkbenchApp;
+use crate::config::{PersistedConfig, config_path};
 use crate::state::{BottomTab, StatusLevel};
 use crate::ui::top_bar::{pdb, ppar, psb};
 use eframe::egui;

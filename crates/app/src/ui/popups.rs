@@ -1,11 +1,11 @@
 use crate::app::WorkbenchApp;
 use crate::bootstrap::REPAINT_INTERVAL_MS;
-use crate::state::StatusLevel;
+use crate::state::{DetachedPanelAction, StatusLevel};
 use crate::ui::bottom_panel::translate_error;
 use eframe::egui;
 use serde_json::Value;
 use tool_core::{Direction, Event, LogLevel, Payload};
-use tool_panels::theme;
+use tool_panels::{PanelKind, theme};
 
 impl WorkbenchApp {
     pub(crate) fn terminal_popup(&mut self, ctx: &egui::Context) {
