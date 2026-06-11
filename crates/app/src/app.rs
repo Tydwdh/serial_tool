@@ -1,3 +1,4 @@
+use crate::config::{PersistedConfig, default_activity_order};
 use crate::config::{
     config_path, default_recorder_path, ensure_jsonl_extension, load_config, pick_recorder_path,
     record_mode_label, windows_open_dialog,
@@ -115,31 +116,6 @@ pub(crate) struct ReplayAnalyzerResult {
     pub(crate) derived_events: Vec<Event>,
     pub(crate) errors: Vec<String>,
     pub(crate) logs: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PersistedConfig {
-    panels: PanelManager,
-    selected_port: Option<String>,
-    baud_rate: String,
-    data_bits: String,
-    stop_bits: String,
-    parity: String,
-    timeout_ms: String,
-    recorder_path: String,
-    #[serde(default = "default_activity_order")]
-    activity_order: Vec<Activity>,
-    #[serde(default)]
-    enabled_plugins: Vec<String>,
-}
-
-pub(crate) fn default_activity_order() -> Vec<Activity> {
-    vec![
-        Activity::Devices,
-        Activity::Replay,
-        Activity::Plugins,
-        Activity::Settings,
-    ]
 }
 
 // ══════════════════════════════════════════

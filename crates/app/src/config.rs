@@ -2,7 +2,33 @@ use std::path::PathBuf;
 use tool_core::now_timestamp_ms;
 use tool_recorder::RecordMode;
 
-use crate::app::PersistedConfig;
+use serde::{Deserialize, Serialize};
+use tool_panels::{Activity, PanelManager};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PersistedConfig {
+    pub(crate) panels: PanelManager,
+    pub(crate) selected_port: Option<String>,
+    pub(crate) baud_rate: String,
+    pub(crate) data_bits: String,
+    pub(crate) stop_bits: String,
+    pub(crate) parity: String,
+    pub(crate) timeout_ms: String,
+    pub(crate) recorder_path: String,
+    #[serde(default = "default_activity_order")]
+    pub(crate) activity_order: Vec<Activity>,
+    #[serde(default)]
+    pub(crate) enabled_plugins: Vec<String>,
+}
+
+pub(crate) fn default_activity_order() -> Vec<Activity> {
+    vec![
+        Activity::Devices,
+        Activity::Replay,
+        Activity::Plugins,
+        Activity::Settings,
+    ]
+}
 
 pub(crate) fn load_config() -> Option<PersistedConfig> {
     let primary = config_path();
