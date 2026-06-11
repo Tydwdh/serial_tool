@@ -1,5 +1,5 @@
-use eframe::egui;
 use crate::app::WorkbenchApp;
+use eframe::egui;
 
 impl WorkbenchApp {
     pub(crate) fn settings_panel(&mut self, ui: &mut egui::Ui) {

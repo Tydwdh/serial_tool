@@ -28,14 +28,14 @@ use crate::ui::top_bar::{
 
 // ── 数据结构 ──
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum StatusLevel {
+pub(crate) enum StatusLevel {
     Info,
     Warn,
     Error,
 }
 
 impl StatusLevel {
-    fn ttl_ms(self) -> u64 {
+    pub(crate) fn ttl_ms(self) -> u64 {
         match self {
             Self::Info => 5_000,
             Self::Warn => 8_000,
@@ -46,7 +46,7 @@ impl StatusLevel {
 
 impl WorkbenchApp {
     /// 统一状态入口。低级别不能覆盖未过期的高级消息。
-    fn set_status(&mut self, level: StatusLevel, text: impl Into<String>) {
+    pub(crate) fn set_status(&mut self, level: StatusLevel, text: impl Into<String>) {
         let now = now_timestamp_ms();
         if level as u8 >= self.status_level as u8 || now > self.status_deadline_ms {
             self.status_level = level;
@@ -56,7 +56,7 @@ impl WorkbenchApp {
     }
 
     /// 用户主动操作：总是更新状态（不被旧错误阻塞）。
-    fn set_status_force(&mut self, level: StatusLevel, text: impl Into<String>) {
+    pub(crate) fn set_status_force(&mut self, level: StatusLevel, text: impl Into<String>) {
         let now = now_timestamp_ms();
         self.status_level = level;
         self.status_message = text.into();
@@ -64,7 +64,7 @@ impl WorkbenchApp {
     }
 
     /// 过期后重置为就绪。每帧调用。
-    fn clear_status_if_expired(&mut self) {
+    pub(crate) fn clear_status_if_expired(&mut self) {
         if now_timestamp_ms() > self.status_deadline_ms {
             self.status_level = StatusLevel::Info;
             self.status_message = "就绪".into();
@@ -73,14 +73,14 @@ impl WorkbenchApp {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum DetachedPanelAction {
+pub(crate) enum DetachedPanelAction {
     None,
     Attach,
     Close,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum BottomTab {
+pub(crate) enum BottomTab {
     Terminal,
     Logs,
 }
@@ -88,14 +88,14 @@ enum BottomTab {
 impl BottomTab {
     const ALL: [Self; 2] = [Self::Terminal, Self::Logs];
 
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Terminal => "接收",
             Self::Logs => "日志",
         }
     }
 
-    fn is_available(self, terminal_popup_open: bool) -> bool {
+    pub(crate) fn is_available(self, terminal_popup_open: bool) -> bool {
         !matches!(self, Self::Terminal) || !terminal_popup_open
     }
 }
@@ -153,7 +153,7 @@ pub(crate) struct ReplayAnalyzerJob {
     handle: std::thread::JoinHandle<ReplayAnalyzerResult>,
 }
 
-struct ReplayAnalyzerResult {
+pub(crate) struct ReplayAnalyzerResult {
     total: usize,
     succeeded: usize,
     failed: usize,
@@ -163,7 +163,7 @@ struct ReplayAnalyzerResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedConfig {
+pub(crate) struct PersistedConfig {
     panels: PanelManager,
     selected_port: Option<String>,
     baud_rate: String,
@@ -178,7 +178,7 @@ struct PersistedConfig {
     enabled_plugins: Vec<String>,
 }
 
-fn default_activity_order() -> Vec<Activity> {
+pub(crate) fn default_activity_order() -> Vec<Activity> {
     vec![
         Activity::Devices,
         Activity::Replay,
@@ -311,18 +311,18 @@ impl WorkbenchApp {
         app
     }
 
-    fn log(&self, lv: LogLevel, m: impl Into<String>) {
+    pub(crate) fn log(&self, lv: LogLevel, m: impl Into<String>) {
         self.bus.publish(Event::system_log(lv, "app", m.into()));
     }
-    fn refresh_ports(&mut self) {
+    pub(crate) fn refresh_ports(&mut self) {
         self.refresh_ports_impl(true);
     }
 
-    fn refresh_ports_silent(&mut self) {
+    pub(crate) fn refresh_ports_silent(&mut self) {
         self.refresh_ports_impl(false);
     }
 
-    fn refresh_ports_impl(&mut self, show_status: bool) {
+    pub(crate) fn refresh_ports_impl(&mut self, show_status: bool) {
         let old_names: BTreeSet<String> = self
             .ports
             .iter()
@@ -383,7 +383,7 @@ impl WorkbenchApp {
         }
     }
 
-    fn open_selected_port(&mut self) {
+    pub(crate) fn open_selected_port(&mut self) {
         self.refresh_ports_silent();
 
         let Some(p) = self.selected_port.clone() else {
@@ -434,7 +434,7 @@ impl WorkbenchApp {
             }
         }
     }
-    fn start_or_stop_recording(&mut self) {
+    pub(crate) fn start_or_stop_recording(&mut self) {
         if self.recorder.is_running() || self.recorder.is_stopping() {
             self.recorder.stop();
             self.set_status_force(StatusLevel::Info, "正在停止录制...");
@@ -449,7 +449,7 @@ impl WorkbenchApp {
             }
         }
     }
-    fn save_config(&mut self) -> Result<(), String> {
+    pub(crate) fn save_config(&mut self) -> Result<(), String> {
         self.panels.bottom_logs_visible = self.bottom_panel_visible;
         let mut p = self.panels.clone();
         p.discard_dynamic_tabs();
@@ -480,14 +480,14 @@ impl WorkbenchApp {
         let t = serde_json::to_string_pretty(&cfg).map_err(|e| format!("序列化失败：{e}"))?;
         std::fs::write(config_path(), t).map_err(|e| format!("写入失败：{e}"))
     }
-    fn available_bottom_tabs(&self) -> Vec<BottomTab> {
+    pub(crate) fn available_bottom_tabs(&self) -> Vec<BottomTab> {
         BottomTab::ALL
             .into_iter()
             .filter(|tab| tab.is_available(self.terminal_popup_open))
             .collect()
     }
 
-    fn ensure_bottom_tab_available(&mut self) {
+    pub(crate) fn ensure_bottom_tab_available(&mut self) {
         if self.bottom_tab.is_available(self.terminal_popup_open) {
             return;
         }
@@ -496,7 +496,7 @@ impl WorkbenchApp {
         }
     }
 
-    fn open_bottom_panel(&mut self) {
+    pub(crate) fn open_bottom_panel(&mut self) {
         self.bottom_panel_visible = true;
         if BottomTab::Terminal.is_available(self.terminal_popup_open) {
             self.bottom_tab = BottomTab::Terminal;
@@ -505,7 +505,7 @@ impl WorkbenchApp {
         }
     }
 
-    fn toggle_bottom_panel(&mut self) {
+    pub(crate) fn toggle_bottom_panel(&mut self) {
         if self.bottom_panel_visible {
             self.bottom_panel_visible = false;
         } else {
@@ -516,7 +516,7 @@ impl WorkbenchApp {
 
     // ── UI 组件 ──
 
-    fn activity_bar(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn activity_bar(&mut self, ui: &mut egui::Ui) {
         let pointer = ui.ctx().pointer_latest_pos();
         let mut activity_rects = Vec::with_capacity(self.activity_order.len());
 
@@ -628,7 +628,7 @@ impl WorkbenchApp {
             self.toggle_bottom_panel();
         }
     }
-    fn dynamic_panel_shortcuts(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn dynamic_panel_shortcuts(&mut self, ui: &mut egui::Ui) {
         let items: Vec<(String, String)> = self
             .panels
             .tabs
@@ -724,7 +724,7 @@ impl WorkbenchApp {
             self.dynamic_drag_source = None;
         }
     }
-    fn reorder_dynamic_tabs(&mut self, source_index: usize, mut insert_index: usize) {
+    pub(crate) fn reorder_dynamic_tabs(&mut self, source_index: usize, mut insert_index: usize) {
         let mut dynamic_tabs: Vec<PanelKind> = self
             .panels
             .tabs
@@ -763,7 +763,7 @@ impl WorkbenchApp {
 
         let _ = self.save_config();
     }
-    fn top_bar(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let so = self
                 .selected_port
@@ -808,7 +808,7 @@ impl WorkbenchApp {
         });
     }
 
-    fn send_bar(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn send_bar(&mut self, ui: &mut egui::Ui) {
         let so = self
             .selected_port
             .as_deref()
@@ -861,7 +861,7 @@ impl WorkbenchApp {
         });
     }
 
-    fn do_send(&mut self) {
+    pub(crate) fn do_send(&mut self) {
         let Some(port) = self.selected_port.as_deref() else {
             self.send_error = Some("请选择串口".into());
             return;
@@ -877,7 +877,7 @@ impl WorkbenchApp {
         .map(|e| e.to_string());
     }
 
-    fn show_bottom_panel_contents(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn show_bottom_panel_contents(&mut self, ui: &mut egui::Ui) {
         self.ensure_bottom_tab_available();
         let visible_tabs = self.available_bottom_tabs();
 
@@ -944,152 +944,7 @@ impl WorkbenchApp {
             },
         );
     }
-    fn device_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("设备");
-
-        ui.horizontal(|ui| {
-            self.serial_connect_controls(ui, "dev-port", "dev-baud", 180.0, 90.0, false);
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("数据位");
-            egui::ComboBox::from_id_salt("dev-db")
-                .width(60.0)
-                .selected_text(&self.data_bits)
-                .show_ui(ui, |ui| {
-                    for &v in &["5", "6", "7", "8"] {
-                        ui.selectable_value(&mut self.data_bits, v.to_owned(), v);
-                    }
-                });
-
-            ui.label("停止位");
-            egui::ComboBox::from_id_salt("dev-sb")
-                .width(60.0)
-                .selected_text(&self.stop_bits)
-                .show_ui(ui, |ui| {
-                    for &v in &["1", "2"] {
-                        ui.selectable_value(&mut self.stop_bits, v.to_owned(), v);
-                    }
-                });
-
-            ui.label("校验");
-            egui::ComboBox::from_id_salt("dev-par")
-                .width(70.0)
-                .selected_text(&self.parity)
-                .show_ui(ui, |ui| {
-                    for &(v, l) in &[("none", "无"), ("odd", "奇"), ("even", "偶")] {
-                        ui.selectable_value(&mut self.parity, v.to_owned(), l);
-                    }
-                });
-
-            ui.label("超时(ms)");
-            ui.add(egui::TextEdit::singleline(&mut self.timeout_ms).desired_width(50.0));
-        });
-
-        // 显示已打开但不在系统端口列表中的 stale 连接
-        let transport_open = self.transport.open_ports();
-        if !transport_open.is_empty() {
-            let system_names: BTreeSet<&str> =
-                self.ports.iter().map(|d| d.port_name.as_str()).collect();
-            let stale: Vec<&String> = transport_open
-                .iter()
-                .filter(|p| !system_names.contains(p.as_str()))
-                .collect();
-            if !stale.is_empty() {
-                ui.separator();
-                ui.colored_label(theme::ORANGE, "⚠ 以下端口已打开但可能已拔出：");
-                for port in &stale {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(*port).monospace().color(theme::ORANGE));
-                        if ui.small_button("强制关闭").clicked() {
-                            self.transport.close_port(port);
-                            self.set_status_force(StatusLevel::Info, format!("{port} 已强制关闭"));
-                        }
-                    });
-                }
-            }
-        }
-
-        ui.separator();
-
-        ui.heading("录制");
-
-        ui.horizontal(|ui| {
-            ui.label("路径");
-
-            let recording = self.recorder.is_running();
-
-            ui.add_enabled(
-                !recording,
-                egui::TextEdit::singleline(&mut self.recorder_path).desired_width(360.0),
-            );
-
-            if ui
-                .add_enabled(!recording, egui::Button::new("浏览"))
-                .on_hover_text(if recording {
-                    "录制中不能修改保存路径"
-                } else {
-                    "选择录制保存路径"
-                })
-                .clicked()
-            {
-                if let Some(path) = pick_recorder_path(&self.recorder_path) {
-                    self.recorder_path = path.display().to_string();
-                }
-            }
-
-            if ui.button(if recording { "停止" } else { "录制" }).clicked() {
-                self.start_or_stop_recording();
-            }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("模式");
-            let recording = self.recorder.is_running();
-            let mut mode = self.recorder.mode();
-            ui.add_enabled_ui(!recording, |ui| {
-                egui::ComboBox::from_id_salt("record-mode")
-                    .width(160.0)
-                    .selected_text(record_mode_label(mode))
-                    .show_ui(ui, |ui| {
-                        for &m in &[
-                            RecordMode::StandardReplay,
-                            RecordMode::RawSerial,
-                            RecordMode::FullDebug,
-                        ] {
-                            ui.selectable_value(&mut mode, m, record_mode_label(m));
-                        }
-                    });
-            });
-            self.recorder.set_mode(mode);
-        });
-
-        ui.separator();
-
-        ui.heading("可用端口");
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for port in &self.ports {
-                ui.monospace(format!("{} {}", port.port_name, port.port_type));
-            }
-        });
-    }
-
-    fn settings_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("设置");
-        ui.separator();
-        ui.heading("外观");
-        ui.checkbox(&mut self.bottom_panel_visible, "底部面板");
-        ui.checkbox(&mut self.panels.inspector_visible, "检查器");
-        ui.separator();
-        ui.heading("快捷键");
-        ui.label("Ctrl+R 刷新  Ctrl+Shift+O 打开  Ctrl+B 底部  Ctrl+I 检查器  Ctrl+1~3 切换");
-        ui.separator();
-        ui.label("硬件调试工作台 v0.1.0");
-    }
-
-    // ── 动态面板辅助 ──
-
-    fn dynamic_tab_cleanup(&mut self) {
+    pub(crate) fn dynamic_tab_cleanup(&mut self) {
         let stale: Vec<String> = self
             .panels
             .tabs
@@ -1103,7 +958,7 @@ impl WorkbenchApp {
         }
     }
 
-    fn dynamic_panel_ui(&mut self, ui: &mut egui::Ui, id: &str) {
+    pub(crate) fn dynamic_panel_ui(&mut self, ui: &mut egui::Ui, id: &str) {
         let title = self.dynamic_panels.title(id).unwrap_or(id).to_owned();
         ui.horizontal(|ui| {
             ui.heading(&title);
@@ -1123,7 +978,7 @@ impl WorkbenchApp {
         self.dynamic_panels.ui_body(ui, id);
     }
 
-    fn detached_dynamic_panel_viewports(&mut self, ctx: &egui::Context) {
+    pub(crate) fn detached_dynamic_panel_viewports(&mut self, ctx: &egui::Context) {
         let ids: Vec<String> = self.detached_dynamic_panels.iter().cloned().collect();
 
         for id in ids {
@@ -1198,7 +1053,7 @@ impl WorkbenchApp {
         }
     }
 
-    fn handle_keys(&mut self, ctx: &egui::Context) {
+    pub(crate) fn handle_keys(&mut self, ctx: &egui::Context) {
         ctx.input(|i| {
             if i.modifiers.ctrl && i.key_pressed(egui::Key::R) && !i.modifiers.shift {
                 self.refresh_ports();
@@ -1227,7 +1082,7 @@ impl WorkbenchApp {
         });
     }
 
-    fn serial_connect_controls(
+    pub(crate) fn serial_connect_controls(
         &mut self,
         ui: &mut egui::Ui,
         port_combo_id: &'static str,
@@ -1558,7 +1413,7 @@ impl eframe::App for WorkbenchApp {
 
 // ── 发送放大窗口 ──
 impl WorkbenchApp {
-    fn terminal_popup(&mut self, ctx: &egui::Context) {
+    pub(crate) fn terminal_popup(&mut self, ctx: &egui::Context) {
         if !self.terminal_popup_open {
             return;
         }
@@ -1597,7 +1452,7 @@ impl WorkbenchApp {
             self.terminal_popup_open = false;
         }
     }
-    fn send_popup(&mut self, ctx: &egui::Context) {
+    pub(crate) fn send_popup(&mut self, ctx: &egui::Context) {
         if !self.send_popup_open {
             return;
         }
@@ -1661,7 +1516,7 @@ impl WorkbenchApp {
     }
 
     /// 处理 Lua ctx.dialog.open_file 请求。每帧最多处理一个。
-    fn poll_dialog_requests(&mut self) {
+    pub(crate) fn poll_dialog_requests(&mut self) {
         if let Ok(request) = self.dialog_receiver.try_recv() {
             let mut dialog = rfd::FileDialog::new().set_title(&request.title);
             for filter in &request.filters {
@@ -1687,7 +1542,7 @@ impl WorkbenchApp {
     }
 
     /// 处理 ui.form.file_browse 请求。每帧最多处理一个，避免连续弹多个模态对话框。
-    fn handle_file_browse_requests(&mut self) {
+    pub(crate) fn handle_file_browse_requests(&mut self) {
         let Some(event) = self.file_browse_subscription.try_recv() else {
             return;
         };
@@ -1760,7 +1615,7 @@ impl WorkbenchApp {
     }
 
     /// 启动后台线程运行 replay analyzer，不阻塞 UI。已有任务运行时拒绝重复触发。
-    fn launch_replay_analyzer_background(&mut self) {
+    pub(crate) fn launch_replay_analyzer_background(&mut self) {
         self.replay_panel.want_run_analyzers = false;
 
         if let Some(ref job) = self.replay_analyzer_job {
@@ -1869,7 +1724,7 @@ impl WorkbenchApp {
         });
     }
 
-    fn poll_replay_analyzer_result(&mut self) {
+    pub(crate) fn poll_replay_analyzer_result(&mut self) {
         let Some(mut job) = self.replay_analyzer_job.take() else {
             return;
         };
@@ -1962,7 +1817,7 @@ impl Drop for WorkbenchApp {
 //  辅助函数
 // ══════════════════════════════════════════
 
-fn pdb(v: &str) -> DataBits {
+pub(crate) fn pdb(v: &str) -> DataBits {
     match v {
         "5" => DataBits::Five,
         "6" => DataBits::Six,
@@ -1970,20 +1825,20 @@ fn pdb(v: &str) -> DataBits {
         _ => DataBits::Eight,
     }
 }
-fn psb(v: &str) -> StopBits {
+pub(crate) fn psb(v: &str) -> StopBits {
     match v {
         "2" => StopBits::Two,
         _ => StopBits::One,
     }
 }
-fn ppar(v: &str) -> Parity {
+pub(crate) fn ppar(v: &str) -> Parity {
     match v {
         "odd" => Parity::Odd,
         "even" => Parity::Even,
         _ => Parity::None,
     }
 }
-fn send_impl_to(
+pub(crate) fn send_impl_to(
     port: &str,
     input: &str,
     hex: bool,
@@ -2010,7 +1865,7 @@ fn send_impl_to(
         t.send_text_to(port, &text)
     }
 }
-fn translate_error(m: &str) -> String {
+pub(crate) fn translate_error(m: &str) -> String {
     if m.contains("no serial") {
         "串口未打开".into()
     } else if m.contains("invalid hex") {
@@ -2019,7 +1874,7 @@ fn translate_error(m: &str) -> String {
         m.to_owned()
     }
 }
-fn load_config() -> Option<PersistedConfig> {
+pub(crate) fn load_config() -> Option<PersistedConfig> {
     let primary = config_path();
 
     // 尝试读主路径
@@ -2046,7 +1901,7 @@ fn load_config() -> Option<PersistedConfig> {
     }
     None
 }
-fn config_path() -> PathBuf {
+pub(crate) fn config_path() -> PathBuf {
     // 优先使用平台配置目录，避免 CWD 变化导致配置"丢失"
     if let Some(dir) = dirs_next::config_dir() {
         let app_dir = dir.join("HardwareWorkbench");
@@ -2057,13 +1912,13 @@ fn config_path() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("workspace.json")
 }
-fn windows_open_dialog() -> Option<PathBuf> {
+pub(crate) fn windows_open_dialog() -> Option<PathBuf> {
     rfd::FileDialog::new()
         .add_filter("JSONL", &["jsonl"])
         .set_directory("logs")
         .pick_file()
 }
-fn pick_recorder_path(current: &str) -> Option<PathBuf> {
+pub(crate) fn pick_recorder_path(current: &str) -> Option<PathBuf> {
     let current_path = PathBuf::from(current);
 
     let mut dialog = rfd::FileDialog::new().add_filter("JSONL", &["jsonl"]);
@@ -2085,7 +1940,7 @@ fn pick_recorder_path(current: &str) -> Option<PathBuf> {
     dialog.save_file().map(ensure_jsonl_extension)
 }
 
-fn ensure_jsonl_extension(mut path: PathBuf) -> PathBuf {
+pub(crate) fn ensure_jsonl_extension(mut path: PathBuf) -> PathBuf {
     let is_jsonl = path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -2097,7 +1952,7 @@ fn ensure_jsonl_extension(mut path: PathBuf) -> PathBuf {
 
     path
 }
-fn record_mode_label(mode: RecordMode) -> &'static str {
+pub(crate) fn record_mode_label(mode: RecordMode) -> &'static str {
     match mode {
         RecordMode::StandardReplay => "标准回放",
         RecordMode::RawSerial => "原始串口",
@@ -2105,10 +1960,10 @@ fn record_mode_label(mode: RecordMode) -> &'static str {
     }
 }
 
-fn default_recorder_path() -> String {
+pub(crate) fn default_recorder_path() -> String {
     format!("logs/session-{}.jsonl", now_timestamp_ms())
 }
-fn aicon(a: Activity) -> &'static str {
+pub(crate) fn aicon(a: Activity) -> &'static str {
     match a {
         Activity::Devices => "📟",
         Activity::Replay => "⏪",
@@ -2117,7 +1972,7 @@ fn aicon(a: Activity) -> &'static str {
         _ => "",
     }
 }
-fn ashortcut(a: Activity) -> &'static str {
+pub(crate) fn ashortcut(a: Activity) -> &'static str {
     match a {
         Activity::Devices => "Ctrl+1",
         Activity::Replay => "Ctrl+2",
@@ -2127,7 +1982,10 @@ fn ashortcut(a: Activity) -> &'static str {
     }
 }
 
-fn activity_insert_index_from_pointer(rects: &[egui::Rect], pointer: egui::Pos2) -> Option<usize> {
+pub(crate) fn activity_insert_index_from_pointer(
+    rects: &[egui::Rect],
+    pointer: egui::Pos2,
+) -> Option<usize> {
     if rects.is_empty() {
         return None;
     }
@@ -2159,7 +2017,7 @@ fn activity_insert_index_from_pointer(rects: &[egui::Rect], pointer: egui::Pos2)
     Some(rects.len())
 }
 
-fn paint_activity_insert_line(ui: &egui::Ui, rects: &[egui::Rect], insert_index: usize) {
+pub(crate) fn paint_activity_insert_line(ui: &egui::Ui, rects: &[egui::Rect], insert_index: usize) {
     if rects.is_empty() {
         return;
     }
@@ -2194,7 +2052,10 @@ fn paint_activity_insert_line(ui: &egui::Ui, rects: &[egui::Rect], insert_index:
     painter.circle_filled(egui::pos2(left + 6.0, y), 3.0, theme::BLUE);
     painter.circle_filled(egui::pos2(right - 6.0, y), 3.0, theme::BLUE);
 }
-fn vertical_insert_index_from_pointer(rects: &[egui::Rect], pointer: egui::Pos2) -> Option<usize> {
+pub(crate) fn vertical_insert_index_from_pointer(
+    rects: &[egui::Rect],
+    pointer: egui::Pos2,
+) -> Option<usize> {
     if rects.is_empty() {
         return None;
     }
@@ -2226,7 +2087,7 @@ fn vertical_insert_index_from_pointer(rects: &[egui::Rect], pointer: egui::Pos2)
     Some(rects.len())
 }
 
-fn paint_vertical_insert_line(ui: &egui::Ui, rects: &[egui::Rect], insert_index: usize) {
+pub(crate) fn paint_vertical_insert_line(ui: &egui::Ui, rects: &[egui::Rect], insert_index: usize) {
     if rects.is_empty() {
         return;
     }

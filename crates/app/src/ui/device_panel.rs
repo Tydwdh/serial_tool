@@ -1,10 +1,11 @@
-use eframe::egui;
-use egui::Color32;
-use std::collections::BTreeSet;
+use crate::app::StatusLevel;
 use crate::app::WorkbenchApp;
-use crate::ui::top_bar::{baud_combo, serial_action_button, serial_action_button_enabled, serial_combo};
-use crate::bootstrap::{record_mode_label, pick_recorder_path};
-use crate::state::StatusLevel;
+use crate::app::{pick_recorder_path, record_mode_label};
+use crate::ui::top_bar::{
+    baud_combo, serial_action_button, serial_action_button_enabled, serial_combo,
+};
+use eframe::egui;
+use std::collections::BTreeSet;
 use tool_panels::theme;
 use tool_recorder::RecordMode;
 
