@@ -85,7 +85,7 @@ struct RenderOutcome {
 impl TerminalPanel {
     pub fn new(bus: &DataBus) -> Self {
         Self {
-            subscription: bus.subscribe(TopicFilter::prefix("transport.serial.")),
+            subscription: bus.subscribe_bounded(TopicFilter::prefix("transport.serial."), 4096),
             ports: BTreeMap::new(),
 
             show_rx: true,
@@ -160,6 +160,14 @@ impl TerminalPanel {
 
                 if ui.button("⛶").on_hover_text("放大查看").clicked() {
                     maximize_clicked = true;
+                }
+
+                let dropped = self.subscription.dropped_count();
+                if dropped > 0 {
+                    ui.colored_label(
+                        theme::YELLOW,
+                        format!("已丢弃 {dropped} 条，数据不完整"),
+                    );
                 }
             });
 

@@ -40,8 +40,15 @@ pub enum ReplayPolicy {
 pub struct JsonlRecorder {
     bus: DataBus,
     worker: Option<RecorderWorker>,
+    stopping: Option<StoppingRecorder>,
     current_path: Option<PathBuf>,
     mode: RecordMode,
+}
+
+struct StoppingRecorder {
+    join: JoinHandle<()>,
+    last_error: Arc<Mutex<Option<String>>>,
+    path: PathBuf,
 }
 
 struct RecorderWorker {
@@ -56,6 +63,7 @@ impl JsonlRecorder {
         Self {
             bus,
             worker: None,
+            stopping: None,
             current_path: None,
             mode: RecordMode::default(),
         }
@@ -80,7 +88,7 @@ impl JsonlRecorder {
         }
 
         let file = File::create(&path)?;
-        let subscription = self.bus.subscribe(TopicFilter::All);
+        let subscription = self.bus.subscribe_bounded(TopicFilter::All, 32_768);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
         let finished = Arc::new(AtomicBool::new(false));
@@ -92,6 +100,9 @@ impl JsonlRecorder {
         let bus = self.bus.clone();
         let join = thread::spawn(move || {
             let mut writer = BufWriter::new(file);
+            let mut written_since_flush = 0u64;
+            let mut last_flush = Instant::now();
+            let mut last_dropped_check = 0u64;
 
             while !stop_thread.load(Ordering::Relaxed) {
                 match subscription.recv_timeout(Duration::from_millis(100)) {
@@ -108,10 +119,35 @@ impl JsonlRecorder {
                                 stop_thread.store(true, Ordering::SeqCst);
                                 break;
                             }
+                            written_since_flush += 1;
                         }
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                }
+
+                // 一旦丢事件，立即告警（不等到停止）
+                let current_dropped = subscription.dropped_count();
+                if current_dropped > last_dropped_check {
+                    last_dropped_check = current_dropped;
+                    bus.publish(Event::system_log(
+                        LogLevel::Warn,
+                        "recorder",
+                        format!("录制队列溢出，已丢弃 {current_dropped} 条，文件将不完整"),
+                    ));
+                }
+
+                // 周期性 flush：每 500 条或 1 秒，防止崩溃/断电丢失尾部数据
+                if written_since_flush >= 500 || last_flush.elapsed() > Duration::from_secs(1) {
+                    if let Err(e) = writer.flush() {
+                        bus.publish(Event::system_log(
+                            LogLevel::Error,
+                            "recorder",
+                            format!("flush failed: {e}"),
+                        ));
+                    }
+                    written_since_flush = 0;
+                    last_flush = Instant::now();
                 }
             }
 
@@ -139,6 +175,16 @@ impl JsonlRecorder {
                 ));
             }
 
+            // 使用 Subscription 自带的 dropped count（真实反映 DataBus 丢弃数）
+            let d = subscription.dropped_count();
+            if d > 0 {
+                bus.publish(Event::system_log(
+                    LogLevel::Warn,
+                    "recorder",
+                    format!("录制期间丢弃 {d} 条事件，文件可能不完整"),
+                ));
+            }
+
             finished_thread.store(true, Ordering::SeqCst);
         });
 
@@ -162,18 +208,55 @@ impl JsonlRecorder {
             self.bus.publish(Event::system_log(
                 LogLevel::Info,
                 "recorder",
-                "recording stopped",
+                "stopping recording...",
             ));
             worker.stop.store(true, Ordering::Relaxed);
-            if let Some(join) = worker.join.take() {
-                let _ = join.join();
-            }
+            // 异步停止：不阻塞 UI，spin 到 Stopping 状态
+            self.stopping = Some(StoppingRecorder {
+                join: worker.join.take().expect("worker must have join"),
+                last_error: worker.last_error,
+                path: self.current_path.take().unwrap_or_default(),
+            });
         }
-        self.current_path = None;
     }
 
     pub fn is_running(&self) -> bool {
         self.worker.is_some()
+    }
+
+    pub fn is_stopping(&self) -> bool {
+        self.stopping.is_some()
+    }
+
+    /// 检查异步停止是否完成。UI 每帧调用。
+    /// 返回 Some(Ok(path)) 表示完成无错误，Some(Err(err)) 表示完成但有错误。
+    pub fn reap_stopping(&mut self) -> Option<Result<PathBuf, String>> {
+        if let Some(s) = self.stopping.take() {
+            if s.join.is_finished() {
+                let _ = s.join.join();
+                let error = s.last_error.lock().unwrap().take();
+                match error {
+                    Some(e) => {
+                        self.bus.publish(Event::system_log(
+                            LogLevel::Error,
+                            "recorder",
+                            format!("recording failed for {}: {e}", s.path.display()),
+                        ));
+                        return Some(Err(e));
+                    }
+                    None => {
+                        self.bus.publish(Event::system_log(
+                            LogLevel::Info,
+                            "recorder",
+                            format!("recording saved to {}", s.path.display()),
+                        ));
+                        return Some(Ok(s.path));
+                    }
+                }
+            }
+            self.stopping = Some(s);
+        }
+        None
     }
 
     /// 检查 worker 线程是否已结束，返回 error。UI 每帧调用。
@@ -203,6 +286,10 @@ impl JsonlRecorder {
 impl Drop for JsonlRecorder {
     fn drop(&mut self) {
         self.stop();
+        // 兜底：等待还在 flush/drain 的 stopping 线程，防止尾部数据丢失
+        if let Some(s) = self.stopping.take() {
+            let _ = s.join.join();
+        }
     }
 }
 
@@ -255,6 +342,13 @@ pub enum ReplayState {
     Finished,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ReplayLoadReport {
+    pub loaded: usize,
+    pub skipped: usize,
+    pub first_errors: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ReplayStatus {
     pub state: ReplayState,
@@ -269,6 +363,8 @@ pub struct ReplayStatus {
     pub has_recorded_protocol: bool,
     pub analyzer_cache_entries: usize,
     pub analyzer_error: Option<String>,
+    pub analyzer_warning: Option<String>,
+    pub load_report: Option<ReplayLoadReport>,
 }
 
 pub struct ReplayManager {
@@ -287,7 +383,9 @@ pub struct ReplayManager {
     analyzer_cache: Vec<Event>,
     analyzer_cache_valid: bool,
     analyzer_error: Option<String>,
+    analyzer_warning: Option<String>,
     analyzer_cursor: usize,
+    last_load_report: Option<ReplayLoadReport>,
 }
 
 impl ReplayManager {
@@ -306,7 +404,9 @@ impl ReplayManager {
             analyzer_cache: Vec::new(),
             analyzer_cache_valid: false,
             analyzer_error: None,
+            analyzer_warning: None,
             analyzer_cursor: 0,
+            last_load_report: None,
         }
     }
 
@@ -314,16 +414,29 @@ impl ReplayManager {
         let path = path.as_ref().to_path_buf();
         let file = File::open(&path)?;
         let mut events = Vec::new();
-        for line in BufReader::new(file).lines() {
+        let mut skipped = 0usize;
+        let mut first_errors: Vec<String> = Vec::new();
+        for (line_num, line) in BufReader::new(file).lines().enumerate() {
             let line = line?;
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            if let Ok(event) = serde_json::from_str::<Event>(trimmed) {
-                events.push(event);
+            match serde_json::from_str::<Event>(trimmed) {
+                Ok(event) => events.push(event),
+                Err(e) => {
+                    skipped += 1;
+                    if first_errors.len() < 5 {
+                        first_errors.push(format!("第 {n} 行: {e}", n = line_num + 1));
+                    }
+                }
             }
         }
+        self.last_load_report = Some(ReplayLoadReport {
+            loaded: events.len(),
+            skipped,
+            first_errors,
+        });
         events.sort_by_key(|event| (event.timestamp_ms, event.id));
 
         // 扫描是否存在录制的 protocol.*（非 replay 事件）
@@ -340,7 +453,7 @@ impl ReplayManager {
         // load 时 invalidate analyzer cache（因为事件变了）
         self.analyzer_cache.clear();
         self.analyzer_cache_valid = false;
-        self.analyzer_error = None;
+        self.clear_analyzer_messages();
         self.analyzer_cursor = 0;
 
         self.state = if self.events.is_empty() {
@@ -370,7 +483,7 @@ impl ReplayManager {
             // 切换 policy 时 invalidate cache
             self.analyzer_cache.clear();
             self.analyzer_cache_valid = false;
-            self.analyzer_error = None;
+            self.clear_analyzer_messages();
             self.analyzer_cursor = 0;
         }
     }
@@ -416,16 +529,36 @@ impl ReplayManager {
         events.sort_by_key(|event| (event.timestamp_ms, event.id));
         self.analyzer_cache = events;
         self.analyzer_cache_valid = true;
-        self.analyzer_error = None;
+        self.clear_analyzer_messages();
         self.analyzer_cursor = 0;
     }
 
-    /// 标记 analyzer 失败。
+    /// 标记 analyzer 失败（会清空缓存）。
     pub fn set_analyzer_error(&mut self, error: String) {
         self.analyzer_cache.clear();
         self.analyzer_cache_valid = false;
         self.analyzer_error = Some(error);
+        self.analyzer_warning = None;
         self.analyzer_cursor = 0;
+    }
+
+    /// 设置 analyzer 警告信息（不清缓存，仅 UI 提示）。
+    pub fn set_analyzer_warning(&mut self, warning: String) {
+        self.analyzer_warning = Some(warning);
+    }
+
+    /// 清除错误/警告，保留缓存。
+    pub fn clear_analyzer_error(&mut self) {
+        self.clear_analyzer_messages();
+    }
+
+    fn clear_analyzer_messages(&mut self) {
+        self.analyzer_error = None;
+        self.analyzer_warning = None;
+    }
+
+    pub fn analyzer_warning(&self) -> Option<&str> {
+        self.analyzer_warning.as_deref()
     }
 
     pub fn analyzer_cache_valid(&self) -> bool {
@@ -719,6 +852,8 @@ impl ReplayManager {
             has_recorded_protocol: self.has_recorded_protocol,
             analyzer_cache_entries: self.analyzer_cache.len(),
             analyzer_error: self.analyzer_error.clone(),
+            analyzer_warning: self.analyzer_warning.clone(),
+            load_report: self.last_load_report.clone(),
         }
     }
 

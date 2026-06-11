@@ -1,4 +1,4 @@
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, unbounded};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -50,10 +50,12 @@ struct Inner {
 struct Subscriber {
     filter: TopicFilter,
     sender: Sender<Event>,
+    dropped: Arc<AtomicU64>,
 }
 
 pub struct Subscription {
     receiver: Receiver<Event>,
+    dropped: Arc<AtomicU64>,
 }
 
 impl Subscription {
@@ -72,6 +74,11 @@ impl Subscription {
     /// 有限消费，防止单帧消费过多事件导致卡顿。
     pub fn drain_limited(&self, max: usize) -> Vec<Event> {
         self.receiver.try_iter().take(max).collect()
+    }
+
+    /// 此订阅自创建以来丢弃的事件总数（仅 bounded channel 有效）。
+    pub fn dropped_count(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 }
 
@@ -107,8 +114,15 @@ impl DataBus {
         let mut subscribers = self.inner.subscribers.lock();
         subscribers.retain(|subscriber| {
             if subscriber.filter.matches(&event.topic) {
-                // try_send：bounded 满时丢弃最老事件，避免阻塞
-                subscriber.sender.try_send(event.clone()).is_ok()
+                // 区分 Full（队列满，保留 subscriber 但计丢）和 Disconnected（真正断开，删除）
+                match subscriber.sender.try_send(event.clone()) {
+                    Ok(()) => true,
+                    Err(TrySendError::Full(_)) => {
+                        subscriber.dropped.fetch_add(1, Ordering::Relaxed);
+                        true
+                    }
+                    Err(TrySendError::Disconnected(_)) => false,
+                }
             } else {
                 true
             }
@@ -119,21 +133,24 @@ impl DataBus {
 
     pub fn subscribe(&self, filter: TopicFilter) -> Subscription {
         let (sender, receiver) = unbounded();
+        let dropped = Arc::new(AtomicU64::new(0));
         self.inner
             .subscribers
             .lock()
-            .push(Subscriber { filter, sender });
-        Subscription { receiver }
+            .push(Subscriber { filter, sender, dropped: Arc::clone(&dropped) });
+        Subscription { receiver, dropped }
     }
 
-    /// 有界订阅：背压保护，超过容量时丢弃最老事件。
+    /// 有界订阅：超过容量时丢弃当前事件并计入 dropped_count（DropNewest 策略）。
+    /// 适用于 UI 面板等可容忍丢帧的场景。完整性需求请用 `subscribe()`。
     pub fn subscribe_bounded(&self, filter: TopicFilter, capacity: usize) -> Subscription {
         let (sender, receiver) = crossbeam_channel::bounded(capacity);
+        let dropped = Arc::new(AtomicU64::new(0));
         self.inner
             .subscribers
             .lock()
-            .push(Subscriber { filter, sender });
-        Subscription { receiver }
+            .push(Subscriber { filter, sender, dropped: Arc::clone(&dropped) });
+        Subscription { receiver, dropped }
     }
 
     pub fn history(&self) -> Vec<Event> {

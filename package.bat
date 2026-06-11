@@ -97,14 +97,6 @@ if exist "tools" (
     echo   tools\
 )
 
-if exist "wasm-decoders" (
-    xcopy "wasm-decoders" "%OUT_DIR%\wasm-decoders\" /E /I /Q /Y >nul
-    if %ERRORLEVEL% neq 0 (
-        echo Failed to copy wasm-decoders
-        exit /b %ERRORLEVEL%
-    )
-    echo   wasm-decoders\
-)
 
 if exist "workspace.json.example" (
     copy "workspace.json.example" "%OUT_DIR%\workspace.json" >nul

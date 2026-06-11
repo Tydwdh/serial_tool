@@ -23,7 +23,7 @@ use tool_transport::{
 
 const ACTIVITY_BAR_WIDTH: f32 = 104.0;
 const BOTTOM_PANEL_HEIGHT: f32 = 350.0;
-const BOTTOM_PANEL_MIN: f32 = 180.0;
+const BOTTOM_PANEL_MIN: f32 = 350.0;
 const INSPECTOR_WIDTH: f32 = 240.0;
 const DEFAULT_WINDOW_WIDTH: f32 = 1280.0;
 const DEFAULT_WINDOW_HEIGHT: f32 = 820.0;
@@ -168,12 +168,6 @@ impl StatusLevel {
     }
 }
 
-struct StatusState {
-    level: StatusLevel,
-    text: String,
-    deadline_ms: u64,
-}
-
 impl WorkbenchApp {
     /// 统一状态入口。低级别不能覆盖未过期的高级消息。
     fn set_status(&mut self, level: StatusLevel, text: impl Into<String>) {
@@ -183,6 +177,14 @@ impl WorkbenchApp {
             self.status_message = text.into();
             self.status_deadline_ms = now + level.ttl_ms();
         }
+    }
+
+    /// 用户主动操作：总是更新状态（不被旧错误阻塞）。
+    fn set_status_force(&mut self, level: StatusLevel, text: impl Into<String>) {
+        let now = now_timestamp_ms();
+        self.status_level = level;
+        self.status_message = text.into();
+        self.status_deadline_ms = now + level.ttl_ms();
     }
 
     /// 过期后重置为就绪。每帧调用。
@@ -466,24 +468,27 @@ impl WorkbenchApp {
 
                 // 关键：只在当前选中端口消失时清空选择，不自动切到新端口。
                 if !selected_still_exists {
-                    self.selected_port = None;
+                    let stale_port = self.selected_port.take();
+                    if let Some(ref p) = stale_port {
+                        self.set_status(StatusLevel::Warn, format!("{p} 已拔出或不可用"));
+                    }
                 }
 
                 if show_status {
-                    self.status_message = format!("{} 个串口", self.ports.len());
+                    self.set_status(StatusLevel::Info, format!("{} 个串口", self.ports.len()));
                     return;
                 }
 
                 if !added_ports.is_empty() {
-                    self.status_message = format!("发现串口 {}", added_ports.join(", "));
+                    self.set_status(StatusLevel::Info, format!("发现串口 {}", added_ports.join(", ")));
                 } else if !removed_ports.is_empty() {
-                    self.status_message = format!("移除串口 {}", removed_ports.join(", "));
+                    self.set_status(StatusLevel::Info, format!("移除串口 {}", removed_ports.join(", ")));
                 } else if self.selected_port != old_selected {
-                    self.status_message = "请选择串口".into();
+                    self.set_status(StatusLevel::Info, "请选择串口");
                 }
             }
             Err(error) => {
-                self.status_message = error.to_string();
+                self.set_status(StatusLevel::Error, error.to_string());
             }
         }
     }
@@ -493,49 +498,63 @@ impl WorkbenchApp {
 
         let Some(p) = self.selected_port.clone() else {
             self.log(LogLevel::Warn, "请选择串口");
-            self.status_message = "请选择串口".into();
+            self.set_status(StatusLevel::Warn, "请选择串口");
             return;
         };
 
         let selected_exists = self.ports.iter().any(|port| port.port_name == p);
 
         if !selected_exists {
-            self.status_message = format!("串口 {p} 不存在，请重新选择");
+            self.set_status(StatusLevel::Error, format!("串口 {p} 不存在，请重新选择"));
             return;
         }
 
-        let b = self.baud_rate.parse().unwrap_or(115200);
+        let baud_rate = match self.baud_rate.trim().parse::<u32>() {
+            Ok(v) if v > 0 => v,
+            _ => {
+                self.set_status_force(StatusLevel::Warn, "波特率格式错误");
+                return;
+            }
+        };
+
+        let timeout_ms = match self.timeout_ms.trim().parse::<u64>() {
+            Ok(v) if (1..=1000).contains(&v) => v,
+            _ => {
+                self.set_status_force(StatusLevel::Warn, "超时时间必须为 1..=1000 ms");
+                return;
+            }
+        };
 
         let cfg = SerialConfig {
             port_name: p.clone(),
-            baud_rate: b,
+            baud_rate,
             data_bits: pdb(&self.data_bits),
             stop_bits: psb(&self.stop_bits),
             parity: ppar(&self.parity),
-            timeout_ms: self.timeout_ms.parse().unwrap_or(50),
+            timeout_ms,
         };
 
         match self.transport.open_serial(cfg) {
             Ok(()) => {
-                self.status_message = format!("{p} 已连接");
+                self.set_status_force(StatusLevel::Info, format!("{p} 已连接"));
                 self.open_bottom_panel();
             }
             Err(e) => {
-                self.status_message = e.to_string();
+                self.set_status_force(StatusLevel::Error, e.to_string());
             }
         }
     }
     fn start_or_stop_recording(&mut self) {
-        if self.recorder.is_running() {
+        if self.recorder.is_running() || self.recorder.is_stopping() {
             self.recorder.stop();
-            self.status_message = "录制已停止".into();
+            self.set_status_force(StatusLevel::Info, "正在停止录制...");
         } else {
             match self.recorder.start(PathBuf::from(&self.recorder_path)) {
                 Ok(()) => {
-                    self.status_message = "录制中".into();
+                    self.set_status_force(StatusLevel::Info, "录制中");
                 }
                 Err(e) => {
-                    self.status_message = e.to_string();
+                    self.set_status_force(StatusLevel::Error, e.to_string());
                 }
             }
         }
@@ -601,7 +620,7 @@ impl WorkbenchApp {
             self.bottom_panel_visible = false;
         } else {
             self.open_bottom_panel();
-            self.status_message = "底部面板已打开".into();
+            self.set_status(StatusLevel::Info, "底部面板已打开");
         }
     }
 
@@ -971,8 +990,8 @@ impl WorkbenchApp {
             }
             if ui.small_button("保存布局").clicked() {
                 match self.save_config() {
-                    Ok(()) => self.status_message = "布局已保存".into(),
-                    Err(e) => self.status_message = format!("保存布局失败：{e}"),
+                    Ok(()) => self.set_status(StatusLevel::Info, "布局已保存"),
+                    Err(e) => self.set_status(StatusLevel::Error, format!("保存布局失败：{e}")),
                 }
             }
         });
@@ -987,7 +1006,10 @@ impl WorkbenchApp {
             ui.label("发送");
             ui.radio_value(&mut self.send_hex_mode, false, "文本");
             ui.radio_value(&mut self.send_hex_mode, true, "HEX");
-            ui.checkbox(&mut self.send_append_lf, "LF");
+            ui.add_enabled_ui(!self.send_hex_mode, |ui| {
+                ui.checkbox(&mut self.send_append_lf, "LF")
+                    .on_disabled_hover_text("HEX 模式请手动添加 0A");
+            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("⛶").on_hover_text("放大编辑").clicked() {
                     self.send_popup_open = true;
@@ -1070,8 +1092,8 @@ impl WorkbenchApp {
                 // 1. 状态栏固定在最底部
                 self.status_bar(ui);
 
-                // 2. 发送区固定在状态栏上方
-                if !self.send_popup_open {
+                // 2. 发送区固定在状态栏上方（仅 Terminal 显示）
+                if !self.send_popup_open && self.bottom_tab == BottomTab::Terminal {
                     ui.separator();
                     self.send_bar(ui);
                 }
@@ -1152,6 +1174,26 @@ impl WorkbenchApp {
             ui.label("超时(ms)");
             ui.add(egui::TextEdit::singleline(&mut self.timeout_ms).desired_width(50.0));
         });
+
+        // 显示已打开但不在系统端口列表中的 stale 连接
+        let transport_open = self.transport.open_ports();
+        if !transport_open.is_empty() {
+            let system_names: BTreeSet<&str> = self.ports.iter().map(|d| d.port_name.as_str()).collect();
+            let stale: Vec<&String> = transport_open.iter().filter(|p| !system_names.contains(p.as_str())).collect();
+            if !stale.is_empty() {
+                ui.separator();
+                ui.colored_label(theme::ORANGE, "⚠ 以下端口已打开但可能已拔出：");
+                for port in &stale {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(*port).monospace().color(theme::ORANGE));
+                        if ui.small_button("强制关闭").clicked() {
+                            self.transport.close_port(port);
+                            self.set_status_force(StatusLevel::Info, format!("{port} 已强制关闭"));
+                        }
+                    });
+                }
+            }
+        }
 
         ui.separator();
 
@@ -1358,8 +1400,9 @@ impl WorkbenchApp {
             if i.modifiers.ctrl {
                 for (k, a) in [
                     (egui::Key::Num1, Activity::Devices),
-                    (egui::Key::Num2, Activity::Plugins),
-                    (egui::Key::Num3, Activity::Settings),
+                    (egui::Key::Num2, Activity::Replay),
+                    (egui::Key::Num3, Activity::Plugins),
+                    (egui::Key::Num4, Activity::Settings),
                 ] {
                     if i.key_pressed(k) {
                         self.panels.select_activity(a);
@@ -1390,11 +1433,12 @@ impl WorkbenchApp {
             &mut self.selected_port,
         );
 
-        if !compact {
+        if compact {
+            // 顶栏只显示连接状态，详细参数统一在设备页
+        } else {
             ui.label("波特率");
+            baud_combo(ui, baud_combo_id, baud_width, &mut self.baud_rate);
         }
-
-        baud_combo(ui, baud_combo_id, baud_width, &mut self.baud_rate);
 
         let selected_open = self
             .selected_port
@@ -1408,7 +1452,7 @@ impl WorkbenchApp {
         if serial_action_button_enabled(ui, selected_open, "关闭").clicked() {
             if let Some(ref port) = self.selected_port {
                 self.transport.close_port(port);
-                self.status_message = format!("{port} 已关闭");
+                self.set_status(StatusLevel::Info, format!("{port} 已关闭"));
             }
         }
 
@@ -1452,6 +1496,11 @@ impl eframe::App for WorkbenchApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.clear_status_if_expired();
+        match self.recorder.reap_stopping() {
+            Some(Ok(path)) => self.set_status_force(StatusLevel::Info, format!("录制已保存: {}", path.display())),
+            Some(Err(e)) => self.set_status_force(StatusLevel::Error, format!("录制失败: {e}")),
+            None => {}
+        }
         // 终端放大按钮
         if self.terminal_panel.maximize_clicked {
             self.terminal_panel.maximize_clicked = false;
@@ -1492,9 +1541,9 @@ impl eframe::App for WorkbenchApp {
             let log_count = self.bottom_log_panel.ingest_all_pending();
             let chart_count = self.dynamic_panels.ingest_all_pending();
 
-            self.status_message = format!(
+            self.set_status(StatusLevel::Info, format!(
                 "回放重建完成：接收 {terminal_count} 条，日志 {log_count} 条，图表 {chart_count} 条"
-            );
+            ));
             ctx.request_repaint();
         }
 
@@ -1520,9 +1569,9 @@ impl eframe::App for WorkbenchApp {
             let log_count = self.bottom_log_panel.ingest_all_pending();
             let chart_count = self.dynamic_panels.ingest_all_pending();
 
-            self.status_message = format!(
+            self.set_status(StatusLevel::Info, format!(
                 "回放重建完成：接收 {terminal_count} 条，日志 {log_count} 条，图表 {chart_count} 条"
-            );
+            ));
             ctx.request_repaint();
         }
         if self.replay_panel.want_pick_file {
@@ -1564,7 +1613,7 @@ impl eframe::App for WorkbenchApp {
         self.dynamic_panels.ingest(&mut self.panels);
         let n = self.plugin_manager.process_pending();
         if n > 0 {
-            self.status_message = format!("{n} 个插件事件");
+            self.set_status(StatusLevel::Info, format!("{n} 个插件事件"));
         }
         self.handle_keys(&ctx);
 
@@ -1808,66 +1857,63 @@ impl WorkbenchApp {
         }
     }
 
-    /// 处理 ui.form.file_browse 请求。
+    /// 处理 ui.form.file_browse 请求。每帧最多处理一个，避免连续弹多个模态对话框。
     fn handle_file_browse_requests(&mut self) {
-        for event in self.file_browse_subscription.drain() {
-            if let Payload::Json(value) = event.payload {
-                let panel_id = value.get("panel_id").and_then(Value::as_str).unwrap_or("");
-                let field_id = value.get("field_id").and_then(Value::as_str).unwrap_or("");
-                let filters: Vec<tool_lua_host::FileFilter> = value
-                    .get("filters")
-                    .and_then(Value::as_array)
-                    .map(|arr| {
-                        arr.iter()
-                            .map(|f| tool_lua_host::FileFilter {
-                                name: f
-                                    .get("name")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("")
-                                    .to_owned(),
-                                extensions: f
-                                    .get("extensions")
-                                    .and_then(Value::as_array)
-                                    .map(|arr| {
-                                        arr.iter()
-                                            .filter_map(|v| v.as_str().map(String::from))
-                                            .collect()
-                                    })
-                                    .unwrap_or_default(),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
+        let Some(event) = self.file_browse_subscription.try_recv() else {
+            return;
+        };
+        if let Payload::Json(value) = event.payload {
+            let panel_id = value.get("panel_id").and_then(Value::as_str).unwrap_or("");
+            let field_id = value.get("field_id").and_then(Value::as_str).unwrap_or("");
+            let filters: Vec<tool_lua_host::FileFilter> = value
+                .get("filters")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .map(|f| tool_lua_host::FileFilter {
+                            name: f
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_owned(),
+                            extensions: f
+                                .get("extensions")
+                                .and_then(Value::as_array)
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_str().map(String::from))
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
 
-                let mut dialog = rfd::FileDialog::new().set_title("选择文件");
-                for filter in &filters {
-                    if !filter.extensions.is_empty() && filter.extensions[0] != "*" {
-                        dialog = dialog.add_filter(
-                            &filter.name,
-                            &filter
-                                .extensions
-                                .iter()
-                                .map(|s| s.as_str())
-                                .collect::<Vec<_>>(),
-                        );
-                    }
+            let mut dialog = rfd::FileDialog::new().set_title("选择文件");
+            for filter in &filters {
+                if !filter.extensions.is_empty() && filter.extensions[0] != "*" {
+                    dialog = dialog.add_filter(
+                        &filter.name,
+                        &filter
+                            .extensions
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>(),
+                    );
                 }
-                let result = dialog.pick_file();
-                let path = result
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default();
+            }
+            let result = dialog.pick_file();
 
-                // 授权路径给 panel owner
-                if let Some(ref selected_path) = result {
-                    if let Some(owner) = self.dynamic_panels.panel_owner(panel_id) {
-                        self.file_broker.authorize(owner, selected_path.clone());
-                    } else {
-                        self.log(
-                            LogLevel::Warn,
-                            &format!("file 字段 {panel_id}/{field_id} 没有 owner plugin，跳过授权"),
-                        );
-                    }
+            // 用户取消时不发布事件，避免清空表单原路径
+            if let Some(ref selected_path) = result {
+                if let Some(owner) = self.dynamic_panels.panel_owner(panel_id) {
+                    self.file_broker.authorize(owner, selected_path.clone());
+                } else {
+                    self.log(
+                        LogLevel::Warn,
+                        &format!("file 字段 {panel_id}/{field_id} 没有 owner plugin，跳过授权"),
+                    );
                 }
 
                 self.bus.publish(Event::new(
@@ -1877,7 +1923,7 @@ impl WorkbenchApp {
                     Payload::Json(serde_json::json!({
                         "panel_id": panel_id,
                         "field_id": field_id,
-                        "path": path,
+                        "path": selected_path.display().to_string(),
                     })),
                 ));
             }
@@ -1890,7 +1936,7 @@ impl WorkbenchApp {
 
         if let Some(ref job) = self.replay_analyzer_job {
             if !job.handle.is_finished() {
-                self.status_message = "回放：analyzer 正在运行中，请等待完成".to_owned();
+                self.set_status(StatusLevel::Warn, "回放：analyzer 正在运行中，请等待完成");
                 return;
             }
         }
@@ -1899,7 +1945,7 @@ impl WorkbenchApp {
         if entries.is_empty() {
             self.replay_panel
                 .set_analyzer_error("没有可用的 replay analyzer".to_owned());
-            self.status_message = "回放：没有可用的 replay analyzer".to_owned();
+            self.set_status(StatusLevel::Error, "回放：没有可用的 replay analyzer");
             return;
         }
 
@@ -1907,7 +1953,7 @@ impl WorkbenchApp {
         if raw_events.is_empty() {
             self.replay_panel
                 .set_analyzer_error("录制文件中没有原始串口事件".to_owned());
-            self.status_message = "回放：录制文件中没有原始串口事件".to_owned();
+            self.set_status(StatusLevel::Error, "回放：录制文件中没有原始串口事件");
             return;
         }
 
@@ -1915,7 +1961,7 @@ impl WorkbenchApp {
         let generation = self.replay_analyzer_generation.wrapping_add(1);
         self.replay_analyzer_generation = generation;
         let source_path = self.replay_panel.path.clone();
-        self.status_message = format!("回放：正在运行 {total_entries} 个 analyzer ...");
+        self.set_status(StatusLevel::Info, format!("回放：正在运行 {total_entries} 个 analyzer ..."));
 
         let handle = std::thread::spawn(move || {
             let mut all_derived = Vec::new();
@@ -2014,7 +2060,7 @@ impl WorkbenchApp {
         }
         // 忽略回放文件已改变的结果
         if job.source_path != self.replay_panel.path {
-            self.status_message = "回放：忽略过期 analyzer 结果，录制文件已改变".into();
+            self.set_status(StatusLevel::Warn, "回放：忽略过期 analyzer 结果，录制文件已改变");
             return;
         }
 
@@ -2033,26 +2079,30 @@ impl WorkbenchApp {
                 )
             };
             self.replay_panel.set_analyzer_error(msg.clone());
-            self.status_message = format!("回放：{msg}");
+            self.set_status(StatusLevel::Error, format!("回放：{msg}"));
+        } else if result.derived_events.is_empty() && result.failed == 0 {
+            // 成功运行但 0 输出：降级为 Warn
+            let msg = format!("{} 个 analyzer 运行成功但未生成任何派生事件", result.succeeded);
+            self.replay_panel.set_analyzer_warning(msg.clone());
+            self.set_status(StatusLevel::Warn, format!("回放：{msg}"));
         } else {
+            // 先设缓存，再用 warning 显示提示（不清缓存）
             self.replay_panel
                 .set_analyzer_cache(result.derived_events.clone());
-            // 显示详细结果
             let summary = format!(
                 "{} 个派生事件，{} 成功",
                 result.derived_events.len(),
                 result.succeeded
             );
-            let msg = if result.failed > 0 {
+            if result.failed > 0 {
                 let err_detail = result.errors.join("; ");
                 self.replay_panel
-                    .set_analyzer_error(format!("{summary}，{} 失败: {err_detail}", result.failed));
-                format!("回放：{summary}，{} 失败", result.failed)
+                    .set_analyzer_warning(format!("{summary}，{} 失败: {err_detail}", result.failed));
+                self.set_status(StatusLevel::Warn, format!("回放：{summary}，{} 失败", result.failed));
             } else {
-                self.replay_panel.set_analyzer_error(String::new());
-                format!("回放：{summary}")
-            };
-            self.status_message = msg;
+                self.replay_panel.clear_analyzer_error();
+                self.set_status(StatusLevel::Info, format!("回放：{summary}"));
+            }
         }
     }
 }
@@ -2244,8 +2294,9 @@ fn aicon(a: Activity) -> &'static str {
 fn ashortcut(a: Activity) -> &'static str {
     match a {
         Activity::Devices => "Ctrl+1",
-        Activity::Plugins => "Ctrl+2",
-        Activity::Settings => "Ctrl+3",
+        Activity::Replay => "Ctrl+2",
+        Activity::Plugins => "Ctrl+3",
+        Activity::Settings => "Ctrl+4",
         _ => "",
     }
 }

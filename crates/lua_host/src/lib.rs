@@ -222,6 +222,7 @@ pub struct LuaPluginRuntime {
     event_sender: Sender<Event>,
     stop: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
+    outcome: Arc<ParkingMutex<Option<LuaRunState>>>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -248,6 +249,10 @@ impl LuaPluginRuntime {
 
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::Relaxed)
+    }
+
+    pub fn outcome(&self) -> Option<LuaRunState> {
+        *self.outcome.lock()
     }
 }
 impl Drop for LuaPluginRuntime {
@@ -431,23 +436,33 @@ pub fn run_plugin(
         format!("starting plugin {}", config.script_name),
     ));
 
+    let thread_outcome = Arc::new(ParkingMutex::new(None));
+    let outcome_for_thread = Arc::clone(&thread_outcome);
+
+    let outcome_in_thread = Arc::clone(&outcome_for_thread);
     let join = thread::spawn(move || {
         plugin_event_loop(
             source,
-            config,
-            bus,
+            config.clone(),
+            bus.clone(),
             transport,
             event_receiver,
             thread_stop,
             thread_alive,
             host_services,
+            outcome_in_thread,
         );
+        // plugin_event_loop 在错误路径已设置 Failed；这里做兜底
+        if outcome_for_thread.lock().is_none() {
+            *outcome_for_thread.lock() = Some(LuaRunState::Finished);
+        }
     });
 
     Ok(LuaPluginRuntime {
         event_sender,
         stop,
         alive,
+        outcome: thread_outcome,
         join: Some(join),
     })
 }
@@ -461,6 +476,7 @@ fn plugin_event_loop(
     stop: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
     host_services: LuaHostServices,
+    outcome: Arc<ParkingMutex<Option<LuaRunState>>>,
 ) {
     let lua = match Lua::new_with(
         StdLib::TABLE
@@ -473,6 +489,7 @@ fn plugin_event_loop(
     ) {
         Ok(lua) => lua,
         Err(error) => {
+            *outcome.lock() = Some(LuaRunState::Failed);
             bus.publish(Event::system_log(
                 LogLevel::Error,
                 &config.source,
@@ -494,6 +511,7 @@ fn plugin_event_loop(
             Ok(VmState::Continue)
         },
     ) {
+        *outcome.lock() = Some(LuaRunState::Failed);
         bus.publish(Event::system_log(
             LogLevel::Error,
             &config.source,
@@ -504,6 +522,7 @@ fn plugin_event_loop(
     }
 
     if let Err(error) = install_ctx(&lua, bus.clone(), transport, &config, &host_services) {
+        *outcome.lock() = Some(LuaRunState::Failed);
         bus.publish(Event::system_log(
             LogLevel::Error,
             &config.source,
@@ -515,6 +534,7 @@ fn plugin_event_loop(
 
     // 注入 task 辅助函数（必须在用户脚本之前）
     if let Err(error) = install_task_helpers(&lua) {
+        *outcome.lock() = Some(LuaRunState::Failed);
         bus.publish(Event::system_log(
             LogLevel::Error,
             &config.source,
@@ -525,6 +545,7 @@ fn plugin_event_loop(
     }
 
     if let Err(error) = lua.load(&source).set_name(&config.script_name).exec() {
+        *outcome.lock() = Some(LuaRunState::Failed);
         bus.publish(Event::system_log(
             LogLevel::Error,
             &config.source,
@@ -978,9 +999,15 @@ fn process_tasks(
                     }
                 }
             }
-            Err(_e) => {
-                // CoroutineUnresumable — 已完成
+            Err(e) => {
+                // CoroutineUnresumable — 记录错误并标记完成
                 let _ = state.set("finished", true);
+                let _ = state.set("last_error", lua.create_string(&e.to_string()).ok());
+                _bus.publish(Event::system_log(
+                    LogLevel::Error,
+                    &_config.source,
+                    format!("task '{id}' failed: {e}"),
+                ));
             }
         }
 
@@ -1489,7 +1516,10 @@ fn install_ctx(
     }
 
     if has_permission(config, "storage") {
-        ctx.set("storage", create_storage_api(lua)?)?;
+        let storage_api = create_storage_api(lua)?;
+        ctx.set("session", storage_api.clone())?;
+        // 向后兼容旧名称
+        ctx.set("storage", storage_api)?;
     }
 
     if has_permission(config, "dialog")
@@ -1919,10 +1949,18 @@ fn create_serial_api(
 
     let expect_bus = bus.clone();
 
+    let expect_transport = transport.clone();
     let expect_stop = host_services.stop_flag.clone();
     table.set(
         "expect",
         lua.create_function(move |lua, (pattern, timeout_ms): (String, Option<u64>)| {
+            // 多串口打开时拒绝不带端口的 expect，避免匹配错误端口
+            let open_ports = expect_transport.open_ports();
+            if open_ports.len() > 1 {
+                return Err(mlua::Error::RuntimeError(
+                    "多个串口已打开，请使用 ctx.serial.expect_from(port, pattern) 或 ctx.serial.request()".into(),
+                ));
+            }
             let subscription = expect_bus.subscribe(TopicFilter::exact(topics::SERIAL_RX));
             let deadline = Instant::now() + Duration::from_millis(timeout_ms.unwrap_or(1_000));
 
@@ -1956,6 +1994,68 @@ fn create_serial_api(
                 }
             }
         })?,
+    )?;
+
+    // ctx.serial.request({ port, tx, expect, timeout_ms })
+    // 正确顺序：先注册 subscriber，再发送，再匹配响应（避免竞态）
+    let rq_bus = bus.clone();
+    let rq_transport = transport.clone();
+    let rq_stop = host_services.stop_flag.clone();
+    table.set(
+        "request",
+        lua.create_function(
+            move |lua, opts: Table| {
+                let port: String = opts.get("port")?;
+                let tx: String = opts.get("tx")?;
+                let expect: String = opts.get("expect")?;
+                let timeout_ms: u64 = opts.get("timeout_ms").unwrap_or(1_000);
+
+                // 1. 先注册 subscriber
+                let subscription = rq_bus.subscribe(TopicFilter::exact(topics::SERIAL_RX));
+                let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+
+                // 2. 发送
+                rq_transport
+                    .send_text_to(&port, &tx)
+                    .map_err(mlua::Error::external)?;
+
+                // 3. 匹配响应
+                loop {
+                    if let Some(ref stop) = rq_stop {
+                        if stop.load(Ordering::Relaxed) {
+                            return Ok(Value::Nil);
+                        }
+                    }
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Ok(Value::Nil);
+                    }
+                    let remaining = deadline
+                        .saturating_duration_since(now)
+                        .min(Duration::from_millis(50));
+                    match subscription.recv_timeout(remaining) {
+                        Ok(event) => {
+                            let event_port = event
+                                .metadata
+                                .get("port")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            if event_port != port {
+                                continue;
+                            }
+                            let text = event.payload.text_lossy();
+                            if text.contains(&expect) {
+                                return Ok(Value::String(lua.create_string(&text)?));
+                            }
+                        }
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                            return Ok(Value::Nil);
+                        }
+                    }
+                }
+            },
+        )?,
     )?;
 
     // ── 行缓冲区操作 ──

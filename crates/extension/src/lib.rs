@@ -10,7 +10,6 @@ use tool_core::{Direction, Event, LogLevel, Payload, topics};
 use tool_databus::{DataBus, Subscription, TopicFilter};
 use tool_lua_host::{ConfigStore, LineBufferMap, LuaPluginRuntime, LuaRunConfig, run_plugin};
 use tool_transport::TransportManager;
-use tool_wasm_host::{WasmPluginConfig, WasmPluginRuntime};
 
 pub mod host_services;
 use host_services::{DialogRequest, FileAccessBroker};
@@ -42,9 +41,6 @@ pub enum ExtensionError {
 
     #[error("lua error: {0}")]
     Lua(#[from] tool_lua_host::LuaHostError),
-
-    #[error("wasm error: {0}")]
-    Wasm(#[from] tool_wasm_host::WasmHostError),
 }
 
 pub type ExtensionResult<T> = Result<T, ExtensionError>;
@@ -292,7 +288,7 @@ pub struct PluginManager {
     permission_manager: PermissionManager,
     records: BTreeMap<String, PluginRecord>,
     lua_runtimes: HashMap<String, LuaPluginRuntime>,
-    wasm_runtimes: HashMap<String, WasmPluginRuntime>,
+    stopping_plugins: Vec<(String, LuaPluginRuntime)>,
     roots: Vec<PathBuf>,
     subscription: Subscription,
     dialog_request_sender: Option<crossbeam_channel::Sender<DialogRequest>>,
@@ -300,11 +296,12 @@ pub struct PluginManager {
     line_buffers: LineBufferMap,
     config_store: Arc<ConfigStore>,
     dropped_events: u64,
+    last_seen_manager_dropped: u64,
 }
 
 impl PluginManager {
     pub fn new(bus: DataBus, transport: TransportManager) -> Self {
-        let subscription = bus.subscribe(TopicFilter::All);
+        let subscription = bus.subscribe_bounded(TopicFilter::All, 32_768);
         let default_config_root = std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join("plugin-config");
@@ -315,7 +312,7 @@ impl PluginManager {
             permission_manager: PermissionManager::default(),
             records: BTreeMap::new(),
             lua_runtimes: HashMap::new(),
-            wasm_runtimes: HashMap::new(),
+            stopping_plugins: Vec::new(),
             roots: Vec::new(),
             subscription,
             dialog_request_sender: None,
@@ -323,6 +320,7 @@ impl PluginManager {
             line_buffers: Arc::new(Mutex::new(HashMap::new())),
             config_store: Arc::new(ConfigStore::new(default_config_root)),
             dropped_events: 0,
+            last_seen_manager_dropped: 0,
         }
     }
 
@@ -355,6 +353,9 @@ impl PluginManager {
     }
 
     pub fn refresh(&mut self) -> ExtensionResult<usize> {
+        // 清理：移除所有之前从某个 root 发现但现已不存在的插件
+        self.records.retain(|_, record| record.root.exists());
+
         let roots = self.roots.clone();
         let mut count = 0;
 
@@ -397,6 +398,21 @@ impl PluginManager {
 
             let id = manifest.id.clone();
 
+            // 重复 ID 检测：非同一目录时告警
+            if let Some(existing) = self.records.get(&id)
+                && existing.root != path
+            {
+                self.bus.publish(Event::system_log(
+                    LogLevel::Warn,
+                    "extension",
+                    format!(
+                        "插件 ID 冲突: '{id}' 同时存在于 {} 和 {}，后者将覆盖",
+                        existing.root.display(),
+                        path.display()
+                    ),
+                ));
+            }
+
             let existing_state = self
                 .records
                 .get(&id)
@@ -422,7 +438,7 @@ impl PluginManager {
     pub fn enable(&mut self, plugin_id: &str) -> ExtensionResult<()> {
         self.update_runtime_states();
 
-        if self.lua_runtimes.contains_key(plugin_id) || self.wasm_runtimes.contains_key(plugin_id) {
+        if self.lua_runtimes.contains_key(plugin_id) {
             return Err(ExtensionError::AlreadyEnabled(plugin_id.to_owned()));
         }
 
@@ -436,7 +452,6 @@ impl PluginManager {
 
         match runtime.as_str() {
             "lua" => self.enable_lua(plugin_id),
-            "wasm" | "wasmtime" => self.enable_wasm(plugin_id),
             _ => Err(ExtensionError::UnsupportedRuntime(runtime)),
         }
     }
@@ -490,71 +505,15 @@ impl PluginManager {
         Ok(())
     }
 
-    fn enable_wasm(&mut self, plugin_id: &str) -> ExtensionResult<()> {
-        let record = self
-            .records
-            .get_mut(plugin_id)
-            .ok_or_else(|| ExtensionError::NotFound(plugin_id.to_owned()))?;
-
-        let mut config = WasmPluginConfig::new(
-            &record.manifest.id,
-            &record.manifest.name,
-            record.root.join(&record.manifest.main),
-        );
-
-        config.permissions = record.manifest.permissions.clone();
-
-        config.initial_subscriptions = record
-            .manifest
-            .contributes
-            .subscriptions
-            .iter()
-            .map(|subscription| subscription.topic.clone())
-            .collect();
-
-        let runtime = match WasmPluginRuntime::load(self.bus.clone(), config) {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                record.state = PluginState::Failed;
-                record.last_error = Some(error.to_string());
-                return Err(error.into());
-            }
-        };
-
-        if let Err(error) = runtime.activate() {
-            record.state = PluginState::Failed;
-            record.last_error = Some(error.to_string());
-            return Err(error.into());
-        }
-
-        record.state = PluginState::Enabled;
-        record.last_error = None;
-
-        self.wasm_runtimes.insert(plugin_id.to_owned(), runtime);
-
-        self.bus.publish(Event::system_log(
-            LogLevel::Info,
-            format!("plugin:{plugin_id}"),
-            "wasm plugin enabled",
-        ));
-
-        Ok(())
-    }
-
     pub fn disable(&mut self, plugin_id: &str) -> ExtensionResult<()> {
         if !self.records.contains_key(plugin_id) {
             return Err(ExtensionError::NotFound(plugin_id.to_owned()));
         }
 
+        // 异步停止：设 stop 后移入 stopping_plugins，不 join（避免卡 UI）
         if let Some(runtime) = self.lua_runtimes.remove(plugin_id) {
             runtime.stop();
-        }
-
-        if let Some(runtime) = self.wasm_runtimes.remove(plugin_id)
-            && let Err(error) = runtime.deactivate()
-            && let Some(record) = self.records.get_mut(plugin_id)
-        {
-            record.last_error = Some(error.to_string());
+            self.stopping_plugins.push((plugin_id.to_owned(), runtime));
         }
 
         let panel_ids: Vec<String> = self
@@ -589,10 +548,25 @@ impl PluginManager {
         self.bus.publish(Event::system_log(
             LogLevel::Info,
             format!("plugin:{plugin_id}"),
-            "plugin disabled",
+            "plugin stopping...",
         ));
 
         Ok(())
+    }
+
+    /// 收割已停止的插件线程。在 process_pending 中每帧调用。
+    fn reap_stopping_plugins(&mut self) {
+        self.stopping_plugins.retain(|(id, runtime)| {
+            if runtime.is_alive() {
+                return true;
+            }
+            self.bus.publish(Event::system_log(
+                LogLevel::Info,
+                format!("plugin:{id}"),
+                "plugin stopped",
+            ));
+            false // remove — Drop will join the finished thread
+        });
     }
 
     pub fn summaries(&mut self) -> Vec<PluginSummary> {
@@ -636,6 +610,19 @@ impl PluginManager {
     }
 
     pub fn process_pending(&mut self) -> usize {
+        self.reap_stopping_plugins();
+
+        // 暴露 PluginManager 入口队列丢包
+        let manager_dropped = self.subscription.dropped_count();
+        if manager_dropped > self.last_seen_manager_dropped {
+            self.last_seen_manager_dropped = manager_dropped;
+            self.bus.publish(Event::system_log(
+                LogLevel::Warn,
+                "extension",
+                format!("插件事件队列溢出，已丢弃 {manager_dropped} 条，插件可能丢失事件"),
+            ));
+        }
+
         let mut count = 0;
 
         for _ in 0..MAX_PLUGIN_EVENTS_PER_FRAME {
@@ -657,58 +644,13 @@ impl PluginManager {
             return 0;
         }
 
-        let ids = self
-            .wasm_runtimes
-            .iter()
-            .filter(|(id, runtime)| {
-                runtime.is_subscribed(&event.topic) && event.source != format!("wasm:{id}")
-            })
-            .map(|(id, _)| id.clone())
-            .collect::<Vec<_>>();
-
         let mut count = 0;
 
-        for id in ids {
-            let result = self
-                .wasm_runtimes
-                .get(&id)
-                .map(|runtime| runtime.on_event(event));
-
-            match result {
-                Some(Ok(true)) => count += 1,
-                Some(Ok(false)) | None => {}
-                Some(Err(error)) => {
-                    let error_text = error.to_string();
-
-                    if let Some(record) = self.records.get_mut(&id) {
-                        record.state = PluginState::Failed;
-                        record.last_error = Some(error_text.clone());
-                    }
-
-                    self.bus.publish(Event::system_log(
-                        LogLevel::Warn,
-                        format!("plugin:{id}"),
-                        error_text,
-                    ));
-                }
-            }
-        }
-
-        for (plugin_id, runtime) in &self.lua_runtimes {
+        // 所有非回放事件都转发给 Lua 插件。Lua 插件通过 ctx.bus.on()
+        // 在 __plugin_callbacks 中按 topic 注册回调，由 Lua worker 侧决定
+        // 是否处理（不再依赖 manifest contributes.subscriptions）。
+        for (_plugin_id, runtime) in &self.lua_runtimes {
             if runtime.is_alive() {
-                // 按插件 ID 检查订阅，不是全局 any
-                let subscribed = self.records.get(plugin_id).is_some_and(|r| {
-                    r.manifest
-                        .contributes
-                        .subscriptions
-                        .iter()
-                        .any(|s| event.topic.starts_with(&s.topic))
-                });
-                // ui.* / log.* 始终允许（系统事件）
-                let is_system = event.topic.starts_with("ui.") || event.topic.starts_with("log.");
-                if !is_system && !subscribed {
-                    continue;
-                }
                 if runtime.on_event(event) {
                     count += 1;
                 } else {
@@ -740,10 +682,29 @@ impl PluginManager {
         }
 
         for id in &finished {
-            self.lua_runtimes.remove(id);
+            let runtime = self.lua_runtimes.remove(id.as_str());
 
-            if let Some(record) = self.records.get_mut(id) {
-                record.state = PluginState::Finished;
+            if let Some(record) = self.records.get_mut(id.as_str()) {
+                match runtime.and_then(|r| r.outcome()) {
+                    None => {
+                        record.state = PluginState::Finished;
+                    }
+                    Some(tool_lua_host::LuaRunState::Failed) => {
+                        record.state = PluginState::Failed;
+                        record.last_error = Some("plugin script failed with error".into());
+                    }
+                    Some(tool_lua_host::LuaRunState::Stopped) => {
+                        record.state = PluginState::Disabled;
+                    }
+                    Some(tool_lua_host::LuaRunState::Finished)
+                    | Some(tool_lua_host::LuaRunState::Idle) => {
+                        record.state = PluginState::Finished;
+                    }
+                    Some(tool_lua_host::LuaRunState::Running) => {
+                        // 不应该走到这里：alive=false 但 outcome=Running
+                        record.state = PluginState::Finished;
+                    }
+                }
             }
         }
     }

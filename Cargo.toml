@@ -9,7 +9,6 @@ members = [
     "crates/recorder",
     "crates/testing",
     "crates/transport",
-    "crates/wasm_host",
 ]
 resolver = "3"
 
@@ -29,8 +28,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serialport = "4.8"
 thiserror = "2"
-wasmtime = "45.0.1"
-wat = "1.251.0"
 # ── 发布优化：减小体积、提升性能 ──
 [profile.release]
 opt-level = "s"   # 优化体积

@@ -15,6 +15,7 @@ pub struct ChartPanel {
     y_max: f64,
     sample_window: usize,
     max_samples: usize,
+    dropped_while_paused: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -34,7 +35,7 @@ impl ChartPanel {
 
     fn new_with_filter(bus: &DataBus, filter: TopicFilter) -> Self {
         Self {
-            subscription: bus.subscribe(filter),
+            subscription: bus.subscribe_bounded(filter, 4096),
             series: BTreeMap::new(),
             paused: false,
             auto_scale: true,
@@ -42,6 +43,7 @@ impl ChartPanel {
             y_max: 100.0,
             sample_window: 600,
             max_samples: 2_000,
+            dropped_while_paused: 0,
         }
     }
 
@@ -68,6 +70,19 @@ impl ChartPanel {
             if ui.button("清空").clicked() {
                 self.series.clear();
             }
+            if self.dropped_while_paused > 0 {
+                ui.label(RichText::new(format!(
+                    "暂停期间跳过 {} 个样本",
+                    self.dropped_while_paused
+                )).color(theme::TEXT_SECONDARY));
+            }
+            let dropped = self.subscription.dropped_count();
+            if dropped > 0 {
+                ui.colored_label(
+                    theme::YELLOW,
+                    format!("队列溢出丢弃 {dropped} 条，曲线可能不完整"),
+                );
+            }
         });
 
         let desired = Vec2::new(ui.available_width(), 280.0);
@@ -78,6 +93,13 @@ impl ChartPanel {
 
     fn ingest(&mut self) {
         if self.paused {
+            // 暂停时 drain 掉积压事件，避免恢复后补处理大量旧数据
+            for _ in 0..MAX_CHART_EVENTS_PER_FRAME {
+                if self.subscription.try_recv().is_none() {
+                    break;
+                }
+                self.dropped_while_paused += 1;
+            }
             return;
         }
 
@@ -149,6 +171,12 @@ impl ChartPanel {
 
     pub fn ingest_all_pending(&mut self) -> usize {
         if self.paused {
+            // 暂停时 drain 积压事件，避免恢复后补处理大量旧数据
+            let mut drained = 0;
+            while self.subscription.try_recv().is_some() {
+                drained += 1;
+            }
+            self.dropped_while_paused += drained;
             return 0;
         }
 
@@ -263,8 +291,10 @@ fn chart_bounds(
         for sample in values {
             min_x = min_x.min(sample.x);
             max_x = max_x.max(sample.x);
-            min_y = min_y.min(sample.y);
-            max_y = max_y.max(sample.y);
+            if auto_scale {
+                min_y = min_y.min(sample.y);
+                max_y = max_y.max(sample.y);
+            }
         }
     }
 

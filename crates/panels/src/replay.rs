@@ -116,6 +116,14 @@ impl ReplayPanel {
         self.want_run_analyzers = false;
     }
 
+    pub fn set_analyzer_warning(&mut self, warning: String) {
+        self.manager.set_analyzer_warning(warning);
+    }
+
+    pub fn clear_analyzer_error(&mut self) {
+        self.manager.clear_analyzer_error();
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         if self.auto_load {
             self.auto_load = false;
@@ -227,6 +235,9 @@ impl ReplayPanel {
 
         if let Some(error) = self.manager.analyzer_error() {
             ui.colored_label(theme::RED, format!("错误: {error}"));
+        }
+        if let Some(warning) = self.manager.analyzer_warning() {
+            ui.colored_label(theme::YELLOW, format!("{warning}"));
         }
     }
 
@@ -410,6 +421,19 @@ impl ReplayPanel {
                 );
             }
         });
+
+        // 加载报告：坏行警告
+        if let Some(report) = status.load_report.as_ref() {
+            if report.skipped > 0 {
+                ui.colored_label(
+                    theme::YELLOW,
+                    format!("加载 {} 条，跳过 {} 条坏行", report.loaded, report.skipped),
+                );
+                if let Some(first) = report.first_errors.first() {
+                    ui.colored_label(theme::TEXT_SECONDARY, first);
+                }
+            }
+        }
     }
 }
 

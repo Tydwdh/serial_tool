@@ -39,7 +39,7 @@ struct LogRenderOutcome {
 impl LogPanel {
     pub fn new(bus: &DataBus) -> Self {
         Self {
-            subscription: bus.subscribe(TopicFilter::prefix("log.")),
+            subscription: bus.subscribe_bounded(TopicFilter::prefix("log."), 4096),
             entries: VecDeque::new(),
             min_level: LogLevel::Info,
             auto_scroll: true,
@@ -93,6 +93,14 @@ impl LogPanel {
             } else if ui.button("↓").on_hover_text("滚动到底部").clicked() {
                 self.auto_scroll = true;
                 force_scroll_to_bottom = true;
+            }
+
+            let dropped = self.subscription.dropped_count();
+            if dropped > 0 {
+                ui.colored_label(
+                    theme::YELLOW,
+                    format!("已丢弃 {dropped} 条"),
+                );
             }
 
             if ui.button("清空").clicked() {

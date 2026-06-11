@@ -108,6 +108,7 @@ impl TransportStatus {
 pub struct TransportManager {
     bus: DataBus,
     ports: Arc<Mutex<HashMap<String, PortHandle>>>,
+    closing: Arc<Mutex<Vec<ClosingHandle>>>,
 }
 
 struct PortHandle {
@@ -118,15 +119,44 @@ struct PortHandle {
     join: Option<JoinHandle<()>>,
 }
 
+struct ClosingHandle {
+    port_name: String,
+    baud_rate: u32,
+    join: JoinHandle<()>,
+}
+
 impl TransportManager {
     pub fn new(bus: DataBus) -> Self {
         Self {
             bus,
             ports: Arc::new(Mutex::new(HashMap::new())),
+            closing: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// 清理已完成关闭的 worker 线程（join 并移除）。
+    fn reap_closing(&self) {
+        let mut closing = self.closing.lock();
+        let mut i = 0;
+        while i < closing.len() {
+            if closing[i].join.is_finished() {
+                let h = closing.swap_remove(i);
+                let _ = h.join.join();
+                self.bus.publish(Event::system_log(
+                    LogLevel::Info,
+                    "transport.serial",
+                    format!("closed {} @ {}", h.port_name, h.baud_rate),
+                ));
+                // swap_remove 把最后一个元素移到了 i，不递增 i
+            } else {
+                i += 1;
+            }
         }
     }
 
     pub fn list_serial_ports(&self) -> TransportResult<Vec<SerialPortDescriptor>> {
+        self.reap_closing();
+        self.reap_dead_ports();
         let mut ports: Vec<SerialPortDescriptor> = sp::available_ports()?
             .into_iter()
             .map(|info| SerialPortDescriptor {
@@ -138,9 +168,21 @@ impl TransportManager {
         Ok(ports)
     }
 
-    // ── 打开端口（不关闭已打开的端口）──
+    // ── 打开端口 ──
     pub fn open_serial(&self, config: SerialConfig) -> TransportResult<()> {
-        // 如果同名端口已打开，先关掉旧的
+        // 先收割已完成关闭的旧 worker
+        self.reap_closing();
+        // 如果同名端口正在关闭中，等不及就返回错误
+        {
+            let closing = self.closing.lock();
+            if closing.iter().any(|h| h.port_name == config.port_name) {
+                return Err(TransportError::Io(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    format!("{} 正在关闭中，请稍后重试", config.port_name),
+                )));
+            }
+        }
+        // 如果同名端口已打开，先异步关掉旧的（不阻塞）
         self.close_port(&config.port_name);
 
         let builder = sp::new(&config.port_name, config.baud_rate)
@@ -197,26 +239,42 @@ impl TransportManager {
         Ok(())
     }
 
-    // ── 关闭所有端口 ──
+    // ── 关闭所有端口（同步，供 shutdown 使用）──
     pub fn close_serial(&self) {
+        self.reap_closing();
+        // 取出所有端口，设置 stop，移入 closing
         let names: Vec<String> = self.ports.lock().keys().cloned().collect();
         for name in names {
             self.close_port(&name);
         }
+        // shutdown 路径：阻塞直到所有 worker 完成
+        let mut remaining = self.closing.lock();
+        while let Some(h) = remaining.pop() {
+            let _ = h.join.join();
+            self.bus.publish(Event::system_log(
+                LogLevel::Info,
+                "transport.serial",
+                format!("closed {} @ {}", h.port_name, h.baud_rate),
+            ));
+        }
     }
 
-    // ── 关闭指定端口 ──
+    // ── 关闭指定端口（异步：设 stop 并移入 closing，不 join）──
     pub fn close_port(&self, port_name: &str) {
         if let Some(mut worker) = self.ports.lock().remove(port_name) {
             worker.stop.store(true, Ordering::Relaxed);
             if let Some(join) = worker.join.take() {
-                let _ = join.join();
+                self.closing.lock().push(ClosingHandle {
+                    port_name: worker.config.port_name.clone(),
+                    baud_rate: worker.config.baud_rate,
+                    join,
+                });
             }
             self.bus.publish(Event::system_log(
                 LogLevel::Info,
                 "transport.serial",
                 format!(
-                    "closed {} @ {}",
+                    "closing {} @ {}",
                     worker.config.port_name, worker.config.baud_rate
                 ),
             ));
@@ -225,6 +283,7 @@ impl TransportManager {
 
     // ── 发送到指定端口 ──
     pub fn send_to(&self, port_name: &str, bytes: Vec<u8>) -> TransportResult<()> {
+        self.reap_closing();
         let guard = self.ports.lock();
         let worker = guard
             .get(port_name)
@@ -283,6 +342,8 @@ impl TransportManager {
     }
 
     pub fn status_port(&self, port_name: &str) -> TransportStatus {
+        self.reap_closing();
+        self.reap_dead_ports();
         let guard = self.ports.lock();
         match guard.get(port_name) {
             Some(w) if w.alive.load(Ordering::Relaxed) => TransportStatus {
@@ -295,6 +356,8 @@ impl TransportManager {
     }
 
     pub fn status_all(&self) -> Vec<TransportStatus> {
+        self.reap_closing();
+        self.reap_dead_ports();
         self.ports
             .lock()
             .values()
@@ -313,7 +376,15 @@ impl TransportManager {
     }
 
     pub fn open_ports(&self) -> Vec<String> {
+        self.reap_closing();
+        self.reap_dead_ports();
         self.ports.lock().keys().cloned().collect()
+    }
+
+    /// 清理已退出 worker 的 stale port handle（alive == false）。
+    /// 可在 status 查询、list/open/close 或定时刷新时调用。
+    pub fn reap_dead_ports(&self) {
+        self.ports.lock().retain(|_, handle| handle.alive.load(Ordering::Relaxed));
     }
 }
 
@@ -355,10 +426,23 @@ fn serial_worker_loop(
             Ok(0) => {}
             Ok(size) => {
                 let mut data = buffer[..size].to_vec();
-                thread::sleep(Duration::from_millis(3));
+                // 内层 read loop 加预算：防止连续高速 RX 饿死写入/关闭
+                let started = std::time::Instant::now();
+                const MAX_EXTRA_READS: usize = 8;
+                const MAX_EXTRA_READ_DURATION_MS: u64 = 5;
+                let mut extra_reads = 0usize;
                 loop {
+                    if stop.load(Ordering::Relaxed)
+                        || extra_reads >= MAX_EXTRA_READS
+                        || started.elapsed() > Duration::from_millis(MAX_EXTRA_READ_DURATION_MS)
+                    {
+                        break;
+                    }
                     match port.read(&mut buffer) {
-                        Ok(more) if more > 0 => data.extend_from_slice(&buffer[..more]),
+                        Ok(more) if more > 0 => {
+                            data.extend_from_slice(&buffer[..more]);
+                            extra_reads += 1;
+                        }
                         _ => break,
                     }
                 }

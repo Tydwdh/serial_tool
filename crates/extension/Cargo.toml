@@ -18,4 +18,3 @@ tool-core = { path = "../core" }
 tool-databus = { path = "../databus" }
 tool-lua-host = { path = "../lua_host" }
 tool-transport = { path = "../transport" }
-tool-wasm-host = { path = "../wasm_host" }

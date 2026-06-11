@@ -169,7 +169,11 @@ impl DynamicPanels {
                 let level_str = val.get("level").and_then(Value::as_str).unwrap_or("info");
                 let msg = val.get("message").and_then(Value::as_str).unwrap_or("");
                 let level = LogLevel::parse_name(level_str).unwrap_or(LogLevel::Info);
-                let plugin_id = val.get("plugin_id").and_then(Value::as_str);
+                // 用事件真实来源校验 owner，不信任 payload 里的 plugin_id
+                let actual_plugin_id = event
+                    .source
+                    .strip_prefix("plugin:")
+                    .unwrap_or(event.source.as_str());
                 if let Some(DynamicPanel::Log {
                     entries,
                     max_entries,
@@ -178,9 +182,8 @@ impl DynamicPanels {
                 }) = self.panels.get_mut(panel_id)
                 {
                     // owner 校验：拒绝非 owner 插件的写入
-                    if let (Some(owner), Some(pid)) = (owner_plugin_id.as_deref(), plugin_id) {
-                        if owner != pid {
-                            // 拒绝：插件不能写其他插件的日志面板
+                    if let Some(owner) = owner_plugin_id.as_deref() {
+                        if owner != actual_plugin_id {
                             continue;
                         }
                     }
@@ -239,7 +242,12 @@ impl DynamicPanels {
         let owner = self.panel_owner(panel_id);
         match owner {
             None => {
-                // 无 owner 的系统面板：禁止插件修改，只允许 app / ui / test
+                // 面板不存在或为无 owner 的系统面板：
+                // - 不存在时允许任何来源的 remove（清理已失效面板不阻塞）
+                // - 系统面板禁止插件修改
+                if !self.panels.contains_key(panel_id) {
+                    return true;
+                }
                 !source.starts_with("plugin:")
             }
             Some(owner_id) => {
@@ -586,9 +594,19 @@ fn dynamic_form_ui(
 ) {
     let mut changed = false;
 
-    // 预收集所有字段值（供 button action 使用，避免 borrow 冲突）
+    // 预收集输入型字段值（供 button action 使用），排除 display-only 字段
     let field_values: Vec<(String, Value)> = fields
         .iter()
+        .filter(|f| {
+            !matches!(
+                f.kind,
+                DynamicFieldKind::Separator
+                    | DynamicFieldKind::Label
+                    | DynamicFieldKind::Progress
+                    | DynamicFieldKind::Status
+                    | DynamicFieldKind::Button
+            )
+        })
         .map(|f| (f.id.clone(), f.value.clone()))
         .collect();
 
@@ -611,10 +629,12 @@ fn dynamic_form_ui(
             }
             // ── 按钮 ──
             DynamicFieldKind::Button => {
+                // 允许 set_value 动态覆盖按钮文字，空字符串视为未设置
                 let text = field
                     .value
                     .as_str()
-                    .or(field.text.as_deref())
+                    .filter(|s| !s.trim().is_empty())
+                    .or(field.text.as_deref().filter(|s| !s.trim().is_empty()))
                     .unwrap_or(&field.label);
                 let fill = match field.variant.as_deref() {
                     Some("primary") => theme::BLUE,
@@ -718,15 +738,13 @@ fn dynamic_form_ui(
                     let path = field.value.as_str().unwrap_or("").to_owned();
                     let status = if path.is_empty() {
                         "未选择".to_owned()
-                    } else if path.len() > 40 {
-                        format!("...{}", &path[path.len().saturating_sub(37)..])
                     } else {
-                        path.clone()
+                        ellipsize_tail(&path, 40)
                     };
                     ui.add_enabled(
                         false,
                         TextEdit::singleline(&mut status.clone()).desired_width(200.0),
-                    );
+                    ).on_hover_text(if path.is_empty() { String::new() } else { format!("完整路径: {path}") });
                     if ui.add_enabled(enabled, egui::Button::new("浏览")).clicked() {
                         bus.publish(Event::new(
                             topics::UI_FORM_FILE_BROWSE,
@@ -882,6 +900,17 @@ fn publish_form_changed(bus: &DataBus, panel_id: &str, fields: &[DynamicField]) 
     let mut values = serde_json::Map::new();
 
     for field in fields {
+        // 只包含输入型字段，排除 display-only
+        if matches!(
+            field.kind,
+            DynamicFieldKind::Separator
+                | DynamicFieldKind::Label
+                | DynamicFieldKind::Progress
+                | DynamicFieldKind::Status
+                | DynamicFieldKind::Button
+        ) {
+            continue;
+        }
         values.insert(field.id.clone(), field.value.clone());
     }
 
@@ -1141,6 +1170,25 @@ fn compact_number(value: f64) -> String {
             .trim_end_matches('.')
             .to_owned()
     }
+}
+
+/// 字符级尾部截断，安全处理 UTF-8 多字节字符。
+/// 返回类似 `"...xyz"` 的字符串，总字符数不超过 `max_chars`。
+fn ellipsize_tail(s: &str, max_chars: usize) -> String {
+    let count = s.chars().count();
+    if count <= max_chars {
+        return s.to_owned();
+    }
+    let tail_len = max_chars.saturating_sub(3);
+    let tail: String = s
+        .chars()
+        .rev()
+        .take(tail_len)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("...{tail}")
 }
 
 #[cfg(test)]

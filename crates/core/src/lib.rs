@@ -8,7 +8,6 @@ pub mod topics {
     pub const SERIAL_TX: &str = "transport.serial.default.tx";
     pub const PROTOCOL_PID_SAMPLE: &str = "protocol.pid.sample";
     pub const PROTOCOL_IMU_ATTITUDE: &str = "protocol.imu.attitude";
-    pub const PROTOCOL_WASM_DECODED: &str = "protocol.wasm.decoded";
     pub const LOG_SYSTEM: &str = "log.system";
     pub const UI_PANEL_CREATE: &str = "ui.panel.create";
     pub const UI_PANEL_REMOVE: &str = "ui.panel.remove";
