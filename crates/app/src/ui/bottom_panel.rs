@@ -1,4 +1,4 @@
-use crate::app::{WorkbenchApp, send_impl_to, translate_error};
+use crate::app::WorkbenchApp;
 use crate::state::{BottomTab, StatusLevel};
 use crate::ui::top_bar::{serial_action_button, serial_action_button_enabled};
 use eframe::egui;
@@ -139,5 +139,45 @@ impl WorkbenchApp {
                 }
             },
         );
+    }
+}
+
+use tool_transport::TransportError;
+use tool_transport::TransportManager;
+
+pub(crate) fn send_impl_to(
+    port: &str,
+    input: &str,
+    hex: bool,
+    lf: bool,
+    t: &TransportManager,
+) -> Result<(), tool_transport::TransportError> {
+    if input.trim().is_empty() {
+        return Ok(());
+    }
+    if hex {
+        for line in input.lines() {
+            let x = line.trim();
+            if x.is_empty() {
+                continue;
+            }
+            t.send_hex_to(port, x)?;
+        }
+        Ok(())
+    } else {
+        let mut text = input.to_owned();
+        if lf {
+            text.push('\n');
+        }
+        t.send_text_to(port, &text)
+    }
+}
+pub(crate) fn translate_error(m: &str) -> String {
+    if m.contains("no serial") {
+        "串口未打开".into()
+    } else if m.contains("invalid hex") {
+        format!("无效HEX: {}", m.trim_start_matches("invalid hex input: "))
+    } else {
+        m.to_owned()
     }
 }

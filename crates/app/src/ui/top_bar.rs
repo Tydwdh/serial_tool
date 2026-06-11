@@ -72,3 +72,27 @@ pub(crate) fn serial_action_button_enabled(
         egui::Button::new(text).min_size(SERIAL_ACTION_BUTTON_SIZE),
     )
 }
+
+use tool_transport::{DataBits, Parity, StopBits};
+
+pub(crate) fn pdb(v: &str) -> DataBits {
+    match v {
+        "5" => DataBits::Five,
+        "6" => DataBits::Six,
+        "7" => DataBits::Seven,
+        _ => DataBits::Eight,
+    }
+}
+pub(crate) fn psb(v: &str) -> StopBits {
+    match v {
+        "2" => StopBits::Two,
+        _ => StopBits::One,
+    }
+}
+pub(crate) fn ppar(v: &str) -> Parity {
+    match v {
+        "odd" => Parity::Odd,
+        "even" => Parity::Even,
+        _ => Parity::None,
+    }
+}

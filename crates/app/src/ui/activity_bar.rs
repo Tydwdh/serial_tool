@@ -1,7 +1,4 @@
-use crate::app::{
-    WorkbenchApp, activity_insert_index_from_pointer, aicon, ashortcut, paint_activity_insert_line,
-    paint_vertical_insert_line, vertical_insert_index_from_pointer,
-};
+use crate::app::WorkbenchApp;
 use eframe::egui;
 use egui::Color32;
 use tool_panels::{PanelKind, theme};
@@ -254,4 +251,166 @@ impl WorkbenchApp {
 
         let _ = self.save_config();
     }
+}
+
+use tool_panels::Activity;
+
+pub(crate) fn aicon(a: Activity) -> &'static str {
+    match a {
+        Activity::Devices => "📟",
+        Activity::Replay => "⏪",
+        Activity::Plugins => "🧩",
+        Activity::Settings => "⚙",
+        _ => "",
+    }
+}
+pub(crate) fn ashortcut(a: Activity) -> &'static str {
+    match a {
+        Activity::Devices => "Ctrl+1",
+        Activity::Replay => "Ctrl+2",
+        Activity::Plugins => "Ctrl+3",
+        Activity::Settings => "Ctrl+4",
+        _ => "",
+    }
+}
+
+pub(crate) fn activity_insert_index_from_pointer(
+    rects: &[egui::Rect],
+    pointer: egui::Pos2,
+) -> Option<usize> {
+    if rects.is_empty() {
+        return None;
+    }
+
+    let left = rects
+        .iter()
+        .map(|rect| rect.left())
+        .fold(f32::INFINITY, f32::min);
+
+    let right = rects
+        .iter()
+        .map(|rect| rect.right())
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    let top = rects.first()?.top() - 14.0;
+    let bottom = rects.last()?.bottom() + 14.0;
+
+    if pointer.x < left - 16.0 || pointer.x > right + 16.0 || pointer.y < top || pointer.y > bottom
+    {
+        return None;
+    }
+
+    for (index, rect) in rects.iter().enumerate() {
+        if pointer.y < rect.center().y {
+            return Some(index);
+        }
+    }
+
+    Some(rects.len())
+}
+
+pub(crate) fn paint_activity_insert_line(ui: &egui::Ui, rects: &[egui::Rect], insert_index: usize) {
+    if rects.is_empty() {
+        return;
+    }
+
+    let left = rects
+        .iter()
+        .map(|rect| rect.left())
+        .fold(f32::INFINITY, f32::min);
+
+    let right = rects
+        .iter()
+        .map(|rect| rect.right())
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    let y = if insert_index == 0 {
+        rects[0].top() - 3.0
+    } else if insert_index >= rects.len() {
+        rects[rects.len() - 1].bottom() + 3.0
+    } else {
+        let above = rects[insert_index - 1];
+        let below = rects[insert_index];
+        (above.bottom() + below.top()) * 0.5
+    };
+
+    let painter = ui.painter();
+
+    painter.line_segment(
+        [egui::pos2(left + 6.0, y), egui::pos2(right - 6.0, y)],
+        egui::Stroke::new(2.0, theme::BLUE),
+    );
+
+    painter.circle_filled(egui::pos2(left + 6.0, y), 3.0, theme::BLUE);
+    painter.circle_filled(egui::pos2(right - 6.0, y), 3.0, theme::BLUE);
+}
+pub(crate) fn vertical_insert_index_from_pointer(
+    rects: &[egui::Rect],
+    pointer: egui::Pos2,
+) -> Option<usize> {
+    if rects.is_empty() {
+        return None;
+    }
+
+    let left = rects
+        .iter()
+        .map(|rect| rect.left())
+        .fold(f32::INFINITY, f32::min);
+
+    let right = rects
+        .iter()
+        .map(|rect| rect.right())
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    let top = rects.first()?.top() - 10.0;
+    let bottom = rects.last()?.bottom() + 10.0;
+
+    if pointer.x < left - 16.0 || pointer.x > right + 16.0 || pointer.y < top || pointer.y > bottom
+    {
+        return None;
+    }
+
+    for (index, rect) in rects.iter().enumerate() {
+        if pointer.y < rect.center().y {
+            return Some(index);
+        }
+    }
+
+    Some(rects.len())
+}
+
+pub(crate) fn paint_vertical_insert_line(ui: &egui::Ui, rects: &[egui::Rect], insert_index: usize) {
+    if rects.is_empty() {
+        return;
+    }
+
+    let left = rects
+        .iter()
+        .map(|rect| rect.left())
+        .fold(f32::INFINITY, f32::min);
+
+    let right = rects
+        .iter()
+        .map(|rect| rect.right())
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    let y = if insert_index == 0 {
+        rects[0].top() - 3.0
+    } else if insert_index >= rects.len() {
+        rects[rects.len() - 1].bottom() + 3.0
+    } else {
+        let above = rects[insert_index - 1];
+        let below = rects[insert_index];
+        (above.bottom() + below.top()) * 0.5
+    };
+
+    let painter = ui.painter();
+
+    painter.line_segment(
+        [egui::pos2(left + 6.0, y), egui::pos2(right - 6.0, y)],
+        egui::Stroke::new(2.0, theme::BLUE),
+    );
+
+    painter.circle_filled(egui::pos2(left + 6.0, y), 3.0, theme::BLUE);
+    painter.circle_filled(egui::pos2(right - 6.0, y), 3.0, theme::BLUE);
 }
