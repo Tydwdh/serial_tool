@@ -4,6 +4,7 @@
 mod app;
 mod bootstrap;
 mod config;
+mod replay_task;
 mod ui;
 pub(crate) use bootstrap::*;
 
