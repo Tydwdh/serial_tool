@@ -36,3 +36,31 @@ impl Default for SendUiState {
         }
     }
 }
+use tool_transport::SerialPortDescriptor;
+
+#[derive(Clone)]
+pub(crate) struct SerialUiState {
+    pub(crate) ports: Vec<SerialPortDescriptor>,
+    pub(crate) selected_port: Option<String>,
+    pub(crate) baud_rate: String,
+    pub(crate) data_bits: String,
+    pub(crate) stop_bits: String,
+    pub(crate) parity: String,
+    pub(crate) timeout_ms: String,
+    pub(crate) last_port_refresh: f64,
+}
+
+impl Default for SerialUiState {
+    fn default() -> Self {
+        Self {
+            ports: Vec::new(),
+            selected_port: None,
+            baud_rate: "115200".into(),
+            data_bits: "8".into(),
+            stop_bits: "1".into(),
+            parity: "none".into(),
+            timeout_ms: "50".into(),
+            last_port_refresh: 0.0,
+        }
+    }
+}
