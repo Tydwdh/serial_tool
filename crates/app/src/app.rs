@@ -2,6 +2,7 @@ use crate::config::{
     config_path, default_recorder_path, ensure_jsonl_extension, load_config, pick_recorder_path,
     record_mode_label, windows_open_dialog,
 };
+use crate::state::SendUiState;
 use crate::state::StatusState;
 use eframe::egui;
 use egui::Color32;
@@ -128,11 +129,7 @@ pub(crate) struct WorkbenchApp {
     pub(crate) last_port_refresh: f64,
     pub(crate) bottom_panel_visible: bool,
     pub(crate) bottom_tab: BottomTab,
-    pub(crate) send_input: String,
-    pub(crate) send_hex_mode: bool,
-    pub(crate) send_append_lf: bool,
-    pub(crate) send_error: Option<String>,
-    pub(crate) send_popup_open: bool,
+    pub(crate) send: SendUiState,
     pub(crate) terminal_popup_open: bool,
     pub(crate) detached_dynamic_panels: BTreeSet<String>,
     pub(crate) top_bar_serial_collapsed: bool,
@@ -268,11 +265,7 @@ impl WorkbenchApp {
             last_port_refresh: 0.0,
             bottom_panel_visible: rp.bottom_logs_visible,
             bottom_tab: BottomTab::Terminal,
-            send_input: String::new(),
-            send_hex_mode: false,
-            send_append_lf: false,
-            send_error: None,
-            send_popup_open: false,
+            send: SendUiState::default(),
             terminal_popup_open: false,
             detached_dynamic_panels: BTreeSet::new(),
             top_bar_serial_collapsed: false,
@@ -816,20 +809,20 @@ impl WorkbenchApp {
             .is_some_and(|p| self.transport.status_port(p).open);
         ui.horizontal(|ui| {
             ui.label("发送");
-            ui.radio_value(&mut self.send_hex_mode, false, "文本");
-            ui.radio_value(&mut self.send_hex_mode, true, "HEX");
-            ui.add_enabled_ui(!self.send_hex_mode, |ui| {
-                ui.checkbox(&mut self.send_append_lf, "LF")
+            ui.radio_value(&mut self.send.hex_mode, false, "文本");
+            ui.radio_value(&mut self.send.hex_mode, true, "HEX");
+            ui.add_enabled_ui(!self.send.hex_mode, |ui| {
+                ui.checkbox(&mut self.send.append_lf, "LF")
                     .on_disabled_hover_text("HEX 模式请手动添加 0A");
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("⛶").on_hover_text("放大编辑").clicked() {
-                    self.send_popup_open = true;
+                    self.send.popup_open = true;
                 }
             });
         });
         ui.add(
-            egui::TextEdit::multiline(&mut self.send_input)
+            egui::TextEdit::multiline(&mut self.send.input)
                 .desired_width(f32::INFINITY)
                 .desired_rows(5)
                 .hint_text(if so {
@@ -843,20 +836,20 @@ impl WorkbenchApp {
             .input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter));
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(so && !self.send_input.is_empty(), egui::Button::new("发送"))
+                .add_enabled(so && !self.send.input.is_empty(), egui::Button::new("发送"))
                 .clicked()
-                || (ctrl_enter && so && !self.send_input.is_empty())
+                || (ctrl_enter && so && !self.send.input.is_empty())
             {
                 self.do_send();
             }
             if ui.button("清空").clicked() {
-                self.send_input.clear();
-                self.send_error = None;
+                self.send.input.clear();
+                self.send.error = None;
             }
             if !so {
                 ui.colored_label(theme::YELLOW, "⚠ 请先打开串口");
             }
-            if let Some(ref e) = self.send_error {
+            if let Some(ref e) = self.send.error {
                 ui.colored_label(theme::RED, translate_error(e));
             }
         });
@@ -864,14 +857,14 @@ impl WorkbenchApp {
 
     pub(crate) fn do_send(&mut self) {
         let Some(port) = self.selected_port.as_deref() else {
-            self.send_error = Some("请选择串口".into());
+            self.send.error = Some("请选择串口".into());
             return;
         };
-        self.send_error = send_impl_to(
+        self.send.error = send_impl_to(
             port,
-            &self.send_input,
-            self.send_hex_mode,
-            self.send_append_lf,
+            &self.send.input,
+            self.send.hex_mode,
+            self.send.append_lf,
             &self.transport,
         )
         .err()
@@ -905,7 +898,7 @@ impl WorkbenchApp {
                 self.status_bar(ui);
 
                 // 2. 发送区固定在状态栏上方（仅 Terminal 显示）
-                if !self.send_popup_open && self.bottom_tab == BottomTab::Terminal {
+                if !self.send.popup_open && self.bottom_tab == BottomTab::Terminal {
                     ui.separator();
                     self.send_bar(ui);
                 }
@@ -1454,7 +1447,7 @@ impl WorkbenchApp {
         }
     }
     pub(crate) fn send_popup(&mut self, ctx: &egui::Context) {
-        if !self.send_popup_open {
+        if !self.send.popup_open {
             return;
         }
         let vid = egui::ViewportId::from_hash_of("send-popup");
@@ -1476,35 +1469,35 @@ impl WorkbenchApp {
                         .ctx()
                         .input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter));
                     ui.horizontal(|ui| {
-                        ui.radio_value(&mut self.send_hex_mode, false, "文本");
-                        ui.radio_value(&mut self.send_hex_mode, true, "HEX");
-                        ui.add_enabled_ui(!self.send_hex_mode, |ui| {
-                            ui.checkbox(&mut self.send_append_lf, "LF")
+                        ui.radio_value(&mut self.send.hex_mode, false, "文本");
+                        ui.radio_value(&mut self.send.hex_mode, true, "HEX");
+                        ui.add_enabled_ui(!self.send.hex_mode, |ui| {
+                            ui.checkbox(&mut self.send.append_lf, "LF")
                                 .on_disabled_hover_text("HEX 模式请手动添加 0A");
                         });
                         if ui
                             .add_enabled(
-                                so && !self.send_input.is_empty(),
+                                so && !self.send.input.is_empty(),
                                 egui::Button::new("发送 (Ctrl+Enter)"),
                             )
                             .clicked()
-                            || (ctrl_enter && so && !self.send_input.is_empty())
+                            || (ctrl_enter && so && !self.send.input.is_empty())
                         {
                             self.do_send();
                         }
                         if ui.button("清空").clicked() {
-                            self.send_input.clear();
-                            self.send_error = None;
+                            self.send.input.clear();
+                            self.send.error = None;
                         }
                     });
                     ui.separator();
                     ui.add(
-                        egui::TextEdit::multiline(&mut self.send_input)
+                        egui::TextEdit::multiline(&mut self.send.input)
                             .desired_width(f32::INFINITY)
                             .desired_rows(24)
                             .hint_text("Ctrl+Enter 发送"),
                     );
-                    if let Some(ref e) = self.send_error {
+                    if let Some(ref e) = self.send.error {
                         ui.colored_label(theme::RED, translate_error(e));
                     }
                     false
@@ -1512,7 +1505,7 @@ impl WorkbenchApp {
                 .inner
         });
         if should_close {
-            self.send_popup_open = false;
+            self.send.popup_open = false;
         }
     }
 

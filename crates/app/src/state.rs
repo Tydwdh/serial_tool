@@ -16,3 +16,23 @@ impl Default for StatusState {
         }
     }
 }
+
+pub(crate) struct SendUiState {
+    pub(crate) input: String,
+    pub(crate) hex_mode: bool,
+    pub(crate) append_lf: bool,
+    pub(crate) error: Option<String>,
+    pub(crate) popup_open: bool,
+}
+
+impl Default for SendUiState {
+    fn default() -> Self {
+        Self {
+            input: String::new(),
+            hex_mode: false,
+            append_lf: false,
+            error: None,
+            popup_open: false,
+        }
+    }
+}
