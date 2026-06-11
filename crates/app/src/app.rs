@@ -40,34 +40,6 @@ use crate::ui::top_bar::{
 
 // ── 数据结构 ──
 
-impl WorkbenchApp {
-    /// 统一状态入口。低级别不能覆盖未过期的高级消息。
-    pub(crate) fn set_status(&mut self, level: StatusLevel, text: impl Into<String>) {
-        let now = now_timestamp_ms();
-        if level as u8 >= self.status.level as u8 || now > self.status.deadline_ms {
-            self.status.level = level;
-            self.status.message = text.into();
-            self.status.deadline_ms = now + level.ttl_ms();
-        }
-    }
-
-    /// 用户主动操作：总是更新状态（不被旧错误阻塞）。
-    pub(crate) fn set_status_force(&mut self, level: StatusLevel, text: impl Into<String>) {
-        let now = now_timestamp_ms();
-        self.status.level = level;
-        self.status.message = text.into();
-        self.status.deadline_ms = now + level.ttl_ms();
-    }
-
-    /// 过期后重置为就绪。每帧调用。
-    pub(crate) fn clear_status_if_expired(&mut self) {
-        if now_timestamp_ms() > self.status.deadline_ms {
-            self.status.level = StatusLevel::Info;
-            self.status.message = "就绪".into();
-        }
-    }
-}
-
 pub(crate) struct WorkbenchApp {
     pub(crate) bus: DataBus,
     pub(crate) transport: TransportManager,
@@ -128,449 +100,124 @@ pub(crate) struct ReplayAnalyzerResult {
 //  WorkbenchApp impl
 // ══════════════════════════════════════════
 
-impl WorkbenchApp {
-    pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        setup_fonts(cc);
-        cc.egui_ctx.set_embed_viewports(false);
-        let bus = DataBus::new();
-        let transport = TransportManager::new(bus.clone());
+pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    setup_fonts(cc);
+    cc.egui_ctx.set_embed_viewports(false);
+    let bus = DataBus::new();
+    let transport = TransportManager::new(bus.clone());
 
-        let (dialog_sender, dialog_receiver) = crossbeam_channel::unbounded::<DialogRequest>();
-        let file_broker = Arc::new(FileAccessBroker::default());
+    let (dialog_sender, dialog_receiver) = crossbeam_channel::unbounded::<DialogRequest>();
+    let file_broker = Arc::new(FileAccessBroker::default());
 
-        let mut pm = PluginManager::new(bus.clone(), transport.clone());
-        pm.set_host_services(dialog_sender, file_broker.clone());
+    let mut pm = PluginManager::new(bus.clone(), transport.clone());
+    pm.set_host_services(dialog_sender, file_broker.clone());
 
-        let plugin_dir = app_dir().join("plugins");
-        if let Err(e) = pm.discover_roots([plugin_dir, PathBuf::from("plugins")]) {
-            bus.publish(Event::system_log(
-                LogLevel::Error,
-                "ext",
-                format!("plugin discover: {e}"),
-            ));
-        }
-        let recorder = JsonlRecorder::new(bus.clone());
-        let config = load_config();
-        if config.is_none() {
-            bus.publish(Event::system_log(
-                LogLevel::Warn,
-                "app",
-                "未找到或无法加载配置，使用默认设置",
-            ));
-        }
-        apply_theme(&cc.egui_ctx);
-        let mut rp = config
+    let plugin_dir = app_dir().join("plugins");
+    if let Err(e) = pm.discover_roots([plugin_dir, PathBuf::from("plugins")]) {
+        bus.publish(Event::system_log(
+            LogLevel::Error,
+            "ext",
+            format!("plugin discover: {e}"),
+        ));
+    }
+    let recorder = JsonlRecorder::new(bus.clone());
+    let config = load_config();
+    if config.is_none() {
+        bus.publish(Event::system_log(
+            LogLevel::Warn,
+            "app",
+            "未找到或无法加载配置，使用默认设置",
+        ));
+    }
+    apply_theme(&cc.egui_ctx);
+    let mut rp = config
+        .as_ref()
+        .map(|c| c.panels.clone())
+        .unwrap_or_default();
+    rp.discard_dynamic_tabs();
+
+    let mut app = Self {
+        terminal_panel: TerminalPanel::new(&bus),
+        dynamic_panels: DynamicPanels::new(&bus),
+        plugins_panel: PluginsPanel::new(),
+        replay_panel: ReplayPanel::new(&bus),
+        bottom_log_panel: LogPanel::new(&bus),
+        ports: Vec::new(),
+        selected_port: config.as_ref().and_then(|c| c.selected_port.clone()),
+        baud_rate: config
             .as_ref()
-            .map(|c| c.panels.clone())
-            .unwrap_or_default();
-        rp.discard_dynamic_tabs();
-
-        let mut app = Self {
-            terminal_panel: TerminalPanel::new(&bus),
-            dynamic_panels: DynamicPanels::new(&bus),
-            plugins_panel: PluginsPanel::new(),
-            replay_panel: ReplayPanel::new(&bus),
-            bottom_log_panel: LogPanel::new(&bus),
-            ports: Vec::new(),
-            selected_port: config.as_ref().and_then(|c| c.selected_port.clone()),
-            baud_rate: config
-                .as_ref()
-                .map(|c| c.baud_rate.clone())
-                .unwrap_or_else(|| "115200".into()),
-            data_bits: config
-                .as_ref()
-                .map(|c| c.data_bits.clone())
-                .unwrap_or_else(|| "8".into()),
-            stop_bits: config
-                .as_ref()
-                .map(|c| c.stop_bits.clone())
-                .unwrap_or_else(|| "1".into()),
-            parity: config
-                .as_ref()
-                .map(|c| c.parity.clone())
-                .unwrap_or_else(|| "none".into()),
-            timeout_ms: config
-                .as_ref()
-                .map(|c| c.timeout_ms.clone())
-                .unwrap_or_else(|| "50".into()),
-            recorder_path: config
-                .as_ref()
-                .map(|c| c.recorder_path.clone())
-                .unwrap_or_else(default_recorder_path),
-            panels: rp.clone(),
-            status: StatusState::default(),
-            last_port_refresh: 0.0,
-            bottom_panel_visible: rp.bottom_logs_visible,
-            bottom_tab: BottomTab::Terminal,
-            send: SendUiState::default(),
-            terminal_popup_open: false,
-            detached_dynamic_panels: BTreeSet::new(),
-            top_bar_serial_collapsed: false,
-            activity_order: config
-                .as_ref()
-                .map(|c| c.activity_order.clone())
-                .unwrap_or_else(default_activity_order),
-            activity_drag_source: None,
-            activity_rects_cache: Vec::new(),
-            last_rate_check_time: 0.0,
-            last_event_count: 0,
-            event_rate: 0.0,
-            bus: bus.clone(),
-            transport,
-            plugin_manager: pm,
-            recorder,
-            dynamic_drag_source: None,
-            file_broker,
-            dialog_receiver,
-            file_browse_subscription: bus.subscribe(tool_databus::TopicFilter::exact(
-                tool_core::topics::UI_FORM_FILE_BROWSE,
-            )),
-            replay_analyzer_job: None,
-            replay_analyzer_generation: 0,
-        };
-        app.refresh_ports();
-        let enabled: Vec<String> = config
+            .map(|c| c.baud_rate.clone())
+            .unwrap_or_else(|| "115200".into()),
+        data_bits: config
             .as_ref()
-            .map(|c| c.enabled_plugins.clone())
-            .unwrap_or_default();
-        for id in &enabled {
-            if let Err(e) = app.plugin_manager.enable(id) {
-                app.log(LogLevel::Warn, format!("restore plugin {id}: {e}"));
-            }
-        }
-        app.log(LogLevel::Info, "就绪");
-        app
-    }
-
-    pub(crate) fn log(&self, lv: LogLevel, m: impl Into<String>) {
-        self.bus.publish(Event::system_log(lv, "app", m.into()));
-    }
-    pub(crate) fn refresh_ports(&mut self) {
-        self.refresh_ports_impl(true);
-    }
-
-    pub(crate) fn refresh_ports_silent(&mut self) {
-        self.refresh_ports_impl(false);
-    }
-
-    pub(crate) fn refresh_ports_impl(&mut self, show_status: bool) {
-        let old_names: BTreeSet<String> = self
-            .ports
-            .iter()
-            .map(|port| port.port_name.clone())
-            .collect();
-
-        let old_selected = self.selected_port.clone();
-
-        match self.transport.list_serial_ports() {
-            Ok(new_ports) => {
-                let new_names: BTreeSet<String> = new_ports
-                    .iter()
-                    .map(|port| port.port_name.clone())
-                    .collect();
-
-                let added_ports: Vec<String> = new_names.difference(&old_names).cloned().collect();
-
-                let removed_ports: Vec<String> =
-                    old_names.difference(&new_names).cloned().collect();
-
-                self.ports = new_ports;
-
-                let selected_still_exists = self
-                    .selected_port
-                    .as_ref()
-                    .is_some_and(|selected| new_names.contains(selected));
-
-                // 关键：只在当前选中端口消失时清空选择，不自动切到新端口。
-                if !selected_still_exists {
-                    let stale_port = self.selected_port.take();
-                    if let Some(ref p) = stale_port {
-                        self.set_status(StatusLevel::Warn, format!("{p} 已拔出或不可用"));
-                    }
-                }
-
-                if show_status {
-                    self.set_status(StatusLevel::Info, format!("{} 个串口", self.ports.len()));
-                    return;
-                }
-
-                if !added_ports.is_empty() {
-                    self.set_status(
-                        StatusLevel::Info,
-                        format!("发现串口 {}", added_ports.join(", ")),
-                    );
-                } else if !removed_ports.is_empty() {
-                    self.set_status(
-                        StatusLevel::Info,
-                        format!("移除串口 {}", removed_ports.join(", ")),
-                    );
-                } else if self.selected_port != old_selected {
-                    self.set_status(StatusLevel::Info, "请选择串口");
-                }
-            }
-            Err(error) => {
-                self.set_status(StatusLevel::Error, error.to_string());
-            }
+            .map(|c| c.data_bits.clone())
+            .unwrap_or_else(|| "8".into()),
+        stop_bits: config
+            .as_ref()
+            .map(|c| c.stop_bits.clone())
+            .unwrap_or_else(|| "1".into()),
+        parity: config
+            .as_ref()
+            .map(|c| c.parity.clone())
+            .unwrap_or_else(|| "none".into()),
+        timeout_ms: config
+            .as_ref()
+            .map(|c| c.timeout_ms.clone())
+            .unwrap_or_else(|| "50".into()),
+        recorder_path: config
+            .as_ref()
+            .map(|c| c.recorder_path.clone())
+            .unwrap_or_else(default_recorder_path),
+        panels: rp.clone(),
+        status: StatusState::default(),
+        last_port_refresh: 0.0,
+        bottom_panel_visible: rp.bottom_logs_visible,
+        bottom_tab: BottomTab::Terminal,
+        send: SendUiState::default(),
+        terminal_popup_open: false,
+        detached_dynamic_panels: BTreeSet::new(),
+        top_bar_serial_collapsed: false,
+        activity_order: config
+            .as_ref()
+            .map(|c| c.activity_order.clone())
+            .unwrap_or_else(default_activity_order),
+        activity_drag_source: None,
+        activity_rects_cache: Vec::new(),
+        last_rate_check_time: 0.0,
+        last_event_count: 0,
+        event_rate: 0.0,
+        bus: bus.clone(),
+        transport,
+        plugin_manager: pm,
+        recorder,
+        dynamic_drag_source: None,
+        file_broker,
+        dialog_receiver,
+        file_browse_subscription: bus.subscribe(tool_databus::TopicFilter::exact(
+            tool_core::topics::UI_FORM_FILE_BROWSE,
+        )),
+        replay_analyzer_job: None,
+        replay_analyzer_generation: 0,
+    };
+    app.refresh_ports();
+    let enabled: Vec<String> = config
+        .as_ref()
+        .map(|c| c.enabled_plugins.clone())
+        .unwrap_or_default();
+    for id in &enabled {
+        if let Err(e) = app.plugin_manager.enable(id) {
+            app.log(LogLevel::Warn, format!("restore plugin {id}: {e}"));
         }
     }
-
-    pub(crate) fn open_selected_port(&mut self) {
-        self.refresh_ports_silent();
-
-        let Some(p) = self.selected_port.clone() else {
-            self.log(LogLevel::Warn, "请选择串口");
-            self.set_status(StatusLevel::Warn, "请选择串口");
-            return;
-        };
-
-        let selected_exists = self.ports.iter().any(|port| port.port_name == p);
-
-        if !selected_exists {
-            self.set_status(StatusLevel::Error, format!("串口 {p} 不存在，请重新选择"));
-            return;
-        }
-
-        let baud_rate = match self.baud_rate.trim().parse::<u32>() {
-            Ok(v) if v > 0 => v,
-            _ => {
-                self.set_status_force(StatusLevel::Warn, "波特率格式错误");
-                return;
-            }
-        };
-
-        let timeout_ms = match self.timeout_ms.trim().parse::<u64>() {
-            Ok(v) if (1..=1000).contains(&v) => v,
-            _ => {
-                self.set_status_force(StatusLevel::Warn, "超时时间必须为 1..=1000 ms");
-                return;
-            }
-        };
-
-        let cfg = SerialConfig {
-            port_name: p.clone(),
-            baud_rate,
-            data_bits: pdb(&self.data_bits),
-            stop_bits: psb(&self.stop_bits),
-            parity: ppar(&self.parity),
-            timeout_ms,
-        };
-
-        match self.transport.open_serial(cfg) {
-            Ok(()) => {
-                self.set_status_force(StatusLevel::Info, format!("{p} 已连接"));
-                self.open_bottom_panel();
-            }
-            Err(e) => {
-                self.set_status_force(StatusLevel::Error, e.to_string());
-            }
-        }
-    }
-    pub(crate) fn start_or_stop_recording(&mut self) {
-        if self.recorder.is_running() || self.recorder.is_stopping() {
-            self.recorder.stop();
-            self.set_status_force(StatusLevel::Info, "正在停止录制...");
-        } else {
-            match self.recorder.start(PathBuf::from(&self.recorder_path)) {
-                Ok(()) => {
-                    self.set_status_force(StatusLevel::Info, "录制中");
-                }
-                Err(e) => {
-                    self.set_status_force(StatusLevel::Error, e.to_string());
-                }
-            }
-        }
-    }
-    pub(crate) fn save_config(&mut self) -> Result<(), String> {
-        self.panels.bottom_logs_visible = self.bottom_panel_visible;
-        let mut p = self.panels.clone();
-        p.discard_dynamic_tabs();
-        p.bottom_logs_visible = self.bottom_panel_visible;
-        let cfg = PersistedConfig {
-            panels: p,
-            selected_port: self.selected_port.clone(),
-            baud_rate: self.baud_rate.clone(),
-            data_bits: self.data_bits.clone(),
-            stop_bits: self.stop_bits.clone(),
-            parity: self.parity.clone(),
-            timeout_ms: self.timeout_ms.clone(),
-            recorder_path: self.recorder_path.clone(),
-            activity_order: self.activity_order.clone(),
-            enabled_plugins: self
-                .plugin_manager
-                .summaries()
-                .into_iter()
-                .filter(|s| {
-                    matches!(
-                        s.state,
-                        tool_extension::PluginState::Enabled | tool_extension::PluginState::Running
-                    )
-                })
-                .map(|s| s.id)
-                .collect(),
-        };
-        let t = serde_json::to_string_pretty(&cfg).map_err(|e| format!("序列化失败：{e}"))?;
-        std::fs::write(config_path(), t).map_err(|e| format!("写入失败：{e}"))
-    }
-    pub(crate) fn available_bottom_tabs(&self) -> Vec<BottomTab> {
-        BottomTab::ALL
-            .into_iter()
-            .filter(|tab| tab.is_available(self.terminal_popup_open))
-            .collect()
-    }
-
-    pub(crate) fn ensure_bottom_tab_available(&mut self) {
-        if self.bottom_tab.is_available(self.terminal_popup_open) {
-            return;
-        }
-        if let Some(tab) = self.available_bottom_tabs().into_iter().next() {
-            self.bottom_tab = tab;
-        }
-    }
-
-    pub(crate) fn open_bottom_panel(&mut self) {
-        self.bottom_panel_visible = true;
-        if BottomTab::Terminal.is_available(self.terminal_popup_open) {
-            self.bottom_tab = BottomTab::Terminal;
-        } else {
-            self.ensure_bottom_tab_available();
-        }
-    }
-
-    pub(crate) fn toggle_bottom_panel(&mut self) {
-        if self.bottom_panel_visible {
-            self.bottom_panel_visible = false;
-        } else {
-            self.open_bottom_panel();
-            self.set_status(StatusLevel::Info, "底部面板已打开");
-        }
-    }
-
-    // ── UI 组件 ──
-
-    pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let so = self
-                .selected_port
-                .as_deref()
-                .is_some_and(|p| self.transport.status_port(p).open);
-            let sl = if so {
-                format!("串口 ▸ {}", self.selected_port.as_deref().unwrap_or("?"))
-            } else {
-                "串口 ▸ 未连接".into()
-            };
-            if ui
-                .selectable_label(
-                    !self.top_bar_serial_collapsed,
-                    egui::RichText::new(format!("{} {sl}", if so { "●" } else { "○" }))
-                        .color(if so { theme::GREEN } else { theme::RED }),
-                )
-                .clicked()
-            {
-                self.top_bar_serial_collapsed = !self.top_bar_serial_collapsed;
-            }
-            if !self.top_bar_serial_collapsed {
-                self.serial_connect_controls(ui, "top-port", "top-baud", 130.0, 80.0, true);
-            }
-            ui.separator();
-            let rec = self.recorder.is_running();
-            if ui
-                .button(if rec {
-                    egui::RichText::new("⏹ 停止").color(theme::RED)
-                } else {
-                    egui::RichText::new("⏺ 录制").color(theme::TEXT_SECONDARY)
-                })
-                .clicked()
-            {
-                self.start_or_stop_recording();
-            }
-            if ui.small_button("保存布局").clicked() {
-                match self.save_config() {
-                    Ok(()) => self.set_status(StatusLevel::Info, "布局已保存"),
-                    Err(e) => self.set_status(StatusLevel::Error, format!("保存布局失败：{e}")),
-                }
-            }
-        });
-    }
-
-    pub(crate) fn serial_connect_controls(
-        &mut self,
-        ui: &mut egui::Ui,
-        port_combo_id: &'static str,
-        baud_combo_id: &'static str,
-        port_width: f32,
-        baud_width: f32,
-        compact: bool,
-    ) {
-        if !compact {
-            ui.label("端口");
-        }
-
-        serial_combo(
-            ui,
-            port_combo_id,
-            port_width,
-            &self.ports,
-            &mut self.selected_port,
-        );
-
-        if compact {
-            // 顶栏只显示连接状态，详细参数统一在设备页
-        } else {
-            ui.label("波特率");
-            baud_combo(ui, baud_combo_id, baud_width, &mut self.baud_rate);
-        }
-
-        let selected_open = self
-            .selected_port
-            .as_deref()
-            .is_some_and(|port| self.transport.status_port(port).open);
-
-        if selected_open {
-            if serial_action_button(ui, "重连").clicked() {
-                self.open_selected_port();
-            }
-        } else if serial_action_button(ui, "打开").clicked() {
-            self.open_selected_port();
-        }
-
-        if serial_action_button_enabled(ui, selected_open, "关闭").clicked() {
-            if let Some(ref port) = self.selected_port {
-                self.transport.close_port(port);
-                self.set_status(StatusLevel::Info, format!("{port} 已关闭"));
-            }
-        }
-
-        if !compact {
-            match self.selected_port.as_deref() {
-                Some(port) => {
-                    let st = self.transport.status_port(port);
-
-                    if st.open {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "● {} @ {} {}N{}",
-                                port,
-                                st.baud_rate.unwrap_or(0),
-                                &self.data_bits,
-                                &self.stop_bits
-                            ))
-                            .color(theme::GREEN),
-                        );
-                    } else {
-                        ui.label(egui::RichText::new("○ 未连接").color(theme::TEXT_SECONDARY));
-                    }
-                }
-                None => {
-                    ui.label(egui::RichText::new("○ 未选择串口").color(theme::TEXT_SECONDARY));
-                }
-            }
-        }
-    }
+    app.log(LogLevel::Info, "就绪");
+    app
 }
 
-// ══════════════════════════════════════════
-//  eframe::App
-// ══════════════════════════════════════════
+pub(crate) fn log(&self, lv: LogLevel, m: impl Into<String>) {
+    self.bus.publish(Event::system_log(lv, "app", m.into()));
+}
+
+// ── UI 组件 ──
 
 impl eframe::App for WorkbenchApp {
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {

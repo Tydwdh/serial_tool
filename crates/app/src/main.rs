@@ -3,6 +3,7 @@
 
 mod app;
 mod bootstrap;
+mod commands;
 mod config;
 mod replay_task;
 mod state;
