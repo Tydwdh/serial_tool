@@ -1,5 +1,6 @@
-use crate::app::{DetachedPanelAction, WorkbenchApp};
+use crate::app::WorkbenchApp;
 use crate::bootstrap::INSPECTOR_WIDTH;
+use crate::state::DetachedPanelAction;
 use eframe::egui;
 use std::collections::BTreeSet;
 use tool_panels::{Activity, PanelKind, theme};

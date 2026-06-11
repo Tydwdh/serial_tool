@@ -1,4 +1,5 @@
-use crate::app::{BottomTab, StatusLevel, WorkbenchApp, send_impl_to, translate_error};
+use crate::app::{WorkbenchApp, send_impl_to, translate_error};
+use crate::state::{BottomTab, StatusLevel};
 use crate::ui::top_bar::{serial_action_button, serial_action_button_enabled};
 use eframe::egui;
 use tool_panels::theme;

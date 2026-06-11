@@ -3,7 +3,8 @@ use std::thread;
 use tool_core::{Direction, Event, LogLevel, Payload};
 use tool_lua_host::{LuaReplayConfig, run_replay_analyzer};
 
-use crate::app::{ReplayAnalyzerJob, ReplayAnalyzerResult, StatusLevel, WorkbenchApp};
+use crate::app::{ReplayAnalyzerJob, ReplayAnalyzerResult, WorkbenchApp};
+use crate::state::StatusLevel;
 
 impl WorkbenchApp {
     pub(crate) fn launch_replay_analyzer_background(&mut self) {

@@ -2,8 +2,7 @@ use crate::config::{
     config_path, default_recorder_path, ensure_jsonl_extension, load_config, pick_recorder_path,
     record_mode_label, windows_open_dialog,
 };
-use crate::state::SendUiState;
-use crate::state::StatusState;
+use crate::state::{BottomTab, DetachedPanelAction, SendUiState, StatusLevel, StatusState};
 use eframe::egui;
 use egui::Color32;
 use serde::{Deserialize, Serialize};
@@ -33,22 +32,6 @@ use crate::ui::top_bar::{
 };
 
 // ── 数据结构 ──
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum StatusLevel {
-    Info,
-    Warn,
-    Error,
-}
-
-impl StatusLevel {
-    pub(crate) fn ttl_ms(self) -> u64 {
-        match self {
-            Self::Info => 5_000,
-            Self::Warn => 8_000,
-            Self::Error => 15_000,
-        }
-    }
-}
 
 impl WorkbenchApp {
     /// 统一状态入口。低级别不能覆盖未过期的高级消息。
@@ -75,34 +58,6 @@ impl WorkbenchApp {
             self.status.level = StatusLevel::Info;
             self.status.message = "就绪".into();
         }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DetachedPanelAction {
-    None,
-    Attach,
-    Close,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BottomTab {
-    Terminal,
-    Logs,
-}
-
-impl BottomTab {
-    const ALL: [Self; 2] = [Self::Terminal, Self::Logs];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Terminal => "接收",
-            Self::Logs => "日志",
-        }
-    }
-
-    pub(crate) fn is_available(self, terminal_popup_open: bool) -> bool {
-        !matches!(self, Self::Terminal) || !terminal_popup_open
     }
 }
 

@@ -1,4 +1,49 @@
-use crate::app::StatusLevel;
+use tool_transport::SerialPortDescriptor;
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum StatusLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+impl StatusLevel {
+    pub(crate) fn ttl_ms(self) -> u64 {
+        match self {
+            Self::Info => 5_000,
+            Self::Warn => 8_000,
+            Self::Error => 15_000,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DetachedPanelAction {
+    None,
+    Attach,
+    Close,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BottomTab {
+    Terminal,
+    Logs,
+}
+
+impl BottomTab {
+    pub(crate) const ALL: [Self; 2] = [Self::Terminal, Self::Logs];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Terminal => "接收",
+            Self::Logs => "日志",
+        }
+    }
+
+    pub(crate) fn is_available(self, terminal_popup_open: bool) -> bool {
+        !matches!(self, Self::Terminal) || !terminal_popup_open
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct StatusState {
@@ -33,34 +78,6 @@ impl Default for SendUiState {
             append_lf: false,
             error: None,
             popup_open: false,
-        }
-    }
-}
-use tool_transport::SerialPortDescriptor;
-
-#[derive(Clone)]
-pub(crate) struct SerialUiState {
-    pub(crate) ports: Vec<SerialPortDescriptor>,
-    pub(crate) selected_port: Option<String>,
-    pub(crate) baud_rate: String,
-    pub(crate) data_bits: String,
-    pub(crate) stop_bits: String,
-    pub(crate) parity: String,
-    pub(crate) timeout_ms: String,
-    pub(crate) last_port_refresh: f64,
-}
-
-impl Default for SerialUiState {
-    fn default() -> Self {
-        Self {
-            ports: Vec::new(),
-            selected_port: None,
-            baud_rate: "115200".into(),
-            data_bits: "8".into(),
-            stop_bits: "1".into(),
-            parity: "none".into(),
-            timeout_ms: "50".into(),
-            last_port_refresh: 0.0,
         }
     }
 }
