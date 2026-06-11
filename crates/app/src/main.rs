@@ -3,6 +3,7 @@
 
 mod app;
 mod bootstrap;
+mod config;
 mod ui;
 pub(crate) use bootstrap::*;
 
