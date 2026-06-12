@@ -199,6 +199,13 @@ impl WorkbenchApp {
     }
 }
 
+impl Drop for WorkbenchApp {
+    fn drop(&mut self) {
+        self.recorder.stop();
+        self.transport.close_serial();
+    }
+}
+
 // ── UI 组件 ──
 
 impl eframe::App for WorkbenchApp {

@@ -37,6 +37,7 @@ impl WorkbenchApp {
 
 impl WorkbenchApp {
     pub(crate) fn tick_pre_ui(&mut self, ctx: &egui::Context) {
+        self.clear_status_if_expired();
         match self.recorder.reap_stopping() {
             Some(Ok(path)) => {
                 self.set_status_force(StatusLevel::Info, format!("录制已保存: {}", path.display()))

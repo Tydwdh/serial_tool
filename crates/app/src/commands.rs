@@ -69,11 +69,20 @@ impl WorkbenchApp {
                     .as_ref()
                     .is_some_and(|selected| new_names.contains(selected));
 
-                // 关键：只在当前选中端口消失时清空选择，不自动切到新端口。
+                // 只在端口消失且 transport 也未打开时才清空选择
                 if !selected_still_exists {
-                    let stale_port = self.selected_port.take();
-                    if let Some(ref p) = stale_port {
-                        self.set_status(StatusLevel::Warn, format!("{p} 已拔出或不可用"));
+                    if let Some(ref selected) = self.selected_port {
+                        if self.transport.status_port(selected).open {
+                            self.set_status(
+                                StatusLevel::Warn,
+                                format!("{selected} 已打开但不在系统列表中"),
+                            );
+                        } else {
+                            let stale_port = self.selected_port.take();
+                            if let Some(ref p) = stale_port {
+                                self.set_status(StatusLevel::Warn, format!("{p} 已拔出或不可用"));
+                            }
+                        }
                     }
                 }
 

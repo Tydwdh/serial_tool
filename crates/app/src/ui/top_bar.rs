@@ -138,12 +138,6 @@ impl WorkbenchApp {
             {
                 self.start_or_stop_recording();
             }
-            if ui.small_button("保存布局").clicked() {
-                match self.save_config() {
-                    Ok(()) => self.set_status(StatusLevel::Info, "布局已保存"),
-                    Err(e) => self.set_status(StatusLevel::Error, format!("保存布局失败：{e}")),
-                }
-            }
         });
     }
 

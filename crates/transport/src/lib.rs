@@ -478,9 +478,17 @@ impl TransportManager {
     /// 清理已退出 worker 的 stale port handle（alive == false）。
     /// 可在 status 查询、list/open/close 或定时刷新时调用。
     pub fn reap_dead_ports(&self) {
-        self.ports
-            .lock()
-            .retain(|_, handle| handle.alive.load(Ordering::Relaxed));
+        let dead_names: Vec<String> = {
+            let guard = self.ports.lock();
+            guard
+                .iter()
+                .filter(|(_, h)| !h.alive.load(Ordering::Relaxed))
+                .map(|(name, _)| name.clone())
+                .collect()
+        };
+        for name in dead_names {
+            self.close_port(&name);
+        }
     }
 }
 
