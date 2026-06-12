@@ -1,6 +1,9 @@
 // Release 模式下不显示控制台窗口
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(test)]
+mod tests;
+
 mod app;
 mod bootstrap;
 mod commands;
