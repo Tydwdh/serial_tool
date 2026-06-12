@@ -78,6 +78,12 @@ impl JsonlRecorder {
     }
 
     pub fn start(&mut self, path: impl AsRef<Path>) -> io::Result<()> {
+        if self.is_stopping() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "recorder is still stopping previous session, please wait",
+            ));
+        }
         self.stop();
 
         let path = path.as_ref().to_path_buf();

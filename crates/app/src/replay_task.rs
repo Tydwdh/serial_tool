@@ -71,6 +71,7 @@ impl WorkbenchApp {
                     plugin_id: entry.plugin_id.clone(),
                     plugin_version: entry.manifest.version.clone(),
                     subscriptions: replay_config.subscriptions.clone(),
+                    outputs: replay_config.outputs.clone(),
                     context: serde_json::json!({
                         "id": entry.manifest.id,
                         "name": entry.manifest.name,

@@ -3420,6 +3420,7 @@ pub struct LuaReplayConfig {
     pub plugin_id: String,
     pub plugin_version: String,
     pub subscriptions: Vec<String>,
+    pub outputs: Vec<String>,
     pub context: serde_json::Value,
     pub plugin_root: Option<PathBuf>,
 }
@@ -3587,6 +3588,15 @@ fn install_replay_ctx(
     replay.set(
         "emit",
         lua.create_function(move |lua, (topic, payload): (String, Value)| {
+            // 校验 topic 必须在 manifest replay.outputs 中
+            if !config_emit.outputs.is_empty()
+                && !config_emit.outputs.iter().any(|o| topic_matches(o, &topic))
+            {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "replay.emit: topic '{}' not in manifest replay.outputs",
+                    topic
+                )));
+            }
             let payload = lua_value_to_payload(payload)?;
             let source = format!("replay-analyzer:{}", config_emit.plugin_id);
 
@@ -3902,6 +3912,7 @@ end
             plugin_id: "test".to_owned(),
             plugin_version: "1.0.0".to_owned(),
             subscriptions: vec!["transport.serial.default.rx".to_owned()],
+            outputs: vec![],
             context: json!({"id": "test", "name": "Test"}),
             plugin_root: None,
         };
@@ -3938,6 +3949,7 @@ end
             plugin_id: "test".to_owned(),
             plugin_version: "1.0.0".to_owned(),
             subscriptions: vec!["transport.serial.default.rx".to_owned()],
+            outputs: vec![],
             context: json!({"id": "test", "name": "Test"}),
             plugin_root: None,
         };
@@ -3970,6 +3982,7 @@ end
             plugin_id: "demo.plugin".to_owned(),
             plugin_version: "2.0.0".to_owned(),
             subscriptions: vec!["transport.serial.default.rx".to_owned()],
+            outputs: vec![],
             context: json!({"id": "demo.plugin", "name": "Demo", "version": "2.0.0"}),
             plugin_root: None,
         };
@@ -4022,6 +4035,7 @@ end
             plugin_id: "test.lifecycle".to_owned(),
             plugin_version: "1.0.0".to_owned(),
             subscriptions: vec!["transport.serial.default.rx".to_owned()],
+            outputs: vec![],
             context: json!({"id": "test.lifecycle", "name": "Lifecycle"}),
             plugin_root: None,
         };
@@ -4067,6 +4081,7 @@ function on_replay_end() end
             plugin_id: "test.skip".to_owned(),
             plugin_version: "1.0.0".to_owned(),
             subscriptions: vec!["transport.serial.default.rx".to_owned()],
+            outputs: vec![],
             context: json!({"id": "test.skip", "name": "Skip"}),
             plugin_root: None,
         };
