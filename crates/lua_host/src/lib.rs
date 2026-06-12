@@ -1582,6 +1582,7 @@ fn install_ctx(
     ctx.set("plugin", json_to_lua_value(lua, &config.context)?)?;
 
     let _ = codec::register_codec(lua);
+    let _ = codec::register_utils(lua);
 
     lua.globals().set("ctx", &ctx)?;
 
@@ -3646,6 +3647,7 @@ fn install_replay_ctx(
     lua.globals().set("__plugin_storage", lua.create_table()?)?;
 
     let _ = codec::register_codec(lua);
+    let _ = codec::register_utils(lua);
 
     // 注册 ctx 全局变量
     lua.globals().set("ctx", ctx)?;

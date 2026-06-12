@@ -100,6 +100,115 @@ fn create_codec_table(lua: &Lua, (): ()) -> mlua::Result<Value> {
     Ok(Value::Table(tbl))
 }
 
+/// 注册 hw.utils 到 package.preload。提供常用工具函数。
+pub fn register_utils(lua: &Lua) -> mlua::Result<()> {
+    let package: Table = lua.globals().get("package")?;
+    let preload: Table = package.get("preload")?;
+    preload.set("hw.utils", lua.create_function(create_utils_table)?)?;
+    Ok(())
+}
+
+fn create_utils_table(lua: &Lua, (): ()) -> mlua::Result<Value> {
+    let tbl = lua.create_table()?;
+
+    // hw.utils.split(str, sep) → array of strings
+    tbl.set(
+        "split",
+        lua.create_function(|lua, (s, sep): (mlua::String, mlua::String)| {
+            let s = s.to_str()?.to_owned();
+            let sep = sep.to_str()?.to_owned();
+            let parts: Vec<&str> = s.split(&sep).collect();
+            let arr = lua.create_table()?;
+            for (i, part) in parts.iter().enumerate() {
+                arr.set(i + 1, *part)?;
+            }
+            Ok(Value::Table(arr))
+        })?,
+    )?;
+
+    // hw.utils.join(arr, sep) → string
+    tbl.set(
+        "join",
+        lua.create_function(|_lua, (arr, sep): (Table, mlua::String)| {
+            let mut parts: Vec<String> = Vec::new();
+            for i in 1..=arr.raw_len() {
+                if let Ok(v) = arr.get::<mlua::String>(i) {
+                    parts.push(v.to_str()?.to_owned());
+                }
+            }
+            Ok(parts.join(sep.to_str()?.as_ref()))
+        })?,
+    )?;
+
+    // hw.utils.parse_number(s) → number or nil
+    tbl.set(
+        "parse_number",
+        lua.create_function(|_lua, s: mlua::String| {
+            let s = s.to_str()?.trim().to_owned();
+            if let Ok(i) = s.parse::<i64>() {
+                Ok(Value::Integer(i))
+            } else if let Ok(f) = s.parse::<f64>() {
+                Ok(Value::Number(f))
+            } else {
+                Ok(Value::Nil)
+            }
+        })?,
+    )?;
+
+    // hw.utils.table_keys(t) → array of keys
+    tbl.set(
+        "table_keys",
+        lua.create_function(|lua, t: Table| {
+            let arr = lua.create_table()?;
+            let mut i = 0;
+            for pair in t.pairs::<Value, Value>() {
+                if let Ok((key, _)) = pair {
+                    i += 1;
+                    arr.set(i, key)?;
+                }
+            }
+            Ok(Value::Table(arr))
+        })?,
+    )?;
+
+    // hw.utils.starts_with(s, prefix) → bool
+    tbl.set(
+        "starts_with",
+        lua.create_function(|_lua, (s, prefix): (mlua::String, mlua::String)| {
+            Ok(s.to_str()?.as_ref().starts_with(prefix.to_str()?.as_ref()))
+        })?,
+    )?;
+
+    // hw.utils.ends_with(s, suffix) → bool
+    tbl.set(
+        "ends_with",
+        lua.create_function(|_lua, (s, suffix): (mlua::String, mlua::String)| {
+            Ok(s.to_str()?.as_ref().ends_with(suffix.to_str()?.as_ref()))
+        })?,
+    )?;
+
+    // hw.utils.format_size(bytes) → human-readable string
+    tbl.set(
+        "format_size",
+        lua.create_function(|_lua, bytes: u64| {
+            let units = ["B", "KB", "MB", "GB"];
+            let mut size = bytes as f64;
+            let mut unit_idx = 0;
+            while size >= 1024.0 && unit_idx < units.len() - 1 {
+                size /= 1024.0;
+                unit_idx += 1;
+            }
+            if unit_idx == 0 {
+                Ok(format!("{} {}", bytes, units[unit_idx]))
+            } else {
+                Ok(format!("{:.1} {}", size, units[unit_idx]))
+            }
+        })?,
+    )?;
+
+    Ok(Value::Table(tbl))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +221,7 @@ mod tests {
         )
         .unwrap();
         register_codec(&lua).unwrap();
+        register_utils(&lua).unwrap();
         lua
     }
 
@@ -216,5 +326,47 @@ mod tests {
         )
         .exec()
         .unwrap();
+    }
+
+    #[test]
+    fn utils_split_works() {
+        let lua = setup();
+        lua.load(
+            r#"local u = require('hw.utils'); local parts = u.split('a,b,c', ','); assert(#parts == 3 and parts[1] == 'a' and parts[3] == 'c')"#,
+        )
+        .exec()
+        .unwrap();
+    }
+
+    #[test]
+    fn utils_parse_number() {
+        let lua = setup();
+        lua.load("local u = require('hw.utils'); assert(u.parse_number('42') == 42); assert(u.parse_number('3.14') > 3.13)")
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
+    fn utils_starts_with() {
+        let lua = setup();
+        lua.load("local u = require('hw.utils'); assert(u.starts_with('hello', 'hel')); assert(not u.starts_with('hello', 'lo'))")
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
+    fn utils_join_works() {
+        let lua = setup();
+        lua.load("local u = require('hw.utils'); assert(u.join({'a','b','c'}, ',') == 'a,b,c')")
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
+    fn utils_format_size() {
+        let lua = setup();
+        lua.load("local u = require('hw.utils'); assert(u.format_size(1024) == '1.0 KB')")
+            .exec()
+            .unwrap();
     }
 }
