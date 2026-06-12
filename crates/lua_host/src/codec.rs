@@ -99,3 +99,122 @@ fn create_codec_table(lua: &Lua, (): ()) -> mlua::Result<Value> {
 
     Ok(Value::Table(tbl))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mlua::{Lua, LuaOptions, StdLib};
+
+    fn setup() -> Lua {
+        let lua = Lua::new_with(
+            StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::PACKAGE,
+            LuaOptions::default(),
+        )
+        .unwrap();
+        register_codec(&lua).unwrap();
+        lua
+    }
+
+    #[test]
+    fn to_hex_encodes_correctly() {
+        let lua = setup();
+        lua.load("local c = require('hw.codec'); assert(c.to_hex('\\x00\\xFF\\xAB') == '00FFAB')")
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
+    fn from_hex_decodes_correctly() {
+        let lua = setup();
+        lua.load(
+            "local c = require('hw.codec'); assert(c.from_hex('00FFAB') == '\\x00\\xFF\\xAB')",
+        )
+        .exec()
+        .unwrap();
+    }
+
+    #[test]
+    fn from_hex_rejects_odd_length() {
+        let lua = setup();
+        let result = lua
+            .load("local c = require('hw.codec'); c.from_hex('ABC')")
+            .exec();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_hex_rejects_invalid_chars() {
+        let lua = setup();
+        let result = lua
+            .load("local c = require('hw.codec'); c.from_hex('ZZ')")
+            .exec();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn xor8_computes_correctly() {
+        let lua = setup();
+        // XOR of 'A'(65) ^ 'B'(66) ^ 'C'(67) = 64
+        lua.load("local c = require('hw.codec'); assert(c.xor8('ABC') == 64)")
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
+    fn crc16_modbus_known_value() {
+        let lua = setup();
+        // CRC-16 Modbus for empty input should be 0xFFFF
+        lua.load("local c = require('hw.codec'); assert(c.crc16_modbus('') == 0xFFFF)")
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
+    fn trim_line_strips_newline() {
+        let lua = setup();
+        lua.load("local c = require('hw.codec'); assert(c.trim_line('hello\\n') == 'hello')")
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
+    fn trim_line_keeps_normal_text() {
+        let lua = setup();
+        lua.load("local c = require('hw.codec'); assert(c.trim_line('hello') == 'hello')")
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
+    fn split_lines_works() {
+        let lua = setup();
+        lua.load(
+            r#"
+            local c = require('hw.codec')
+            local lines = c.split_lines("a\nb\nc")
+            assert(#lines == 3)
+            assert(lines[1] == 'a')
+            assert(lines[2] == 'b')
+            assert(lines[3] == 'c')
+        "#,
+        )
+        .exec()
+        .unwrap();
+    }
+
+    #[test]
+    fn split_lines_strips_cr() {
+        let lua = setup();
+        lua.load(
+            r#"
+            local c = require('hw.codec')
+            local lines = c.split_lines("a\r\nb\r\n")
+            assert(#lines == 2)
+            assert(lines[1] == 'a')
+            assert(lines[2] == 'b')
+        "#,
+        )
+        .exec()
+        .unwrap();
+    }
+}
