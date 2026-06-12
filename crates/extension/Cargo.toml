@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 crossbeam-channel.workspace = true
+dirs-next.workspace = true
 parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true

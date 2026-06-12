@@ -315,9 +315,13 @@ pub struct PluginManager {
 impl PluginManager {
     pub fn new(bus: DataBus, transport: TransportManager) -> Self {
         let subscription = bus.subscribe_bounded(TopicFilter::All, 32_768);
-        let default_config_root = std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join("plugin-config");
+        let config_root = dirs_next::config_dir()
+            .map(|d| d.join("HardwareWorkbench").join("plugin-config"))
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join("plugin-config")
+            });
 
         Self {
             bus,
@@ -331,7 +335,7 @@ impl PluginManager {
             dialog_request_sender: None,
             file_broker: None,
             line_buffers: Arc::new(Mutex::new(HashMap::new())),
-            config_store: Arc::new(ConfigStore::new(default_config_root)),
+            config_store: Arc::new(ConfigStore::new(config_root)),
             dropped_events: 0,
             last_seen_manager_dropped: 0,
         }
