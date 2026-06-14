@@ -60,12 +60,47 @@ impl Default for StatusState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LineEnding {
+    None,
+    Lf,
+    Cr,
+    Crlf,
+}
+
+impl LineEnding {
+    pub(crate) const ALL: [Self; 4] = [Self::None, Self::Lf, Self::Cr, Self::Crlf];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::None => "无",
+            Self::Lf => "LF",
+            Self::Cr => "CR",
+            Self::Crlf => "CRLF",
+        }
+    }
+
+    pub(crate) fn suffix(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Lf => "\n",
+            Self::Cr => "\r",
+            Self::Crlf => "\r\n",
+        }
+    }
+}
+
 pub(crate) struct SendUiState {
     pub(crate) input: String,
     pub(crate) hex_mode: bool,
-    pub(crate) append_lf: bool,
+    pub(crate) line_ending: LineEnding,
     pub(crate) error: Option<String>,
     pub(crate) popup_open: bool,
+    pub(crate) target_port: Option<String>,
+    pub(crate) send_history: std::collections::VecDeque<String>,
+    pub(crate) periodic_enabled: bool,
+    pub(crate) periodic_interval_ms: String,
+    pub(crate) next_periodic_send_time: f64,
 }
 
 impl Default for SendUiState {
@@ -73,9 +108,14 @@ impl Default for SendUiState {
         Self {
             input: String::new(),
             hex_mode: false,
-            append_lf: false,
+            line_ending: LineEnding::Lf,
             error: None,
             popup_open: false,
+            target_port: None,
+            send_history: std::collections::VecDeque::new(),
+            periodic_enabled: false,
+            periodic_interval_ms: "1000".to_owned(),
+            next_periodic_send_time: 0.0,
         }
     }
 }

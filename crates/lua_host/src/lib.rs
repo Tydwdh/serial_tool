@@ -3451,6 +3451,20 @@ pub fn run_replay_analyzer(
     config: LuaReplayConfig,
     input_events: &[Event],
 ) -> LuaHostResult<LuaReplayOutput> {
+    run_replay_analyzer_with_cancel(
+        source,
+        config,
+        input_events,
+        Arc::new(AtomicBool::new(false)),
+    )
+}
+
+pub fn run_replay_analyzer_with_cancel(
+    source: String,
+    config: LuaReplayConfig,
+    input_events: &[Event],
+    cancel: Arc<AtomicBool>,
+) -> LuaHostResult<LuaReplayOutput> {
     let lua = Lua::new_with(
         StdLib::TABLE
             | StdLib::STRING
@@ -3461,9 +3475,8 @@ pub fn run_replay_analyzer(
         LuaOptions::default(),
     )?;
 
-    // 安装 budget hook：防止 analyzer 死循环或卡死
-    let replay_stop = Arc::new(AtomicBool::new(false));
-    install_budget_hook(&lua, 30_000, replay_stop.clone())?;
+    // 安装 budget hook：防止 analyzer 死循环或卡死；取消信号共用
+    install_budget_hook(&lua, 30_000, Arc::clone(&cancel))?;
 
     let emitted_events = Arc::new(ParkingMutex::new(Vec::new()));
     let logs = Arc::new(ParkingMutex::new(Vec::new()));
@@ -3472,6 +3485,15 @@ pub fn run_replay_analyzer(
 
     // 加载并执行 Lua 源码
     lua.load(&source).set_name(&config.script_name).exec()?;
+
+    // 检查取消
+    if cancel.load(Ordering::Relaxed) {
+        logs.lock().push("Analyzer 已取消".to_owned());
+        return Ok(LuaReplayOutput {
+            events: Vec::new(),
+            logs: logs.lock().clone(),
+        });
+    }
 
     // 构建 session 信息
     let first_ts = input_events.first().map(|e| e.timestamp_ms).unwrap_or(0);
@@ -3490,6 +3512,11 @@ pub fn run_replay_analyzer(
 
     // 遍历输入事件
     for input_event in input_events {
+        if cancel.load(Ordering::Relaxed) {
+            logs.lock().push("Analyzer 已取消".to_owned());
+            break;
+        }
+
         // 只处理匹配 subscriptions 的事件
         // 使用与实时插件一致的 topic_matches 语义（* 前缀，无 * 精确）
         if !config

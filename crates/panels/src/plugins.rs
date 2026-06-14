@@ -29,6 +29,12 @@ impl PluginsPanel {
             if ui.button("刷新").clicked() {
                 self.refresh(manager);
             }
+            if ui.button("创建插件...").clicked() {
+                self.scaffold_plugin();
+            }
+            if ui.button("打开目录").clicked() {
+                self.last_error = Some(format!("插件目录: {}", self.root));
+            }
         });
 
         if let Some(error) = &self.last_error {
@@ -56,6 +62,65 @@ impl PluginsPanel {
         match manager.discover_roots([PathBuf::from(self.root.trim())]) {
             Ok(count) => self.last_error = Some(format!("发现了 {count} 个插件")),
             Err(error) => self.last_error = Some(error.to_string()),
+        }
+    }
+
+    fn scaffold_plugin(&mut self) {
+        let name = "my-plugin";
+        let dir = PathBuf::from(self.root.trim()).join(name);
+        if dir.exists() {
+            self.last_error = Some(format!("{name} 已存在"));
+            return;
+        }
+        match std::fs::create_dir_all(&dir) {
+            Ok(()) => {
+                let plugin_json = serde_json::json!({
+                    "id": name,
+                    "name": "我的插件",
+                    "version": "0.1.0",
+                    "runtime": "lua",
+                    "main": "main.lua",
+                    "permissions": ["bus", "log", "ui", "storage"],
+                });
+                let _ = std::fs::write(
+                    dir.join("plugin.json"),
+                    serde_json::to_string_pretty(&plugin_json).unwrap_or_default(),
+                );
+
+                let main_lua = r#"local PANEL_ID = "my-panel"
+
+function on_init(ctx)
+    ctx.log("info", "插件已加载")
+
+    ctx.ui.create_form({
+        id = PANEL_ID,
+        title = "我的面板",
+        fields = {
+            { id = "msg", kind = "TextArea", title = "消息", value = "Hello!", rows = 1 },
+            { id = "btn", kind = "Button", title = "发送日志", action = "my.send" },
+        },
+    })
+end
+
+function on_form_changed(ctx, panel_id, values)
+    -- 处理表单变更
+end
+
+function on_form_action(ctx, panel_id, field_id, action, values)
+    if action == "my.send" then
+        ctx.log("info", "发送: " .. tostring(values.msg or ""))
+    end
+end
+"#;
+                let _ = std::fs::write(dir.join("main.lua"), main_lua);
+
+                self.last_error = Some(format!(
+                    "已创建插件 {name}，请点击刷新后启用"
+                ));
+            }
+            Err(e) => {
+                self.last_error = Some(format!("创建失败：{e}"));
+            }
         }
     }
 
@@ -138,6 +203,20 @@ impl PluginsPanel {
                         self.recently_disabled.push(summary.id.clone());
                     }
                     Err(error) => self.last_error = Some(error.to_string()),
+                }
+            }
+            let can_restart = can_disable;
+            if ui
+                .add_enabled(can_restart, egui::Button::new("重启"))
+                .on_hover_text("禁用后重新启用")
+                .clicked()
+            {
+                if let Err(e) = manager.disable(&summary.id) {
+                    self.last_error = Some(format!("禁用失败：{e}"));
+                } else if let Err(e) = manager.enable(&summary.id) {
+                    self.last_error = Some(format!("启用失败：{e}"));
+                } else {
+                    self.last_error = Some(format!("{} 已重启", summary.id));
                 }
             }
         });

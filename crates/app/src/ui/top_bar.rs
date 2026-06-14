@@ -9,14 +9,18 @@ pub(crate) fn serial_combo(
     w: f32,
     ports: &[SerialPortDescriptor],
     sel: &mut Option<String>,
+    aliases: &std::collections::HashMap<String, String>,
 ) {
     let selected_text = sel
         .as_deref()
         .and_then(|name| {
-            ports
-                .iter()
-                .find(|p| p.port_name == name)
-                .map(|p| format!("{}  {}", p.port_name, p.port_type))
+            ports.iter().find(|p| p.port_name == name).map(|p| {
+                if let Some(alias) = aliases.get(&p.port_name).filter(|s| !s.trim().is_empty()) {
+                    format!("{alias} ({})  {}", p.port_name, p.port_type)
+                } else {
+                    format!("{}  {}", p.port_name, p.port_type)
+                }
+            })
         })
         .unwrap_or_else(|| {
             if ports.is_empty() {
@@ -34,10 +38,18 @@ pub(crate) fn serial_combo(
                 ui.add_enabled(false, egui::Label::new("无可用串口"));
             } else {
                 for port in ports {
+                    let label = if let Some(alias) = aliases
+                        .get(&port.port_name)
+                        .filter(|s| !s.trim().is_empty())
+                    {
+                        format!("{alias} ({})  {}", port.port_name, port.port_type)
+                    } else {
+                        format!("{}  {}", port.port_name, port.port_type)
+                    };
                     ui.selectable_value(
                         sel,
                         Some(port.port_name.clone()),
-                        format!("{}  {}", port.port_name, port.port_type),
+                        label,
                     );
                 }
             }
@@ -99,6 +111,7 @@ pub(crate) fn ppar(v: &str) -> Parity {
 
 use crate::app::WorkbenchApp;
 use crate::state::StatusLevel;
+use crate::ui::layout_buttons::{layout_icon_button, LayoutButtonKind};
 use tool_panels::theme;
 
 impl WorkbenchApp {
@@ -138,6 +151,52 @@ impl WorkbenchApp {
             {
                 self.start_or_stop_recording();
             }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if layout_icon_button(
+                    ui,
+                    LayoutButtonKind::RightDock,
+                    self.panels.dock.right_visible,
+                    "显示/隐藏右侧停靠区",
+                )
+                .clicked()
+                {
+                    self.panels.dock.right_visible = !self.panels.dock.right_visible;
+                    let _ = self.save_config();
+                }
+
+                if layout_icon_button(
+                    ui,
+                    LayoutButtonKind::BottomPanel,
+                    self.panels.dock.bottom_visible,
+                    "显示/隐藏底部面板",
+                )
+                .clicked()
+                {
+                    self.panels.dock.bottom_visible = !self.panels.dock.bottom_visible;
+                    self.bottom_panel_visible = self.panels.dock.bottom_visible;
+                    let _ = self.save_config();
+                }
+
+                if layout_icon_button(
+                    ui,
+                    LayoutButtonKind::ActivityBar,
+                    self.panels.dock.activity_bar_visible,
+                    "显示/隐藏左侧活动栏",
+                )
+                .clicked()
+                {
+                    self.panels.dock.activity_bar_visible =
+                        !self.panels.dock.activity_bar_visible;
+                    let _ = self.save_config();
+                }
+
+                if layout_icon_button(ui, LayoutButtonKind::Menu, false, "重置布局").clicked() {
+                    self.panels.dock = tool_panels::DockLayout::default();
+                    self.bottom_panel_visible = self.panels.dock.bottom_visible;
+                    let _ = self.save_config();
+                }
+            });
         });
     }
 
@@ -160,6 +219,7 @@ impl WorkbenchApp {
             port_width,
             &self.ports,
             &mut self.selected_port,
+            &self.port_aliases,
         );
 
         if compact {

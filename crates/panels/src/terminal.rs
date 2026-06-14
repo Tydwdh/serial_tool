@@ -1,6 +1,6 @@
 use crate::theme;
 use egui::{Color32, RichText, ScrollArea};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use tool_core::{Direction, Event, Payload, topics};
 use tool_databus::{DataBus, Subscription, TopicFilter};
 
@@ -20,6 +20,10 @@ pub struct TerminalPanel {
     show_tx: bool,
     show_hex: bool,
     auto_scroll: bool,
+
+    search_text: String,
+    port_filter: Option<String>,
+    bookmarked_entry_ids: BTreeSet<u64>,
 
     max_entries: usize,
 
@@ -85,13 +89,17 @@ struct RenderOutcome {
 impl TerminalPanel {
     pub fn new(bus: &DataBus) -> Self {
         Self {
-            subscription: bus.subscribe_bounded(TopicFilter::prefix("transport.serial."), 4096),
+            subscription: bus.subscribe_lossy_bounded(TopicFilter::prefix("transport.serial."), 4096),
             ports: BTreeMap::new(),
 
             show_rx: true,
             show_tx: true,
             show_hex: false,
             auto_scroll: true,
+
+            search_text: String::new(),
+            port_filter: None,
+            bookmarked_entry_ids: BTreeSet::new(),
 
             max_entries: 2_000,
 
@@ -119,11 +127,83 @@ impl TerminalPanel {
 
         count
     }
+    pub fn ingest_pending(&mut self) -> usize {
+        self.ingest()
+    }
+
     pub fn clear(&mut self) {
         self.ports.clear();
         self.last_scroll_offsets.clear();
         self.selected_entry_id = None;
         self.detail_entry_id = None;
+        self.search_text.clear();
+        self.port_filter = None;
+        self.bookmarked_entry_ids.clear();
+    }
+
+    pub fn is_bookmarked(&self, entry_id: u64) -> bool {
+        self.bookmarked_entry_ids.contains(&entry_id)
+    }
+
+    pub fn toggle_bookmark(&mut self, entry_id: u64) {
+        if !self.bookmarked_entry_ids.insert(entry_id) {
+            self.bookmarked_entry_ids.remove(&entry_id);
+        }
+    }
+
+    pub fn export_visible_csv(&self) -> String {
+        let mut out = String::from("time,port,direction,text,hex\n");
+        for (port, data) in &self.ports {
+            if let Some(ref filter) = self.port_filter {
+                if filter != port { continue; }
+            }
+            for entry in &data.entries {
+                if !entry_visible(entry.direction, self.show_rx, self.show_tx) { continue; }
+                if !entry_matches_search(port, entry, &self.search_text) { continue; }
+                out.push_str(&csv_cell(&entry.timestamp_label));
+                out.push(',');
+                out.push_str(&csv_cell(port));
+                out.push(',');
+                out.push_str(&csv_cell(match entry.direction {
+                    Direction::Rx => "RX",
+                    Direction::Tx => "TX",
+                    Direction::Internal => "INTERNAL",
+                }));
+                out.push(',');
+                out.push_str(&csv_cell(&entry.raw_text));
+                out.push(',');
+                out.push_str(&csv_cell(&entry.hex_text));
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    pub fn export_visible_jsonl(&self) -> String {
+        let mut out = String::new();
+        for (port, data) in &self.ports {
+            if let Some(ref filter) = self.port_filter {
+                if filter != port { continue; }
+            }
+            for entry in &data.entries {
+                if !entry_visible(entry.direction, self.show_rx, self.show_tx) { continue; }
+                if !entry_matches_search(port, entry, &self.search_text) { continue; }
+                let line = serde_json::json!({
+                    "time": entry.timestamp_label,
+                    "port": port,
+                    "direction": match entry.direction {
+                        Direction::Rx => "RX",
+                        Direction::Tx => "TX",
+                        Direction::Internal => "INTERNAL",
+                    },
+                    "text": entry.raw_text,
+                    "hex": entry.hex_text,
+                });
+                out.push_str(&serde_json::to_string(&line).unwrap_or_default());
+                out.push('\n');
+            }
+        }
+        out
     }
 
     pub fn port_names(&self) -> Vec<String> {
@@ -177,10 +257,11 @@ impl TerminalPanel {
                 .map(|entry| VisibleRow { port: None, entry })
                 .collect();
 
+            let scroll_height = ui.available_height().max(40.0);
             render_rows_view(
                 ui,
                 &scroll_key,
-                self.height,
+                scroll_height,
                 &rows,
                 show_hex,
                 auto_scroll,
@@ -203,8 +284,6 @@ impl TerminalPanel {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
-        let _new_entries = self.ingest();
-
         let scroll_key = "terminal-all".to_owned();
         let mut force_scroll_to_bottom = false;
 
@@ -216,40 +295,84 @@ impl TerminalPanel {
             force_scroll_to_bottom |= auto_scroll_button(ui, &mut self.auto_scroll);
 
             if ui.button("清空").clicked() {
-                self.ports.clear();
-                self.selected_entry_id = None;
-                self.detail_entry_id = None;
+                self.clear();
+            }
+
+            if ui.button("复制 CSV").on_hover_text("复制过滤后的视图为 CSV").clicked() {
+                ui.ctx().copy_text(self.export_visible_csv());
+            }
+
+            if ui.button("复制 JSONL").on_hover_text("复制过滤后的视图为 JSONL").clicked() {
+                ui.ctx().copy_text(self.export_visible_jsonl());
             }
 
             if ui.button("⛶").on_hover_text("放大查看").clicked() {
                 self.maximize_clicked = true;
             }
+        });
 
-            let total = self
-                .ports
-                .values()
-                .map(|port| port.entries.len())
-                .sum::<usize>();
+        ui.horizontal(|ui| {
+            ui.label("搜索");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.search_text)
+                    .desired_width(140.0)
+                    .hint_text("文本 / HEX"),
+            );
 
-            ui.label(RichText::new(format!("{total} 条")).color(theme::TEXT_SECONDARY));
+            ui.label("端口");
+            egui::ComboBox::from_id_salt("terminal-port-filter")
+                .width(100.0)
+                .selected_text(self.port_filter.as_deref().unwrap_or("全部"))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.port_filter, None, "全部");
+                    for port in self.ports.keys() {
+                        ui.selectable_value(
+                            &mut self.port_filter,
+                            Some(port.clone()),
+                            port,
+                        );
+                    }
+                });
+
+            if ui.button("清除筛选").clicked() {
+                self.search_text.clear();
+                self.port_filter = None;
+            }
         });
 
         ui.separator();
+
+        let total_all: usize = self.ports.values().map(|d| d.entries.len()).sum();
 
         let render_outcome = {
             let mut rows: Vec<VisibleRow<'_>> = Vec::new();
 
             for (port, data) in &self.ports {
+                if let Some(filter_port) = &self.port_filter {
+                    if filter_port != port {
+                        continue;
+                    }
+                }
+
                 for entry in data
                     .entries
                     .iter()
                     .filter(|entry| entry_visible(entry.direction, self.show_rx, self.show_tx))
+                    .filter(|entry| entry_matches_search(port, entry, &self.search_text))
                 {
                     rows.push(VisibleRow {
                         port: Some(port.as_str()),
                         entry,
                     });
                 }
+            }
+
+            let visible_count = rows.len();
+            if visible_count != total_all {
+                ui.label(
+                    RichText::new(format!("{visible_count} / {total_all} 条"))
+                        .color(theme::TEXT_SECONDARY),
+                );
             }
 
             // 关键修复：
@@ -260,10 +383,11 @@ impl TerminalPanel {
             // 所以只按 timestamp_ms 或 (timestamp_ms, local_id) 都可能看起来像 COM 分组。
             rows.sort_by_key(|row| row.entry.event_id);
 
+            let scroll_height = ui.available_height().max(40.0);
             render_rows_view(
                 ui,
                 &scroll_key,
-                self.height,
+                scroll_height,
                 &rows,
                 self.show_hex,
                 self.auto_scroll,
@@ -633,6 +757,25 @@ fn entry_visible(direction: Direction, show_rx: bool, show_tx: bool) -> bool {
         Direction::Tx => show_tx,
         Direction::Internal => false,
     }
+}
+
+fn entry_matches_search(port: &str, entry: &TerminalEntry, search: &str) -> bool {
+    let q = search.trim();
+    if q.is_empty() {
+        return true;
+    }
+
+    let q = q.to_ascii_lowercase();
+
+    port.to_ascii_lowercase().contains(&q)
+        || entry.raw_text.to_ascii_lowercase().contains(&q)
+        || entry.display_text.to_ascii_lowercase().contains(&q)
+        || entry.hex_text.to_ascii_lowercase().contains(&q)
+}
+
+fn csv_cell(s: &str) -> String {
+    let escaped = s.replace('"', "\"\"");
+    format!("\"{escaped}\"")
 }
 
 fn auto_scroll_button(ui: &mut egui::Ui, auto_scroll: &mut bool) -> bool {

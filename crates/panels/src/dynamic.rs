@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
 use tool_core::{Direction, Event, LogLevel, Payload, topics};
 use tool_databus::{DataBus, Subscription, TopicFilter};
+use tool_transport::SerialPortDescriptor;
 
 pub struct DynamicPanels {
     bus: DataBus,
@@ -18,6 +19,7 @@ pub struct DynamicPanels {
     log_append_subscription: Subscription,
     panels: BTreeMap<String, DynamicPanel>,
     last_error: Option<String>,
+    ports: Vec<SerialPortDescriptor>,
 }
 
 struct LogEntry {
@@ -87,6 +89,8 @@ enum DynamicFieldKind {
     Status,
     Separator,
     Label,
+    // ── v0.3 新增 ──
+    Serial,
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +123,7 @@ impl DynamicPanels {
             log_append_subscription: bus.subscribe(TopicFilter::exact(topics::UI_LOG_APPEND)),
             panels: BTreeMap::new(),
             last_error: None,
+            ports: Vec::new(),
         }
     }
 
@@ -316,7 +321,7 @@ impl DynamicPanels {
             DynamicPanel::Form {
                 fields, auto_apply, ..
             } => {
-                dynamic_form_ui(ui, &self.bus, id, fields, *auto_apply);
+                dynamic_form_ui(ui, &self.bus, id, fields, *auto_apply, &self.ports);
             }
             DynamicPanel::Attitude { attitude, .. } => {
                 attitude.ui(ui);
@@ -438,6 +443,10 @@ impl DynamicPanels {
 
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
+    }
+
+    pub fn set_ports(&mut self, ports: &[SerialPortDescriptor]) {
+        self.ports = ports.to_vec();
     }
 
     fn create_from_event(&mut self, event: Event) -> Result<Option<String>, String> {
@@ -591,6 +600,7 @@ fn dynamic_form_ui(
     panel_id: &str,
     fields: &mut [DynamicField],
     auto_apply: bool,
+    ports: &[SerialPortDescriptor],
 ) {
     let mut changed = false;
 
@@ -879,6 +889,59 @@ fn dynamic_form_ui(
                                 false
                             }
                         }
+                        DynamicFieldKind::Serial => {
+                            let current = field.value.as_str().unwrap_or("").to_owned();
+                            let selected_text = ports
+                                .iter()
+                                .find(|p| p.port_name == current)
+                                .map(|p| format!("{}  {}", p.port_name, p.port_type))
+                                .unwrap_or_else(|| {
+                                    if ports.is_empty() {
+                                        "无端口".to_owned()
+                                    } else {
+                                        "请选择串口".to_owned()
+                                    }
+                                });
+
+                            let mut new_value = current;
+                            let mut field_changed = false;
+
+                            egui::ComboBox::from_id_salt((panel_id, &field.id))
+                                .width(180.0)
+                                .selected_text(selected_text)
+                                .show_ui(ui, |ui| {
+                                    if ports.is_empty() {
+                                        ui.add_enabled(
+                                            false,
+                                            egui::Label::new("无可用串口"),
+                                        );
+                                    } else {
+                                        for port in ports {
+                                            if ui
+                                                .selectable_value(
+                                                    &mut new_value,
+                                                    port.port_name.clone(),
+                                                    format!(
+                                                        "{}  {}",
+                                                        port.port_name,
+                                                        port.port_type
+                                                    ),
+                                                )
+                                                .changed()
+                                            {
+                                                field_changed = true;
+                                            }
+                                        }
+                                    }
+                                });
+
+                            if field_changed {
+                                field.value = Value::String(new_value);
+                                true
+                            } else {
+                                false
+                            }
+                        }
                         _ => false, // Button, TextArea 等已在上面处理
                     };
 
@@ -973,6 +1036,7 @@ fn parse_fields(value: Option<&Value>) -> Result<Vec<DynamicField>, String> {
                 "status" => DynamicFieldKind::Status,
                 "separator" => DynamicFieldKind::Separator,
                 "label" => DynamicFieldKind::Label,
+                "serial" | "serial_port" | "comport" => DynamicFieldKind::Serial,
                 _ => DynamicFieldKind::Text,
             };
 

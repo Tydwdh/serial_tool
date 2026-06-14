@@ -14,7 +14,7 @@ pub use chart::ChartPanel;
 pub use dynamic::DynamicPanels;
 pub use form::FormPanel;
 pub use log::LogPanel;
-pub use manager::{Activity, PanelKind, PanelManager};
+pub use manager::{Activity, DockArea, DockLayout, DockStack, PanelKind, PanelManager};
 pub use plugins::PluginsPanel;
 pub use replay::ReplayPanel;
 pub use terminal::TerminalPanel;

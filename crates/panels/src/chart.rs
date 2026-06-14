@@ -35,7 +35,7 @@ impl ChartPanel {
 
     fn new_with_filter(bus: &DataBus, filter: TopicFilter) -> Self {
         Self {
-            subscription: bus.subscribe_bounded(filter, 4096),
+            subscription: bus.subscribe_lossy_bounded(filter, 4096),
             series: BTreeMap::new(),
             paused: false,
             auto_scale: true,

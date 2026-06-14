@@ -39,7 +39,7 @@ struct LogRenderOutcome {
 impl LogPanel {
     pub fn new(bus: &DataBus) -> Self {
         Self {
-            subscription: bus.subscribe_bounded(TopicFilter::prefix("log."), 4096),
+            subscription: bus.subscribe_lossy_bounded(TopicFilter::prefix("log."), 4096),
             entries: VecDeque::new(),
             min_level: LogLevel::Info,
             auto_scroll: true,

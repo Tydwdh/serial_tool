@@ -2,7 +2,8 @@ use crate::ui::activity_bar::aicon;
 pub mod activity_bar;
 pub mod bottom_panel;
 pub mod device_panel;
-pub mod inspector;
+pub mod dock;
+pub mod layout_buttons;
 pub mod popups;
 pub mod settings_panel;
 pub mod status_bar;
@@ -10,41 +11,69 @@ pub mod top_bar;
 
 use crate::app::WorkbenchApp;
 use crate::bootstrap::{
-    ACTIVITY_BAR_WIDTH, BOTTOM_PANEL_HEIGHT, BOTTOM_PANEL_MIN, INSPECTOR_WIDTH,
+    ACTIVITY_BAR_WIDTH, BOTTOM_PANEL_HEIGHT, BOTTOM_PANEL_MIN,
 };
 use eframe::egui;
-use tool_panels::{Activity, theme};
+use tool_panels::{Activity, DockArea, PanelKind, theme};
 
 impl WorkbenchApp {
     pub(crate) fn draw_shell(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        // 面板
         egui::Panel::top("top-bar").show_inside(ui, |ui| self.top_bar(ui));
-        egui::Panel::left("activity-bar")
-            .resizable(false)
-            .default_size(ACTIVITY_BAR_WIDTH)
-            .show_inside(ui, |ui| self.activity_bar(ui));
 
-        egui::Panel::right("inspector")
-            .resizable(false)
-            .exact_size(if self.panels.inspector_visible {
-                INSPECTOR_WIDTH
-            } else {
-                0.0
-            })
-            .show_separator_line(self.panels.inspector_visible)
-            .show_inside(ui, |ui| {
-                if self.panels.inspector_visible {
-                    self.inspector(ui);
-                }
-            });
+        if self.panels.dock.activity_bar_visible {
+            egui::Panel::left("activity-bar")
+                .resizable(false)
+                .default_size(ACTIVITY_BAR_WIDTH)
+                .show_inside(ui, |ui| self.activity_bar(ui));
+        }
 
-        if self.bottom_panel_visible {
-            egui::Panel::bottom("bottom-bar")
+        if self.panels.dock.right_visible {
+            egui::Panel::right("right-dock")
+                .resizable(true)
+                .default_size(self.panels.dock.right_size)
+                .min_size(220.0)
+                .show_separator_line(true)
+                .show_inside(ui, |ui| {
+                    self.dock_stack_ui(ui, DockArea::Right);
+                });
+        }
+
+        if self.panels.dock.bottom_visible {
+            egui::Panel::bottom("bottom-dock")
                 .resizable(true)
                 .min_size(BOTTOM_PANEL_MIN)
-                .default_size(BOTTOM_PANEL_HEIGHT)
+                .default_size(self.panels.dock.bottom_size)
                 .show_separator_line(true)
-                .show_inside(ui, |ui| self.show_bottom_panel_contents(ui));
+                .show_inside(ui, |ui| {
+                    let total = ui.available_size();
+                    ui.allocate_ui_with_layout(
+                        total,
+                        egui::Layout::bottom_up(egui::Align::Min),
+                        |ui| {
+                            self.status_bar(ui);
+
+                            ui.separator();
+
+                            let bottom_active = self.panels.dock.bottom.active_or_first();
+                            if matches!(bottom_active, Some(PanelKind::Terminal))
+                                && !self.send.popup_open
+                                && !self.terminal_popup_open
+                            {
+                                self.send_bar(ui);
+                                ui.separator();
+                            }
+
+                            let dock_height = ui.available_height().max(80.0);
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(ui.available_width(), dock_height),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| {
+                                    self.dock_stack_ui(ui, DockArea::Bottom);
+                                },
+                            );
+                        },
+                    );
+                });
         } else {
             egui::Panel::bottom("status-only")
                 .resizable(false)
@@ -53,20 +82,13 @@ impl WorkbenchApp {
                 .show_inside(ui, |ui| self.status_bar(ui));
         }
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
-            self.dynamic_tab_cleanup();
-            if let Some(id) = self.panels.active_dynamic_id().map(str::to_owned) {
-                self.dynamic_panel_ui(ui, &id);
-            } else {
-                match self.panels.activity {
-                    Activity::Devices => self.device_panel(ui),
-                    Activity::Replay => self.replay_panel.ui(ui),
-                    Activity::Plugins => self.plugins_panel.ui(ui, &mut self.plugin_manager),
-                    Activity::Settings => self.settings_panel(ui),
-                    _ => self.device_panel(ui),
-                }
-            }
-        });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::default().fill(theme::BG_PRIMARY))
+            .show_inside(ui, |ui| {
+                self.dock_stack_ui(ui, DockArea::Center);
+            });
+
+        self.paint_dock_drop_overlay(ctx);
 
         // 浮动拖拽副本
         if let Some(s) = self.activity_drag_source

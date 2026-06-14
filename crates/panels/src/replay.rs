@@ -1,7 +1,7 @@
 use crate::theme;
 use egui::{Color32, ComboBox, ProgressBar, RichText, Sense, TextEdit};
 use tool_databus::DataBus;
-use tool_recorder::{ReplayManager, ReplayPolicy, ReplayState};
+use tool_recorder::{ReplayBlockReason, ReplayManager, ReplayPolicy, ReplayState};
 
 pub struct ReplayPanel {
     manager: ReplayManager,
@@ -27,6 +27,12 @@ pub struct ReplayPanel {
 
     /// main.rs 消费后运行 replay analyzer
     pub want_run_analyzers: bool,
+
+    /// main.rs 消费后取消正在运行的 analyzer
+    pub want_cancel_analyzers: bool,
+
+    pub analyzer_busy: bool,
+    pub analyzer_logs: Vec<String>,
 }
 
 impl ReplayPanel {
@@ -48,6 +54,9 @@ impl ReplayPanel {
             want_seek_replay: None,
             want_step_backward: None,
             want_run_analyzers: false,
+            want_cancel_analyzers: false,
+            analyzer_busy: false,
+            analyzer_logs: Vec::new(),
         }
     }
 
@@ -124,6 +133,15 @@ impl ReplayPanel {
         self.manager.clear_analyzer_error();
     }
 
+    pub fn push_analyzer_log(&mut self, msg: impl Into<String>) {
+        self.analyzer_logs.push(msg.into());
+        const MAX_LOGS: usize = 200;
+        if self.analyzer_logs.len() > MAX_LOGS {
+            let excess = self.analyzer_logs.len() - MAX_LOGS;
+            self.analyzer_logs.drain(0..excess);
+        }
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         if self.auto_load {
             self.auto_load = false;
@@ -163,6 +181,43 @@ impl ReplayPanel {
         if let Some(message) = &self.message {
             ui.label(message);
         }
+
+        ui.collapsing("Replay Analyzer", |ui| {
+            if self.analyzer_busy {
+                ui.colored_label(theme::BLUE, "Analyzer 正在运行");
+
+                if ui.button("取消").clicked() {
+                    self.want_cancel_analyzers = true;
+                }
+            } else {
+                if ui.button("运行 Analyzer").clicked() {
+                    self.want_run_analyzers = true;
+                }
+            }
+
+            let status = self.manager.status();
+
+            if let Some(error) = &status.analyzer_error {
+                ui.colored_label(theme::RED, error);
+            }
+
+            if let Some(warning) = &status.analyzer_warning {
+                ui.colored_label(theme::YELLOW, warning);
+            }
+
+            ui.label(format!(
+                "Analyzer cache: {} events",
+                status.analyzer_cache_entries
+            ));
+
+            egui::ScrollArea::vertical()
+                .max_height(120.0)
+                .show(ui, |ui| {
+                    for line in &self.analyzer_logs {
+                        ui.monospace(line);
+                    }
+                });
+        });
     }
 
     fn file_controls(&mut self, ui: &mut egui::Ui) {
@@ -243,8 +298,10 @@ impl ReplayPanel {
 
     fn playback_controls(&mut self, ui: &mut egui::Ui, status: &tool_recorder::ReplayStatus) {
         let has_events = status.total_events > 0;
+        let can_play = self.manager.can_play();
+        let can_seek = self.manager.can_seek();
         let can_control = has_events && status.state != ReplayState::Empty;
-        let can_step = can_control && status.state != ReplayState::Playing;
+        let block_reason = self.manager.replay_block_reason();
 
         ui.horizontal_wrapped(|ui| {
             if status.state == ReplayState::Playing {
@@ -258,7 +315,8 @@ impl ReplayPanel {
                 };
 
                 if ui
-                    .add_enabled(has_events, egui::Button::new(label))
+                    .add_enabled(can_play, egui::Button::new(label))
+                    .on_disabled_hover_text("当前回放策略需要先完成 Replay Analyzer")
                     .clicked()
                 {
                     match status.state {
@@ -299,7 +357,7 @@ impl ReplayPanel {
                 });
 
             if ui
-                .add_enabled(can_step && status.cursor > 0, egui::Button::new("◀"))
+                .add_enabled(can_seek && status.cursor > 0, egui::Button::new("◀"))
                 .on_hover_text("后退指定事件数")
                 .clicked()
             {
@@ -308,7 +366,7 @@ impl ReplayPanel {
 
             if ui
                 .add_enabled(
-                    can_step && status.cursor < status.total_events,
+                    can_seek && status.cursor < status.total_events,
                     egui::Button::new("▶"),
                 )
                 .on_hover_text("前进指定事件数")
@@ -359,6 +417,35 @@ impl ReplayPanel {
 
             speed_resp.on_hover_text(format!("回放速度 {:.2}x  |  范围 0.1x ~ 16x", self.speed));
         });
+
+        if let Some(reason) = block_reason {
+            ui.separator();
+
+            match reason {
+                ReplayBlockReason::NeedAnalyzer => {
+                    ui.colored_label(
+                        theme::YELLOW,
+                        "重新解析模式需要先运行 Replay Analyzer",
+                    );
+
+                    if ui.button("运行 Analyzer").clicked() {
+                        self.want_run_analyzers = true;
+                    }
+                }
+
+                ReplayBlockReason::AnalyzerFailed(ref error) => {
+                    ui.colored_label(theme::RED, format!("Analyzer 失败：{error}"));
+
+                    if ui.button("重试 Analyzer").clicked() {
+                        self.want_run_analyzers = true;
+                    }
+
+                    if ui.button("切换到精确回放").clicked() {
+                        self.manager.set_policy(ReplayPolicy::ExactRecorded);
+                    }
+                }
+            }
+        }
     }
 
     fn progress_bar(&mut self, ui: &mut egui::Ui, status: &tool_recorder::ReplayStatus) {
@@ -378,6 +465,11 @@ impl ReplayPanel {
         let bar_resp = ui.add(bar);
 
         if status.total_events == 0 || status.duration_ms == 0 {
+            return;
+        }
+
+        if !self.manager.can_seek() {
+            bar_resp.on_hover_text("当前回放策略需要先完成 Replay Analyzer");
             return;
         }
 

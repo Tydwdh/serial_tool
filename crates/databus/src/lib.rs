@@ -15,6 +15,8 @@ pub enum TopicFilter {
     All,
     Exact(String),
     Prefix(String),
+    And(Vec<TopicFilter>),
+    MetadataEq { key: String, value: String },
 }
 
 impl TopicFilter {
@@ -26,11 +28,46 @@ impl TopicFilter {
         Self::Prefix(prefix.into())
     }
 
+    pub fn metadata_eq(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self::MetadataEq {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    pub fn and(filters: impl IntoIterator<Item = TopicFilter>) -> Self {
+        Self::And(filters.into_iter().collect())
+    }
+
+    /// 便捷构造：匹配特定串口的所有事件（topic 前缀 + port metadata）。
+    pub fn serial_port(port: impl Into<String>) -> Self {
+        Self::and([
+            Self::prefix("transport.serial."),
+            Self::metadata_eq("port", port),
+        ])
+    }
+
+    /// 仅匹配 topic 字符串（metadata 过滤条件在 topic 级别总是通过）。
     pub fn matches(&self, topic: &str) -> bool {
         match self {
             Self::All => true,
             Self::Exact(expected) => topic == expected,
             Self::Prefix(prefix) => topic.starts_with(prefix),
+            Self::And(filters) => filters.iter().all(|f| f.matches(topic)),
+            Self::MetadataEq { .. } => true,
+        }
+    }
+
+    /// 完整匹配（包括 metadata）。DataBus publish 内部使用。
+    pub fn matches_event(&self, event: &Event) -> bool {
+        match self {
+            Self::All => true,
+            Self::Exact(expected) => event.topic == *expected,
+            Self::Prefix(prefix) => event.topic.starts_with(prefix),
+            Self::And(filters) => filters.iter().all(|filter| filter.matches_event(event)),
+            Self::MetadataEq { key, value } => {
+                event.meta_str(key).is_some_and(|actual| actual == value)
+            }
         }
     }
 }
@@ -113,7 +150,7 @@ impl DataBus {
 
         let mut subscribers = self.inner.subscribers.lock();
         subscribers.retain(|subscriber| {
-            if subscriber.filter.matches(&event.topic) {
+            if subscriber.filter.matches_event(&event) {
                 // 区分 Full（队列满，保留 subscriber 但计丢）和 Disconnected（真正断开，删除）
                 match subscriber.sender.try_send(event.clone()) {
                     Ok(()) => true,
@@ -131,7 +168,10 @@ impl DataBus {
         event
     }
 
-    pub fn subscribe(&self, filter: TopicFilter) -> Subscription {
+    /// 无界（lossless）订阅：永不因队列满而丢弃事件。
+    /// 适用于录制、测试断言等完整性敏感的场景。
+    /// 极端情况下生产者快于消费者会导致内存增长，需配合背压或限速使用。
+    pub fn subscribe_lossless(&self, filter: TopicFilter) -> Subscription {
         let (sender, receiver) = unbounded();
         let dropped = Arc::new(AtomicU64::new(0));
         self.inner.subscribers.lock().push(Subscriber {
@@ -142,9 +182,19 @@ impl DataBus {
         Subscription { receiver, dropped }
     }
 
-    /// 有界订阅：超过容量时丢弃当前事件并计入 dropped_count（DropNewest 策略）。
-    /// 适用于 UI 面板等可容忍丢帧的场景。完整性需求请用 `subscribe()`。
-    pub fn subscribe_bounded(&self, filter: TopicFilter, capacity: usize) -> Subscription {
+    /// [`subscribe_lossless`] 的别名，向后兼容。
+    pub fn subscribe(&self, filter: TopicFilter) -> Subscription {
+        self.subscribe_lossless(filter)
+    }
+
+    /// 有界（lossy）订阅：超过容量时丢弃当前事件并计入 dropped_count（DropNewest 策略）。
+    /// 适用于 UI 面板、图表、日志等可容忍丢帧的场景。
+    /// 完整性需求请用 [`subscribe_lossless`]。
+    pub fn subscribe_lossy_bounded(
+        &self,
+        filter: TopicFilter,
+        capacity: usize,
+    ) -> Subscription {
         let (sender, receiver) = crossbeam_channel::bounded(capacity);
         let dropped = Arc::new(AtomicU64::new(0));
         self.inner.subscribers.lock().push(Subscriber {
@@ -153,6 +203,15 @@ impl DataBus {
             dropped: Arc::clone(&dropped),
         });
         Subscription { receiver, dropped }
+    }
+
+    /// 有界订阅：超过容量时丢弃当前事件并计入 dropped_count（DropNewest 策略）。
+    /// 适用于 UI 面板等可容忍丢帧的场景。完整性需求请用 `subscribe_lossless()`。
+    #[deprecated(
+        note = "Use subscribe_lossy_bounded for UI lossy consumers, or subscribe_lossless for integrity-sensitive consumers. Never use for recorder."
+    )]
+    pub fn subscribe_bounded(&self, filter: TopicFilter, capacity: usize) -> Subscription {
+        self.subscribe_lossy_bounded(filter, capacity)
     }
 
     pub fn history(&self) -> Vec<Event> {

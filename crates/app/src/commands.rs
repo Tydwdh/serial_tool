@@ -1,4 +1,4 @@
-use crate::app::WorkbenchApp;
+use crate::app::{PendingReconnect, WorkbenchApp};
 use crate::config::{PersistedConfig, config_path};
 use crate::state::{BottomTab, StatusLevel};
 use crate::ui::top_bar::{pdb, ppar, psb};
@@ -63,6 +63,7 @@ impl WorkbenchApp {
                     old_names.difference(&new_names).cloned().collect();
 
                 self.ports = new_ports;
+                self.dynamic_panels.set_ports(&self.ports);
 
                 let selected_still_exists = self
                     .selected_port
@@ -71,16 +72,57 @@ impl WorkbenchApp {
 
                 // 只在端口消失且 transport 也未打开时才清空选择
                 if !selected_still_exists {
-                    if let Some(ref selected) = self.selected_port {
+                    let selected_val = self.selected_port.clone();
+                    if let Some(ref selected) = selected_val {
                         if self.transport.status_port(selected).open {
                             self.set_status(
                                 StatusLevel::Warn,
                                 format!("{selected} 已打开但不在系统列表中"),
                             );
+                            if self.auto_reconnect {
+                                self.pending_reconnect = Some(PendingReconnect {
+                                    port_name: selected.clone(),
+                                    config: SerialConfig {
+                                        port_name: selected.clone(),
+                                        baud_rate: self.baud_rate.parse().unwrap_or(115200),
+                                        data_bits: pdb(&self.data_bits),
+                                        stop_bits: psb(&self.stop_bits),
+                                        parity: ppar(&self.parity),
+                                        timeout_ms: self.timeout_ms.parse().unwrap_or(50),
+                                    },
+                                    attempts: 0,
+                                    next_try_at: 0.0,
+                                });
+                            }
                         } else {
-                            let stale_port = self.selected_port.take();
-                            if let Some(ref p) = stale_port {
-                                self.set_status(StatusLevel::Warn, format!("{p} 已拔出或不可用"));
+                            self.selected_port = None;
+                            self.set_status(
+                                StatusLevel::Warn,
+                                format!("{selected} 已拔出或不可用"),
+                            );
+                        }
+                    }
+                }
+
+                // 自动重连：使用完整配置快照直接打开
+                if self.auto_reconnect {
+                    if let Some(ref pending) = self.pending_reconnect.clone() {
+                        if new_names.contains(&pending.port_name) {
+                            match self.transport.open_serial(pending.config.clone()) {
+                                Ok(()) => {
+                                    self.selected_port = Some(pending.port_name.clone());
+                                    self.pending_reconnect = None;
+                                    self.set_status_force(
+                                        StatusLevel::Info,
+                                        format!("已自动重连 {}", pending.port_name),
+                                    );
+                                }
+                                Err(e) => {
+                                    self.set_status(
+                                        StatusLevel::Warn,
+                                        format!("自动重连失败：{e}"),
+                                    );
+                                }
                             }
                         }
                     }
@@ -204,10 +246,79 @@ impl WorkbenchApp {
                 })
                 .map(|s| s.id)
                 .collect(),
+            terminal_popup_always_on_top: self.terminal_popup_always_on_top,
+            send_popup_always_on_top: self.send_popup_always_on_top,
+            port_aliases: self.port_aliases.clone(),
         };
         let t = serde_json::to_string_pretty(&cfg).map_err(|e| format!("序列化失败：{e}"))?;
         std::fs::write(config_path(), t).map_err(|e| format!("写入失败：{e}"))
     }
+
+    pub(crate) fn save_config_to_path(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let mut p = self.panels.clone();
+        p.discard_dynamic_tabs();
+        p.bottom_logs_visible = self.bottom_panel_visible;
+        let cfg = PersistedConfig {
+            panels: p,
+            selected_port: self.selected_port.clone(),
+            baud_rate: self.baud_rate.clone(),
+            data_bits: self.data_bits.clone(),
+            stop_bits: self.stop_bits.clone(),
+            parity: self.parity.clone(),
+            timeout_ms: self.timeout_ms.clone(),
+            recorder_path: self.recorder_path.clone(),
+            activity_order: self.activity_order.clone(),
+            enabled_plugins: self
+                .plugin_manager
+                .summaries()
+                .into_iter()
+                .filter(|s| {
+                    matches!(
+                        s.state,
+                        tool_extension::PluginState::Enabled | tool_extension::PluginState::Running
+                    )
+                })
+                .map(|s| s.id)
+                .collect(),
+            terminal_popup_always_on_top: self.terminal_popup_always_on_top,
+            send_popup_always_on_top: self.send_popup_always_on_top,
+            port_aliases: self.port_aliases.clone(),
+        };
+        let t =
+            serde_json::to_string_pretty(&cfg).map_err(|e| format!("序列化失败：{e}"))?;
+        std::fs::write(path, t).map_err(|e| format!("写入失败：{e}"))
+    }
+
+    pub(crate) fn load_config_from_path(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let t = std::fs::read_to_string(path).map_err(|e| format!("读取失败：{e}"))?;
+        let cfg: PersistedConfig =
+            serde_json::from_str(&t).map_err(|e| format!("解析失败：{e}"))?;
+        self.selected_port = cfg.selected_port.clone();
+        self.baud_rate = cfg.baud_rate.clone();
+        self.data_bits = cfg.data_bits.clone();
+        self.stop_bits = cfg.stop_bits.clone();
+        self.parity = cfg.parity.clone();
+        self.timeout_ms = cfg.timeout_ms.clone();
+        self.recorder_path = cfg.recorder_path.clone();
+        self.activity_order = cfg.activity_order.clone();
+        self.terminal_popup_always_on_top = cfg.terminal_popup_always_on_top;
+        self.send_popup_always_on_top = cfg.send_popup_always_on_top;
+        self.port_aliases = cfg.port_aliases.clone();
+        self.panels = cfg.panels.clone();
+        self.apply_loaded_workspace_postprocess();
+        Ok(())
+    }
+
+    pub(crate) fn apply_loaded_workspace_postprocess(&mut self) {
+        self.panels.discard_dynamic_tabs();
+        self.bottom_panel_visible = self.panels.bottom_logs_visible;
+        self.ensure_bottom_tab_available();
+        self.refresh_ports_silent();
+        self.dynamic_panels.set_ports(&self.ports);
+        self.send.target_port = None;
+        self.ensure_send_target_port();
+    }
+
     pub(crate) fn available_bottom_tabs(&self) -> Vec<BottomTab> {
         BottomTab::ALL
             .into_iter()
@@ -225,19 +336,23 @@ impl WorkbenchApp {
     }
 
     pub(crate) fn open_bottom_panel(&mut self) {
-        self.bottom_panel_visible = true;
-        if BottomTab::Terminal.is_available(self.terminal_popup_open) {
-            self.bottom_tab = BottomTab::Terminal;
-        } else {
-            self.ensure_bottom_tab_available();
-        }
+        self.set_bottom_visible(true);
+        self.panels
+            .dock
+            .move_panel(tool_panels::PanelKind::Terminal, tool_panels::DockArea::Bottom);
+        self.bottom_tab = BottomTab::Terminal;
+    }
+
+    pub(crate) fn set_bottom_visible(&mut self, visible: bool) {
+        self.bottom_panel_visible = visible;
+        self.panels.bottom_logs_visible = visible;
+        self.panels.dock.bottom_visible = visible;
     }
 
     pub(crate) fn toggle_bottom_panel(&mut self) {
-        if self.bottom_panel_visible {
-            self.bottom_panel_visible = false;
-        } else {
-            self.open_bottom_panel();
+        self.set_bottom_visible(!self.panels.dock.bottom_visible);
+
+        if self.panels.dock.bottom_visible {
             self.set_status(StatusLevel::Info, "底部面板已打开");
         }
     }

@@ -37,12 +37,29 @@ pub enum ReplayPolicy {
     ReparseRaw,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayBlockReason {
+    NeedAnalyzer,
+    AnalyzerFailed(String),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RecorderStats {
+    pub events_written: u64,
+    pub bytes_written: u64,
+    pub last_flush_elapsed_ms: u64,
+    pub last_error: Option<String>,
+    pub running: bool,
+    pub stopping: bool,
+}
+
 pub struct JsonlRecorder {
     bus: DataBus,
     worker: Option<RecorderWorker>,
     stopping: Option<StoppingRecorder>,
     current_path: Option<PathBuf>,
     mode: RecordMode,
+    stats: Arc<Mutex<RecorderStats>>,
 }
 
 struct StoppingRecorder {
@@ -56,6 +73,8 @@ struct RecorderWorker {
     finished: Arc<AtomicBool>,
     last_error: Arc<Mutex<Option<String>>>,
     join: Option<JoinHandle<()>>,
+    #[allow(dead_code)]
+    stats: Arc<Mutex<RecorderStats>>,
 }
 
 impl JsonlRecorder {
@@ -66,7 +85,12 @@ impl JsonlRecorder {
             stopping: None,
             current_path: None,
             mode: RecordMode::default(),
+            stats: Arc::new(Mutex::new(RecorderStats::default())),
         }
+    }
+
+    pub fn stats(&self) -> RecorderStats {
+        self.stats.lock().unwrap().clone()
     }
 
     pub fn set_mode(&mut self, mode: RecordMode) {
@@ -94,7 +118,10 @@ impl JsonlRecorder {
         }
 
         let file = File::create(&path)?;
-        let subscription = self.bus.subscribe_bounded(TopicFilter::All, 32_768);
+        let path_for_summary = path.clone();
+        // recorder 是可靠性链路，不能用 bounded 订阅。
+        // UI 面板可以 bounded，recorder 必须 lossless。
+        let subscription = self.bus.subscribe_lossless(TopicFilter::All);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
         let finished = Arc::new(AtomicBool::new(false));
@@ -104,76 +131,123 @@ impl JsonlRecorder {
         let mode = self.mode;
 
         let bus = self.bus.clone();
+        let stats_thread = Arc::clone(&self.stats);
+        let stats_thread_for_worker = Arc::clone(&self.stats);
+
+        {
+            let mut s = stats_thread.lock().unwrap();
+            *s = RecorderStats {
+                running: true,
+                ..RecorderStats::default()
+            };
+        }
+
         let join = thread::spawn(move || {
             let mut writer = BufWriter::new(file);
             let mut written_since_flush = 0u64;
             let mut last_flush = Instant::now();
-            let mut last_dropped_check = 0u64;
 
             while !stop_thread.load(Ordering::Relaxed) {
                 match subscription.recv_timeout(Duration::from_millis(100)) {
                     Ok(event) => {
                         if should_record_event_with_mode(&event, mode) {
-                            if let Err(e) = write_event(&mut writer, &event) {
-                                *last_error_thread.lock().unwrap() =
-                                    Some(format!("write failed: {e}"));
-                                bus.publish(Event::system_log(
-                                    LogLevel::Error,
-                                    "recorder",
-                                    format!("write failed: {e}"),
-                                ));
-                                stop_thread.store(true, Ordering::SeqCst);
-                                break;
+                            match write_event_counted(&mut writer, &event) {
+                                Ok(bytes) => {
+                                    let mut s = stats_thread.lock().unwrap();
+                                    s.events_written += 1;
+                                    s.bytes_written += bytes;
+                                }
+                                Err(e) => {
+                                    let msg = format!("write failed: {e}");
+                                    {
+                                        let mut s = stats_thread.lock().unwrap();
+                                        s.last_error = Some(msg.clone());
+                                        s.running = false;
+                                    }
+                                    *last_error_thread.lock().unwrap() =
+                                        Some(msg.clone());
+                                    bus.publish(Event::system_log(
+                                        LogLevel::Error,
+                                        "recorder",
+                                        msg,
+                                    ));
+                                    stop_thread.store(true, Ordering::SeqCst);
+                                    break;
+                                }
                             }
                             written_since_flush += 1;
                         }
                     }
-                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        stats_thread.lock().unwrap().last_flush_elapsed_ms =
+                            last_flush.elapsed().as_millis() as u64;
+                    }
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-                }
-
-                // 一旦丢事件，立即告警（不等到停止）
-                let current_dropped = subscription.dropped_count();
-                if current_dropped > last_dropped_check {
-                    last_dropped_check = current_dropped;
-                    bus.publish(Event::system_log(
-                        LogLevel::Warn,
-                        "recorder",
-                        format!("录制队列溢出，已丢弃 {current_dropped} 条，文件将不完整"),
-                    ));
                 }
 
                 // 周期性 flush：每 500 条或 1 秒，防止崩溃/断电丢失尾部数据
                 if written_since_flush >= 500 || last_flush.elapsed() > Duration::from_secs(1) {
                     if let Err(e) = writer.flush() {
+                        let msg = format!("flush failed: {e}");
+
+                        {
+                            let mut s = stats_thread.lock().unwrap();
+                            s.last_error = Some(msg.clone());
+                            s.running = false;
+                        }
+
+                        *last_error_thread.lock().unwrap() = Some(msg.clone());
+
                         bus.publish(Event::system_log(
                             LogLevel::Error,
                             "recorder",
-                            format!("flush failed: {e}"),
+                            msg,
                         ));
+
+                        stop_thread.store(true, Ordering::SeqCst);
+                        break;
                     }
                     written_since_flush = 0;
                     last_flush = Instant::now();
                 }
             }
 
+            stats_thread.lock().unwrap().last_flush_elapsed_ms =
+                last_flush.elapsed().as_millis() as u64;
+
             for event in subscription.drain() {
                 if should_record_event_with_mode(&event, mode) {
-                    if let Err(e) = write_event(&mut writer, &event) {
-                        *last_error_thread.lock().unwrap() =
-                            Some(format!("drain write failed: {e}"));
-                        bus.publish(Event::system_log(
-                            LogLevel::Error,
-                            "recorder",
-                            format!("drain write failed: {e}"),
-                        ));
-                        break;
+                    match write_event_counted(&mut writer, &event) {
+                        Ok(bytes) => {
+                            let mut s = stats_thread.lock().unwrap();
+                            s.events_written += 1;
+                            s.bytes_written += bytes;
+                        }
+                        Err(e) => {
+                            let msg = format!("drain write failed: {e}");
+                            {
+                                let mut s = stats_thread.lock().unwrap();
+                                s.last_error = Some(msg.clone());
+                            }
+                            *last_error_thread.lock().unwrap() = Some(msg.clone());
+                            bus.publish(Event::system_log(
+                                LogLevel::Error,
+                                "recorder",
+                                msg,
+                            ));
+                            break;
+                        }
                     }
                 }
             }
 
             if let Err(e) = writer.flush() {
-                *last_error_thread.lock().unwrap() = Some(format!("flush failed: {e}"));
+                let msg = format!("flush failed: {e}");
+                {
+                    let mut s = stats_thread.lock().unwrap();
+                    s.last_error = Some(msg.clone());
+                }
+                *last_error_thread.lock().unwrap() = Some(msg.clone());
                 bus.publish(Event::system_log(
                     LogLevel::Error,
                     "recorder",
@@ -181,14 +255,28 @@ impl JsonlRecorder {
                 ));
             }
 
-            // 使用 Subscription 自带的 dropped count（真实反映 DataBus 丢弃数）
-            let d = subscription.dropped_count();
-            if d > 0 {
-                bus.publish(Event::system_log(
-                    LogLevel::Warn,
-                    "recorder",
-                    format!("录制期间丢弃 {d} 条事件，文件可能不完整"),
-                ));
+            {
+                let mut s = stats_thread.lock().unwrap();
+                s.running = false;
+                s.stopping = false;
+            }
+
+            // ── 生成会话完整性摘要 ──
+            let summary_path = path_for_summary.with_extension("summary.json");
+            let (events_written, bytes_written) = {
+                let s = stats_thread.lock().unwrap();
+                (s.events_written, s.bytes_written)
+            };
+            let summary = serde_json::json!({
+                "ended_at_ms": tool_core::now_timestamp_ms(),
+                "events_written": events_written,
+                "bytes_written": bytes_written,
+                "record_mode": format!("{:?}", mode),
+                "closed_cleanly": last_error_thread.lock().unwrap().is_none(),
+                "error": last_error_thread.lock().unwrap().clone(),
+            });
+            if let Ok(text) = serde_json::to_string_pretty(&summary) {
+                let _ = std::fs::write(&summary_path, text);
             }
 
             finished_thread.store(true, Ordering::SeqCst);
@@ -199,6 +287,7 @@ impl JsonlRecorder {
             finished,
             last_error,
             join: Some(join),
+            stats: stats_thread_for_worker,
         });
         self.current_path = Some(path.clone());
         self.bus.publish(Event::system_log(
@@ -211,6 +300,7 @@ impl JsonlRecorder {
 
     pub fn stop(&mut self) {
         if let Some(mut worker) = self.worker.take() {
+            self.stats.lock().unwrap().stopping = true;
             self.bus.publish(Event::system_log(
                 LogLevel::Info,
                 "recorder",
@@ -300,8 +390,15 @@ impl Drop for JsonlRecorder {
 }
 
 fn write_event(writer: &mut impl Write, event: &Event) -> io::Result<()> {
-    serde_json::to_writer(&mut *writer, event)?;
-    writer.write_all(b"\n")
+    write_event_counted(writer, event).map(|_| ())
+}
+
+fn write_event_counted(writer: &mut impl Write, event: &Event) -> io::Result<u64> {
+    let line = serde_json::to_string(event)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    writer.write_all(line.as_bytes())?;
+    writer.write_all(b"\n")?;
+    Ok(line.len() as u64 + 1)
 }
 
 /// 所有 mode 都统一排除的事件。
@@ -518,6 +615,40 @@ impl ReplayManager {
         self.effective_policy() == ReplayPolicy::ReparseRaw
     }
 
+    /// 当前策略下，阻止播放/seek 的原因。
+    /// 仅在 ReparseRaw 且 analyzer cache 不可用时返回原因。
+    pub fn replay_block_reason(&self) -> Option<ReplayBlockReason> {
+        if self.effective_policy() != ReplayPolicy::ReparseRaw {
+            return None;
+        }
+
+        if self.analyzer_cache_valid {
+            return None;
+        }
+
+        if let Some(error) = &self.analyzer_error {
+            return Some(ReplayBlockReason::AnalyzerFailed(error.clone()));
+        }
+
+        Some(ReplayBlockReason::NeedAnalyzer)
+    }
+
+    pub fn replay_ready(&self) -> bool {
+        self.replay_block_reason().is_none()
+    }
+
+    pub fn can_play(&self) -> bool {
+        !self.events.is_empty()
+            && self.state != ReplayState::Empty
+            && self.replay_ready()
+    }
+
+    pub fn can_seek(&self) -> bool {
+        !self.events.is_empty()
+            && self.state != ReplayState::Playing
+            && self.replay_ready()
+    }
+
     // ── Analyzer cache ──
 
     /// 获取所有原始串口事件（供 analyzer 使用）。
@@ -575,11 +706,22 @@ impl ReplayManager {
         self.analyzer_error.as_deref()
     }
 
-    pub fn play(&mut self) {
+    /// 开始播放。返回 false 表示被门控阻止（如需要 analyzer）。
+    pub fn play(&mut self) -> bool {
         if self.events.is_empty() {
             self.state = ReplayState::Empty;
-            return;
+            return false;
         }
+
+        if !self.replay_ready() {
+            self.bus.publish(Event::system_log(
+                LogLevel::Warn,
+                "replay",
+                "playback blocked: replay analyzer is required",
+            ));
+            return false;
+        }
+
         if self.cursor >= self.events.len() {
             self.seek_ms(0);
         }
@@ -591,6 +733,7 @@ impl ReplayManager {
             "replay",
             "playback started",
         ));
+        true
     }
 
     pub fn pause(&mut self) {
@@ -641,6 +784,15 @@ impl ReplayManager {
     /// 回退并重放到指定位置（用于拖动进度条）
     /// 返回重放的事件数，调用方应在调用前清空 UI 面板
     pub fn seek_with_replay(&mut self, position_ms: u64) -> usize {
+        if !self.replay_ready() {
+            self.bus.publish(Event::system_log(
+                LogLevel::Warn,
+                "replay",
+                "seek blocked: replay analyzer is required",
+            ));
+            return 0;
+        }
+
         let panel_count = self.seek_panel_phase(position_ms);
         let data_count = self.seek_data_phase(position_ms);
         panel_count + data_count
@@ -734,6 +886,10 @@ impl ReplayManager {
 
     /// 逐事件前进：发布当前事件，并同步更新位置。
     pub fn step_forward(&mut self) -> usize {
+        if !self.replay_ready() {
+            return self.cursor;
+        }
+
         if self.cursor < self.events.len() {
             self.publish_cursor_event();
 
@@ -972,6 +1128,20 @@ mod tests {
         ));
         thread::sleep(Duration::from_millis(150));
         recorder.stop();
+
+        // 等待异步停止完成（worker 线程 flush + drain）
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(result) = recorder.reap_stopping() {
+                result.unwrap();
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "recorder did not stop in time"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
 
         let text = fs::read_to_string(&path).unwrap();
         let _ = fs::remove_file(&path);

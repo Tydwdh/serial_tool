@@ -32,6 +32,11 @@ impl WorkbenchApp {
 
                 if response.clicked() && self.activity_drag_source.is_none() {
                     self.panels.select_activity(act);
+                    if let Some(kind) = act.panel_kind() {
+                        self.panels
+                            .dock
+                            .move_panel(kind, tool_panels::DockArea::Center);
+                    }
                 }
 
                 let is_source = self.activity_drag_source == Some(idx);

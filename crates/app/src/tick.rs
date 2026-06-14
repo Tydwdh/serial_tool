@@ -16,9 +16,6 @@ impl WorkbenchApp {
             if i.modifiers.ctrl && i.key_pressed(egui::Key::B) {
                 self.toggle_bottom_panel();
             }
-            if i.modifiers.ctrl && i.key_pressed(egui::Key::I) {
-                self.panels.inspector_visible = !self.panels.inspector_visible;
-            }
             if i.modifiers.ctrl {
                 for (k, a) in [
                     (egui::Key::Num1, Activity::Devices),
@@ -45,10 +42,16 @@ impl WorkbenchApp {
             Some(Err(e)) => self.set_status_force(StatusLevel::Error, format!("录制失败: {e}")),
             None => {}
         }
-        // 终端放大按钮
+        // 终端放大按钮：打开悬浮窗并切走底部 Terminal
         if self.terminal_panel.maximize_clicked {
             self.terminal_panel.maximize_clicked = false;
             self.terminal_popup_open = true;
+            if matches!(
+                self.panels.dock.bottom.active_or_first(),
+                Some(tool_panels::PanelKind::Terminal)
+            ) {
+                self.panels.dock.bottom.active = Some(tool_panels::PanelKind::Logs);
+            }
         }
         // 回放清理
         if self.replay_panel.want_clear_on_play {
@@ -129,6 +132,20 @@ impl WorkbenchApp {
         if self.replay_panel.want_run_analyzers {
             self.launch_replay_analyzer_background();
         }
+        // 取消后台 analyzer
+        if self.replay_panel.want_cancel_analyzers {
+            self.replay_panel.want_cancel_analyzers = false;
+            if let Some(ref job) = self.replay_analyzer_job {
+                job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.set_status(StatusLevel::Warn, "回放：正在取消 analyzer...");
+            }
+        }
+        // 同步 analyzer 状态到 UI
+        self.replay_panel.analyzer_busy = self
+            .replay_analyzer_job
+            .as_ref()
+            .is_some_and(|job| !job.handle.is_finished());
+
         // 检查后台 analyzer 是否完成
         self.poll_replay_analyzer_result();
 
@@ -155,6 +172,7 @@ impl WorkbenchApp {
         }
 
         self.dynamic_panels.ingest(&mut self.panels);
+        let _terminal_ingested = self.terminal_panel.ingest_pending();
         let n = self.plugin_manager.process_pending();
         if n > 0 {
             self.set_status(StatusLevel::Info, format!("{n} 个插件事件"));
@@ -184,6 +202,47 @@ impl WorkbenchApp {
             self.last_port_refresh = now;
             self.refresh_ports_silent();
         }
+
+        // 周期发送
+        self.tick_periodic_send(ctx);
+    }
+
+    fn tick_periodic_send(&mut self, ctx: &egui::Context) {
+        if !self.send.periodic_enabled {
+            return;
+        }
+
+        let now = ctx.input(|i| i.time);
+        if now < self.send.next_periodic_send_time {
+            return;
+        }
+
+        let interval_ms = match self.send.periodic_interval_ms.trim().parse::<u64>() {
+            Ok(v) if v >= 10 => v,
+            _ => {
+                self.send.periodic_enabled = false;
+                self.set_status_force(
+                    crate::state::StatusLevel::Warn,
+                    "周期发送间隔必须 >= 10ms",
+                );
+                return;
+            }
+        };
+
+        if self.send_target_port_open() && !self.send.input.is_empty() {
+            self.do_send();
+
+            if self.send.error.is_some() {
+                self.send.periodic_enabled = false;
+                self.set_status_force(
+                    crate::state::StatusLevel::Error,
+                    "周期发送已停止：发送失败",
+                );
+                return;
+            }
+        }
+
+        self.send.next_periodic_send_time = now + interval_ms as f64 / 1000.0;
     }
     pub(crate) fn tick_post_ui(&mut self, ctx: &egui::Context) {
         self.bottom_log_panel.ingest_pending();

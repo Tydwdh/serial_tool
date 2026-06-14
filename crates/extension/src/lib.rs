@@ -314,7 +314,7 @@ pub struct PluginManager {
 
 impl PluginManager {
     pub fn new(bus: DataBus, transport: TransportManager) -> Self {
-        let subscription = bus.subscribe_bounded(TopicFilter::All, 32_768);
+        let subscription = bus.subscribe_lossy_bounded(TopicFilter::All, 32_768);
         let config_root = dirs_next::config_dir()
             .map(|d| d.join("HardwareWorkbench").join("plugin-config"))
             .unwrap_or_else(|| {

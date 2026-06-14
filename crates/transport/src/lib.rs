@@ -1,4 +1,4 @@
-use crossbeam_channel::{Sender, bounded};
+use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serialport as sp;
@@ -12,6 +12,11 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use thiserror::Error;
 use tool_core::{Event, LogLevel};
+
+enum DtrRtsCommand {
+    SetDtr(bool),
+    SetRts(bool),
+}
 use tool_databus::DataBus;
 
 #[derive(Debug, Error)]
@@ -114,6 +119,7 @@ pub struct TransportManager {
 struct PortHandle {
     config: SerialConfig,
     writer: Sender<Vec<u8>>,
+    dtr_rts_tx: Sender<DtrRtsCommand>,
     stop: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
@@ -244,6 +250,7 @@ impl TransportManager {
         })?;
 
         let (writer, write_rx) = bounded::<Vec<u8>>(1024);
+        let (dtr_rts_tx, dtr_rts_rx) = bounded::<DtrRtsCommand>(16);
         let stop = Arc::new(AtomicBool::new(false));
         let alive = Arc::new(AtomicBool::new(true));
         let thread_stop = Arc::clone(&stop);
@@ -256,6 +263,7 @@ impl TransportManager {
             serial_worker_loop(
                 port,
                 write_rx,
+                dtr_rts_rx,
                 thread_stop,
                 thread_alive,
                 thread_bus,
@@ -268,6 +276,7 @@ impl TransportManager {
             PortHandle {
                 config: config.clone(),
                 writer,
+                dtr_rts_tx,
                 stop,
                 alive,
                 join: Some(join),
@@ -475,6 +484,46 @@ impl TransportManager {
         self.ports.lock().keys().cloned().collect()
     }
 
+    pub fn set_dtr(&self, port_name: &str, value: bool) -> TransportResult<()> {
+        self.reap_closing();
+        let guard = self.ports.lock();
+        let resolved = Self::resolve_open_port_name_locked(&guard, port_name)
+            .ok_or_else(|| TransportError::PortNotOpen(port_name.to_owned()))?;
+        let worker = guard
+            .get(&resolved)
+            .ok_or_else(|| TransportError::PortNotOpen(port_name.to_owned()))?;
+        if !worker.alive.load(Ordering::Relaxed) {
+            return Err(TransportError::WorkerClosed);
+        }
+        worker
+            .dtr_rts_tx
+            .try_send(DtrRtsCommand::SetDtr(value))
+            .map_err(|e| match e {
+                TrySendError::Full(_) => TransportError::QueueFull,
+                TrySendError::Disconnected(_) => TransportError::WorkerClosed,
+            })
+    }
+
+    pub fn set_rts(&self, port_name: &str, value: bool) -> TransportResult<()> {
+        self.reap_closing();
+        let guard = self.ports.lock();
+        let resolved = Self::resolve_open_port_name_locked(&guard, port_name)
+            .ok_or_else(|| TransportError::PortNotOpen(port_name.to_owned()))?;
+        let worker = guard
+            .get(&resolved)
+            .ok_or_else(|| TransportError::PortNotOpen(port_name.to_owned()))?;
+        if !worker.alive.load(Ordering::Relaxed) {
+            return Err(TransportError::WorkerClosed);
+        }
+        worker
+            .dtr_rts_tx
+            .try_send(DtrRtsCommand::SetRts(value))
+            .map_err(|e| match e {
+                TrySendError::Full(_) => TransportError::QueueFull,
+                TrySendError::Disconnected(_) => TransportError::WorkerClosed,
+            })
+    }
+
     /// 清理已退出 worker 的 stale port handle（alive == false）。
     /// 可在 status 查询、list/open/close 或定时刷新时调用。
     pub fn reap_dead_ports(&self) {
@@ -500,7 +549,8 @@ impl TransportManager {
 
 fn serial_worker_loop(
     mut port: Box<dyn sp::SerialPort>,
-    write_rx: crossbeam_channel::Receiver<Vec<u8>>,
+    write_rx: Receiver<Vec<u8>>,
+    dtr_rts_rx: Receiver<DtrRtsCommand>,
     stop: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
     bus: DataBus,
@@ -509,6 +559,30 @@ fn serial_worker_loop(
     let mut buffer = [0_u8; 4096];
 
     while !stop.load(Ordering::Relaxed) {
+        // 处理 DTR/RTS 命令
+        while let Ok(cmd) = dtr_rts_rx.try_recv() {
+            match cmd {
+                DtrRtsCommand::SetDtr(value) => {
+                    if let Err(e) = port.write_data_terminal_ready(value) {
+                        bus.publish(Event::system_log(
+                            LogLevel::Error,
+                            "transport.serial",
+                            format!("set DTR failed on {source}: {e}"),
+                        ));
+                    }
+                }
+                DtrRtsCommand::SetRts(value) => {
+                    if let Err(e) = port.write_request_to_send(value) {
+                        bus.publish(Event::system_log(
+                            LogLevel::Error,
+                            "transport.serial",
+                            format!("set RTS failed on {source}: {e}"),
+                        ));
+                    }
+                }
+            }
+        }
+
         while let Ok(bytes) = write_rx.try_recv() {
             match port.write_all(&bytes) {
                 Ok(()) => {

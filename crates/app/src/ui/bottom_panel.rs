@@ -1,76 +1,235 @@
 use crate::app::WorkbenchApp;
-use crate::state::BottomTab;
+use crate::state::{BottomTab, LineEnding, StatusLevel};
 use eframe::egui;
 use tool_panels::theme;
 
 impl WorkbenchApp {
-    pub(crate) fn send_bar(&mut self, ui: &mut egui::Ui) {
-        let so = self
-            .selected_port
+    /// 确保 send.target_port 指向一个已打开的端口（自动回退逻辑）。
+    pub(crate) fn ensure_send_target_port(&mut self) {
+        let open_ports = self.transport.open_ports();
+
+        if self
+            .send
+            .target_port
+            .as_ref()
+            .is_none_or(|p| !open_ports.contains(p))
+        {
+            self.send.target_port = self
+                .selected_port
+                .clone()
+                .filter(|p| self.transport.status_port(p).open)
+                .or_else(|| open_ports.first().cloned());
+        }
+    }
+
+    pub(crate) fn send_target_port_open(&self) -> bool {
+        self.send
+            .target_port
             .as_deref()
-            .is_some_and(|p| self.transport.status_port(p).open);
+            .is_some_and(|p| self.transport.status_port(p).open)
+    }
+
+    pub(crate) fn send_target_port_combo(&mut self, ui: &mut egui::Ui, id_salt: &'static str) {
+        let open_ports: Vec<String> = self.transport.open_ports();
+
+        egui::ComboBox::from_id_salt(id_salt)
+            .width(130.0)
+            .selected_text(
+                self.send
+                    .target_port
+                    .as_deref()
+                    .map(|p| self.port_label(p))
+                    .unwrap_or_else(|| "无端口".to_owned()),
+            )
+            .show_ui(ui, |ui| {
+                if open_ports.is_empty() {
+                    ui.add_enabled(false, egui::Label::new("无已打开串口"));
+                } else {
+                    for port in &open_ports {
+                        let label = self.port_label(port);
+                        ui.selectable_value(
+                            &mut self.send.target_port,
+                            Some(port.clone()),
+                            label,
+                        );
+                    }
+                }
+            });
+    }
+
+    pub(crate) fn send_bar(&mut self, ui: &mut egui::Ui) {
+        self.ensure_send_target_port();
+        let send_port_open = self.send_target_port_open();
+
         ui.horizontal(|ui| {
-            ui.label("发送");
+            ui.label("发送到");
+            self.send_target_port_combo(ui, "send-target-port");
+
             ui.radio_value(&mut self.send.hex_mode, false, "文本");
             ui.radio_value(&mut self.send.hex_mode, true, "HEX");
+
             ui.add_enabled_ui(!self.send.hex_mode, |ui| {
-                ui.checkbox(&mut self.send.append_lf, "LF")
-                    .on_disabled_hover_text("HEX 模式请手动添加 0A");
+                egui::ComboBox::from_id_salt("line-ending")
+                    .width(60.0)
+                    .selected_text(self.send.line_ending.label())
+                    .show_ui(ui, |ui| {
+                        for &le in LineEnding::ALL.iter() {
+                            ui.selectable_value(
+                                &mut self.send.line_ending,
+                                le,
+                                le.label(),
+                            );
+                        }
+                    });
             });
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("⛶").on_hover_text("放大编辑").clicked() {
                     self.send.popup_open = true;
                 }
             });
         });
+
         ui.add(
             egui::TextEdit::multiline(&mut self.send.input)
                 .desired_width(f32::INFINITY)
                 .desired_rows(5)
-                .hint_text(if so {
+                .hint_text(if send_port_open {
                     "Ctrl+Enter 发送 | ⛶ 放大编辑"
                 } else {
-                    "可先编辑内容，打开串口后发送"
+                    "请选择已打开的串口"
                 }),
         );
+
         let ctrl_enter = ui
             .ctx()
             .input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter));
+
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(so && !self.send.input.is_empty(), egui::Button::new("发送"))
+                .add_enabled(
+                    send_port_open && !self.send.input.is_empty(),
+                    egui::Button::new("发送"),
+                )
                 .clicked()
-                || (ctrl_enter && so && !self.send.input.is_empty())
+                || (ctrl_enter && send_port_open && !self.send.input.is_empty())
             {
                 self.do_send();
             }
+
             if ui.button("清空").clicked() {
                 self.send.input.clear();
                 self.send.error = None;
             }
-            if !so {
-                ui.colored_label(theme::YELLOW, "⚠ 请先打开串口");
+
+            if !send_port_open {
+                ui.colored_label(theme::YELLOW, "\u{26a0} 请先选择并打开串口");
             }
-            if let Some(ref e) = self.send.error {
+
+            if let Some(e) = &self.send.error {
                 ui.colored_label(theme::RED, translate_error(e));
             }
         });
+
+        ui.horizontal(|ui| {
+            if ui
+                .checkbox(&mut self.send.periodic_enabled, "周期发送")
+                .changed()
+            {
+                if self.send.periodic_enabled {
+                    let now = ui.ctx().input(|i| i.time);
+                    let interval_ms = self
+                        .send
+                        .periodic_interval_ms
+                        .trim()
+                        .parse::<u64>()
+                        .unwrap_or(1000);
+                    self.send.next_periodic_send_time =
+                        now + interval_ms as f64 / 1000.0;
+                }
+            }
+            ui.add_enabled(
+                self.send.periodic_enabled,
+                egui::TextEdit::singleline(&mut self.send.periodic_interval_ms)
+                    .desired_width(60.0)
+                    .hint_text("ms"),
+            );
+            ui.label("ms");
+
+            if !self.send.send_history.is_empty() {
+                ui.separator();
+                egui::ComboBox::from_id_salt("send-history")
+                    .width(140.0)
+                    .selected_text("发送历史")
+                    .show_ui(ui, |ui| {
+                        for item in self.send.send_history.iter().take(20) {
+                            if ui.button(shorten_for_ui(item, 48)).clicked() {
+                                self.send.input = item.clone();
+                            }
+                        }
+                    });
+            }
+
+            if ui.button("重置周期").clicked() {
+                self.send.next_periodic_send_time = 0.0;
+            }
+        });
+
+        if let Some(port) = self.send.target_port.clone() {
+            if self.transport.status_port(&port).open {
+                ui.horizontal(|ui| {
+                    ui.label("信号");
+                    if ui.small_button("DTR ON").clicked() {
+                        if let Err(e) = self.transport.set_dtr(&port, true) {
+                            self.set_status_force(StatusLevel::Error, e.to_string());
+                        }
+                    }
+                    if ui.small_button("DTR OFF").clicked() {
+                        if let Err(e) = self.transport.set_dtr(&port, false) {
+                            self.set_status_force(StatusLevel::Error, e.to_string());
+                        }
+                    }
+                    if ui.small_button("RTS ON").clicked() {
+                        if let Err(e) = self.transport.set_rts(&port, true) {
+                            self.set_status_force(StatusLevel::Error, e.to_string());
+                        }
+                    }
+                    if ui.small_button("RTS OFF").clicked() {
+                        if let Err(e) = self.transport.set_rts(&port, false) {
+                            self.set_status_force(StatusLevel::Error, e.to_string());
+                        }
+                    }
+                });
+            }
+        }
     }
 
     pub(crate) fn do_send(&mut self) {
-        let Some(port) = self.selected_port.as_deref() else {
-            self.send.error = Some("请选择串口".into());
+        let Some(port) = self.send.target_port.as_deref() else {
+            self.send.error = Some("请选择发送目标串口".into());
             return;
         };
         self.send.error = send_impl_to(
             port,
             &self.send.input,
             self.send.hex_mode,
-            self.send.append_lf,
+            self.send.line_ending,
             &self.transport,
         )
         .err()
         .map(|e| e.to_string());
+
+        // 发送成功后记录历史
+        if self.send.error.is_none() && !self.send.input.trim().is_empty() {
+            let text = self.send.input.clone();
+            if self.send.send_history.front() != Some(&text) {
+                self.send.send_history.push_front(text);
+                const MAX_SEND_HISTORY: usize = 50;
+                while self.send.send_history.len() > MAX_SEND_HISTORY {
+                    self.send.send_history.pop_back();
+                }
+            }
+        }
     }
     pub(crate) fn show_bottom_panel_contents(&mut self, ui: &mut egui::Ui) {
         self.ensure_bottom_tab_available();
@@ -147,7 +306,7 @@ pub(crate) fn send_impl_to(
     port: &str,
     input: &str,
     hex: bool,
-    lf: bool,
+    line_ending: LineEnding,
     t: &TransportManager,
 ) -> Result<(), tool_transport::TransportError> {
     if input.trim().is_empty() {
@@ -164,9 +323,7 @@ pub(crate) fn send_impl_to(
         Ok(())
     } else {
         let mut text = input.to_owned();
-        if lf {
-            text.push('\n');
-        }
+        text.push_str(line_ending.suffix());
         t.send_text_to(port, &text)
     }
 }
@@ -178,4 +335,12 @@ pub(crate) fn translate_error(m: &str) -> String {
     } else {
         m.to_owned()
     }
+}
+
+fn shorten_for_ui(s: &str, max_chars: usize) -> String {
+    let mut out = s.chars().take(max_chars).collect::<String>();
+    if s.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
 }

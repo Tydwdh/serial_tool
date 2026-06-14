@@ -26,10 +26,12 @@ impl Activity {
 
     pub fn panel_kind(self) -> Option<PanelKind> {
         match self {
+            Self::Devices => Some(PanelKind::Devices),
             Self::Replay => Some(PanelKind::Replay),
+            Self::Plugins => Some(PanelKind::Plugins),
+            Self::Settings => Some(PanelKind::Settings),
             Self::Terminal => Some(PanelKind::Terminal),
             Self::Logs => Some(PanelKind::Logs),
-            Self::Devices | Self::Plugins | Self::Settings => None,
         }
     }
 }
@@ -37,8 +39,11 @@ impl Activity {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PanelKind {
+    Devices,
     #[default]
     Replay,
+    Plugins,
+    Settings,
     Terminal,
     Logs,
     Dynamic(String),
@@ -47,7 +52,10 @@ pub enum PanelKind {
 impl PanelKind {
     pub fn title(&self) -> String {
         match self {
+            Self::Devices => "设备".to_owned(),
             Self::Replay => "回放".to_owned(),
+            Self::Plugins => "插件".to_owned(),
+            Self::Settings => "设置".to_owned(),
             Self::Terminal => "终端".to_owned(),
             Self::Logs => "日志".to_owned(),
             Self::Dynamic(id) => id.clone(),
@@ -56,7 +64,10 @@ impl PanelKind {
 
     pub fn activity(&self) -> Option<Activity> {
         match self {
+            Self::Devices => Some(Activity::Devices),
             Self::Replay => Some(Activity::Replay),
+            Self::Plugins => Some(Activity::Plugins),
+            Self::Settings => Some(Activity::Settings),
             Self::Terminal => Some(Activity::Terminal),
             Self::Logs => Some(Activity::Logs),
             Self::Dynamic(_) => None,
@@ -71,18 +82,205 @@ impl PanelKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DockArea {
+    Center,
+    Bottom,
+    Right,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DockStack {
+    pub tabs: Vec<PanelKind>,
+    pub active: Option<PanelKind>,
+}
+
+impl Default for DockStack {
+    fn default() -> Self {
+        Self {
+            tabs: Vec::new(),
+            active: None,
+        }
+    }
+}
+
+impl DockStack {
+    pub fn open(&mut self, kind: PanelKind) {
+        if !self.tabs.contains(&kind) {
+            self.tabs.push(kind.clone());
+        }
+        self.active = Some(kind);
+    }
+
+    /// 添加标签但不切换焦点（后台创建面板时使用）
+    pub fn add_inactive(&mut self, kind: PanelKind) {
+        if !self.tabs.contains(&kind) {
+            self.tabs.push(kind.clone());
+        }
+        if self.active.is_none() {
+            self.active = Some(kind);
+        }
+    }
+
+    pub fn close(&mut self, kind: &PanelKind) {
+        self.tabs.retain(|tab| tab != kind);
+        if self.active.as_ref() == Some(kind) {
+            self.active = self.tabs.last().cloned();
+        }
+    }
+
+    pub fn remove(&mut self, kind: &PanelKind) -> bool {
+        let old_len = self.tabs.len();
+        self.close(kind);
+        old_len != self.tabs.len()
+    }
+
+    pub fn contains(&self, kind: &PanelKind) -> bool {
+        self.tabs.contains(kind)
+    }
+
+    pub fn active_or_first(&self) -> Option<PanelKind> {
+        self.active.clone().or_else(|| self.tabs.first().cloned())
+    }
+
+    pub fn discard_dynamic_tabs(&mut self) {
+        self.tabs.retain(|kind| kind.dynamic_id().is_none());
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|kind| kind.dynamic_id().is_some())
+        {
+            self.active = self.tabs.last().cloned();
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+fn default_bottom_size() -> f32 {
+    350.0
+}
+
+fn default_right_size() -> f32 {
+    320.0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DockLayout {
+    #[serde(default = "default_true")]
+    pub activity_bar_visible: bool,
+    #[serde(default = "default_true")]
+    pub bottom_visible: bool,
+    #[serde(default)]
+    pub right_visible: bool,
+    #[serde(default = "default_bottom_size")]
+    pub bottom_size: f32,
+    #[serde(default = "default_right_size")]
+    pub right_size: f32,
+    #[serde(default)]
+    pub center: DockStack,
+    #[serde(default)]
+    pub bottom: DockStack,
+    #[serde(default)]
+    pub right: DockStack,
+}
+
+impl Default for DockLayout {
+    fn default() -> Self {
+        let mut center = DockStack::default();
+        center.open(PanelKind::Devices);
+
+        let mut bottom = DockStack::default();
+        bottom.open(PanelKind::Terminal);
+        bottom.open(PanelKind::Logs);
+        bottom.active = Some(PanelKind::Terminal);
+
+        Self {
+            activity_bar_visible: true,
+            bottom_visible: true,
+            right_visible: false,
+            bottom_size: default_bottom_size(),
+            right_size: default_right_size(),
+            center,
+            bottom,
+            right: DockStack::default(),
+        }
+    }
+}
+
+impl DockLayout {
+    pub fn stack_mut(&mut self, area: DockArea) -> &mut DockStack {
+        match area {
+            DockArea::Center => &mut self.center,
+            DockArea::Bottom => &mut self.bottom,
+            DockArea::Right => &mut self.right,
+        }
+    }
+
+    pub fn stack(&self, area: DockArea) -> &DockStack {
+        match area {
+            DockArea::Center => &self.center,
+            DockArea::Bottom => &self.bottom,
+            DockArea::Right => &self.right,
+        }
+    }
+
+    pub fn move_panel(&mut self, kind: PanelKind, to: DockArea) {
+        self.center.remove(&kind);
+        self.bottom.remove(&kind);
+        self.right.remove(&kind);
+        self.stack_mut(to).open(kind);
+        match to {
+            DockArea::Bottom => self.bottom_visible = true,
+            DockArea::Right => self.right_visible = true,
+            _ => {}
+        }
+    }
+
+    pub fn all_tabs(&self) -> Vec<PanelKind> {
+        self.center
+            .tabs
+            .iter()
+            .chain(self.bottom.tabs.iter())
+            .chain(self.right.tabs.iter())
+            .cloned()
+            .collect()
+    }
+
+    pub fn discard_dynamic_tabs(&mut self) {
+        self.center.discard_dynamic_tabs();
+        self.bottom.discard_dynamic_tabs();
+        self.right.discard_dynamic_tabs();
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PanelManager {
     pub activity: Activity,
     pub tabs: Vec<PanelKind>,
     pub active_tab: PanelKind,
-    pub inspector_visible: bool,
+    #[serde(default)]
+    pub inspector_visible: bool, // legacy: ignored, kept for old workspace compatibility
     #[serde(default = "default_true")]
     pub bottom_logs_visible: bool,
+    #[serde(default)]
+    pub dock: DockLayout,
+}
+
+impl Default for PanelManager {
+    fn default() -> Self {
+        Self {
+            activity: Activity::Devices,
+            tabs: Default::default(),
+            active_tab: PanelKind::Replay,
+            inspector_visible: false,
+            bottom_logs_visible: true,
+            dock: DockLayout::default(),
+        }
+    }
 }
 
 impl PanelManager {
@@ -102,14 +300,16 @@ impl PanelManager {
         if let Some(activity) = kind.activity() {
             self.activity = activity;
         }
-        self.active_tab = kind;
+        self.active_tab = kind.clone();
+        self.dock.center.open(kind);
     }
 
     /// 添加标签但不自动切换（插件后台创建面板时使用）
     pub fn add_tab(&mut self, kind: PanelKind) {
         if !self.tabs.contains(&kind) {
-            self.tabs.push(kind);
+            self.tabs.push(kind.clone());
         }
+        self.dock.center.add_inactive(kind);
     }
 
     pub fn close_tab(&mut self, kind: PanelKind) {
@@ -127,6 +327,9 @@ impl PanelManager {
             }
         }
         self.tabs.retain(|k| k != &kind);
+        self.dock.center.remove(&kind);
+        self.dock.bottom.remove(&kind);
+        self.dock.right.remove(&kind);
     }
 
     pub fn active_dynamic_id(&self) -> Option<&str> {
@@ -138,6 +341,7 @@ impl PanelManager {
         if self.active_tab.dynamic_id().is_some() {
             self.active_tab = self.activity.panel_kind().unwrap_or_default();
         }
+        self.dock.discard_dynamic_tabs();
     }
 }
 

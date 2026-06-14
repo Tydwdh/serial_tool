@@ -19,6 +19,12 @@ pub(crate) struct PersistedConfig {
     pub(crate) activity_order: Vec<Activity>,
     #[serde(default)]
     pub(crate) enabled_plugins: Vec<String>,
+    #[serde(default)]
+    pub(crate) terminal_popup_always_on_top: bool,
+    #[serde(default)]
+    pub(crate) send_popup_always_on_top: bool,
+    #[serde(default)]
+    pub(crate) port_aliases: std::collections::HashMap<String, String>,
 }
 
 pub(crate) fn default_activity_order() -> Vec<Activity> {
@@ -68,6 +74,19 @@ pub(crate) fn config_path() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("workspace.json")
 }
+pub(crate) fn pick_workspace_open_path() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .add_filter("Workspace", &["json"])
+        .pick_file()
+}
+
+pub(crate) fn pick_workspace_save_path() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .add_filter("Workspace", &["json"])
+        .set_file_name("workspace.json")
+        .save_file()
+}
+
 pub(crate) fn windows_open_dialog() -> Option<PathBuf> {
     rfd::FileDialog::new()
         .add_filter("JSONL", &["jsonl"])

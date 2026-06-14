@@ -41,15 +41,21 @@ pub(crate) struct WorkbenchApp {
     pub(crate) recorder_path: String,
     pub(crate) status: StatusState,
     pub(crate) last_port_refresh: f64,
+    pub(crate) auto_reconnect: bool,
+    pub(crate) pending_reconnect: Option<PendingReconnect>,
+    pub(crate) port_aliases: std::collections::HashMap<String, String>,
     pub(crate) bottom_panel_visible: bool,
     pub(crate) bottom_tab: BottomTab,
     pub(crate) send: SendUiState,
     pub(crate) terminal_popup_open: bool,
+    pub(crate) terminal_popup_always_on_top: bool,
+    pub(crate) send_popup_always_on_top: bool,
     pub(crate) detached_dynamic_panels: BTreeSet<String>,
     pub(crate) top_bar_serial_collapsed: bool,
     pub(crate) activity_order: Vec<Activity>,
     pub(crate) activity_drag_source: Option<usize>,
     pub(crate) activity_rects_cache: Vec<egui::Rect>,
+    pub(crate) dock_dragging_panel: Option<tool_panels::PanelKind>,
     pub(crate) last_rate_check_time: f64,
     pub(crate) last_event_count: u64,
     pub(crate) event_rate: f64,
@@ -64,6 +70,7 @@ pub(crate) struct WorkbenchApp {
 pub(crate) struct ReplayAnalyzerJob {
     pub(crate) generation: u64,
     pub(crate) source_path: String,
+    pub(crate) cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub(crate) handle: std::thread::JoinHandle<ReplayAnalyzerResult>,
 }
 
@@ -76,11 +83,26 @@ pub(crate) struct ReplayAnalyzerResult {
     pub(crate) logs: Vec<String>,
 }
 
+#[derive(Clone)]
+pub(crate) struct PendingReconnect {
+    pub(crate) port_name: String,
+    pub(crate) config: tool_transport::SerialConfig,
+    pub(crate) attempts: u32,
+    pub(crate) next_try_at: f64,
+}
+
 // ══════════════════════════════════════════
 //  WorkbenchApp impl
 // ══════════════════════════════════════════
 
 impl WorkbenchApp {
+    pub(crate) fn port_label(&self, port: &str) -> String {
+        match self.port_aliases.get(port).filter(|s| !s.trim().is_empty()) {
+            Some(alias) => format!("{alias} ({port})"),
+            None => port.to_owned(),
+        }
+    }
+
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
         setup_fonts(cc);
         cc.egui_ctx.set_embed_viewports(false);
@@ -152,10 +174,24 @@ impl WorkbenchApp {
             panels: rp.clone(),
             status: StatusState::default(),
             last_port_refresh: 0.0,
+            auto_reconnect: true,
+            pending_reconnect: None,
+            port_aliases: config
+                .as_ref()
+                .map(|c| c.port_aliases.clone())
+                .unwrap_or_default(),
             bottom_panel_visible: rp.bottom_logs_visible,
             bottom_tab: BottomTab::Terminal,
             send: SendUiState::default(),
             terminal_popup_open: false,
+            terminal_popup_always_on_top: config
+                .as_ref()
+                .map(|c| c.terminal_popup_always_on_top)
+                .unwrap_or(false),
+            send_popup_always_on_top: config
+                .as_ref()
+                .map(|c| c.send_popup_always_on_top)
+                .unwrap_or(false),
             detached_dynamic_panels: BTreeSet::new(),
             top_bar_serial_collapsed: false,
             activity_order: config
@@ -172,6 +208,7 @@ impl WorkbenchApp {
             plugin_manager: pm,
             recorder,
             dynamic_drag_source: None,
+            dock_dragging_panel: None,
             file_broker,
             dialog_receiver,
             file_browse_subscription: bus.subscribe(tool_databus::TopicFilter::exact(

@@ -4,8 +4,7 @@ use tool_panels::theme;
 
 pub const ACTIVITY_BAR_WIDTH: f32 = 104.0;
 pub const BOTTOM_PANEL_HEIGHT: f32 = 350.0;
-pub const BOTTOM_PANEL_MIN: f32 = 350.0;
-pub const INSPECTOR_WIDTH: f32 = 240.0;
+pub const BOTTOM_PANEL_MIN: f32 = 160.0;
 pub const DEFAULT_WINDOW_WIDTH: f32 = 1280.0;
 pub const DEFAULT_WINDOW_HEIGHT: f32 = 820.0;
 pub const REPAINT_INTERVAL_MS: u64 = 50;

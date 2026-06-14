@@ -1,5 +1,7 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tool_core::LogLevel;
-use tool_lua_host::{LuaReplayConfig, run_replay_analyzer};
+use tool_lua_host::{LuaReplayConfig, run_replay_analyzer_with_cancel};
 
 use crate::app::{ReplayAnalyzerJob, ReplayAnalyzerResult, WorkbenchApp};
 use crate::state::StatusLevel;
@@ -35,10 +37,16 @@ impl WorkbenchApp {
         let generation = self.replay_analyzer_generation.wrapping_add(1);
         self.replay_analyzer_generation = generation;
         let source_path = self.replay_panel.path.clone();
+        self.replay_panel.analyzer_logs.clear();
+        self.replay_panel
+            .push_analyzer_log(format!("启动 {total_entries} 个 analyzer ..."));
         self.set_status(
             StatusLevel::Info,
             format!("回放：正在运行 {total_entries} 个 analyzer ..."),
         );
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_thread = Arc::clone(&cancel);
 
         let handle = std::thread::spawn(move || {
             let mut all_derived = Vec::new();
@@ -48,6 +56,10 @@ impl WorkbenchApp {
             let mut failed = 0usize;
 
             for entry in &entries {
+                if cancel_thread.load(Ordering::Relaxed) {
+                    logs.push("Analyzer 已取消".to_owned());
+                    break;
+                }
                 let replay_config = match &entry.manifest.replay {
                     Some(cfg) => cfg,
                     None => {
@@ -80,7 +92,12 @@ impl WorkbenchApp {
                     plugin_root: Some(entry.root.clone()),
                 };
 
-                match run_replay_analyzer(script, config, &raw_events) {
+                match run_replay_analyzer_with_cancel(
+                    script,
+                    config,
+                    &raw_events,
+                    Arc::clone(&cancel_thread),
+                ) {
                     Ok(output) => {
                         succeeded += 1;
                         logs.push(format!(
@@ -111,6 +128,7 @@ impl WorkbenchApp {
         self.replay_analyzer_job = Some(ReplayAnalyzerJob {
             generation,
             source_path,
+            cancel,
             handle,
         });
     }
@@ -147,6 +165,12 @@ impl WorkbenchApp {
 
         for msg in &result.logs {
             self.log(LogLevel::Info, msg);
+            self.replay_panel.push_analyzer_log(msg.clone());
+        }
+
+        for err in &result.errors {
+            self.replay_panel
+                .push_analyzer_log(format!("ERROR: {err}"));
         }
 
         if result.derived_events.is_empty() && result.succeeded == 0 {

@@ -340,7 +340,7 @@ local function init()
         title = "G-code 发送器",
         fields = {
             { id = "file_path", kind = "File",       title = "G-code 文件", filters = { { name = "G-code", extensions = { "gcode", "nc", "ngc", "txt" } } } },
-            { id = "port",      kind = "TextArea",   title = "串口号",      value = settings.port, rows = 1 },
+            { id = "port",      kind = "serial",     title = "串口号",      value = settings.port },
             { id = "baud_rate", kind = "TextArea",   title = "波特率",      value = tostring(settings.baud_rate), rows = 1 },
             { id = "send_delay_ms", kind = "TextArea", title = "发送间隔(ms)", value = tostring(settings.send_delay_ms), rows = 1 },
             { id = "profile_name", kind = "TextArea", title = "Profile 名", value = "", rows = 1 },

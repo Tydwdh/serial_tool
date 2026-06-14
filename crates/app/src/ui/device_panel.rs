@@ -127,13 +127,101 @@ impl WorkbenchApp {
             self.recorder.set_mode(mode);
         });
 
+        // ── 录制健康状态 ──
+        let stats = self.recorder.stats();
+        if stats.running || stats.stopping {
+            ui.separator();
+            ui.horizontal(|ui| {
+                if stats.running {
+                    ui.colored_label(theme::GREEN, "● 录制中");
+                } else {
+                    ui.colored_label(theme::YELLOW, "● 正在停止");
+                }
+
+                ui.label(format!("事件 {}", stats.events_written));
+                ui.label(format!(
+                    "{:.1} MB",
+                    stats.bytes_written as f64 / 1024.0 / 1024.0
+                ));
+                ui.label(format!("flush {} ms 前", stats.last_flush_elapsed_ms));
+            });
+
+            if let Some(ref path) = self.recorder.current_path() {
+                ui.label(format!("路径：{}", path.display()));
+            }
+            if let Some(ref error) = stats.last_error {
+                ui.colored_label(theme::RED, format!("录制错误：{error}"));
+            }
+        }
+
+        ui.separator();
+
+        ui.checkbox(&mut self.auto_reconnect, "串口拔出后自动重连");
+        if self.auto_reconnect {
+            if let Some(ref pending) = self.pending_reconnect {
+                ui.label(format!(
+                    "等待 {} 重新插入... (第 {} 次)",
+                    pending.port_name,
+                    pending.attempts + 1
+                ));
+            }
+        }
+
         ui.separator();
 
         ui.heading("可用端口");
+        ui.label(
+            egui::RichText::new("提示：别名会显示在串口选择、发送目标和设备列表中")
+                .color(theme::TEXT_SECONDARY),
+        );
+        let mut alias_changes: Vec<(String, Option<String>)> = Vec::new();
         egui::ScrollArea::vertical().show(ui, |ui| {
             for port in &self.ports {
-                ui.monospace(format!("{} {}", port.port_name, port.port_type));
+                let name = port.port_name.clone();
+                let mut alias_buf = self
+                    .port_aliases
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_default();
+
+                ui.horizontal(|ui| {
+                    ui.monospace(&name);
+                    ui.label(format!("{}", port.port_type));
+
+                    ui.label("别名");
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut alias_buf)
+                            .desired_width(140.0)
+                            .hint_text("例如 主控板 / GPS"),
+                    );
+
+                    if resp.changed() {
+                        let new_alias = if alias_buf.trim().is_empty() {
+                            None
+                        } else {
+                            Some(alias_buf.trim().to_owned())
+                        };
+                        alias_changes.push((name.clone(), new_alias));
+                    }
+
+                    if self.port_aliases.contains_key(&name)
+                        && ui.small_button("清除").clicked()
+                    {
+                        alias_changes.push((name.clone(), None));
+                    }
+                });
             }
         });
+        for (name, new_alias) in alias_changes {
+            match new_alias {
+                Some(alias) => {
+                    self.port_aliases.insert(name, alias);
+                }
+                None => {
+                    self.port_aliases.remove(&name);
+                }
+            }
+            let _ = self.save_config();
+        }
     }
 }

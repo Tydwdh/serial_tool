@@ -1,10 +1,27 @@
 use crate::app::WorkbenchApp;
-use crate::state::DetachedPanelAction;
+use crate::state::{DetachedPanelAction, LineEnding};
 use crate::ui::bottom_panel::translate_error;
 use eframe::egui;
 use serde_json::Value;
 use tool_core::{Direction, Event, LogLevel, Payload};
 use tool_panels::{PanelKind, theme};
+
+fn floating_viewport_builder(
+    title: impl Into<String>,
+    size: [f32; 2],
+    min_size: [f32; 2],
+    always_on_top: bool,
+) -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
+        .with_title(title)
+        .with_inner_size(size)
+        .with_min_inner_size(min_size)
+        .with_window_level(if always_on_top {
+            egui::WindowLevel::AlwaysOnTop
+        } else {
+            egui::WindowLevel::Normal
+        })
+}
 
 impl WorkbenchApp {
     pub(crate) fn terminal_popup(&mut self, ctx: &egui::Context) {
@@ -13,9 +30,12 @@ impl WorkbenchApp {
         }
 
         let vid = egui::ViewportId::from_hash_of("term-popup");
-        let builder = egui::ViewportBuilder::default()
-            .with_title("接收区 - 硬件调试工作台")
-            .with_inner_size([800.0, 600.0]);
+        let builder = floating_viewport_builder(
+            "接收区 - 硬件调试工作台",
+            [800.0, 600.0],
+            [360.0, 240.0],
+            self.terminal_popup_always_on_top,
+        );
 
         let should_close = ctx.show_viewport_immediate(vid, builder, |ui, _| {
             if ui.ctx().input(|i| i.viewport().close_requested()) {
@@ -28,13 +48,40 @@ impl WorkbenchApp {
 
                     ui.horizontal(|ui| {
                         ui.heading("接收区");
-                        if ui.button("关闭").clicked() {
-                            close = true;
+
+                        let pin_label = if self.terminal_popup_always_on_top {
+                            "\u{1f4cc} 置顶"
+                        } else {
+                            "置顶"
+                        };
+
+                        if ui
+                            .selectable_label(
+                                self.terminal_popup_always_on_top,
+                                pin_label,
+                            )
+                            .on_hover_text("让该窗口保持在其他窗口上方")
+                            .clicked()
+                        {
+                            self.terminal_popup_always_on_top =
+                                !self.terminal_popup_always_on_top;
+                            let _ = self.save_config();
                         }
+
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                if ui.button("清空").clicked() {
+                                    self.terminal_panel.clear();
+                                }
+                                if ui.button("关闭").clicked() {
+                                    close = true;
+                                }
+                            },
+                        );
                     });
                     ui.separator();
 
-                    self.terminal_panel.height = (ui.available_height() - 42.0).max(120.0);
                     self.terminal_panel.ui(ui);
 
                     close
@@ -51,44 +98,85 @@ impl WorkbenchApp {
             return;
         }
         let vid = egui::ViewportId::from_hash_of("send-popup");
-        let builder = egui::ViewportBuilder::default()
-            .with_title("发送 - 硬件调试工作台")
-            .with_inner_size([640.0, 480.0])
-            .with_min_inner_size([360.0, 260.0]);
+        let builder = floating_viewport_builder(
+            "发送 - 硬件调试工作台",
+            [640.0, 480.0],
+            [360.0, 260.0],
+            self.send_popup_always_on_top,
+        );
         let should_close = ctx.show_viewport_immediate(vid, builder, |ui, _| {
             if ui.ctx().input(|i| i.viewport().close_requested()) {
                 return true;
             }
             egui::CentralPanel::default()
                 .show_inside(ui, |ui| {
-                    let so = self
-                        .selected_port
-                        .as_deref()
-                        .is_some_and(|p| self.transport.status_port(p).open);
+                    self.ensure_send_target_port();
+                    let send_port_open = self.send_target_port_open();
                     let ctrl_enter = ui
                         .ctx()
                         .input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter));
                     ui.horizontal(|ui| {
-                        ui.radio_value(&mut self.send.hex_mode, false, "文本");
-                        ui.radio_value(&mut self.send.hex_mode, true, "HEX");
-                        ui.add_enabled_ui(!self.send.hex_mode, |ui| {
-                            ui.checkbox(&mut self.send.append_lf, "LF")
-                                .on_disabled_hover_text("HEX 模式请手动添加 0A");
-                        });
+                        ui.heading("发送");
+
+                        ui.label("目标");
+                        self.send_target_port_combo(ui, "send-popup-target-port");
+
+                        let pin_label = if self.send_popup_always_on_top {
+                            "\u{1f4cc} 置顶"
+                        } else {
+                            "置顶"
+                        };
+
                         if ui
-                            .add_enabled(
-                                so && !self.send.input.is_empty(),
-                                egui::Button::new("发送 (Ctrl+Enter)"),
+                            .selectable_label(
+                                self.send_popup_always_on_top,
+                                pin_label,
                             )
+                            .on_hover_text("让该窗口保持在其他窗口上方")
                             .clicked()
-                            || (ctrl_enter && so && !self.send.input.is_empty())
                         {
-                            self.do_send();
+                            self.send_popup_always_on_top =
+                                !self.send_popup_always_on_top;
+                            let _ = self.save_config();
                         }
-                        if ui.button("清空").clicked() {
-                            self.send.input.clear();
-                            self.send.error = None;
-                        }
+
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                ui.radio_value(&mut self.send.hex_mode, false, "文本");
+                                ui.radio_value(&mut self.send.hex_mode, true, "HEX");
+                                ui.add_enabled_ui(!self.send.hex_mode, |ui| {
+                                    egui::ComboBox::from_id_salt("send-popup-line-ending")
+                                        .width(60.0)
+                                        .selected_text(self.send.line_ending.label())
+                                        .show_ui(ui, |ui| {
+                                            for &le in LineEnding::ALL.iter() {
+                                                ui.selectable_value(
+                                                    &mut self.send.line_ending,
+                                                    le,
+                                                    le.label(),
+                                                );
+                                            }
+                                        });
+                                });
+                                if ui
+                                    .add_enabled(
+                                        send_port_open && !self.send.input.is_empty(),
+                                        egui::Button::new("发送 (Ctrl+Enter)"),
+                                    )
+                                    .clicked()
+                                    || (ctrl_enter
+                                        && send_port_open
+                                        && !self.send.input.is_empty())
+                                {
+                                    self.do_send();
+                                }
+                                if ui.button("清空").clicked() {
+                                    self.send.input.clear();
+                                    self.send.error = None;
+                                }
+                            },
+                        );
                     });
                     ui.separator();
                     ui.add(
@@ -97,7 +185,7 @@ impl WorkbenchApp {
                             .desired_rows(24)
                             .hint_text("Ctrl+Enter 发送"),
                     );
-                    if let Some(ref e) = self.send.error {
+                    if let Some(e) = &self.send.error {
                         ui.colored_label(theme::RED, translate_error(e));
                     }
                     false
