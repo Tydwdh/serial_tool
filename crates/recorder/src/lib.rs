@@ -285,6 +285,7 @@ impl JsonlRecorder {
                 "bytes_written": bytes_written,
                 "record_mode": format!("{:?}", mode),
                 "closed_cleanly": last_error_thread.lock().unwrap().is_none(),
+                "app_version": env!("CARGO_PKG_VERSION"),
                 "error": last_error_thread.lock().unwrap().clone(),
             });
             if let Ok(text) = serde_json::to_string_pretty(&summary) {

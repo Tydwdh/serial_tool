@@ -371,12 +371,24 @@ pub(crate) fn hex_preview(input: &str) -> String {
     if input.trim().is_empty() {
         return "—".to_owned();
     }
+    const MAX_PREVIEW: usize = 32;
     match tool_transport::parse_hex(input) {
-        Ok(bytes) if !bytes.is_empty() => bytes
-            .iter()
-            .map(|b| format!("{b:02X}"))
-            .collect::<Vec<_>>()
-            .join(" "),
+        Ok(bytes) if !bytes.is_empty() => {
+            let count = bytes.len();
+            let display = if count > MAX_PREVIEW {
+                format!(
+                    "{}… (共{count}字节)",
+                    bytes[..MAX_PREVIEW]
+                        .iter()
+                        .map(|b| format!("{b:02X}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            } else {
+                bytes.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
+            };
+            display
+        }
         Ok(_) => "空".to_owned(),
         Err(_) => "解析失败".to_owned(),
     }
