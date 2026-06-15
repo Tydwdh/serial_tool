@@ -178,11 +178,7 @@ impl WorkbenchApp {
         egui::ScrollArea::vertical().show(ui, |ui| {
             for port in &self.ports {
                 let name = port.port_name.clone();
-                let mut alias_buf = self
-                    .port_aliases
-                    .get(&name)
-                    .cloned()
-                    .unwrap_or_default();
+                let mut alias_buf = self.port_aliases.get(&name).cloned().unwrap_or_default();
 
                 ui.horizontal(|ui| {
                     ui.monospace(&name);
@@ -204,8 +200,7 @@ impl WorkbenchApp {
                         alias_changes.push((name.clone(), new_alias));
                     }
 
-                    if self.port_aliases.contains_key(&name)
-                        && ui.small_button("清除").clicked()
+                    if self.port_aliases.contains_key(&name) && ui.small_button("清除").clicked()
                     {
                         alias_changes.push((name.clone(), None));
                     }

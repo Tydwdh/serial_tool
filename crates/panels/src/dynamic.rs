@@ -911,10 +911,7 @@ fn dynamic_form_ui(
                                 .selected_text(selected_text)
                                 .show_ui(ui, |ui| {
                                     if ports.is_empty() {
-                                        ui.add_enabled(
-                                            false,
-                                            egui::Label::new("无可用串口"),
-                                        );
+                                        ui.add_enabled(false, egui::Label::new("无可用串口"));
                                     } else {
                                         for port in ports {
                                             if ui
@@ -923,8 +920,7 @@ fn dynamic_form_ui(
                                                     port.port_name.clone(),
                                                     format!(
                                                         "{}  {}",
-                                                        port.port_name,
-                                                        port.port_type
+                                                        port.port_name, port.port_type
                                                     ),
                                                 )
                                                 .changed()

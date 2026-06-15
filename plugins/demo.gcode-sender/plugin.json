@@ -4,10 +4,59 @@
   "version": "0.1.0",
   "runtime": "lua",
   "main": "main.lua",
-  "permissions": ["bus", "log", "serial", "ui", "storage", "timer", "dialog", "fs.read.user_selected", "task", "config"],
+  "permissions": ["bus", "log", "serial", "dialog", "fs.read.user_selected", "task", "config"],
   "contributes": {
-    "panels": [
-      { "id": "demo.gcode-sender.main", "title": "G-code 发送器", "kind": "form" }
+    "commands": [
+      { "id": "demo.gcode-sender.send_file", "title": "G文件" },
+      { "id": "demo.gcode-sender.send_single", "title": "G单条" },
+      { "id": "demo.gcode-sender.send_raw", "title": "G原始" },
+      { "id": "demo.gcode-sender.pause", "title": "暂停/恢复" },
+      { "id": "demo.gcode-sender.cancel", "title": "取消" }
+    ],
+    "ui": [
+      {
+        "id": "demo.gcode-sender.send_file.button",
+        "slot": "send.toolbar",
+        "kind": "button",
+        "command": "demo.gcode-sender.send_file",
+        "tooltip": "发送区为空时选择 G-code 文件；否则把发送区内容当作文件路径",
+        "record_send_input": true,
+        "order": 20
+      },
+      {
+        "id": "demo.gcode-sender.send_single.button",
+        "slot": "send.toolbar",
+        "kind": "button",
+        "command": "demo.gcode-sender.send_single",
+        "tooltip": "按脚本 singlegcode 模式发送：M92 + 当前输入 + M2，并带行号和校验",
+        "record_send_input": true,
+        "order": 21
+      },
+      {
+        "id": "demo.gcode-sender.send_raw.button",
+        "slot": "send.toolbar",
+        "kind": "button",
+        "command": "demo.gcode-sender.send_raw",
+        "tooltip": "按脚本 rawgcode 模式发送当前输入，不加行号和校验",
+        "record_send_input": true,
+        "order": 22
+      },
+      {
+        "id": "demo.gcode-sender.pause.button",
+        "slot": "send.toolbar",
+        "kind": "button",
+        "command": "demo.gcode-sender.pause",
+        "tooltip": "暂停或恢复当前 G-code 发送任务",
+        "order": 23
+      },
+      {
+        "id": "demo.gcode-sender.cancel.button",
+        "slot": "send.toolbar",
+        "kind": "button",
+        "command": "demo.gcode-sender.cancel",
+        "tooltip": "取消当前 G-code 发送任务",
+        "order": 24
+      }
     ]
   }
 }

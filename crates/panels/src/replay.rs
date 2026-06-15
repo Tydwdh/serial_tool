@@ -423,10 +423,7 @@ impl ReplayPanel {
 
             match reason {
                 ReplayBlockReason::NeedAnalyzer => {
-                    ui.colored_label(
-                        theme::YELLOW,
-                        "重新解析模式需要先运行 Replay Analyzer",
-                    );
+                    ui.colored_label(theme::YELLOW, "重新解析模式需要先运行 Replay Analyzer");
 
                     if ui.button("运行 Analyzer").clicked() {
                         self.want_run_analyzers = true;

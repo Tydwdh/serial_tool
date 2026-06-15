@@ -169,8 +169,7 @@ impl WorkbenchApp {
         }
 
         for err in &result.errors {
-            self.replay_panel
-                .push_analyzer_log(format!("ERROR: {err}"));
+            self.replay_panel.push_analyzer_log(format!("ERROR: {err}"));
         }
 
         if result.derived_events.is_empty() && result.succeeded == 0 {

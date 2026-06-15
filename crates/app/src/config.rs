@@ -25,6 +25,8 @@ pub(crate) struct PersistedConfig {
     pub(crate) send_popup_always_on_top: bool,
     #[serde(default)]
     pub(crate) port_aliases: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub(crate) send_history: Vec<String>,
 }
 
 pub(crate) fn default_activity_order() -> Vec<Activity> {

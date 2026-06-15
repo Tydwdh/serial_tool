@@ -1,6 +1,7 @@
 use crate::ui::activity_bar::aicon;
 pub mod activity_bar;
 pub mod bottom_panel;
+pub mod contributions;
 pub mod device_panel;
 pub mod dock;
 pub mod layout_buttons;
@@ -10,9 +11,7 @@ pub mod status_bar;
 pub mod top_bar;
 
 use crate::app::WorkbenchApp;
-use crate::bootstrap::{
-    ACTIVITY_BAR_WIDTH, BOTTOM_PANEL_HEIGHT, BOTTOM_PANEL_MIN,
-};
+use crate::bootstrap::{ACTIVITY_BAR_WIDTH, BOTTOM_PANEL_HEIGHT, BOTTOM_PANEL_MIN};
 use eframe::egui;
 use tool_panels::{Activity, DockArea, PanelKind, theme};
 

@@ -4,6 +4,7 @@ use parking_lot::Mutex as ParkingMutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, json};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -150,6 +151,8 @@ pub struct LuaHostServices {
 }
 
 const LUA_PLUGIN_EVENT_QUEUE_CAPACITY: usize = 4096;
+const LUA_PLUGIN_INTERNAL_SERIAL_RX_CAPACITY: usize = 4096;
+const LUA_PLUGIN_INTERNAL_SERIAL_RX_DRAIN_LIMIT: usize = 512;
 
 const LUA_DEFAULT_PERMISSIONS: &[&str] =
     &["bus", "log", "serial", "ui", "storage", "timer", "testing"];
@@ -544,6 +547,16 @@ fn plugin_event_loop(
         return;
     }
 
+    let serial_rx_subscription =
+        if has_permission(&config, "serial") && host_services.line_buffers.is_some() {
+            Some(bus.subscribe_lossy_bounded(
+                TopicFilter::exact(topics::SERIAL_RX),
+                LUA_PLUGIN_INTERNAL_SERIAL_RX_CAPACITY,
+            ))
+        } else {
+            None
+        };
+
     if let Err(error) = lua.load(&source).set_name(&config.script_name).exec() {
         *outcome.lock() = Some(LuaRunState::Failed);
         bus.publish(Event::system_log(
@@ -593,6 +606,12 @@ fn plugin_event_loop(
             break;
         }
 
+        if let Some(ref subscription) = serial_rx_subscription {
+            for event in subscription.drain_limited(LUA_PLUGIN_INTERNAL_SERIAL_RX_DRAIN_LIMIT) {
+                drain_serial_rx_to_buffers(&event, &host_services);
+            }
+        }
+
         process_timers(&lua, &bus, &config);
         process_tasks(&lua, &bus, &config, &host_services);
 
@@ -600,8 +619,10 @@ fn plugin_event_loop(
 
         match event_receiver.recv_timeout(wait_duration.min(Duration::from_millis(50))) {
             Ok(event) => {
-                // 将 serial_rx 数据喂入行缓冲区
-                drain_serial_rx_to_buffers(&event, &host_services);
+                // 没有内部 serial RX 订阅时，仍兼容旧的 manifest subscription 喂入方式。
+                if serial_rx_subscription.is_none() {
+                    drain_serial_rx_to_buffers(&event, &host_services);
+                }
 
                 if let Some(callback) = get_callback(&lua, &event.topic) {
                     let event_table = lua.create_table().ok();
@@ -770,9 +791,9 @@ const MAX_TASK_RESUMES_PER_TICK: usize = 50;
 fn install_task_helpers(lua: &Lua) -> mlua::Result<()> {
     lua.load(
         r#"
-    -- 内部 yield 辅助：所有阻塞操作都通过这个函数 yield
+    -- 内部 yield 辅助：所有阻塞操作都通过纯 Lua wrapper yield。
     function __task_yield(yield_op)
-        coroutine.yield(yield_op)
+        return coroutine.yield(yield_op)
     end
 "#,
     )
@@ -1050,9 +1071,9 @@ fn create_task_methods_table(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
-    // task:sleep_ms(ms) — yield {kind="sleep", ms=N}
+    // task:sleep_ms(ms) 的 Rust 半边：设置状态并返回 yield op。
     tbl.set(
-        "sleep_ms",
+        "__sleep_ms_begin",
         lua.create_function(|lua, (task, ms): (Table, u64)| {
             let state = get_state_for_task(&lua, &task)?;
             let _ = state.set("wake_at_ms", tool_core::now_timestamp_ms() + ms);
@@ -1060,26 +1081,22 @@ fn create_task_methods_table(lua: &Lua) -> mlua::Result<Table> {
             op.set("kind", "sleep")?;
             op.set("ms", ms)?;
             let _ = state.set("yield_op", op.clone());
-            let yield_fn: Function = lua.globals().get("__task_yield")?;
-            yield_fn.call::<Value>(op)?;
-            Ok(())
+            Ok(Value::Table(op))
         })?,
     )?;
 
-    // task:wait_if_paused() — yield {kind="wait_paused"}
+    // task:wait_if_paused() 的 Rust 半边：暂停时返回 yield op。
     tbl.set(
-        "wait_if_paused",
+        "__wait_if_paused_begin",
         lua.create_function(|lua, task: Table| {
             let state = get_state_for_task(&lua, &task)?;
             if !state.get::<bool>("paused").unwrap_or(false) {
-                return Ok(());
+                return Ok(Value::Nil);
             }
             let op = lua.create_table()?;
             op.set("kind", "wait_paused")?;
             let _ = state.set("yield_op", op.clone());
-            let yield_fn: Function = lua.globals().get("__task_yield")?;
-            yield_fn.call::<Value>(op)?;
-            Ok(())
+            Ok(Value::Table(op))
         })?,
     )?;
 
@@ -1133,7 +1150,35 @@ fn create_task_methods_table(lua: &Lua) -> mlua::Result<Table> {
         })?,
     )?;
 
+    install_task_method_wrappers(lua, &tbl)?;
+
     Ok(tbl)
+}
+
+fn install_task_method_wrappers(lua: &Lua, methods: &Table) -> mlua::Result<()> {
+    let install: Function = lua
+        .load(
+            r#"
+return function(methods)
+    methods.sleep_ms = function(task, ms)
+        local op = methods.__sleep_ms_begin(task, ms)
+        if op ~= nil then
+            return coroutine.yield(op)
+        end
+    end
+
+    methods.wait_if_paused = function(task)
+        local op = methods.__wait_if_paused_begin(task)
+        if op ~= nil then
+            return coroutine.yield(op)
+        end
+    end
+end
+"#,
+        )
+        .set_name("task-method-wrappers")
+        .eval()?;
+    install.call::<()>(methods.clone())
 }
 
 /// ctx.task API
@@ -1222,7 +1267,11 @@ fn create_task_api(
             // 首次 resume：把 task_obj 传给 function(task)
             // 如果 task 立即 yield（如 sleep），resume 返回 yield 值
             // coroutine 的 yield_op / wake_at_ms 已在 sleep_ms 等函数中设置
-            match thread.resume::<Value>(task_obj.clone()) {
+            let _ = lua.globals().set("__current_task_id", id.as_str());
+            let resume_result = thread.resume::<Value>(task_obj.clone());
+            let _ = lua.globals().set("__current_task_id", Value::Nil);
+
+            match resume_result {
                 Ok(_) => {
                     // coroutine 正常返回（未 yield，函数执行完毕）
                     match thread.status() {
@@ -2101,13 +2150,12 @@ fn create_serial_api(
         })?,
     )?;
 
-    // ctx.serial.read_line(port_name, opts)
-    // 只能在 task coroutine 内调用（coroutine.yield）
+    // ctx.serial.read_line(port_name, opts) 的 Rust begin 半边。
     let lb_read = host_services.line_buffers.clone();
     let pid_read = host_services.plugin_id.clone();
     let transport_read = transport.clone();
     table.set(
-        "read_line",
+        "__read_line_begin",
         lua.create_function(move |lua, (port, opts): (String, Table)| {
             let port = transport_read
                 .canonical_open_port_name(&port)
@@ -2127,11 +2175,14 @@ fn create_serial_api(
                     let result = lua.create_table()?;
                     result.set("line", lua.create_string(&line)?)?;
                     result.set("err", Value::Nil)?;
-                    return Ok(Value::Table(result));
+                    let ready = lua.create_table()?;
+                    ready.set("__ready", true)?;
+                    ready.set("value", result)?;
+                    return Ok(Value::Table(ready));
                 }
             }
 
-            // 无数据，yield 等待
+            // 无数据，返回 yield op，由 Lua wrapper 执行 coroutine.yield。
             let task_id: String = lua
                 .globals()
                 .get::<String>("__current_task_id")
@@ -2154,9 +2205,23 @@ fn create_serial_api(
                 let _ = state.set("yield_op", op.clone());
             }
 
-            let yield_fn: Function = lua.globals().get("__task_yield")?;
-            yield_fn.call::<Value>(op)?;
+            Ok(Value::Table(op))
+        })?,
+    )?;
 
+    // ctx.serial.read_line(port_name, opts) 的 Rust finish 半边。
+    table.set(
+        "__read_line_finish",
+        lua.create_function(move |lua, ()| {
+            let task_id: String = lua
+                .globals()
+                .get::<String>("__current_task_id")
+                .unwrap_or_default();
+            if task_id.is_empty() {
+                return Err(mlua::Error::RuntimeError(
+                    "ctx.serial.read_line 必须在 ctx.task 协程内调用".into(),
+                ));
+            }
             // 恢复后，从 state 中读取结果。返回 table { line = ..., err = ... }
             let tasks: Table = lua.globals().get("__plugin_tasks")?;
             if let Ok(state) = tasks.get::<Table>(task_id.as_str()) {
@@ -2184,13 +2249,12 @@ fn create_serial_api(
         })?,
     )?;
 
-    // ctx.serial.write_line_and_expect(port, line, opts)
-    // 只能在 task coroutine 内调用
+    // ctx.serial.write_line_and_expect(port, line, opts) 的 Rust begin 半边。
     let lb_expect = host_services.line_buffers.clone();
     let pid_expect = host_services.plugin_id.clone();
     let transport_expect = transport;
     table.set(
-        "write_line_and_expect",
+        "__write_line_and_expect_begin",
         lua.create_function(move |lua, (port, line, opts): (String, String, Table)| {
             let port = transport_expect
                 .canonical_open_port_name(&port)
@@ -2267,14 +2331,17 @@ fn create_serial_api(
                                 let wrapper = lua.create_table()?;
                                 wrapper.set("result", r)?;
                                 wrapper.set("err", Value::Nil)?;
-                                return Ok(Value::Table(wrapper));
+                                let ready = lua.create_table()?;
+                                ready.set("__ready", true)?;
+                                ready.set("value", wrapper)?;
+                                return Ok(Value::Table(ready));
                             }
                         }
                     }
                 }
             }
 
-            // 无匹配，yield
+            // 无匹配，返回 yield op，由 Lua wrapper 执行 coroutine.yield。
             let task_id: String = lua
                 .globals()
                 .get::<String>("__current_task_id")
@@ -2299,9 +2366,23 @@ fn create_serial_api(
                 let _ = state.set("yield_op", yield_data.clone());
             }
 
-            let yield_fn: Function = lua.globals().get("__task_yield")?;
-            yield_fn.call::<Value>(yield_data)?;
+            Ok(Value::Table(yield_data))
+        })?,
+    )?;
 
+    // ctx.serial.write_line_and_expect(port, line, opts) 的 Rust finish 半边。
+    table.set(
+        "__write_line_and_expect_finish",
+        lua.create_function(move |lua, ()| {
+            let task_id: String = lua
+                .globals()
+                .get::<String>("__current_task_id")
+                .unwrap_or_default();
+            if task_id.is_empty() {
+                return Err(mlua::Error::RuntimeError(
+                    "ctx.serial.write_line_and_expect 必须在 ctx.task 协程内调用".into(),
+                ));
+            }
             // 恢复后读取结果。返回 table { result = {name,line,elapsed_ms}, err = ... }
             let tasks: Table = lua.globals().get("__plugin_tasks")?;
             if let Ok(state) = tasks.get::<Table>(task_id.as_str()) {
@@ -2328,7 +2409,39 @@ fn create_serial_api(
         })?,
     )?;
 
+    install_serial_blocking_wrappers(lua, &table)?;
+
     Ok(table)
+}
+
+fn install_serial_blocking_wrappers(lua: &Lua, serial: &Table) -> mlua::Result<()> {
+    let install: Function = lua
+        .load(
+            r#"
+return function(serial)
+    serial.read_line = function(port, opts)
+        local op = serial.__read_line_begin(port, opts or {})
+        if op and op.__ready then
+            return op.value
+        end
+        coroutine.yield(op)
+        return serial.__read_line_finish()
+    end
+
+    serial.write_line_and_expect = function(port, line, opts)
+        local op = serial.__write_line_and_expect_begin(port, line, opts or {})
+        if op and op.__ready then
+            return op.value
+        end
+        coroutine.yield(op)
+        return serial.__write_line_and_expect_finish()
+    end
+end
+"#,
+        )
+        .set_name("serial-blocking-wrappers")
+        .eval()?;
+    install.call::<()>(serial.clone())
 }
 
 fn create_storage_api(lua: &Lua) -> mlua::Result<Table> {
@@ -2549,8 +2662,8 @@ fn create_fs_api(
         })?,
     )?;
 
-    let broker_lines = broker;
-    let pid_lines = plugin_id;
+    let broker_lines = broker.clone();
+    let pid_lines = plugin_id.clone();
     table.set(
         "read_lines",
         lua.create_function(move |lua, path: String| {
@@ -2579,6 +2692,44 @@ fn create_fs_api(
                 *i += 1;
                 Ok(Value::String(lua.create_string(&line)?))
             })?;
+            Ok(Value::Function(iter_fn))
+        })?,
+    )?;
+
+    let broker_stream = broker;
+    let pid_stream = plugin_id;
+    table.set(
+        "read_lines_stream",
+        lua.create_function(move |lua, path: String| {
+            let p = PathBuf::from(&path);
+            if !broker_stream.is_authorized(&pid_stream, &p) {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "文件未授权: {path}. 请先通过文件选择对话框选择文件。"
+                )));
+            }
+
+            let file = std::fs::File::open(&p)
+                .map_err(|e| mlua::Error::RuntimeError(format!("读取文件失败: {e}")))?;
+            let reader = std::rc::Rc::new(std::cell::RefCell::new(BufReader::new(file)));
+
+            let iter_reader = reader.clone();
+            let iter_fn = lua.create_function(move |lua, ()| {
+                let mut line = String::new();
+                let bytes = iter_reader
+                    .borrow_mut()
+                    .read_line(&mut line)
+                    .map_err(|e| mlua::Error::RuntimeError(format!("读取文件失败: {e}")))?;
+                if bytes == 0 {
+                    return Ok(Value::Nil);
+                }
+
+                let trimmed = line
+                    .trim_end_matches('\n')
+                    .trim_end_matches('\r')
+                    .to_owned();
+                Ok(Value::String(lua.create_string(&trimmed)?))
+            })?;
+
             Ok(Value::Function(iter_fn))
         })?,
     )?;
@@ -3724,6 +3875,149 @@ mod tests {
             event.payload.text_lossy(),
             r#"{"actual":2.0,"t":1,"target":2.5}"#
         );
+    }
+
+    #[test]
+    fn serial_blocking_wrappers_are_exported() {
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+
+        run_script_for_test(
+            r#"
+assert(type(ctx.serial.read_line) == "function", type(ctx.serial.read_line))
+assert(type(ctx.serial.write_line_and_expect) == "function", type(ctx.serial.write_line_and_expect))
+"#,
+            bus,
+            transport,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn serial_read_line_uses_internal_rx_subscription() {
+        let bus = DataBus::new();
+        let logs = bus.subscribe(TopicFilter::prefix("log."));
+        let transport = TransportManager::new(bus.clone());
+        let host_services = LuaHostServices {
+            plugin_root: None,
+            plugin_id: "test-plugin".to_owned(),
+            dialog_sender: None,
+            file_broker: None,
+            stop_flag: None,
+            line_buffers: Some(Arc::new(ParkingMutex::new(HashMap::new()))),
+            config_store: None,
+        };
+
+        let _runtime = run_plugin(
+            r#"
+ctx.task.start({ id = "reader" }, function()
+    local result = ctx.serial.read_line("COM1", { timeout_ms = 1000 })
+    if result.err then
+        error(result.err)
+    end
+    ctx.log.info("read:" .. tostring(result.line))
+end)
+ctx.log.info("reader-ready")
+"#
+            .to_owned(),
+            LuaRunConfig {
+                script_name: "internal-serial-rx.lua".to_owned(),
+                timeout_ms: 5_000,
+                source: "plugin:test-plugin".to_owned(),
+                context: json!({}),
+                permissions: vec!["serial".to_owned(), "task".to_owned(), "log".to_owned()],
+            },
+            bus.clone(),
+            transport,
+            host_services,
+        )
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut saw_ready = false;
+        while Instant::now() < deadline {
+            if let Ok(event) = logs.recv_timeout(Duration::from_millis(50))
+                && event.payload.text_lossy().contains("reader-ready")
+            {
+                saw_ready = true;
+                break;
+            }
+        }
+        assert!(saw_ready, "plugin did not start read task");
+
+        bus.publish(Event::serial_rx("serial:COM1", b"ok\n".to_vec()));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut saw_read = false;
+        while Instant::now() < deadline {
+            if let Ok(event) = logs.recv_timeout(Duration::from_millis(50))
+                && event.payload.text_lossy().contains("read:ok")
+            {
+                saw_read = true;
+                break;
+            }
+        }
+        assert!(saw_read, "ctx.serial.read_line did not receive internal RX");
+    }
+
+    #[test]
+    fn task_start_sets_current_task_id_on_first_resume() {
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+        let mut permissions = default_lua_permissions();
+        permissions.push("task".to_owned());
+
+        run_script_blocking(
+            r#"
+local task = ctx.task.start({ id = "instant" }, function()
+    assert(__current_task_id == "instant", tostring(__current_task_id))
+end)
+assert(task.finished == true)
+"#
+            .to_owned(),
+            LuaRunConfig {
+                script_name: "task-first-resume.lua".to_owned(),
+                timeout_ms: 5_000,
+                source: "test".to_owned(),
+                context: json!({}),
+                permissions,
+            },
+            bus,
+            transport,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn task_sleep_yields_from_lua_wrapper_inside_pcall() {
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+        let mut permissions = default_lua_permissions();
+        permissions.push("task".to_owned());
+
+        run_script_blocking(
+            r#"
+local task = ctx.task.start({ id = "sleepy" }, function(task)
+    pcall(function()
+        task:sleep_ms(10)
+    end)
+end)
+assert(task.finished == false)
+"#
+            .to_owned(),
+            LuaRunConfig {
+                script_name: "task-sleep-yield.lua".to_owned(),
+                timeout_ms: 5_000,
+                source: "test".to_owned(),
+                context: json!({}),
+                permissions,
+            },
+            bus,
+            transport,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
     }
 
     #[test]

@@ -165,6 +165,9 @@ pub struct PluginContributes {
     pub commands: Vec<PluginCommand>,
 
     #[serde(default)]
+    pub ui: Vec<PluginUiContribution>,
+
+    #[serde(default)]
     pub panels: Vec<PluginPanelContribution>,
 
     #[serde(default)]
@@ -178,6 +181,47 @@ pub struct PluginContributes {
 pub struct PluginCommand {
     pub id: String,
     pub title: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginUiContribution {
+    pub id: String,
+    pub slot: String,
+
+    #[serde(default = "default_ui_contribution_kind")]
+    pub kind: String,
+
+    #[serde(default)]
+    pub title: Option<String>,
+
+    #[serde(default)]
+    pub command: Option<String>,
+
+    #[serde(default)]
+    pub action: Option<String>,
+
+    #[serde(default)]
+    pub tooltip: Option<String>,
+
+    #[serde(default)]
+    pub order: i32,
+
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    #[serde(default = "default_true")]
+    pub visible: bool,
+
+    #[serde(default)]
+    pub record_send_input: bool,
+}
+
+fn default_ui_contribution_kind() -> String {
+    "button".to_owned()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -828,8 +872,46 @@ ctx.bus.publish('protocol.pid.sample', { t = 1, target = 50, actual = 43, output
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
         assert_eq!(manifest.live_main(), "main.lua");
         assert_eq!(manifest.live_permissions().len(), 3);
+        assert!(manifest.contributes.ui.is_empty());
         assert!(!manifest.has_replay_analyzer());
         assert!(manifest.replay_main().is_none());
+    }
+
+    #[test]
+    fn manifest_parses_ui_contributions() {
+        let json = r#"{
+          "id": "demo.test",
+          "name": "Test",
+          "version": "1.0.0",
+          "runtime": "lua",
+          "main": "main.lua",
+          "permissions": ["bus"],
+          "contributes": {
+            "commands": [
+              { "id": "demo.test.run", "title": "Run" }
+            ],
+            "ui": [
+              {
+                "id": "demo.test.run.button",
+                "slot": "send.toolbar",
+                "command": "demo.test.run",
+                "title": "Run",
+                "tooltip": "Run from the send toolbar",
+                "order": 20
+              }
+            ]
+          }
+        }"#;
+
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.contributes.ui.len(), 1);
+        let item = &manifest.contributes.ui[0];
+        assert_eq!(item.slot, "send.toolbar");
+        assert_eq!(item.kind, "button");
+        assert_eq!(item.command.as_deref(), Some("demo.test.run"));
+        assert!(item.enabled);
+        assert!(item.visible);
+        assert!(!item.record_send_input);
     }
 
     #[test]

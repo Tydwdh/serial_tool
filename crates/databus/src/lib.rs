@@ -190,11 +190,7 @@ impl DataBus {
     /// 有界（lossy）订阅：超过容量时丢弃当前事件并计入 dropped_count（DropNewest 策略）。
     /// 适用于 UI 面板、图表、日志等可容忍丢帧的场景。
     /// 完整性需求请用 [`subscribe_lossless`]。
-    pub fn subscribe_lossy_bounded(
-        &self,
-        filter: TopicFilter,
-        capacity: usize,
-    ) -> Subscription {
+    pub fn subscribe_lossy_bounded(&self, filter: TopicFilter, capacity: usize) -> Subscription {
         let (sender, receiver) = crossbeam_channel::bounded(capacity);
         let dropped = Arc::new(AtomicU64::new(0));
         self.inner.subscribers.lock().push(Subscriber {

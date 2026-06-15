@@ -1,8 +1,6 @@
 use crate::app::WorkbenchApp;
 use crate::config::default_activity_order;
-use crate::config::{
-    default_recorder_path, pick_workspace_open_path, pick_workspace_save_path,
-};
+use crate::config::{default_recorder_path, pick_workspace_open_path, pick_workspace_save_path};
 use crate::state::StatusLevel;
 use eframe::egui;
 
@@ -34,10 +32,7 @@ impl WorkbenchApp {
                             );
                         }
                         Err(e) => {
-                            self.set_status_force(
-                                StatusLevel::Error,
-                                format!("保存失败：{e}"),
-                            );
+                            self.set_status_force(StatusLevel::Error, format!("保存失败：{e}"));
                         }
                     }
                 }
@@ -53,10 +48,7 @@ impl WorkbenchApp {
                             );
                         }
                         Err(e) => {
-                            self.set_status_force(
-                                StatusLevel::Error,
-                                format!("加载失败：{e}"),
-                            );
+                            self.set_status_force(StatusLevel::Error, format!("加载失败：{e}"));
                         }
                     }
                 }

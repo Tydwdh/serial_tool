@@ -1,417 +1,644 @@
 -- demo.gcode-sender / main.lua
--- v0.1 — G-code 发送器
---
--- 演示 v0.3 新 API：
---   ctx.task       — 长任务（进度、暂停/恢复/取消）
---   ctx.serial.*   — write_line / read_line / write_line_and_expect
---   ctx.config     — 配置持久化 + profile
---   ctx.ui.log_*   — 插件日志面板
---   ctx.dialog.open_file / ctx.fs.read_lines — 文件选择与读取
---   hw.codec       — 内置编解码
+-- G-code sender driven by host UI contributions.
 
-local c = require("hw.codec")
+local codec = require("hw.codec")
 
--- ── 配置默认值 ──
+local PLUGIN_ID = ctx.plugin.id
+local TASK_ID = "demo.gcode-sender.print"
+
+local COMMAND_SEND_FILE = "demo.gcode-sender.send_file"
+local COMMAND_SEND_SINGLE = "demo.gcode-sender.send_single"
+local COMMAND_SEND_RAW = "demo.gcode-sender.send_raw"
+local COMMAND_PAUSE = "demo.gcode-sender.pause"
+local COMMAND_CANCEL = "demo.gcode-sender.cancel"
+
 local DEFAULTS = {
-    port = "",
-    baud_rate = 115200,
-    send_delay_ms = 10,
+    default_setup_gcode = "M92 X40 Y40 Z2.5 E7.53",
     ack_timeout_ms = 300000,
-    ok_pattern = "^ok",
-    error_pattern = "^Error",
-    busy_pattern = "busy",
-    resend_pattern = "^Resend:",
+    start_timeout_ms = 3000,
+    send_delay_ms = 10,
+    eof_delay_ms = 1000,
+    error_followup_ms = 2000,
+    max_marlin_line_bytes = 96,
 }
 
--- ── 发送状态 ──
 local state = {
-    total_lines = 0,
-    sent_lines = 0,
-    cancelled = false,
     paused = false,
-    current_task_id = nil,
+    active = false,
 }
 
--- ── UI 面板 ──
-local PANEL_ID = "demo.gcode-sender.main"
-local LOG_PANEL_ID = "demo.gcode-sender.log"
-
--- ── 初始化 ──
-
--- 从持久配置恢复设置
-local function load_settings()
-    local settings = {}
-    for k, v in pairs(DEFAULTS) do
-        settings[k] = ctx.config.get(k, v)
-    end
-    return settings
+local function log(level, message)
+    local fn = ctx.log[level] or ctx.log.info
+    fn("[G-code] " .. tostring(message))
 end
 
-local function save_settings(settings)
-    for k, v in pairs(settings) do
-        ctx.config.set(k, v)
-    end
+local function trim(value)
+    return tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
 end
 
-local function save_profile(name)
-    local t = {}
-    for k, _ in pairs(DEFAULTS) do
-        t[k] = ctx.config.get(k, DEFAULTS[k])
+local function strip_quotes(value)
+    local text = trim(value)
+    if text:sub(1, 1) == '"' and text:sub(-1) == '"' then
+        return text:sub(2, -2)
     end
-    ctx.config.profile_save(name, t)
-    ctx.log.info("profile '" .. name .. "' saved")
+    return text
 end
 
-local function load_profile(name)
-    local t = ctx.config.profile_load(name)
-    if t then
-        for k, v in pairs(t) do
-            ctx.config.set(k, v)
+local function setting_number(key)
+    return tonumber(ctx.config.get(key, DEFAULTS[key])) or DEFAULTS[key]
+end
+
+local function setting_string(key)
+    return tostring(ctx.config.get(key, DEFAULTS[key]) or DEFAULTS[key])
+end
+
+local function settings()
+    return {
+        default_setup_gcode = setting_string("default_setup_gcode"),
+        ack_timeout_ms = setting_number("ack_timeout_ms"),
+        start_timeout_ms = setting_number("start_timeout_ms"),
+        send_delay_ms = setting_number("send_delay_ms"),
+        eof_delay_ms = setting_number("eof_delay_ms"),
+        error_followup_ms = setting_number("error_followup_ms"),
+        max_marlin_line_bytes = setting_number("max_marlin_line_bytes"),
+    }
+end
+
+local function send_context(payload)
+    local context = (payload or {}).context or {}
+    local send = context.send or {}
+    local serial = context.serial or {}
+    return {
+        input = tostring(send.input or ""),
+        target_port = tostring(send.target_port or serial.selected_port or ""),
+        target_port_open = send.target_port_open == true,
+    }
+end
+
+local function current_task()
+    for _, task in ipairs(ctx.task.list()) do
+        if task.id == TASK_ID then
+            return task
         end
-        ctx.log.info("profile '" .. name .. "' loaded")
-        return true
     end
+    return nil
+end
+
+local function task_running()
+    local task = current_task()
+    return task and not task.finished and not task.cancelled
+end
+
+local function require_open_port(port)
+    if port == "" then
+        log("warn", "请先在发送区选择一个已打开串口")
+        return nil
+    end
+
+    local status = ctx.serial.status_port(port)
+    if not status or not status.open then
+        log("warn", "串口未打开: " .. port)
+        return nil
+    end
+
+    return port
+end
+
+local function split_nonempty_lines(text)
+    local result = {}
+    for line in tostring(text or ""):gmatch("[^\r\n]+") do
+        local clean = trim(line)
+        if clean ~= "" then
+            table.insert(result, clean)
+        end
+    end
+    return result
+end
+
+local function checksum_line(line, no)
+    local body = "N" .. tostring(no) .. " " .. line
+    return body .. "*" .. tostring(codec.xor8(body))
+end
+
+local function numbered_entries(lines)
+    local entries = {}
+    for index, line in ipairs(lines) do
+        table.insert(entries, {
+            no = index,
+            source = line,
+            wire = checksum_line(line, index),
+        })
+    end
+    return entries
+end
+
+local function raw_entries(lines)
+    local entries = {}
+    for _, line in ipairs(lines) do
+        table.insert(entries, {
+            source = line,
+            wire = line,
+        })
+    end
+    return entries
+end
+
+local function clean_gcode_file(path, s)
+    local lines = {}
+    local skipped_long = 0
+    local skipped_m110 = 0
+    local last_clean = nil
+
+    local read_lines = ctx.fs.read_lines_stream or ctx.fs.read_lines
+    local ok, iterator = pcall(read_lines, path)
+    if not ok then
+        log("error", iterator)
+        return nil
+    end
+
+    for raw_line in iterator do
+        local line = codec.trim_line(raw_line)
+        local before_comment = line:match("^[^;]*") or ""
+        local clean = trim(before_comment)
+
+        if clean == "" or clean:sub(1, 1) == "(" then
+            -- skip blank/comment-only lines
+        elseif clean:find("M110", 1, true) then
+            skipped_m110 = skipped_m110 + 1
+        elseif #clean > s.max_marlin_line_bytes then
+            skipped_long = skipped_long + 1
+            log("warn", "忽略超过 " .. s.max_marlin_line_bytes .. " 字节的行: " .. clean)
+        else
+            table.insert(lines, clean)
+            last_clean = clean
+        end
+    end
+
+    if #lines > 0 and not (last_clean or ""):find("M2", 1, true) then
+        table.insert(lines, "M2")
+    end
+
+    if skipped_m110 > 0 then
+        log("info", "已跳过 M110 行: " .. skipped_m110)
+    end
+    if skipped_long > 0 then
+        log("warn", "已跳过超长行: " .. skipped_long)
+    end
+
+    return lines
+end
+
+local function response_patterns()
+    return {
+        { name = "ok", pattern = "ok", action = "return" },
+        { name = "ok", pattern = "OK", action = "return" },
+        { name = "resend", pattern = "Resend", action = "return" },
+        { name = "rs", pattern = "rs ", action = "return" },
+        { name = "halted", pattern = "Printer halted", action = "return" },
+        { name = "heating_failed", pattern = "Heating failed", action = "return" },
+        { name = "error", pattern = "^Error", action = "return" },
+        { name = "busy", pattern = "busy", action = "continue" },
+        { name = "dwin", pattern = "Dwin command", action = "continue" },
+    }
+end
+
+local function parse_resend_no(line)
+    local text = tostring(line or "")
+    return tonumber(text:match("[Rr]esend:%s*N?(%d+)"))
+        or tonumber(text:match("[Rr]esend%s*N?(%d+)"))
+        or tonumber(text:match("rs%s*N?(%d+)"))
+end
+
+local function classify_line(line)
+    local text = tostring(line or "")
+    local resend_no = parse_resend_no(text)
+    if resend_no then
+        return { kind = "resend", no = resend_no, line = text }
+    end
+    if text:find("Printer halted", 1, true) or text:find("Heating failed", 1, true) then
+        return { kind = "terminated", line = text }
+    end
+    if text:lower():find("ok", 1, true) then
+        return { kind = "ok", line = text }
+    end
+    if text:match("^Error") then
+        return { kind = "error", line = text }
+    end
+    return { kind = "other", line = text }
+end
+
+local function read_followup(port, s, task)
+    local deadline = ctx.now_ms() + s.error_followup_ms
+    while ctx.now_ms() < deadline do
+        if task:is_cancelled() then
+            return { kind = "cancelled" }
+        end
+
+        local item = ctx.serial.read_line(port, { timeout_ms = 200 })
+        if item and item.line then
+            log("info", "接收: " .. item.line)
+            local classified = classify_line(item.line)
+            if classified.kind == "ok"
+                or classified.kind == "resend"
+                or classified.kind == "terminated" then
+                return classified
+            end
+        elseif item and item.err == "cancelled" then
+            return { kind = "cancelled" }
+        end
+    end
+    return { kind = "timeout" }
+end
+
+local function send_and_wait(port, wire, s, task, use_checksum)
+    log("info", "发送: " .. wire)
+    local resp = ctx.serial.write_line_and_expect(port, wire, {
+        delimiter = "\n",
+        timeout_ms = s.ack_timeout_ms,
+        flush_before_send = false,
+        patterns = response_patterns(),
+    })
+
+    if resp.err then
+        return { kind = "timeout", line = resp.err }
+    end
+
+    local result = resp.result or {}
+    local line = tostring(result.line or "")
+    local name = tostring(result.name or "")
+
+    if line ~= "" then
+        log("info", "接收: " .. line)
+    end
+
+    if name == "ok" then
+        return { kind = "ok", line = line }
+    end
+    if name == "resend" or name == "rs" then
+        return { kind = "resend", no = parse_resend_no(line), line = line }
+    end
+    if name == "halted" or name == "heating_failed" then
+        return { kind = "terminated", line = line }
+    end
+
+    if name == "error" then
+        if line:find("Unknown command", 1, true) then
+            log("warn", "设备不支持该 G-code，已忽略: " .. line)
+            local followup = read_followup(port, s, task)
+            if followup.kind == "resend" and use_checksum then
+                return followup
+            end
+            return { kind = "ok", line = line }
+        end
+
+        local followup = read_followup(port, s, task)
+        if followup.kind == "resend" and use_checksum then
+            return followup
+        end
+        if followup.kind == "terminated" then
+            return followup
+        end
+        if followup.kind == "ok" and use_checksum then
+            return { kind = "ok", line = line }
+        end
+        return { kind = "error", line = line }
+    end
+
+    return { kind = "error", line = line }
+end
+
+local function send_start_command(port, s, task)
+    local start_body = "N0 M110 N0"
+    local start_wire = start_body .. "*" .. tostring(codec.xor8(start_body))
+    task:set_status("同步 G-code 行号")
+
+    for attempt = 1, 10 do
+        log("info", "发送: " .. start_wire)
+        local resp = ctx.serial.write_line_and_expect(port, start_wire, {
+            delimiter = "\n",
+            timeout_ms = s.start_timeout_ms,
+            flush_before_send = false,
+            patterns = response_patterns(),
+        })
+
+        if resp.result and resp.result.name == "ok" then
+            log("info", "行号同步完成")
+            return true
+        end
+
+        if task:is_cancelled() then
+            return false
+        end
+
+        log("warn", "M110 无响应，重试 " .. attempt .. "/10")
+        task:sleep_ms(3000)
+    end
+
+    log("error", "请检查和打印机的串口通信，终止")
     return false
 end
 
--- ── 日志辅助 ──
-local function plugin_log(level, message)
-    ctx.ui.log_append(LOG_PANEL_ID, { level = level, message = message })
-    ctx.log.info(message)
-end
+local function run_entries(port, entries, use_checksum, task)
+    local s = settings()
+    local started_ms = ctx.now_ms()
+    local total = #entries
 
--- ── 发送任务 ──
-local function run_send_task(settings, lines, task)
-    local total = #lines
-    state.total_lines = total
-    state.sent_lines = 0
-    state.cancelled = false
+    if total == 0 then
+        task:set_status("没有可发送的 G-code")
+        log("warn", "没有可发送的 G-code")
+        return
+    end
 
+    ctx.serial.flush_rx(port)
+
+    if use_checksum and not send_start_command(port, s, task) then
+        task:set_status("行号同步失败")
+        return
+    end
+
+    local index_by_no = {}
+    for index, entry in ipairs(entries) do
+        if entry.no then
+            index_by_no[entry.no] = index
+        end
+    end
+
+    local pos = 1
+    local max_done = 0
     task:set_progress(0, total)
-    task:set_status("开始发送")
 
-    for i, raw_line in ipairs(lines) do
+    while pos <= total do
         if task:is_cancelled() then
-            plugin_log("warn", "发送已取消 (line " .. i .. "/" .. total .. ")")
-            state.cancelled = true
+            task:set_status("已取消")
+            log("warn", "发送已取消")
             return
         end
 
         task:wait_if_paused()
 
-        -- 预处理：去除注释和空白
-        local line = c.trim_line(raw_line)
-        if line == "" or line:sub(1, 1) == ";" or line:sub(1, 1) == "(" then
-            task:set_progress(i, total)
-            goto continue
-        end
+        local entry = entries[pos]
+        local label = entry.no and ("N" .. tostring(entry.no)) or tostring(pos)
+        task:set_status("发送 " .. label .. " (" .. pos .. "/" .. total .. ")")
 
-        -- 去掉行内注释
-        local semicolon = line:find(";")
-        if semicolon then
-            line = line:sub(1, semicolon - 1)
-            line = c.trim_line(line)
-            if line == "" then
-                task:set_progress(i, total)
-                goto continue
+        local result = send_and_wait(port, entry.wire, s, task, use_checksum)
+
+        if result.kind == "ok" then
+            pos = pos + 1
+            if pos - 1 > max_done then
+                max_done = pos - 1
             end
-        end
-
-        plugin_log("info", "发送 [" .. i .. "/" .. total .. "]: " .. line)
-
-        -- 发送并等待应答
-        local resp = ctx.serial.write_line_and_expect(
-            settings.port,
-            line,
-            {
-                delimiter = "\n",
-                timeout_ms = settings.ack_timeout_ms,
-                patterns = {
-                    { name = "ok",      pattern = settings.ok_pattern,      action = "return" },
-                    { name = "error",   pattern = settings.error_pattern,   action = "return" },
-                    { name = "resend",  pattern = settings.resend_pattern,  action = "return" },
-                    { name = "busy",    pattern = settings.busy_pattern,    action = "continue" },
-                }
-            }
-        )
-
-        if resp.err then
-            plugin_log("error", "无应答: " .. line .. " (" .. resp.err .. ")")
-            task:set_status("无应答: 行 " .. i)
+            task:set_progress(max_done, total)
+            if s.send_delay_ms > 0 then
+                task:sleep_ms(s.send_delay_ms)
+            end
+        elseif result.kind == "resend" then
+            if not use_checksum then
+                log("warn", "raw 模式忽略 Resend: " .. tostring(result.line or ""))
+                pos = pos + 1
+            else
+                local no = result.no or entry.no
+                local resend_pos = no and index_by_no[no] or nil
+                if not resend_pos then
+                    task:set_status("重传序号不匹配")
+                    log("error", "找不到可重传的 G-code 序号: " .. tostring(no))
+                    return
+                end
+                log("warn", "设备请求重传 N" .. tostring(no))
+                pos = resend_pos
+            end
+        elseif result.kind == "timeout" then
+            log("warn", "无应答，继续重发当前行: " .. label)
+        elseif result.kind == "terminated" then
+            task:set_status("打印机错误，已停止")
+            log("error", "打印机错误，已停止: " .. tostring(result.line or ""))
+            return
+        elseif result.kind == "cancelled" then
+            task:set_status("已取消")
+            return
+        else
+            task:set_status("设备错误，已停止")
+            log("error", "设备错误，已停止: " .. tostring(result.line or result.kind))
             return
         end
-
-        local r = resp.result
-        if r.name == "error" then
-            plugin_log("error", "设备错误 @" .. line .. ": " .. r.line)
-            task:set_status("设备错误: 行 " .. i)
-            return
-        end
-
-        if r.name == "resend" then
-            plugin_log("warn", "需要重发: " .. line)
-            task:set_status("重发: 行 " .. i)
-            -- 简单处理：重试一次
-            local r2 = ctx.serial.write_line_and_expect(
-                settings.port, line,
-                {
-                    delimiter = "\n",
-                    timeout_ms = settings.ack_timeout_ms,
-                    patterns = {
-                        { name = "ok",    pattern = settings.ok_pattern,    action = "return" },
-                        { name = "error", pattern = settings.error_pattern, action = "return" },
-                    }
-                }
-            )
-            if r2.err or not r2.result or r2.result.name ~= "ok" then
-                plugin_log("error", "重发失败: " .. line)
-                task:set_status("重发失败: 行 " .. i)
-                return
-            end
-        end
-
-        state.sent_lines = i
-        task:set_progress(i, total)
-
-        if settings.send_delay_ms > 0 then
-            task:sleep_ms(settings.send_delay_ms)
-        end
-
-        ::continue::
     end
 
     task:set_progress(total, total)
     task:set_status("发送完成")
-    plugin_log("info", "发送完成: " .. total .. " 行已发送")
+    log("info", "发送完成: " .. total .. " 行")
+
+    if s.eof_delay_ms > 0 then
+        task:sleep_ms(s.eof_delay_ms)
+    end
+
+    local elapsed = (ctx.now_ms() - started_ms) / 1000
+    if elapsed > 60 then
+        log("warn", string.format("总共耗时 %.2f 分钟", elapsed / 60))
+    else
+        log("warn", string.format("总共耗时 %.2f 秒", elapsed))
+    end
 end
 
--- ── 按钮：选择文件 ──
-local function on_select_file()
-    local path = ctx.dialog.open_file({
+local function start_task(port, entries, use_checksum)
+    if task_running() then
+        log("warn", "已有 G-code 发送任务在运行")
+        return
+    end
+
+    state.paused = false
+    state.active = true
+
+    ctx.task.start({
+        id = TASK_ID,
+        title = "发送 G-code",
+        cancellable = true,
+        pausable = true,
+    }, function(task)
+        local ok, err = pcall(run_entries, port, entries, use_checksum, task)
+        state.active = false
+        state.paused = false
+        if not ok then
+            task:set_status("插件错误")
+            log("error", err)
+        end
+    end)
+end
+
+local function open_gcode_file_dialog()
+    return ctx.dialog.open_file({
         title = "选择 G-code 文件",
         filters = {
             { name = "G-code", extensions = { "gcode", "nc", "ngc", "txt" } },
             { name = "所有文件", extensions = { "*" } },
-        }
+        },
     })
-    if path then
-        ctx.ui.set_value(PANEL_ID, "file_path", path)
-        -- 统计行数用作预览
-        local count = 0
-        for _ in ctx.fs.read_lines(path) do
-            count = count + 1
-        end
-        plugin_log("info", "file loaded: " .. path .. " (" .. count .. " lines)")
-    end
 end
 
--- ── 按钮：开始发送 ──
-local function on_start(values)
-    local settings = load_settings()
-    local path = values.file_path or ""
+local function looks_like_file_path(value)
+    local text = strip_quotes(value)
+    if text == "" or text:find("[\r\n]") then
+        return false
+    end
 
-    if path == "" then
-        plugin_log("warn", "请先选择 G-code 文件")
+    if text:find("/", 1, true) or text:find("\\", 1, true) then
+        return true
+    end
+    if #text >= 2 and text:sub(2, 2) == ":" then
+        return true
+    end
+    if text:match("%.[%w_%-]+$") then
+        return true
+    end
+
+    return false
+end
+
+local function resolve_file_path(input)
+    local candidate = strip_quotes(input)
+    if candidate == "" then
+        return open_gcode_file_dialog()
+    end
+
+    if looks_like_file_path(candidate) then
+        return candidate
+    end
+
+    if candidate:find("[\r\n]") then
+        log("warn", "发送区是多行内容，不是文件路径。发送当前内容请使用 G单条 或 G原始。")
+    else
+        log(
+            "warn",
+            "发送区内容不像文件路径: "
+                .. candidate
+                .. "。发送当前 G-code 请使用 G单条 或 G原始；发送文件请清空发送区后点 G文件。"
+        )
+    end
+
+    return nil
+end
+
+local function handle_send_file(payload)
+    local sc = send_context(payload)
+    local port = require_open_port(sc.target_port)
+    if not port then
         return
     end
 
-    settings.port = values.port or settings.port
-    settings.baud_rate = tonumber(values.baud_rate) or settings.baud_rate
-    settings.send_delay_ms = tonumber(values.send_delay_ms) or settings.send_delay_ms
-
-    save_settings(settings)
-
-    -- 打开串口
-    local ok, err = pcall(ctx.serial.open, {
-        port_name = settings.port,
-        baud_rate = settings.baud_rate,
-    })
-    if not ok then
-        plugin_log("error", "无法打开串口 " .. settings.port .. ": " .. tostring(err))
+    local path = resolve_file_path(sc.input)
+    if not path then
+        log("warn", "未选择 G-code 文件")
         return
     end
 
-    -- 清空接收缓冲
-    ctx.serial.flush_rx(settings.port)
+    local s = settings()
+    local lines = clean_gcode_file(path, s)
+    if not lines or #lines == 0 then
+        log("warn", "文件为空或没有有效 G-code: " .. tostring(path))
+        return
+    end
 
-    -- 读取文件行
+    log("info", "开始打印文件: " .. path .. " (" .. #lines .. " 行)")
+    start_task(port, numbered_entries(lines), true)
+end
+
+local function handle_send_single(payload)
+    local sc = send_context(payload)
+    local port = require_open_port(sc.target_port)
+    if not port then
+        return
+    end
+
+    local command_lines = split_nonempty_lines(sc.input)
+    if #command_lines == 0 then
+        log("warn", "请输入单条 G-code")
+        return
+    end
+
+    local s = settings()
     local lines = {}
-    for line in ctx.fs.read_lines(path) do
+    local setup = trim(s.default_setup_gcode)
+    if setup ~= "" then
+        table.insert(lines, setup)
+    end
+    for _, line in ipairs(command_lines) do
         table.insert(lines, line)
     end
+    table.insert(lines, "M2")
 
+    log("warn", "单条模式会先发送默认 M92，请确认配置: " .. setup)
+    start_task(port, numbered_entries(lines), true)
+end
+
+local function handle_send_raw(payload)
+    local sc = send_context(payload)
+    local port = require_open_port(sc.target_port)
+    if not port then
+        return
+    end
+
+    local lines = split_nonempty_lines(sc.input)
     if #lines == 0 then
-        plugin_log("warn", "文件为空")
+        log("warn", "请输入原始 G-code")
         return
     end
 
-    plugin_log("info", "开始发送 " .. #lines .. " 行到 " .. settings.port)
-
-    -- 启动发送任务
-    local task = ctx.task.start({
-        id = "gcode.send",
-        title = "发送 G-code",
-        cancellable = true,
-        pausable = true,
-    }, function(t)
-        run_send_task(settings, lines, t)
-    end)
-
-    state.current_task_id = task.id
-    ctx.ui.set_enabled(PANEL_ID, "btn_start", false)
-    ctx.ui.set_enabled(PANEL_ID, "btn_pause", true)
-    ctx.ui.set_enabled(PANEL_ID, "btn_cancel", true)
+    start_task(port, raw_entries(lines), false)
 end
 
--- ── 按钮：暂停 / 恢复 ──
-local function on_pause()
+local function handle_pause()
+    local task = current_task()
+    if not task or task.finished then
+        log("warn", "没有正在运行的 G-code 任务")
+        return
+    end
+
     if state.paused then
-        ctx.task.resume("gcode.send")
+        ctx.task.resume(TASK_ID)
         state.paused = false
-        ctx.ui.set_value(PANEL_ID, "btn_pause", "暂停")
-        plugin_log("info", "发送已恢复")
+        log("info", "发送已恢复")
     else
-        ctx.task.pause("gcode.send")
+        ctx.task.pause(TASK_ID)
         state.paused = true
-        ctx.ui.set_value(PANEL_ID, "btn_pause", "恢复")
-        plugin_log("info", "发送已暂停")
+        log("info", "发送已暂停")
     end
 end
 
--- ── 按钮：取消 ──
-local function on_cancel()
-    ctx.task.cancel("gcode.send")
-    state.cancelled = true
-    ctx.ui.set_enabled(PANEL_ID, "btn_start", true)
-    ctx.ui.set_enabled(PANEL_ID, "btn_pause", false)
-    ctx.ui.set_enabled(PANEL_ID, "btn_cancel", false)
-    plugin_log("warn", "发送取消请求")
-end
-
--- ── 按钮：保存 profile ──
-local function on_save_profile(values)
-    local name = values.profile_name or ""
-    if name == "" then
-        plugin_log("warn", "请输入 profile 名称")
+local function handle_cancel()
+    local task = current_task()
+    if not task or task.finished then
+        log("warn", "没有正在运行的 G-code 任务")
         return
     end
-    -- 先保存当前设置
-    local settings = {
-        port = values.port or "",
-        baud_rate = tonumber(values.baud_rate) or 115200,
-        send_delay_ms = tonumber(values.send_delay_ms) or 10,
-    }
-    save_settings(settings)
-    save_profile(name)
+
+    ctx.task.cancel(TASK_ID)
+    state.paused = false
+    log("warn", "发送取消请求")
 end
 
--- ── 按钮：加载 profile ──
-local function on_load_profile(values)
-    local name = values.profile_name or ""
-    if name == "" then
-        plugin_log("warn", "请输入 profile 名称")
+ctx.bus.on("ui.contribution.action", function(event)
+    local payload = event.payload or {}
+    if payload.plugin_id ~= PLUGIN_ID then
         return
     end
-    if load_profile(name) then
-        -- 更新 UI 字段
-        local settings = load_settings()
-        ctx.ui.set_value(PANEL_ID, "port", settings.port)
-        ctx.ui.set_value(PANEL_ID, "baud_rate", tostring(settings.baud_rate))
-        ctx.ui.set_value(PANEL_ID, "send_delay_ms", tostring(settings.send_delay_ms))
-    else
-        plugin_log("warn", "profile '" .. name .. "' 不存在")
-    end
-end
 
--- ── 初始化 ──
-local function init()
-    -- 创建日志面板
-    ctx.ui.create_log({
-        id = LOG_PANEL_ID,
-        title = "发送日志",
-        max_entries = 5000,
-    })
-
-    -- 创建主面板
-    local settings = load_settings()
-
-    ctx.ui.create_form({
-        id = PANEL_ID,
-        title = "G-code 发送器",
-        fields = {
-            { id = "file_path", kind = "File",       title = "G-code 文件", filters = { { name = "G-code", extensions = { "gcode", "nc", "ngc", "txt" } } } },
-            { id = "port",      kind = "serial",     title = "串口号",      value = settings.port },
-            { id = "baud_rate", kind = "TextArea",   title = "波特率",      value = tostring(settings.baud_rate), rows = 1 },
-            { id = "send_delay_ms", kind = "TextArea", title = "发送间隔(ms)", value = tostring(settings.send_delay_ms), rows = 1 },
-            { id = "profile_name", kind = "TextArea", title = "Profile 名", value = "", rows = 1 },
-            { kind = "Separator" },
-            { id = "btn_select",    kind = "Button", title = "选择文件",   action = "gcode.select_file" },
-            { id = "btn_start",     kind = "Button", title = "开始发送",   action = "gcode.start" },
-            { id = "btn_pause",     kind = "Button", title = "暂停",       action = "gcode.pause", enabled = false },
-            { id = "btn_cancel",    kind = "Button", title = "取消",       action = "gcode.cancel", enabled = false },
-            { kind = "Separator" },
-            { id = "btn_save_profile",   kind = "Button", title = "保存 Profile", action = "gcode.save_profile" },
-            { id = "btn_load_profile",   kind = "Button", title = "加载 Profile", action = "gcode.load_profile" },
-            { kind = "Label", text = "提示：选择串口和 G-code 文件后点击开始发送。暂停/取消可在发送中途控制。" },
-            { id = "progress", kind = "Progress", title = "进度" },
-            { id = "status",   kind = "Status",   title = "状态" },
-        }
-    })
-
-    -- 更新进度和状态的初始值
-    ctx.ui.set_value(PANEL_ID, "progress", { current = 0, total = 0 })
-    ctx.ui.set_value(PANEL_ID, "status", "就绪")
-
-    plugin_log("info", "G-code Sender v0.1 initialized")
-end
-
--- ── 事件处理 ──
-
--- 处理表单按钮点击
-ctx.bus.on("ui.form.action", function(event)
-    local p = event.payload
-    if p.panel_id ~= PANEL_ID then return end
-
-    if p.action == "gcode.select_file" then
-        on_select_file()
-    elseif p.action == "gcode.start" then
-        on_start(p.values or {})
-    elseif p.action == "gcode.pause" then
-        on_pause()
-    elseif p.action == "gcode.cancel" then
-        on_cancel()
-    elseif p.action == "gcode.save_profile" then
-        on_save_profile(p.values or {})
-    elseif p.action == "gcode.load_profile" then
-        on_load_profile(p.values or {})
+    local action = payload.action or payload.command
+    if action == COMMAND_SEND_FILE then
+        handle_send_file(payload)
+    elseif action == COMMAND_SEND_SINGLE then
+        handle_send_single(payload)
+    elseif action == COMMAND_SEND_RAW then
+        handle_send_raw(payload)
+    elseif action == COMMAND_PAUSE then
+        handle_pause()
+    elseif action == COMMAND_CANCEL then
+        handle_cancel()
     end
 end)
 
--- 定期更新进度
-ctx.timer.every(500, function()
-    if state.current_task_id then
-        local tasks = ctx.task.list()
-        for _, t in ipairs(tasks) do
-            if t.id == "gcode.send" then
-                ctx.ui.set_value(PANEL_ID, "progress", {
-                    current = t.progress_current,
-                    total = t.progress_total,
-                })
-                ctx.ui.set_value(PANEL_ID, "status", t.status)
-                if t.finished then
-                    ctx.ui.set_enabled(PANEL_ID, "btn_start", true)
-                    ctx.ui.set_enabled(PANEL_ID, "btn_pause", false)
-                    ctx.ui.set_enabled(PANEL_ID, "btn_cancel", false)
-                    state.current_task_id = nil
-                    if t.error and t.error ~= "" then
-                        plugin_log("error", "task error: " .. t.error)
-                    end
-                end
-                break
-            end
-        end
+on_disable(function()
+    if task_running() then
+        ctx.task.cancel(TASK_ID)
     end
+    log("info", "插件已停止")
 end)
 
--- ── 启动 ──
-init()
+log("info", "G-code Sender ready. Actions are contributed to send.toolbar")

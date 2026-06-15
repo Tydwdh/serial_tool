@@ -1,8 +1,8 @@
 use crate::config::default_activity_order;
 use crate::config::{default_recorder_path, load_config};
-use crate::state::{BottomTab, SendUiState, StatusState};
+use crate::state::{BottomTab, MAX_SEND_HISTORY, SendUiState, StatusState};
 use eframe::egui;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tool_core::{Event, LogLevel};
@@ -138,6 +138,16 @@ impl WorkbenchApp {
             .map(|c| c.panels.clone())
             .unwrap_or_default();
         rp.discard_dynamic_tabs();
+        let mut send = SendUiState::default();
+        if let Some(cfg) = config.as_ref() {
+            send.send_history = cfg
+                .send_history
+                .iter()
+                .filter(|item| !item.trim().is_empty())
+                .take(MAX_SEND_HISTORY)
+                .cloned()
+                .collect::<VecDeque<_>>();
+        }
 
         let mut app = Self {
             terminal_panel: TerminalPanel::new(&bus),
@@ -182,7 +192,7 @@ impl WorkbenchApp {
                 .unwrap_or_default(),
             bottom_panel_visible: rp.bottom_logs_visible,
             bottom_tab: BottomTab::Terminal,
-            send: SendUiState::default(),
+            send,
             terminal_popup_open: false,
             terminal_popup_always_on_top: config
                 .as_ref()

@@ -114,9 +114,7 @@ end
 "#;
                 let _ = std::fs::write(dir.join("main.lua"), main_lua);
 
-                self.last_error = Some(format!(
-                    "已创建插件 {name}，请点击刷新后启用"
-                ));
+                self.last_error = Some(format!("已创建插件 {name}，请点击刷新后启用"));
             }
             Err(e) => {
                 self.last_error = Some(format!("创建失败：{e}"));

@@ -89,7 +89,8 @@ struct RenderOutcome {
 impl TerminalPanel {
     pub fn new(bus: &DataBus) -> Self {
         Self {
-            subscription: bus.subscribe_lossy_bounded(TopicFilter::prefix("transport.serial."), 4096),
+            subscription: bus
+                .subscribe_lossy_bounded(TopicFilter::prefix("transport.serial."), 4096),
             ports: BTreeMap::new(),
 
             show_rx: true,
@@ -155,11 +156,17 @@ impl TerminalPanel {
         let mut out = String::from("time,port,direction,text,hex\n");
         for (port, data) in &self.ports {
             if let Some(ref filter) = self.port_filter {
-                if filter != port { continue; }
+                if filter != port {
+                    continue;
+                }
             }
             for entry in &data.entries {
-                if !entry_visible(entry.direction, self.show_rx, self.show_tx) { continue; }
-                if !entry_matches_search(port, entry, &self.search_text) { continue; }
+                if !entry_visible(entry.direction, self.show_rx, self.show_tx) {
+                    continue;
+                }
+                if !entry_matches_search(port, entry, &self.search_text) {
+                    continue;
+                }
                 out.push_str(&csv_cell(&entry.timestamp_label));
                 out.push(',');
                 out.push_str(&csv_cell(port));
@@ -183,11 +190,17 @@ impl TerminalPanel {
         let mut out = String::new();
         for (port, data) in &self.ports {
             if let Some(ref filter) = self.port_filter {
-                if filter != port { continue; }
+                if filter != port {
+                    continue;
+                }
             }
             for entry in &data.entries {
-                if !entry_visible(entry.direction, self.show_rx, self.show_tx) { continue; }
-                if !entry_matches_search(port, entry, &self.search_text) { continue; }
+                if !entry_visible(entry.direction, self.show_rx, self.show_tx) {
+                    continue;
+                }
+                if !entry_matches_search(port, entry, &self.search_text) {
+                    continue;
+                }
                 let line = serde_json::json!({
                     "time": entry.timestamp_label,
                     "port": port,
@@ -298,11 +311,19 @@ impl TerminalPanel {
                 self.clear();
             }
 
-            if ui.button("复制 CSV").on_hover_text("复制过滤后的视图为 CSV").clicked() {
+            if ui
+                .button("复制 CSV")
+                .on_hover_text("复制过滤后的视图为 CSV")
+                .clicked()
+            {
                 ui.ctx().copy_text(self.export_visible_csv());
             }
 
-            if ui.button("复制 JSONL").on_hover_text("复制过滤后的视图为 JSONL").clicked() {
+            if ui
+                .button("复制 JSONL")
+                .on_hover_text("复制过滤后的视图为 JSONL")
+                .clicked()
+            {
                 ui.ctx().copy_text(self.export_visible_jsonl());
             }
 
@@ -326,11 +347,7 @@ impl TerminalPanel {
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.port_filter, None, "全部");
                     for port in self.ports.keys() {
-                        ui.selectable_value(
-                            &mut self.port_filter,
-                            Some(port.clone()),
-                            port,
-                        );
+                        ui.selectable_value(&mut self.port_filter, Some(port.clone()), port);
                     }
                 });
 

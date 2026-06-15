@@ -221,10 +221,7 @@ impl WorkbenchApp {
             Ok(v) if v >= 10 => v,
             _ => {
                 self.send.periodic_enabled = false;
-                self.set_status_force(
-                    crate::state::StatusLevel::Warn,
-                    "周期发送间隔必须 >= 10ms",
-                );
+                self.set_status_force(crate::state::StatusLevel::Warn, "周期发送间隔必须 >= 10ms");
                 return;
             }
         };
@@ -234,10 +231,7 @@ impl WorkbenchApp {
 
             if self.send.error.is_some() {
                 self.send.periodic_enabled = false;
-                self.set_status_force(
-                    crate::state::StatusLevel::Error,
-                    "周期发送已停止：发送失败",
-                );
+                self.set_status_force(crate::state::StatusLevel::Error, "周期发送已停止：发送失败");
                 return;
             }
         }

@@ -2,9 +2,14 @@
   "ack_timeout_ms": 300000,
   "baud_rate": 115200,
   "busy_pattern": "busy",
+  "default_setup_gcode": "M92 X40 Y40 Z2.5 E7.53",
+  "eof_delay_ms": 1000,
   "error_pattern": "^Error",
+  "error_followup_ms": 2000,
+  "max_marlin_line_bytes": 96,
   "ok_pattern": "^ok",
   "port": "com3",
   "resend_pattern": "^Resend:",
-  "send_delay_ms": 10
+  "send_delay_ms": 10,
+  "start_timeout_ms": 3000
 }

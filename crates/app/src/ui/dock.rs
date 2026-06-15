@@ -47,18 +47,14 @@ impl WorkbenchApp {
                     }
 
                     if ui.button("移到底部").clicked() {
-                        self.panels
-                            .dock
-                            .move_panel(kind.clone(), DockArea::Bottom);
+                        self.panels.dock.move_panel(kind.clone(), DockArea::Bottom);
                         self.panels.dock.bottom_visible = true;
                         self.bottom_panel_visible = true;
                         ui.close();
                     }
 
                     if ui.button("移到右侧").clicked() {
-                        self.panels
-                            .dock
-                            .move_panel(kind.clone(), DockArea::Right);
+                        self.panels.dock.move_panel(kind.clone(), DockArea::Right);
                         self.panels.dock.right_visible = true;
                         ui.close();
                     }
@@ -82,11 +78,7 @@ impl WorkbenchApp {
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| match area {
                     DockArea::Bottom => {
-                        if ui
-                            .small_button("×")
-                            .on_hover_text("隐藏底部面板")
-                            .clicked()
-                        {
+                        if ui.small_button("×").on_hover_text("隐藏底部面板").clicked() {
                             self.panels.dock.bottom_visible = false;
                             self.bottom_panel_visible = false;
                         }
@@ -169,11 +161,7 @@ impl WorkbenchApp {
 
     pub(crate) fn panel_title(&self, kind: &PanelKind) -> String {
         match kind {
-            PanelKind::Dynamic(id) => self
-                .dynamic_panels
-                .title(id)
-                .unwrap_or(id)
-                .to_owned(),
+            PanelKind::Dynamic(id) => self.dynamic_panels.title(id).unwrap_or(id).to_owned(),
             _ => kind.title(),
         }
     }
@@ -229,12 +217,7 @@ impl WorkbenchApp {
     }
 }
 
-fn paint_drop_target(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    pointer: egui::Pos2,
-    label: &str,
-) {
+fn paint_drop_target(painter: &egui::Painter, rect: egui::Rect, pointer: egui::Pos2, label: &str) {
     let hovered = rect.contains(pointer);
 
     let fill = if hovered {

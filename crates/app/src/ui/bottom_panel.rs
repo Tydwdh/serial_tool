@@ -1,5 +1,5 @@
 use crate::app::WorkbenchApp;
-use crate::state::{BottomTab, LineEnding, StatusLevel};
+use crate::state::{BottomTab, LineEnding, MAX_SEND_HISTORY, StatusLevel};
 use eframe::egui;
 use tool_panels::theme;
 
@@ -47,11 +47,7 @@ impl WorkbenchApp {
                 } else {
                     for port in &open_ports {
                         let label = self.port_label(port);
-                        ui.selectable_value(
-                            &mut self.send.target_port,
-                            Some(port.clone()),
-                            label,
-                        );
+                        ui.selectable_value(&mut self.send.target_port, Some(port.clone()), label);
                     }
                 }
             });
@@ -74,11 +70,7 @@ impl WorkbenchApp {
                     .selected_text(self.send.line_ending.label())
                     .show_ui(ui, |ui| {
                         for &le in LineEnding::ALL.iter() {
-                            ui.selectable_value(
-                                &mut self.send.line_ending,
-                                le,
-                                le.label(),
-                            );
+                            ui.selectable_value(&mut self.send.line_ending, le, le.label());
                         }
                     });
             });
@@ -122,6 +114,8 @@ impl WorkbenchApp {
                 self.send.error = None;
             }
 
+            self.ui_contribution_slot(ui, "send.toolbar");
+
             if !send_port_open {
                 ui.colored_label(theme::YELLOW, "\u{26a0} 请先选择并打开串口");
             }
@@ -144,8 +138,7 @@ impl WorkbenchApp {
                         .trim()
                         .parse::<u64>()
                         .unwrap_or(1000);
-                    self.send.next_periodic_send_time =
-                        now + interval_ms as f64 / 1000.0;
+                    self.send.next_periodic_send_time = now + interval_ms as f64 / 1000.0;
                 }
             }
             ui.add_enabled(
@@ -156,19 +149,7 @@ impl WorkbenchApp {
             );
             ui.label("ms");
 
-            if !self.send.send_history.is_empty() {
-                ui.separator();
-                egui::ComboBox::from_id_salt("send-history")
-                    .width(140.0)
-                    .selected_text("发送历史")
-                    .show_ui(ui, |ui| {
-                        for item in self.send.send_history.iter().take(20) {
-                            if ui.button(shorten_for_ui(item, 48)).clicked() {
-                                self.send.input = item.clone();
-                            }
-                        }
-                    });
-            }
+            self.send_history_combo(ui, "send-history");
 
             if ui.button("重置周期").clicked() {
                 self.send.next_periodic_send_time = 0.0;
@@ -219,18 +200,60 @@ impl WorkbenchApp {
         .err()
         .map(|e| e.to_string());
 
-        // 发送成功后记录历史
         if self.send.error.is_none() && !self.send.input.trim().is_empty() {
             let text = self.send.input.clone();
-            if self.send.send_history.front() != Some(&text) {
-                self.send.send_history.push_front(text);
-                const MAX_SEND_HISTORY: usize = 50;
-                while self.send.send_history.len() > MAX_SEND_HISTORY {
-                    self.send.send_history.pop_back();
-                }
-            }
+            self.record_send_history(text);
         }
     }
+
+    pub(crate) fn record_send_history(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        if text.trim().is_empty() {
+            return;
+        }
+
+        let changed = if self.send.send_history.front() == Some(&text) {
+            false
+        } else {
+            if let Some(index) = self
+                .send
+                .send_history
+                .iter()
+                .position(|candidate| candidate == &text)
+            {
+                self.send.send_history.remove(index);
+            }
+            self.send.send_history.push_front(text);
+            while self.send.send_history.len() > MAX_SEND_HISTORY {
+                self.send.send_history.pop_back();
+            }
+            true
+        };
+
+        if changed {
+            let _ = self.save_config();
+        }
+    }
+
+    pub(crate) fn send_history_combo(&mut self, ui: &mut egui::Ui, id_salt: &'static str) {
+        if self.send.send_history.is_empty() {
+            return;
+        }
+
+        let entries: Vec<String> = self.send.send_history.iter().take(20).cloned().collect();
+        ui.separator();
+        egui::ComboBox::from_id_salt(id_salt)
+            .width(140.0)
+            .selected_text("发送历史")
+            .show_ui(ui, |ui| {
+                for item in entries {
+                    if ui.button(shorten_for_ui(&item, 48)).clicked() {
+                        self.send.input = item;
+                    }
+                }
+            });
+    }
+
     pub(crate) fn show_bottom_panel_contents(&mut self, ui: &mut egui::Ui) {
         self.ensure_bottom_tab_available();
         let visible_tabs = self.available_bottom_tabs();

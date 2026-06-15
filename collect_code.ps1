@@ -6,6 +6,8 @@ $includes = @(
     "*.lua",
     "*.json",
     "*.toml"
+    "*.c"
+    "*.h"
 )
 
 $excludeDirs = @(

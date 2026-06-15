@@ -1,6 +1,6 @@
 use crate::app::{PendingReconnect, WorkbenchApp};
 use crate::config::{PersistedConfig, config_path};
-use crate::state::{BottomTab, StatusLevel};
+use crate::state::{BottomTab, MAX_SEND_HISTORY, StatusLevel};
 use crate::ui::top_bar::{pdb, ppar, psb};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -249,6 +249,7 @@ impl WorkbenchApp {
             terminal_popup_always_on_top: self.terminal_popup_always_on_top,
             send_popup_always_on_top: self.send_popup_always_on_top,
             port_aliases: self.port_aliases.clone(),
+            send_history: self.send.send_history.iter().cloned().collect(),
         };
         let t = serde_json::to_string_pretty(&cfg).map_err(|e| format!("序列化失败：{e}"))?;
         std::fs::write(config_path(), t).map_err(|e| format!("写入失败：{e}"))
@@ -283,9 +284,9 @@ impl WorkbenchApp {
             terminal_popup_always_on_top: self.terminal_popup_always_on_top,
             send_popup_always_on_top: self.send_popup_always_on_top,
             port_aliases: self.port_aliases.clone(),
+            send_history: self.send.send_history.iter().cloned().collect(),
         };
-        let t =
-            serde_json::to_string_pretty(&cfg).map_err(|e| format!("序列化失败：{e}"))?;
+        let t = serde_json::to_string_pretty(&cfg).map_err(|e| format!("序列化失败：{e}"))?;
         std::fs::write(path, t).map_err(|e| format!("写入失败：{e}"))
     }
 
@@ -304,6 +305,13 @@ impl WorkbenchApp {
         self.terminal_popup_always_on_top = cfg.terminal_popup_always_on_top;
         self.send_popup_always_on_top = cfg.send_popup_always_on_top;
         self.port_aliases = cfg.port_aliases.clone();
+        self.send.send_history = cfg
+            .send_history
+            .iter()
+            .filter(|item| !item.trim().is_empty())
+            .take(MAX_SEND_HISTORY)
+            .cloned()
+            .collect();
         self.panels = cfg.panels.clone();
         self.apply_loaded_workspace_postprocess();
         Ok(())
@@ -337,9 +345,10 @@ impl WorkbenchApp {
 
     pub(crate) fn open_bottom_panel(&mut self) {
         self.set_bottom_visible(true);
-        self.panels
-            .dock
-            .move_panel(tool_panels::PanelKind::Terminal, tool_panels::DockArea::Bottom);
+        self.panels.dock.move_panel(
+            tool_panels::PanelKind::Terminal,
+            tool_panels::DockArea::Bottom,
+        );
         self.bottom_tab = BottomTab::Terminal;
     }
 

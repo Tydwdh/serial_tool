@@ -89,6 +89,24 @@ end)
 ctx.bus.off("transport.serial.default.rx")
 ```
 
+### ui.contribution.action
+
+插件通过 `plugin.json` 的 `contributes.ui` 挂到宿主插槽后，点击动作会以普通事件送回 Lua。
+
+```lua
+ctx.bus.on("ui.contribution.action", function(event)
+  local p = event.payload or {}
+  if p.plugin_id ~= ctx.plugin.id then
+    return
+  end
+
+  if p.action == "my-plugin.send" then
+    local send = (p.context or {}).send or {}
+    ctx.log.info("send input: " .. tostring(send.input))
+  end
+end)
+```
+
 ## ctx.serial
 
 需要权限：`serial`
@@ -151,6 +169,40 @@ local ports = ctx.serial.open_ports()
 ```lua
 local line = ctx.serial.expect("READY", 1000)
 ```
+
+## ctx.dialog
+
+需要权限：`dialog`
+
+```lua
+local path = ctx.dialog.open_file({
+  title = "选择文件",
+  filters = {
+    { name = "G-code", extensions = { "gcode", "nc", "txt" } },
+    { name = "所有文件", extensions = { "*" } },
+  }
+})
+```
+
+通过 `ctx.dialog.open_file` 选择的文件会授权给当前插件读取。
+
+## ctx.fs
+
+需要权限：`fs.read.user_selected`
+
+```lua
+local text = ctx.fs.read_text(path)
+
+for line in ctx.fs.read_lines(path) do
+  ctx.log.info(line)
+end
+
+for line in ctx.fs.read_lines_stream(path) do
+  ctx.log.info(line)
+end
+```
+
+`read_lines_stream` 使用流式逐行读取，适合较大的日志或 G-code 文件；它和 `read_lines` 一样要求文件已由宿主授权。
 
 ## ctx.ui
 

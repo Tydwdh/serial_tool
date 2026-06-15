@@ -27,6 +27,19 @@
   },
 
   "contributes": {
+    "commands": [
+      { "id": "demo.signal-generator.start", "title": "开始输出" }
+    ],
+    "ui": [
+      {
+        "id": "demo.signal-generator.start.button",
+        "slot": "send.toolbar",
+        "kind": "button",
+        "command": "demo.signal-generator.start",
+        "tooltip": "从发送区工具栏触发插件动作",
+        "order": 10
+      }
+    ],
     "panels": [
       { "id": "demo-signal-chart", "title": "信号波形", "kind": "chart" },
       { "id": "demo-signal-form", "title": "信号参数", "kind": "form" }
@@ -85,6 +98,10 @@
 | `ui` | 使用 `ctx.ui.*` 创建或移除动态面板。 |
 | `timer` | 使用 `ctx.timer.*` 创建定时任务。 |
 | `storage` | 使用 `ctx.storage.*` 运行期存储。 |
+| `dialog` | 使用 `ctx.dialog.open_file` 请求宿主文件选择对话框。 |
+| `fs.read.user_selected` | 读取用户通过宿主对话框或受控 UI 明确选择的文件。 |
+| `task` | 使用 `ctx.task.*` 运行可暂停、可取消的长任务。 |
+| `config` | 使用 `ctx.config.*` 读取和保存插件配置。 |
 | `testing` | 测试辅助 API，普通插件不建议使用。 |
 
 回放解析器当前只建议声明：
@@ -110,6 +127,70 @@ chart
 form
 attitude
 ```
+
+## contributes.ui
+
+`contributes.ui` 用于把插件动作挂到宿主定义的 UI 插槽。插件只声明控件和命令，不直接绘制 egui。
+
+```json
+"contributes": {
+  "commands": [
+    { "id": "my-plugin.send", "title": "插件发送" }
+  ],
+  "ui": [
+    {
+      "id": "my-plugin.send.button",
+      "slot": "send.toolbar",
+      "kind": "button",
+      "command": "my-plugin.send",
+      "tooltip": "使用发送区当前内容执行插件动作",
+      "record_send_input": true,
+      "order": 10
+    }
+  ]
+}
+```
+
+当前宿主提供的插槽：
+
+```text
+send.toolbar
+```
+
+当前受控控件类型：
+
+```text
+button
+small_button
+separator
+label
+status
+```
+
+`send.*` 插槽中的控件可以设置 `record_send_input: true`。点击时宿主会把当前发送区内容写入发送历史；插件仍只处理 action，不需要直接操作宿主 UI 状态。
+
+点击 `button` / `small_button` 时，宿主发布 `ui.contribution.action`。payload 包含：
+
+```json
+{
+  "plugin_id": "my-plugin",
+  "contribution_id": "my-plugin.send.button",
+  "slot": "send.toolbar",
+  "command": "my-plugin.send",
+  "action": "my-plugin.send",
+  "context": {
+    "send": {
+      "input": "发送区文本",
+      "target_port": "COM3",
+      "target_port_open": true,
+      "hex_mode": false,
+      "line_ending": { "label": "LF", "suffix": "\n" }
+    }
+  }
+}
+```
+
+Lua 插件应监听 `ui.contribution.action`，并先检查 `payload.plugin_id` 是否等于自己的插件 ID。
 
 ## 旧格式兼容
 

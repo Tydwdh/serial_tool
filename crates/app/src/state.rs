@@ -15,6 +15,8 @@ impl StatusLevel {
     }
 }
 
+pub(crate) const MAX_SEND_HISTORY: usize = 50;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DetachedPanelAction {
     None,

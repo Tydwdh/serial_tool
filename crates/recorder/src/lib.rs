@@ -164,8 +164,7 @@ impl JsonlRecorder {
                                         s.last_error = Some(msg.clone());
                                         s.running = false;
                                     }
-                                    *last_error_thread.lock().unwrap() =
-                                        Some(msg.clone());
+                                    *last_error_thread.lock().unwrap() = Some(msg.clone());
                                     bus.publish(Event::system_log(
                                         LogLevel::Error,
                                         "recorder",
@@ -198,11 +197,7 @@ impl JsonlRecorder {
 
                         *last_error_thread.lock().unwrap() = Some(msg.clone());
 
-                        bus.publish(Event::system_log(
-                            LogLevel::Error,
-                            "recorder",
-                            msg,
-                        ));
+                        bus.publish(Event::system_log(LogLevel::Error, "recorder", msg));
 
                         stop_thread.store(true, Ordering::SeqCst);
                         break;
@@ -230,11 +225,7 @@ impl JsonlRecorder {
                                 s.last_error = Some(msg.clone());
                             }
                             *last_error_thread.lock().unwrap() = Some(msg.clone());
-                            bus.publish(Event::system_log(
-                                LogLevel::Error,
-                                "recorder",
-                                msg,
-                            ));
+                            bus.publish(Event::system_log(LogLevel::Error, "recorder", msg));
                             break;
                         }
                     }
@@ -394,8 +385,8 @@ fn write_event(writer: &mut impl Write, event: &Event) -> io::Result<()> {
 }
 
 fn write_event_counted(writer: &mut impl Write, event: &Event) -> io::Result<u64> {
-    let line = serde_json::to_string(event)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let line =
+        serde_json::to_string(event).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     writer.write_all(line.as_bytes())?;
     writer.write_all(b"\n")?;
     Ok(line.len() as u64 + 1)
@@ -638,15 +629,11 @@ impl ReplayManager {
     }
 
     pub fn can_play(&self) -> bool {
-        !self.events.is_empty()
-            && self.state != ReplayState::Empty
-            && self.replay_ready()
+        !self.events.is_empty() && self.state != ReplayState::Empty && self.replay_ready()
     }
 
     pub fn can_seek(&self) -> bool {
-        !self.events.is_empty()
-            && self.state != ReplayState::Playing
-            && self.replay_ready()
+        !self.events.is_empty() && self.state != ReplayState::Playing && self.replay_ready()
     }
 
     // ── Analyzer cache ──

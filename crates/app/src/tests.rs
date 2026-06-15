@@ -1,7 +1,9 @@
 #[cfg(test)]
 mod tests {
     use crate::bootstrap::{ACTIVITY_BAR_WIDTH, BOTTOM_PANEL_HEIGHT, BOTTOM_PANEL_MIN, app_dir};
-    use crate::state::{BottomTab, DetachedPanelAction, LineEnding, SendUiState, StatusLevel, StatusState};
+    use crate::state::{
+        BottomTab, DetachedPanelAction, LineEnding, SendUiState, StatusLevel, StatusState,
+    };
 
     #[test]
     fn status_state_defaults() {

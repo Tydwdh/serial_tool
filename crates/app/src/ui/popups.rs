@@ -56,29 +56,22 @@ impl WorkbenchApp {
                         };
 
                         if ui
-                            .selectable_label(
-                                self.terminal_popup_always_on_top,
-                                pin_label,
-                            )
+                            .selectable_label(self.terminal_popup_always_on_top, pin_label)
                             .on_hover_text("让该窗口保持在其他窗口上方")
                             .clicked()
                         {
-                            self.terminal_popup_always_on_top =
-                                !self.terminal_popup_always_on_top;
+                            self.terminal_popup_always_on_top = !self.terminal_popup_always_on_top;
                             let _ = self.save_config();
                         }
 
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if ui.button("清空").clicked() {
-                                    self.terminal_panel.clear();
-                                }
-                                if ui.button("关闭").clicked() {
-                                    close = true;
-                                }
-                            },
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("清空").clicked() {
+                                self.terminal_panel.clear();
+                            }
+                            if ui.button("关闭").clicked() {
+                                close = true;
+                            }
+                        });
                     });
                     ui.separator();
 
@@ -128,55 +121,48 @@ impl WorkbenchApp {
                         };
 
                         if ui
-                            .selectable_label(
-                                self.send_popup_always_on_top,
-                                pin_label,
-                            )
+                            .selectable_label(self.send_popup_always_on_top, pin_label)
                             .on_hover_text("让该窗口保持在其他窗口上方")
                             .clicked()
                         {
-                            self.send_popup_always_on_top =
-                                !self.send_popup_always_on_top;
+                            self.send_popup_always_on_top = !self.send_popup_always_on_top;
                             let _ = self.save_config();
                         }
 
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                ui.radio_value(&mut self.send.hex_mode, false, "文本");
-                                ui.radio_value(&mut self.send.hex_mode, true, "HEX");
-                                ui.add_enabled_ui(!self.send.hex_mode, |ui| {
-                                    egui::ComboBox::from_id_salt("send-popup-line-ending")
-                                        .width(60.0)
-                                        .selected_text(self.send.line_ending.label())
-                                        .show_ui(ui, |ui| {
-                                            for &le in LineEnding::ALL.iter() {
-                                                ui.selectable_value(
-                                                    &mut self.send.line_ending,
-                                                    le,
-                                                    le.label(),
-                                                );
-                                            }
-                                        });
-                                });
-                                if ui
-                                    .add_enabled(
-                                        send_port_open && !self.send.input.is_empty(),
-                                        egui::Button::new("发送 (Ctrl+Enter)"),
-                                    )
-                                    .clicked()
-                                    || (ctrl_enter
-                                        && send_port_open
-                                        && !self.send.input.is_empty())
-                                {
-                                    self.do_send();
-                                }
-                                if ui.button("清空").clicked() {
-                                    self.send.input.clear();
-                                    self.send.error = None;
-                                }
-                            },
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.radio_value(&mut self.send.hex_mode, false, "文本");
+                            ui.radio_value(&mut self.send.hex_mode, true, "HEX");
+                            ui.add_enabled_ui(!self.send.hex_mode, |ui| {
+                                egui::ComboBox::from_id_salt("send-popup-line-ending")
+                                    .width(60.0)
+                                    .selected_text(self.send.line_ending.label())
+                                    .show_ui(ui, |ui| {
+                                        for &le in LineEnding::ALL.iter() {
+                                            ui.selectable_value(
+                                                &mut self.send.line_ending,
+                                                le,
+                                                le.label(),
+                                            );
+                                        }
+                                    });
+                            });
+                            if ui
+                                .add_enabled(
+                                    send_port_open && !self.send.input.is_empty(),
+                                    egui::Button::new("发送 (Ctrl+Enter)"),
+                                )
+                                .clicked()
+                                || (ctrl_enter && send_port_open && !self.send.input.is_empty())
+                            {
+                                self.do_send();
+                            }
+                            if ui.button("清空").clicked() {
+                                self.send.input.clear();
+                                self.send.error = None;
+                            }
+                            self.send_history_combo(ui, "send-popup-history");
+                            self.ui_contribution_slot(ui, "send.toolbar");
+                        });
                     });
                     ui.separator();
                     ui.add(

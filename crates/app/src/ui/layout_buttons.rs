@@ -52,22 +52,15 @@ pub(crate) fn layout_icon_button(
 }
 
 fn paint_outer(ui: &egui::Ui, rect: egui::Rect, stroke: egui::Stroke) {
-    ui.painter().rect_stroke(
-        rect,
-        2.0,
-        stroke,
-        egui::StrokeKind::Inside,
-    );
+    ui.painter()
+        .rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
 }
 
 fn paint_layout_menu_icon(ui: &egui::Ui, rect: egui::Rect, stroke: egui::Stroke) {
     let w = rect.width();
     let h = rect.height();
 
-    let r1 = egui::Rect::from_min_size(
-        rect.left_top(),
-        egui::vec2(w * 0.35, h * 0.45),
-    );
+    let r1 = egui::Rect::from_min_size(rect.left_top(), egui::vec2(w * 0.35, h * 0.45));
     let r2 = egui::Rect::from_min_size(
         egui::pos2(rect.left(), rect.bottom() - h * 0.35),
         egui::vec2(w * 0.35, h * 0.35),

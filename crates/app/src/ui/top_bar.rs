@@ -46,11 +46,7 @@ pub(crate) fn serial_combo(
                     } else {
                         format!("{}  {}", port.port_name, port.port_type)
                     };
-                    ui.selectable_value(
-                        sel,
-                        Some(port.port_name.clone()),
-                        label,
-                    );
+                    ui.selectable_value(sel, Some(port.port_name.clone()), label);
                 }
             }
         });
@@ -111,7 +107,7 @@ pub(crate) fn ppar(v: &str) -> Parity {
 
 use crate::app::WorkbenchApp;
 use crate::state::StatusLevel;
-use crate::ui::layout_buttons::{layout_icon_button, LayoutButtonKind};
+use crate::ui::layout_buttons::{LayoutButtonKind, layout_icon_button};
 use tool_panels::theme;
 
 impl WorkbenchApp {
@@ -186,8 +182,7 @@ impl WorkbenchApp {
                 )
                 .clicked()
                 {
-                    self.panels.dock.activity_bar_visible =
-                        !self.panels.dock.activity_bar_visible;
+                    self.panels.dock.activity_bar_visible = !self.panels.dock.activity_bar_visible;
                     let _ = self.save_config();
                 }
 
