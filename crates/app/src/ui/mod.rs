@@ -1,4 +1,3 @@
-use crate::ui::activity_bar::aicon;
 pub mod activity_bar;
 pub mod bottom_panel;
 pub mod contributions;
@@ -13,21 +12,34 @@ pub mod top_bar;
 use crate::app::WorkbenchApp;
 use crate::bootstrap::{ACTIVITY_BAR_WIDTH, BOTTOM_PANEL_MIN};
 use eframe::egui;
-use tool_panels::{DockArea, PanelKind, theme};
+use tool_panels::{DockArea, theme};
 
 impl WorkbenchApp {
     pub(crate) fn draw_shell(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         self.bottom_dock_rect = None;
         self.right_dock_rect = None;
 
-        egui::Panel::top("top-bar").show_inside(ui, |ui| self.top_bar(ui));
+        egui::Panel::top("top-bar").show_inside(ui, |ui| {
+            self.top_bar(ui);
+        });
 
         if self.panels.dock.activity_bar_visible {
             egui::Panel::left("activity-bar")
                 .resizable(false)
                 .exact_size(ACTIVITY_BAR_WIDTH)
-                .show_inside(ui, |ui| self.activity_bar(ui));
+                .show_inside(ui, |ui| {
+                    self.activity_bar(ui);
+                });
         }
+
+        // 固定状态栏：永远贴在窗口最底部，不参与 bottom-dock resize。
+        egui::Panel::bottom("status-bar")
+            .resizable(false)
+            .exact_size(26.0)
+            .show_separator_line(true)
+            .show_inside(ui, |ui| {
+                self.status_bar(ui);
+            });
 
         if self.panels.dock.right_visible {
             let shown = egui::Panel::right("right-dock")
@@ -44,39 +56,70 @@ impl WorkbenchApp {
         }
 
         if self.panels.dock.bottom_visible {
-            let shown = egui::Panel::bottom("bottom-dock")
+            let shown = egui::Panel::bottom("bottom-dock-v6")
                 .resizable(true)
-                .default_size(self.panels.dock.bottom_size)
+                .default_size(self.panels.dock.bottom_size.max(BOTTOM_PANEL_MIN))
                 .min_size(BOTTOM_PANEL_MIN)
-                .show_separator_line(true)
+                .show_separator_line(false)
                 .show_inside(ui, |ui| {
                     let width = ui.available_width();
                     let total_h = ui.available_height();
-                    const STATUS_H: f32 = 26.0;
+
+                    const RESIZE_GUARD_H: f32 = 10.0;
                     const SEP_H: f32 = 8.0;
                     const OUTPUT_MIN_H: f32 = 120.0;
                     const SENDER_MIN_H: f32 = 190.0;
 
-                    let sender_visible = self.panels.dock.bottom_sender_visible
-                        && !self.send.popup_open;
+                    // 关键：顶部保护带。
+                    //
+                    // dock_tab_bar() 里的 tab 是 click_and_drag。
+                    // 如果 tab bar 直接贴着 bottom panel 顶边，它会和 Panel::bottom 的 resize 热区抢事件。
+                    // 这里先留 10px，只接受 hover，不启动任何 drag。
+                    let guard_h = RESIZE_GUARD_H.min(total_h);
+                    let (guard_rect, guard_response) =
+                        ui.allocate_exact_size(egui::vec2(width, guard_h), egui::Sense::hover());
+
+                    if guard_response.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                    }
+
+                    ui.painter().line_segment(
+                        [
+                            egui::pos2(guard_rect.left(), guard_rect.center().y),
+                            egui::pos2(guard_rect.right(), guard_rect.center().y),
+                        ],
+                        egui::Stroke::new(1.0, theme::SEPARATOR),
+                    );
+
+                    let body_h = (total_h - guard_h).max(0.0);
+
+                    let sender_visible =
+                        self.panels.dock.bottom_sender_visible && !self.send.popup_open;
 
                     let max_sender_h = if sender_visible {
-                        (total_h - STATUS_H - SEP_H * 2.0 - OUTPUT_MIN_H).max(0.0)
+                        (body_h - SEP_H - OUTPUT_MIN_H).max(0.0)
                     } else {
                         0.0
                     };
 
                     let sender_h = if sender_visible && max_sender_h >= SENDER_MIN_H {
-                        self.panels.dock.bottom_sender_height.clamp(SENDER_MIN_H, max_sender_h)
+                        self.panels
+                            .dock
+                            .bottom_sender_height
+                            .clamp(SENDER_MIN_H, max_sender_h)
                     } else if sender_visible {
                         max_sender_h
                     } else {
                         0.0
                     };
 
-                    let output_h = (total_h - sender_h - STATUS_H - SEP_H * 2.0).max(0.0);
+                    let output_h = if sender_h > 0.0 {
+                        (body_h - sender_h - SEP_H).max(0.0)
+                    } else {
+                        body_h
+                    };
 
-                    // 上层：接收 / 日志
+                    // 上层：接收 / 日志 / 图表输出 dock。
                     ui.allocate_ui_with_layout(
                         egui::vec2(width, output_h),
                         egui::Layout::top_down(egui::Align::Min),
@@ -85,10 +128,10 @@ impl WorkbenchApp {
                         },
                     );
 
-                    ui.separator();
-
-                    // 中层：发送器
                     if sender_h > 0.0 {
+                        ui.separator();
+
+                        // 下层：发送器。
                         ui.allocate_ui_with_layout(
                             egui::vec2(width, sender_h),
                             egui::Layout::top_down(egui::Align::Min),
@@ -96,27 +139,17 @@ impl WorkbenchApp {
                                 self.send_panel_horizontal(ui);
                             },
                         );
-                        ui.separator();
                     }
-
-                    // 底层：状态栏
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(width, STATUS_H),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            self.status_bar(ui);
-                        },
-                    );
                 });
 
             self.bottom_dock_rect = Some(shown.response.rect);
-            // 保存高度（仅变化>1px时，避免干扰拖拽）
+
             let h = shown.response.rect.height();
-            if (h - self.panels.dock.bottom_size).abs() > 1.0 {
+            if !ctx.input(|i| i.pointer.primary_down()) {
                 self.panels.dock.bottom_size = h.max(BOTTOM_PANEL_MIN);
             }
         }
-        //中心面板
+
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(theme::BG_PRIMARY))
             .show_inside(ui, |ui| {
@@ -129,54 +162,20 @@ impl WorkbenchApp {
             });
 
         self.paint_dock_drop_overlay(ctx);
-
-        // 浮动拖拽副本
-        if let Some(s) = self.activity_drag_source
-            && s < self.activity_order.len()
-            && let Some(p) = ctx.pointer_latest_pos()
-        {
-            let act = self.activity_order[s];
-            let label = format!("{} {}", aicon(act), act.label());
-            let gal = ctx.fonts_mut(|f| {
-                f.layout(
-                    label.clone(),
-                    egui::FontId::proportional(12.0),
-                    theme::TEXT_PRIMARY,
-                    f32::INFINITY,
-                )
-            });
-            let rect = egui::Rect::from_min_size(
-                p + egui::vec2(8.0, -12.0),
-                egui::vec2(gal.size().x + 16.0, 26.0),
-            );
-            let painter = ctx.layer_painter(egui::LayerId::new(
-                egui::Order::Foreground,
-                egui::Id::new("dghost"),
-            ));
-            painter.rect_filled(
-                rect,
-                5.0,
-                egui::Color32::from_rgba_premultiplied(46, 80, 120, 210),
-            );
-            painter.galley(
-                rect.center() - gal.size() * 0.5,
-                gal,
-                egui::Color32::from_rgba_premultiplied(255, 255, 255, 240),
-            );
-        }
     }
 }
 
 pub(crate) fn baud_combo(ui: &mut egui::Ui, id: &'static str, w: f32, baud: &mut String) {
-    let r = [
+    let rates = [
         "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600",
     ];
+
     egui::ComboBox::from_id_salt(id)
         .width(w)
         .selected_text(baud.clone())
         .show_ui(ui, |ui| {
-            for x in r {
-                ui.selectable_value(baud, x.to_owned(), x);
+            for rate in rates {
+                ui.selectable_value(baud, rate.to_owned(), rate);
             }
         });
 }

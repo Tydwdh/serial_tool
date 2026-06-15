@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use tool_panels::theme;
 
 pub const ACTIVITY_BAR_WIDTH: f32 = 104.0; //左侧活动栏宽度
-pub const BOTTOM_PANEL_MIN: f32 = 360.0; //底部面板最小高度
+pub const BOTTOM_PANEL_MIN: f32 = 420.0; //底部面板最小高度
 pub const DEFAULT_WINDOW_WIDTH: f32 = 1280.0; //默认窗口宽度
 pub const DEFAULT_WINDOW_HEIGHT: f32 = 820.0; //默认窗口高度
 pub const REPAINT_INTERVAL_MS: u64 = 50; //UI 自动重绘间隔，单位毫秒
