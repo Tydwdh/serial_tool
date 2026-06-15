@@ -125,15 +125,14 @@ impl WorkbenchApp {
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| match area {
                     DockArea::Bottom => {
-                        // 发送器开关
                         let snd_visible = self.panels.dock.bottom_sender_visible;
-                        let snd_label = if snd_visible { "📤" } else { "📤" };
                         if ui
-                            .selectable_label(snd_visible, snd_label)
+                            .selectable_label(snd_visible, "📤")
                             .on_hover_text("显示/隐藏底部发送器")
                             .clicked()
                         {
                             self.panels.dock.bottom_sender_visible = !snd_visible;
+                            self.send.periodic_send_count = 0;
                             let _ = self.save_config();
                         }
                         if ui.small_button("×").on_hover_text("隐藏底部面板").clicked() {
