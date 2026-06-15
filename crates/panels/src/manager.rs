@@ -263,14 +263,24 @@ impl DockLayout {
     }
 
     pub fn move_panel(&mut self, kind: PanelKind, to: DockArea) {
+        let is_sender = kind == PanelKind::Sender;
         self.center.remove(&kind);
         self.bottom.remove(&kind);
         self.right.remove(&kind);
         self.stack_mut(to).open(kind);
         match to {
             DockArea::Bottom => self.bottom_visible = true,
-            DockArea::Right => self.right_visible = true,
-            _ => {}
+            DockArea::Right => {
+                self.right_visible = true;
+                if is_sender {
+                    self.bottom_sender_visible = false;
+                }
+            }
+            _ => {
+                if is_sender {
+                    self.bottom_sender_visible = true;
+                }
+            }
         }
     }
 

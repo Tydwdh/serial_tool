@@ -109,7 +109,12 @@ impl WorkbenchApp {
                     }
 
                     if ui.button("关闭").clicked() {
+                        let is_sender = matches!(kind, PanelKind::Sender);
                         self.panels.dock.stack_mut(area).close(kind);
+                        // Sender 从右侧关闭时恢复底部发送器
+                        if is_sender && area == DockArea::Right {
+                            self.panels.dock.bottom_sender_visible = true;
+                        }
                         let _ = self.save_config();
                         ui.close();
                     }
@@ -120,6 +125,17 @@ impl WorkbenchApp {
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| match area {
                     DockArea::Bottom => {
+                        // 发送器开关
+                        let snd_visible = self.panels.dock.bottom_sender_visible;
+                        let snd_label = if snd_visible { "📤" } else { "📤" };
+                        if ui
+                            .selectable_label(snd_visible, snd_label)
+                            .on_hover_text("显示/隐藏底部发送器")
+                            .clicked()
+                        {
+                            self.panels.dock.bottom_sender_visible = !snd_visible;
+                            let _ = self.save_config();
+                        }
                         if ui.small_button("×").on_hover_text("隐藏底部面板").clicked() {
                             self.panels.dock.bottom_visible = false;
                             self.bottom_panel_visible = false;
@@ -133,6 +149,10 @@ impl WorkbenchApp {
                             .clicked()
                         {
                             self.panels.dock.right_visible = false;
+                            // Sender 离开右侧时恢复底部发送器
+                            if self.panels.dock.right.contains(&PanelKind::Sender) {
+                                self.panels.dock.bottom_sender_visible = true;
+                            }
                             let _ = self.save_config();
                         }
                     }
