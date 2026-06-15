@@ -26,6 +26,7 @@ impl WorkbenchApp {
                 if let Some(path) = pick_workspace_save_path() {
                     match self.save_config_to_path(&path) {
                         Ok(()) => {
+                            self.add_recent_workspace(&path);
                             self.set_status_force(
                                 StatusLevel::Info,
                                 format!("工作区已保存: {}", path.display()),
@@ -80,6 +81,34 @@ impl WorkbenchApp {
                 }
             }
         });
+
+        if !self.recent_workspaces.is_empty() {
+            ui.separator();
+            ui.label("最近工作区：");
+            let mut to_remove: Option<usize> = None;
+            for (i, path) in self.recent_workspaces.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    if ui.button("打开").clicked() {
+                        let p = std::path::PathBuf::from(path);
+                        match self.load_config_from_path(&p) {
+                            Ok(()) => {
+                                self.apply_loaded_workspace_postprocess();
+                                self.set_status_force(StatusLevel::Info, format!("已加载: {path}"));
+                            }
+                            Err(e) => self.set_status_force(StatusLevel::Error, e),
+                        }
+                    }
+                    ui.label(path);
+                    if ui.small_button("×").clicked() {
+                        to_remove = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = to_remove {
+                self.recent_workspaces.remove(i);
+                let _ = self.save_config();
+            }
+        }
 
         ui.separator();
         ui.heading("外观");

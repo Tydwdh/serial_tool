@@ -39,6 +39,8 @@ pub(crate) struct PersistedConfig {
     pub(crate) send_history: Vec<String>,
     #[serde(default)]
     pub(crate) port_profiles: HashMap<String, PortProfile>,
+    #[serde(default)]
+    pub(crate) recent_workspaces: Vec<String>,
 }
 
 pub(crate) fn default_activity_order() -> Vec<Activity> {

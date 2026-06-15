@@ -316,6 +316,7 @@ impl WorkbenchApp {
             port_aliases: self.port_aliases.clone(),
             send_history: self.send.send_history.iter().cloned().collect(),
             port_profiles: self.port_profiles.clone(),
+            recent_workspaces: self.recent_workspaces.clone(),
         };
         let t = serde_json::to_string_pretty(&cfg).map_err(|e| format!("序列化失败：{e}"))?;
         std::fs::write(config_path(), t).map_err(|e| format!("写入失败：{e}"))
@@ -381,6 +382,13 @@ impl WorkbenchApp {
         self.panels = cfg.panels.clone();
         self.apply_loaded_workspace_postprocess();
         Ok(())
+    }
+
+    pub(crate) fn add_recent_workspace(&mut self, path: &std::path::Path) {
+        let s = path.display().to_string();
+        self.recent_workspaces.retain(|p| p != &s);
+        self.recent_workspaces.insert(0, s);
+        self.recent_workspaces.truncate(10);
     }
 
     pub(crate) fn apply_loaded_workspace_postprocess(&mut self) {

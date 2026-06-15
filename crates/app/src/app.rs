@@ -45,6 +45,7 @@ pub(crate) struct WorkbenchApp {
     pub(crate) pending_reconnect: Option<PendingReconnect>,
     pub(crate) port_aliases: std::collections::HashMap<String, String>,
     pub(crate) port_profiles: std::collections::HashMap<String, crate::config::PortProfile>,
+    pub(crate) recent_workspaces: Vec<String>,
     pub(crate) bottom_panel_visible: bool,
     pub(crate) bottom_tab: BottomTab,
     pub(crate) send: SendUiState,
@@ -194,6 +195,10 @@ impl WorkbenchApp {
             port_profiles: config
                 .as_ref()
                 .map(|c| c.port_profiles.clone())
+                .unwrap_or_default(),
+            recent_workspaces: config
+                .as_ref()
+                .map(|c| c.recent_workspaces.clone())
                 .unwrap_or_default(),
             bottom_panel_visible: rp.bottom_logs_visible,
             bottom_tab: BottomTab::Terminal,
