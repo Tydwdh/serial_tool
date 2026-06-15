@@ -55,7 +55,7 @@ impl WorkbenchApp {
                     const STATUS_H: f32 = 26.0;
                     const SEP_H: f32 = 8.0;
                     const OUTPUT_MIN_H: f32 = 120.0;
-                    const SENDER_MIN_H: f32 = 180.0;
+                    const SENDER_MIN_H: f32 = 190.0;
 
                     let sender_visible = self.panels.dock.bottom_sender_visible
                         && !self.send.popup_open;

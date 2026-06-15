@@ -368,17 +368,20 @@ impl WorkbenchApp {
             if ui
                 .checkbox(&mut self.send.periodic_enabled, "周期发送")
                 .changed()
-                && self.send.periodic_enabled
             {
                 self.send.periodic_send_count = 0;
-                let now = ui.ctx().input(|i| i.time);
-                let ms = self
-                    .send
-                    .periodic_interval_ms
-                    .trim()
-                    .parse::<u64>()
-                    .unwrap_or(1000);
-                self.send.periodic_send_count = 0;
+                if self.send.periodic_enabled {
+                    let now = ui.ctx().input(|i| i.time);
+                    let ms = self
+                        .send
+                        .periodic_interval_ms
+                        .trim()
+                        .parse::<u64>()
+                        .unwrap_or(1000)
+                        .max(10);
+                    self.send.next_periodic_send_time =
+                        now + ms as f64 / 1000.0;
+                }
             }
             ui.add(
                 egui::TextEdit::singleline(&mut self.send.periodic_interval_ms)
@@ -390,8 +393,7 @@ impl WorkbenchApp {
                 let left = (self.send.next_periodic_send_time - now).max(0.0);
                 ui.label(format!("{:.0}s", left));
             }
-            ui.checkbox(&mut self.send.dtr_high, "DTR");
-            ui.checkbox(&mut self.send.rts_high, "RTS");
+            self.send_signal_controls(ui);
         });
     }
 
@@ -463,12 +465,39 @@ impl WorkbenchApp {
             ui.label("ms");
         });
 
-        ui.checkbox(&mut self.send.dtr_high, "DTR");
-        ui.checkbox(&mut self.send.rts_high, "RTS");
+        self.send_signal_controls(ui);
 
         if let Some(err) = &self.send.error {
             ui.colored_label(theme::YELLOW, err);
         }
+    }
+
+    fn send_signal_controls(&mut self, ui: &mut egui::Ui) {
+        let Some(port) = self.send.target_port.clone() else {
+            ui.add_enabled(false, egui::Checkbox::new(&mut self.send.dtr_high, "DTR"));
+            ui.add_enabled(false, egui::Checkbox::new(&mut self.send.rts_high, "RTS"));
+            return;
+        };
+
+        let open = self.transport.status_port(&port).open;
+
+        ui.add_enabled_ui(open, |ui| {
+            let mut dtr = self.send.dtr_high;
+            if ui.checkbox(&mut dtr, "DTR").changed() {
+                match self.transport.set_dtr(&port, dtr) {
+                    Ok(()) => self.send.dtr_high = dtr,
+                    Err(e) => self.set_status_force(StatusLevel::Error, e.to_string()),
+                }
+            }
+
+            let mut rts = self.send.rts_high;
+            if ui.checkbox(&mut rts, "RTS").changed() {
+                match self.transport.set_rts(&port, rts) {
+                    Ok(()) => self.send.rts_high = rts,
+                    Err(e) => self.set_status_force(StatusLevel::Error, e.to_string()),
+                }
+            }
+        });
     }
 
     pub(crate) fn do_send(&mut self) {

@@ -193,7 +193,7 @@ fn default_right_size() -> f32 {
     320.0
 }
 fn default_bottom_sender_height() -> f32 {
-    170.0
+    190.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
