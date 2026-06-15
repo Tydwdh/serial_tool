@@ -263,24 +263,34 @@ impl DockLayout {
     }
 
     pub fn move_panel(&mut self, kind: PanelKind, to: DockArea) {
-        let is_sender = kind == PanelKind::Sender;
+        // Sender 特殊路径：不允许进入 Center/Bottom stack
+        if kind == PanelKind::Sender {
+            self.center.remove(&PanelKind::Sender);
+            self.bottom.remove(&PanelKind::Sender);
+            self.right.remove(&PanelKind::Sender);
+            match to {
+                DockArea::Right => {
+                    self.right.open(PanelKind::Sender);
+                    self.right_visible = true;
+                    self.bottom_sender_visible = false;
+                }
+                _ => {
+                    self.bottom_visible = true;
+                    self.bottom_sender_visible = true;
+                }
+            }
+            return;
+        }
+
         self.center.remove(&kind);
         self.bottom.remove(&kind);
         self.right.remove(&kind);
         self.stack_mut(to).open(kind);
+
         match to {
             DockArea::Bottom => self.bottom_visible = true,
-            DockArea::Right => {
-                self.right_visible = true;
-                if is_sender {
-                    self.bottom_sender_visible = false;
-                }
-            }
-            _ => {
-                if is_sender {
-                    self.bottom_sender_visible = true;
-                }
-            }
+            DockArea::Right => self.right_visible = true,
+            DockArea::Center => {}
         }
     }
 
@@ -301,29 +311,45 @@ impl DockLayout {
     }
 
     pub fn normalize_tool_layout(&mut self) {
-        for kind in [PanelKind::Terminal, PanelKind::Logs, PanelKind::Sender] {
+        // 工具面板不允许留在 Center
+        for kind in [PanelKind::Terminal, PanelKind::Logs] {
             if self.center.remove(&kind) {
-                match kind {
-                    PanelKind::Sender => {
-                        self.bottom_sender_visible = true;
-                        self.right.remove(&PanelKind::Sender);
-                    }
-                    _ => {
-                        if !self.bottom.contains(&kind) && !self.right.contains(&kind) {
-                            self.bottom.open(kind);
-                        }
-                        self.bottom_visible = true;
-                    }
+                if !self.bottom.contains(&kind) && !self.right.contains(&kind) {
+                    self.bottom.open(kind);
                 }
+                self.bottom_visible = true;
             }
         }
-        if !self.bottom_sender_visible && !self.right.contains(&PanelKind::Sender) {
+
+        // Sender 不允许在 Center / Bottom stack 中存在
+        self.center.remove(&PanelKind::Sender);
+        self.bottom.remove(&PanelKind::Sender);
+
+        // Sender 只能二选一：右侧 tab 或底部固定区域
+        if self.right.contains(&PanelKind::Sender) {
+            self.right_visible = true;
+            self.bottom_sender_visible = false;
+        } else {
             self.bottom_sender_visible = true;
+            self.bottom_visible = true;
         }
-        if self.bottom.active.is_none() && !self.bottom.tabs.is_empty() {
+
+        if self.bottom.active.is_none()
+            || self
+                .bottom
+                .active
+                .as_ref()
+                .map_or(true, |k| !self.bottom.contains(k))
+        {
             self.bottom.active = self.bottom.tabs.first().cloned();
         }
-        if self.right.active.is_none() && !self.right.tabs.is_empty() {
+        if self.right.active.is_none()
+            || self
+                .right
+                .active
+                .as_ref()
+                .map_or(true, |k| !self.right.contains(k))
+        {
             self.right.active = self.right.tabs.first().cloned();
         }
     }

@@ -17,6 +17,9 @@ use tool_panels::{DockArea, PanelKind, theme};
 
 impl WorkbenchApp {
     pub(crate) fn draw_shell(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        self.bottom_dock_rect = None;
+        self.right_dock_rect = None;
+
         egui::Panel::top("top-bar").show_inside(ui, |ui| self.top_bar(ui));
 
         if self.panels.dock.activity_bar_visible {
@@ -37,6 +40,7 @@ impl WorkbenchApp {
                 });
 
             self.right_dock_rect = Some(shown.response.rect);
+            self.panels.dock.right_size = shown.response.rect.width().max(220.0);
         }
 
         if self.panels.dock.bottom_visible {

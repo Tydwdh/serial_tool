@@ -421,7 +421,9 @@ impl WorkbenchApp {
 
     pub(crate) fn apply_loaded_workspace_postprocess(&mut self) {
         self.panels.discard_dynamic_tabs();
-        self.bottom_panel_visible = self.panels.bottom_logs_visible;
+        self.panels.dock.normalize_tool_layout();
+        self.bottom_panel_visible = self.panels.dock.bottom_visible;
+        self.panels.bottom_logs_visible = self.panels.dock.bottom_visible;
         self.ensure_bottom_tab_available();
         self.refresh_ports_silent();
         self.dynamic_panels.set_ports(&self.ports);

@@ -210,9 +210,19 @@ impl WorkbenchApp {
                     self.terminal_panel.ui(ui);
                 }
             }
-            PanelKind::Sender => {
-                self.send_bar(ui);
-            }
+            PanelKind::Sender => match area {
+                DockArea::Right => {
+                    ui.heading("发送器");
+                    ui.separator();
+                    self.send_bar(ui);
+                }
+                DockArea::Bottom => {
+                    ui.colored_label(theme::YELLOW, "发送器已固定在底部下层");
+                }
+                DockArea::Center => {
+                    ui.colored_label(theme::YELLOW, "发送器不支持放在主工作区");
+                }
+            },
             PanelKind::Logs => self.bottom_log_panel.ui(ui),
             PanelKind::Dynamic(id) => {
                 if self.detached_dynamic_panels.contains(&id) {
