@@ -182,6 +182,7 @@ impl ReplayPanel {
             ui.label(message);
         }
 
+        if self.manager.needs_analyzer() || self.analyzer_busy || self.manager.analyzer_cache_valid() {
         ui.collapsing("Replay Analyzer", |ui| {
             if self.analyzer_busy {
                 ui.colored_label(theme::BLUE, "Analyzer 正在运行");
@@ -218,6 +219,7 @@ impl ReplayPanel {
                     }
                 });
         });
+        }
     }
 
     fn file_controls(&mut self, ui: &mut egui::Ui) {

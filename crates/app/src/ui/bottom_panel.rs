@@ -96,6 +96,9 @@ impl WorkbenchApp {
                     "请选择已打开的串口"
                 }),
         );
+        if text_edit_resp.changed() {
+            self.send.periodic_send_count = 0;
+        }
 
         let ctrl_enter = text_edit_resp.has_focus()
             && ui
