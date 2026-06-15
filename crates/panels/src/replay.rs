@@ -178,6 +178,8 @@ impl ReplayPanel {
         self.progress_bar(ui, &status);
         self.status_line(ui, &status);
 
+        self.bookmark_controls(ui, &status);
+
         if let Some(message) = &self.message {
             ui.label(message);
         }
@@ -489,6 +491,26 @@ impl ReplayPanel {
 
             self.want_seek_replay = Some(target);
         }
+    }
+
+    fn bookmark_controls(&mut self, ui: &mut egui::Ui, status: &tool_recorder::ReplayStatus) {
+        let bookmarks = self.manager.bookmarks().to_vec();
+        if bookmarks.is_empty() && status.total_events == 0 {
+            return;
+        }
+        ui.horizontal(|ui| {
+            if ui.small_button("+书签").on_hover_text("在当前时间点添加书签").clicked() {
+                self.manager.add_bookmark();
+            }
+            for &pos_ms in &bookmarks {
+                if ui.small_button(format!("{}", ms_to_hms(pos_ms))).clicked() {
+                    self.want_seek_replay = Some(pos_ms);
+                }
+                if ui.small_button("×").on_hover_text("删除此书签").clicked() {
+                    self.manager.remove_bookmark(pos_ms);
+                }
+            }
+        });
     }
 
     fn status_line(&mut self, ui: &mut egui::Ui, status: &tool_recorder::ReplayStatus) {

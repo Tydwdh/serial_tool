@@ -552,6 +552,7 @@ pub struct ReplayManager {
     analyzer_warning: Option<String>,
     analyzer_cursor: usize,
     last_load_report: Option<ReplayLoadReport>,
+    bookmarks: Vec<u64>,
 }
 
 impl ReplayManager {
@@ -573,7 +574,24 @@ impl ReplayManager {
             analyzer_warning: None,
             analyzer_cursor: 0,
             last_load_report: None,
+            bookmarks: Vec::new(),
         }
+    }
+
+    pub fn add_bookmark(&mut self) {
+        let pos = self.position_ms();
+        if !self.bookmarks.contains(&pos) {
+            self.bookmarks.push(pos);
+            self.bookmarks.sort();
+        }
+    }
+
+    pub fn remove_bookmark(&mut self, pos_ms: u64) {
+        self.bookmarks.retain(|&b| b != pos_ms);
+    }
+
+    pub fn bookmarks(&self) -> &[u64] {
+        &self.bookmarks
     }
 
     pub fn load(&mut self, path: impl AsRef<Path>) -> io::Result<usize> {
