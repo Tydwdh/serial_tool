@@ -85,20 +85,21 @@ impl WorkbenchApp {
         if !self.recent_workspaces.is_empty() {
             ui.separator();
             ui.label("最近工作区：");
+            let paths: Vec<(usize, std::path::PathBuf)> = self.recent_workspaces.iter().enumerate().map(|(i, p)| (i, std::path::PathBuf::from(p))).collect();
             let mut to_remove: Option<usize> = None;
-            for (i, path) in self.recent_workspaces.iter().enumerate() {
+            for (i, path) in paths {
+                let path_str = path.display().to_string();
                 ui.horizontal(|ui| {
                     if ui.button("打开").clicked() {
-                        let p = std::path::PathBuf::from(path);
-                        match self.load_config_from_path(&p) {
+                        match self.load_config_from_path(&path) {
                             Ok(()) => {
                                 self.apply_loaded_workspace_postprocess();
-                                self.set_status_force(StatusLevel::Info, format!("已加载: {path}"));
+                                self.set_status_force(StatusLevel::Info, format!("已加载: {path_str}"));
                             }
                             Err(e) => self.set_status_force(StatusLevel::Error, e),
                         }
                     }
-                    ui.label(path);
+                    ui.label(&path_str);
                     if ui.small_button("×").clicked() {
                         to_remove = Some(i);
                     }

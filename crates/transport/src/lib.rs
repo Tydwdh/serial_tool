@@ -527,23 +527,21 @@ impl TransportManager {
     /// 清理已退出 worker 的 stale port handle（alive == false）。
     /// 可在 status 查询、list/open/close 或定时刷新时调用。
     pub fn reap_dead_ports(&self) {
-        let dead_names: Vec<String> = {
+        let dead: Vec<(String, u32)> = {
             let guard = self.ports.lock();
             guard
                 .iter()
                 .filter(|(_, h)| !h.alive.load(Ordering::Relaxed))
-                .map(|(name, _)| name.clone())
+                .map(|(name, h)| (name.clone(), h.config.baud_rate))
                 .collect()
         };
-        for name in &dead_names {
+        for (name, baud) in &dead {
             self.bus.publish(Event::system_log(
                 LogLevel::Error,
                 "transport.serial",
-                format!("串口 {name} 已断开连接"),
+                format!("串口 {name} @{baud} 已断开连接"),
             ));
-        }
-        for name in dead_names {
-            self.close_port(&name);
+            self.close_port(name);
         }
     }
 }

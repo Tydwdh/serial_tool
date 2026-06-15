@@ -221,6 +221,7 @@ impl WorkbenchApp {
                 .unwrap_or_else(default_activity_order),
             activity_drag_source: None,
             activity_rects_cache: Vec::new(),
+            last_auto_save_time: 0.0,
             last_rate_check_time: 0.0,
             last_event_count: 0,
             event_rate: 0.0,

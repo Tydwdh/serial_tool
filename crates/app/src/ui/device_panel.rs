@@ -204,7 +204,7 @@ impl WorkbenchApp {
                 let mut alias_buf = self.port_aliases.get(&name).cloned().unwrap_or_default();
 
                 ui.horizontal(|ui| {
-                    let open = self.transport.status_port(name).open;
+                    let open = self.transport.status_port(&name).open;
                     ui.label(if open { "●" } else { "○" });
                     ui.monospace(&name);
                     ui.label(format!("{}", port.port_type));

@@ -46,6 +46,13 @@ impl WorkbenchApp {
                     ui.colored_label(theme::RED, format!("错误: {err}"));
                 }
             }
+            // DTR/RTS 状态
+            if st.open {
+                ui.separator();
+                let dtr = if self.send.dtr_high { "DTR⬆" } else { "DTR⬇" };
+                let rts = if self.send.rts_high { "RTS⬆" } else { "RTS⬇" };
+                ui.label(format!("{dtr} {rts}"));
+            }
             ui.separator();
             ui.label(format!("{:.0} 事件/秒", self.event_rate));
             ui.separator();

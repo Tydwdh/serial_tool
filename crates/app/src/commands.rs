@@ -318,8 +318,13 @@ impl WorkbenchApp {
             port_profiles: self.port_profiles.clone(),
             recent_workspaces: self.recent_workspaces.clone(),
         };
+        let path = config_path();
+        // 备份旧文件
+        if path.exists() {
+            let _ = std::fs::copy(&path, path.with_extension("json.backup"));
+        }
         let t = serde_json::to_string_pretty(&cfg).map_err(|e| format!("序列化失败：{e}"))?;
-        std::fs::write(config_path(), t).map_err(|e| format!("写入失败：{e}"))
+        std::fs::write(&path, t).map_err(|e| format!("写入失败：{e}"))
     }
 
     pub(crate) fn save_config_to_path(&mut self, path: &std::path::Path) -> Result<(), String> {
@@ -352,6 +357,8 @@ impl WorkbenchApp {
             send_popup_always_on_top: self.send_popup_always_on_top,
             port_aliases: self.port_aliases.clone(),
             send_history: self.send.send_history.iter().cloned().collect(),
+            port_profiles: self.port_profiles.clone(),
+            recent_workspaces: self.recent_workspaces.clone(),
         };
         let t = serde_json::to_string_pretty(&cfg).map_err(|e| format!("序列化失败：{e}"))?;
         std::fs::write(path, t).map_err(|e| format!("写入失败：{e}"))
