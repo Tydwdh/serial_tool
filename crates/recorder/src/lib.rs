@@ -8,7 +8,7 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use tool_core::{Event, LogLevel};
+use tool_core::{Direction, Event, LogLevel, Payload, topics};
 use tool_databus::{DataBus, TopicFilter};
 
 // ── RecordMode ──
@@ -341,13 +341,20 @@ impl JsonlRecorder {
 
     pub fn pause(&mut self) {
         if let Some(ref worker) = self.worker {
-            worker.pause.store(true, Ordering::Relaxed);
-            self.stats.lock().unwrap().paused = true;
+            // 先发布 marker 事件（worker 尚未暂停，会写入文件）
+            self.bus.publish(Event::new(
+                "recorder.pause",
+                "recorder",
+                Direction::Internal,
+                Payload::Text("paused".to_owned()),
+            ));
             self.bus.publish(Event::system_log(
                 LogLevel::Info,
                 "recorder",
                 "recording paused",
             ));
+            worker.pause.store(true, Ordering::Relaxed);
+            self.stats.lock().unwrap().paused = true;
         }
     }
 
@@ -355,6 +362,13 @@ impl JsonlRecorder {
         if let Some(ref worker) = self.worker {
             worker.pause.store(false, Ordering::Relaxed);
             self.stats.lock().unwrap().paused = false;
+            // 恢复后发布 marker 事件
+            self.bus.publish(Event::new(
+                "recorder.resume",
+                "recorder",
+                Direction::Internal,
+                Payload::Text("resumed".to_owned()),
+            ));
             self.bus.publish(Event::system_log(
                 LogLevel::Info,
                 "recorder",
@@ -466,6 +480,11 @@ fn is_excluded_event(event: &Event) -> bool {
 fn should_record_event_with_mode(event: &Event, mode: RecordMode) -> bool {
     if is_excluded_event(event) {
         return false;
+    }
+
+    // 录制控制事件（暂停/继续）在所有模式下都写入
+    if event.topic == "recorder.pause" || event.topic == "recorder.resume" {
+        return true;
     }
 
     match mode {

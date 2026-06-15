@@ -75,32 +75,34 @@ impl WorkbenchApp {
                 if !selected_still_exists {
                     let selected_val = self.selected_port.clone();
                     if let Some(ref selected) = selected_val {
+                        // 保存配置快照（在 reap_dead_ports 移除 handle 前）
+                        let snapshot = SerialConfig {
+                            port_name: selected.clone(),
+                            baud_rate: self.baud_rate.parse().unwrap_or(115200),
+                            data_bits: pdb(&self.data_bits),
+                            stop_bits: psb(&self.stop_bits),
+                            parity: ppar(&self.parity),
+                            timeout_ms: self.timeout_ms.parse().unwrap_or(50),
+                        };
                         if self.transport.status_port(selected).open {
-                            self.set_status(
+                            self.set_status_force(
                                 StatusLevel::Warn,
                                 format!("{selected} 已打开但不在系统列表中"),
                             );
-                            if self.auto_reconnect {
-                                self.pending_reconnect = Some(PendingReconnect {
-                                    port_name: selected.clone(),
-                                    config: SerialConfig {
-                                        port_name: selected.clone(),
-                                        baud_rate: self.baud_rate.parse().unwrap_or(115200),
-                                        data_bits: pdb(&self.data_bits),
-                                        stop_bits: psb(&self.stop_bits),
-                                        parity: ppar(&self.parity),
-                                        timeout_ms: self.timeout_ms.parse().unwrap_or(50),
-                                    },
-                                    attempts: 0,
-                                    next_try_at: 0.0,
-                                });
-                            }
                         } else {
                             self.selected_port = None;
-                            self.set_status(
+                            self.set_status_force(
                                 StatusLevel::Warn,
                                 format!("{selected} 已拔出或不可用"),
                             );
+                        }
+                        if self.auto_reconnect {
+                            self.pending_reconnect = Some(PendingReconnect {
+                                port_name: selected.clone(),
+                                config: snapshot,
+                                attempts: 0,
+                                next_try_at: 0.0,
+                            });
                         }
                     }
                 }
@@ -191,79 +193,54 @@ impl WorkbenchApp {
     }
 
     pub(crate) fn open_selected_port(&mut self) {
-        self.refresh_ports_silent();
-
-        let Some(p) = self.selected_port.clone() else {
-            self.log(LogLevel::Warn, "请选择串口");
-            self.set_status(StatusLevel::Warn, "请选择串口");
-            return;
-        };
-
-        let selected_exists = self.ports.iter().any(|port| port.port_name == p);
-
-        if !selected_exists {
-            self.set_status(StatusLevel::Error, format!("串口 {p} 不存在，请重新选择"));
-            return;
-        }
-
-        let baud_rate = match self.baud_rate.trim().parse::<u32>() {
-            Ok(v) if v > 0 => v,
-            _ => {
-                self.set_status_force(StatusLevel::Warn, "波特率格式错误");
-                return;
-            }
-        };
-
-        let timeout_ms = match self.timeout_ms.trim().parse::<u64>() {
-            Ok(v) if (1..=1000).contains(&v) => v,
-            _ => {
-                self.set_status_force(StatusLevel::Warn, "超时时间必须为 1..=1000 ms");
-                return;
-            }
-        };
-
-        let cfg = SerialConfig {
-            port_name: p.clone(),
-            baud_rate,
-            data_bits: pdb(&self.data_bits),
-            stop_bits: psb(&self.stop_bits),
-            parity: ppar(&self.parity),
-            timeout_ms,
-        };
-
-        match self.transport.open_serial(cfg) {
+        match self.open_selected_port_result() {
             Ok(()) => {
+                let p = self.selected_port.as_deref().unwrap_or("?");
                 self.set_status_force(StatusLevel::Info, format!("{p} 已连接"));
                 self.open_bottom_panel();
             }
             Err(e) => {
-                self.set_status_force(StatusLevel::Error, e.to_string());
+                self.set_status_force(StatusLevel::Error, e);
             }
         }
+    }
+
+    fn open_selected_port_result(&mut self) -> Result<(), String> {
+        self.refresh_ports_silent();
+        let Some(p) = self.selected_port.clone() else { return Err("请选择串口".to_owned()) };
+        if !self.ports.iter().any(|port| port.port_name == p) { return Err(format!("{p} 不存在")) }
+        let baud_rate = self.baud_rate.trim().parse::<u32>().map_err(|_| "波特率格式错误".to_owned())?;
+        if baud_rate == 0 { return Err("波特率格式错误".to_owned()) }
+        let timeout_ms = self.timeout_ms.trim().parse::<u64>().map_err(|_| "超时格式错误".to_owned())?;
+        if !(1..=1000).contains(&timeout_ms) { return Err("超时 1..=1000 ms".to_owned()) }
+        let cfg = SerialConfig { port_name: p, baud_rate, data_bits: pdb(&self.data_bits), stop_bits: psb(&self.stop_bits), parity: ppar(&self.parity), timeout_ms };
+        self.transport.open_serial(cfg).map_err(|e| e.to_string())
     }
 
     /// 真正重连：先关闭端口并等待 worker 退出，再用当前配置重新打开。
     pub(crate) fn reconnect_selected_port(&mut self) {
         let Some(p) = self.selected_port.clone() else {
-            self.set_status(StatusLevel::Warn, "请选择串口");
+            self.set_status_force(StatusLevel::Warn, "请选择串口");
             return;
         };
 
         let selected_exists = self.ports.iter().any(|port| port.port_name == p);
         if !selected_exists {
-            self.set_status(StatusLevel::Error, format!("串口 {p} 不存在"));
+            self.set_status_force(StatusLevel::Error, format!("串口 {p} 不存在"));
             return;
         }
 
         // 先关闭，阻塞等待 worker 退出
-        self.transport.close_port_blocking(
-            &p,
-            Duration::from_millis(3000),
-        );
+        if let Err(e) = self.transport.close_port_blocking(&p, Duration::from_millis(3000)) {
+            self.set_status_force(StatusLevel::Error, format!("关闭 {p} 失败：{e}"));
+            return;
+        }
 
         // 重新打开
-        self.open_selected_port();
-        self.set_status_force(StatusLevel::Info, format!("{p} 已重新连接"));
+        match self.open_selected_port_result() {
+            Ok(()) => self.set_status_force(StatusLevel::Info, format!("{p} 已重新连接")),
+            Err(e) => self.set_status_force(StatusLevel::Error, format!("重连 {p} 失败：{e}")),
+        }
     }
 
     pub(crate) fn start_or_stop_recording(&mut self) {

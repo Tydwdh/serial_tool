@@ -228,9 +228,9 @@ impl WorkbenchApp {
 
         if self.send_target_port_open() && !self.send.input.is_empty() {
             self.do_send();
-            self.send.periodic_send_count += 1;
-
-            if self.send.error.is_some() {
+            if self.send.error.is_none() {
+                self.send.periodic_send_count += 1;
+            } else {
                 self.send.periodic_enabled = false;
                 self.set_status_force(crate::state::StatusLevel::Error, "周期发送已停止：发送失败");
                 return;

@@ -142,7 +142,9 @@ impl WorkbenchApp {
         if stats.running || stats.stopping {
             ui.separator();
             ui.horizontal(|ui| {
-                if stats.running {
+                if stats.paused {
+                    ui.colored_label(theme::YELLOW, "⏸ 已暂停，未写入新事件");
+                } else if stats.running {
                     ui.colored_label(theme::GREEN, "● 录制中");
                 } else {
                     ui.colored_label(theme::YELLOW, "● 正在停止");
