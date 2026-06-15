@@ -216,6 +216,12 @@ impl WorkbenchApp {
                             self.send.dtr_high = new_val;
                         }
                     }
+                    if ui.small_button("DTR ⏱").on_hover_text("DTR 脉冲(LOW 100ms→HIGH)").clicked() {
+                        let _ = self.transport.set_dtr(&port, false);
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        let _ = self.transport.set_dtr(&port, true);
+                        self.send.dtr_high = true;
+                    }
                     if ui.small_button(rts_label).on_hover_text("切换 RTS").clicked() {
                         let new_val = !self.send.rts_high;
                         if let Err(e) = self.transport.set_rts(&port, new_val) {
@@ -223,6 +229,12 @@ impl WorkbenchApp {
                         } else {
                             self.send.rts_high = new_val;
                         }
+                    }
+                    if ui.small_button("RTS ⏱").on_hover_text("RTS 脉冲(LOW 100ms→HIGH)").clicked() {
+                        let _ = self.transport.set_rts(&port, false);
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        let _ = self.transport.set_rts(&port, true);
+                        self.send.rts_high = true;
                     }
                 });
             }

@@ -52,6 +52,7 @@ pub struct RecorderStats {
     pub running: bool,
     pub stopping: bool,
     pub paused: bool,
+    pub pause_count: u64,
 }
 
 pub struct JsonlRecorder {
@@ -275,9 +276,9 @@ impl JsonlRecorder {
 
             // ── 生成会话完整性摘要 ──
             let summary_path = path_for_summary.with_extension("summary.json");
-            let (events_written, bytes_written) = {
+            let (events_written, bytes_written, pause_count) = {
                 let s = stats_thread.lock().unwrap();
-                (s.events_written, s.bytes_written)
+                (s.events_written, s.bytes_written, s.pause_count)
             };
             let summary = serde_json::json!({
                 "ended_at_ms": tool_core::now_timestamp_ms(),
@@ -285,6 +286,7 @@ impl JsonlRecorder {
                 "bytes_written": bytes_written,
                 "record_mode": format!("{:?}", mode),
                 "closed_cleanly": last_error_thread.lock().unwrap().is_none(),
+                "pause_count": pause_count,
                 "app_version": env!("CARGO_PKG_VERSION"),
                 "error": last_error_thread.lock().unwrap().clone(),
             });
@@ -355,7 +357,9 @@ impl JsonlRecorder {
                 "recording paused",
             ));
             worker.pause.store(true, Ordering::Relaxed);
-            self.stats.lock().unwrap().paused = true;
+            let mut s = self.stats.lock().unwrap();
+            s.paused = true;
+            s.pause_count += 1;
         }
     }
 

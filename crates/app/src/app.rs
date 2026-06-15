@@ -58,6 +58,7 @@ pub(crate) struct WorkbenchApp {
     pub(crate) activity_drag_source: Option<usize>,
     pub(crate) activity_rects_cache: Vec<egui::Rect>,
     pub(crate) dock_dragging_panel: Option<tool_panels::PanelKind>,
+    pub(crate) last_auto_save_time: f64,
     pub(crate) last_rate_check_time: f64,
     pub(crate) last_event_count: u64,
     pub(crate) event_rate: f64,

@@ -205,6 +205,12 @@ impl WorkbenchApp {
 
         // 周期发送
         self.tick_periodic_send(ctx);
+
+        // 自动保存工作区（每60秒）
+        if now - self.last_auto_save_time > 60.0 {
+            self.last_auto_save_time = now;
+            let _ = self.save_config();
+        }
     }
 
     fn tick_periodic_send(&mut self, ctx: &egui::Context) {
