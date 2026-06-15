@@ -186,7 +186,7 @@ fn default_true() -> bool {
 }
 
 fn default_bottom_size() -> f32 {
-    350.0
+    420.0
 }
 
 fn default_right_size() -> f32 {

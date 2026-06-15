@@ -207,7 +207,7 @@ impl WorkbenchApp {
                 .as_ref()
                 .map(|c| c.recent_workspaces.clone())
                 .unwrap_or_default(),
-            bottom_panel_visible: rp.bottom_logs_visible,
+            bottom_panel_visible: rp.dock.bottom_visible,
             bottom_tab: BottomTab::Terminal,
             send,
             terminal_popup_open: false,

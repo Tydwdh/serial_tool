@@ -211,11 +211,7 @@ impl WorkbenchApp {
                 }
             }
             PanelKind::Sender => match area {
-                DockArea::Right => {
-                    ui.heading("发送器");
-                    ui.separator();
-                    self.send_bar(ui);
-                }
+                DockArea::Right => self.send_panel_vertical(ui),
                 DockArea::Bottom => {
                     ui.colored_label(theme::YELLOW, "发送器已固定在底部下层");
                 }

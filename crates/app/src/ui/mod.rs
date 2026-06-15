@@ -52,22 +52,29 @@ impl WorkbenchApp {
                 .show_inside(ui, |ui| {
                     let width = ui.available_width();
                     let total_h = ui.available_height();
-                    let status_h = 26.0;
-                    let sep_h = 8.0;
+                    const STATUS_H: f32 = 26.0;
+                    const SEP_H: f32 = 8.0;
+                    const OUTPUT_MIN_H: f32 = 120.0;
+                    const SENDER_MIN_H: f32 = 180.0;
 
-                    let sender_h = if self.panels.dock.bottom_sender_visible
-                        && !self.send.popup_open
-                    {
-                        self.panels
-                            .dock
-                            .bottom_sender_height
-                            .clamp(150.0, total_h * 0.45)
+                    let sender_visible = self.panels.dock.bottom_sender_visible
+                        && !self.send.popup_open;
+
+                    let max_sender_h = if sender_visible {
+                        (total_h - STATUS_H - SEP_H * 2.0 - OUTPUT_MIN_H).max(0.0)
                     } else {
                         0.0
                     };
 
-                    let output_h =
-                        (total_h - sender_h - status_h - sep_h * 2.0).max(100.0);
+                    let sender_h = if sender_visible && max_sender_h >= SENDER_MIN_H {
+                        self.panels.dock.bottom_sender_height.clamp(SENDER_MIN_H, max_sender_h)
+                    } else if sender_visible {
+                        max_sender_h
+                    } else {
+                        0.0
+                    };
+
+                    let output_h = (total_h - sender_h - STATUS_H - SEP_H * 2.0).max(0.0);
 
                     // 上层：接收 / 日志
                     ui.allocate_ui_with_layout(
@@ -86,7 +93,7 @@ impl WorkbenchApp {
                             egui::vec2(width, sender_h),
                             egui::Layout::top_down(egui::Align::Min),
                             |ui| {
-                                self.send_bar(ui);
+                                self.send_panel_horizontal(ui);
                             },
                         );
                         ui.separator();
@@ -94,7 +101,7 @@ impl WorkbenchApp {
 
                     // 底层：状态栏
                     ui.allocate_ui_with_layout(
-                        egui::vec2(width, status_h),
+                        egui::vec2(width, STATUS_H),
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
                             self.status_bar(ui);

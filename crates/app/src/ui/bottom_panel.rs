@@ -289,6 +289,188 @@ impl WorkbenchApp {
         }
     }
 
+    pub(crate) fn send_panel_horizontal(&mut self, ui: &mut egui::Ui) {
+        self.ensure_send_target_port();
+        let send_port_open = self.send_target_port_open();
+
+        ui.horizontal(|ui| {
+            ui.label("发送到");
+            self.send_target_port_combo(ui, "send-target-port-bottom");
+
+            ui.radio_value(&mut self.send.hex_mode, false, "文本");
+            ui.radio_value(&mut self.send.hex_mode, true, "HEX");
+            if self.send.hex_mode {
+                ui.checkbox(&mut self.send.hex_strict, "严格");
+            }
+
+            ui.add_enabled_ui(!self.send.hex_mode, |ui| {
+                egui::ComboBox::from_id_salt("line-ending-bottom")
+                    .width(60.0)
+                    .selected_text(self.send.line_ending.label())
+                    .show_ui(ui, |ui| {
+                        for &le in LineEnding::ALL.iter() {
+                            ui.selectable_value(&mut self.send.line_ending, le, le.label());
+                        }
+                    });
+            });
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("⛶").on_hover_text("放大编辑").clicked() {
+                    self.send.popup_open = true;
+                }
+            });
+        });
+
+        let resp = ui.add(
+            egui::TextEdit::multiline(&mut self.send.input)
+                .desired_width(f32::INFINITY)
+                .desired_rows(3)
+                .hint_text(if send_port_open {
+                    "Ctrl+Enter 发送 | ⛶ 放大编辑"
+                } else {
+                    "请选择已打开的串口"
+                }),
+        );
+
+        if resp.changed() {
+            self.send.periodic_send_count = 0;
+        }
+
+        let ctrl_enter = resp.has_focus()
+            && ui
+                .ctx()
+                .input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter));
+
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    send_port_open && !self.send.input.trim().is_empty(),
+                    egui::Button::new("发送"),
+                )
+                .clicked()
+                || ctrl_enter
+            {
+                self.do_send();
+            }
+
+            if ui.button("清空").clicked() {
+                self.send.input.clear();
+                self.send.error = None;
+                self.send.periodic_send_count = 0;
+            }
+
+            if let Some(err) = &self.send.error {
+                ui.colored_label(theme::YELLOW, err);
+            }
+
+            ui.separator();
+
+            if ui
+                .checkbox(&mut self.send.periodic_enabled, "周期发送")
+                .changed()
+                && self.send.periodic_enabled
+            {
+                self.send.periodic_send_count = 0;
+                let now = ui.ctx().input(|i| i.time);
+                let ms = self
+                    .send
+                    .periodic_interval_ms
+                    .trim()
+                    .parse::<u64>()
+                    .unwrap_or(1000);
+                self.send.periodic_send_count = 0;
+            }
+            ui.add(
+                egui::TextEdit::singleline(&mut self.send.periodic_interval_ms)
+                    .desired_width(54.0),
+            );
+            ui.label("ms");
+            if self.send.periodic_enabled {
+                let now = ui.ctx().input(|i| i.time);
+                let left = (self.send.next_periodic_send_time - now).max(0.0);
+                ui.label(format!("{:.0}s", left));
+            }
+            ui.checkbox(&mut self.send.dtr_high, "DTR");
+            ui.checkbox(&mut self.send.rts_high, "RTS");
+        });
+    }
+
+    pub(crate) fn send_panel_vertical(&mut self, ui: &mut egui::Ui) {
+        self.ensure_send_target_port();
+        let send_port_open = self.send_target_port_open();
+
+        ui.heading("发送器");
+        ui.separator();
+
+        ui.label("端口");
+        self.send_target_port_combo(ui, "send-target-port-right");
+
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut self.send.hex_mode, false, "文本");
+            ui.radio_value(&mut self.send.hex_mode, true, "HEX");
+            if self.send.hex_mode {
+                ui.checkbox(&mut self.send.hex_strict, "严格");
+            }
+        });
+
+        if !self.send.hex_mode {
+            ui.horizontal(|ui| {
+                ui.label("换行");
+                egui::ComboBox::from_id_salt("line-ending-right")
+                    .width(80.0)
+                    .selected_text(self.send.line_ending.label())
+                    .show_ui(ui, |ui| {
+                        for &le in LineEnding::ALL.iter() {
+                            ui.selectable_value(&mut self.send.line_ending, le, le.label());
+                        }
+                    });
+            });
+        }
+
+        ui.add(
+            egui::TextEdit::multiline(&mut self.send.input)
+                .desired_width(f32::INFINITY)
+                .desired_rows(8)
+                .hint_text("输入要发送的数据"),
+        );
+
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    send_port_open && !self.send.input.trim().is_empty(),
+                    egui::Button::new("发送"),
+                )
+                .clicked()
+            {
+                self.do_send();
+            }
+
+            if ui.button("清空").clicked() {
+                self.send.input.clear();
+                self.send.error = None;
+            }
+        });
+
+        ui.separator();
+
+        ui.checkbox(&mut self.send.periodic_enabled, "周期发送");
+        ui.horizontal(|ui| {
+            ui.label("间隔");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.send.periodic_interval_ms)
+                    .desired_width(72.0),
+            );
+            ui.label("ms");
+        });
+
+        ui.checkbox(&mut self.send.dtr_high, "DTR");
+        ui.checkbox(&mut self.send.rts_high, "RTS");
+
+        if let Some(err) = &self.send.error {
+            ui.colored_label(theme::YELLOW, err);
+        }
+    }
+
     pub(crate) fn do_send(&mut self) {
         let Some(port) = self.send.target_port.as_deref() else {
             self.send.error = Some("请选择发送目标串口".into());
