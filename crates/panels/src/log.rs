@@ -23,7 +23,6 @@ pub struct LogPanel {
 }
 
 struct LogEntry {
-    timestamp_ms: u64,
     timestamp_label: String,
     level: LogLevel,
     source: String,
@@ -160,7 +159,6 @@ impl LogPanel {
             .to_owned();
 
         self.entries.push_back(LogEntry {
-            timestamp_ms: event.timestamp_ms,
             timestamp_label: format!("[{}]", fmt_ts(event.timestamp_ms)),
             level,
             source,

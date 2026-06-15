@@ -410,18 +410,8 @@ impl TransportManager {
         self.send_to(&name, bytes)
     }
 
-    #[deprecated = "多串口场景不安全：请使用 send_text_to(port_name, text)"]
-    pub fn send_text(&self, text: &str) -> TransportResult<()> {
-        self.send(text.as_bytes().to_vec())
-    }
-
     pub fn send_text_to(&self, port_name: &str, text: &str) -> TransportResult<()> {
         self.send_to(port_name, text.as_bytes().to_vec())
-    }
-
-    #[deprecated = "多串口场景不安全：请使用 send_hex_to(port_name, hex)"]
-    pub fn send_hex(&self, input: &str) -> TransportResult<()> {
-        self.send(parse_hex(input)?)
     }
 
     pub fn send_hex_to(&self, port_name: &str, input: &str) -> TransportResult<()> {
@@ -429,19 +419,6 @@ impl TransportManager {
     }
 
     // ── 状态 ──
-    #[deprecated = "多串口场景语义不稳定：请使用 status_port(port_name)"]
-    pub fn status(&self) -> TransportStatus {
-        let guard = self.ports.lock();
-        match guard.values().next() {
-            Some(w) if w.alive.load(Ordering::Relaxed) => TransportStatus {
-                open: true,
-                port_name: Some(w.config.port_name.clone()),
-                baud_rate: Some(w.config.baud_rate),
-            },
-            _ => TransportStatus::closed(),
-        }
-    }
-
     pub fn status_port(&self, port_name: &str) -> TransportStatus {
         self.reap_closing();
         self.reap_dead_ports();

@@ -1,5 +1,5 @@
 use crate::app::WorkbenchApp;
-use crate::state::{BottomTab, LineEnding, MAX_SEND_HISTORY, StatusLevel};
+use crate::state::{LineEnding, MAX_SEND_HISTORY, StatusLevel};
 use eframe::egui;
 use tool_panels::theme;
 
@@ -157,7 +157,12 @@ impl WorkbenchApp {
                         self.send.error = Some("请先输入发送内容".into());
                         disable = true;
                     } else if self.send.hex_mode {
-                        let interval = self.send.periodic_interval_ms.trim().parse::<u64>().unwrap_or(0);
+                        let interval = self
+                            .send
+                            .periodic_interval_ms
+                            .trim()
+                            .parse::<u64>()
+                            .unwrap_or(0);
                         if interval < 10 {
                             self.send.error = Some("周期发送间隔必须 >= 10ms".into());
                             disable = true;
@@ -187,9 +192,18 @@ impl WorkbenchApp {
             );
             ui.label("ms");
             ui.label("最多");
-            let mut max_str = self.send.periodic_max_count.map_or(String::new(), |v| v.to_string());
-            ui.add_enabled(!self.send.periodic_enabled, egui::TextEdit::singleline(&mut max_str).desired_width(40.0).hint_text("不限"));
-            if !self.send.periodic_enabled && ui.ctx().input(|i| i.pointer.any_released()) { // lazy parse
+            let mut max_str = self
+                .send
+                .periodic_max_count
+                .map_or(String::new(), |v| v.to_string());
+            ui.add_enabled(
+                !self.send.periodic_enabled,
+                egui::TextEdit::singleline(&mut max_str)
+                    .desired_width(40.0)
+                    .hint_text("不限"),
+            );
+            if !self.send.periodic_enabled && ui.ctx().input(|i| i.pointer.any_released()) {
+                // lazy parse
                 if max_str.trim().is_empty() {
                     self.send.periodic_max_count = None;
                 } else if let Ok(v) = max_str.trim().parse::<u64>() {
@@ -216,9 +230,21 @@ impl WorkbenchApp {
             if self.transport.status_port(&port).open {
                 ui.horizontal(|ui| {
                     ui.label("信号");
-                    let dtr_label = if self.send.dtr_high { "DTR ⬆" } else { "DTR ⬇" };
-                    let rts_label = if self.send.rts_high { "RTS ⬆" } else { "RTS ⬇" };
-                    if ui.small_button(dtr_label).on_hover_text("切换 DTR").clicked() {
+                    let dtr_label = if self.send.dtr_high {
+                        "DTR ⬆"
+                    } else {
+                        "DTR ⬇"
+                    };
+                    let rts_label = if self.send.rts_high {
+                        "RTS ⬆"
+                    } else {
+                        "RTS ⬇"
+                    };
+                    if ui
+                        .small_button(dtr_label)
+                        .on_hover_text("切换 DTR")
+                        .clicked()
+                    {
                         let new_val = !self.send.dtr_high;
                         if let Err(e) = self.transport.set_dtr(&port, new_val) {
                             self.set_status_force(StatusLevel::Error, e.to_string());
@@ -226,13 +252,21 @@ impl WorkbenchApp {
                             self.send.dtr_high = new_val;
                         }
                     }
-                    if ui.small_button("DTR ⏱").on_hover_text("DTR 脉冲(LOW 100ms→HIGH)").clicked() {
+                    if ui
+                        .small_button("DTR ⏱")
+                        .on_hover_text("DTR 脉冲(LOW 100ms→HIGH)")
+                        .clicked()
+                    {
                         let _ = self.transport.set_dtr(&port, false);
                         std::thread::sleep(std::time::Duration::from_millis(100));
                         let _ = self.transport.set_dtr(&port, true);
                         self.send.dtr_high = true;
                     }
-                    if ui.small_button(rts_label).on_hover_text("切换 RTS").clicked() {
+                    if ui
+                        .small_button(rts_label)
+                        .on_hover_text("切换 RTS")
+                        .clicked()
+                    {
                         let new_val = !self.send.rts_high;
                         if let Err(e) = self.transport.set_rts(&port, new_val) {
                             self.set_status_force(StatusLevel::Error, e.to_string());
@@ -240,7 +274,11 @@ impl WorkbenchApp {
                             self.send.rts_high = new_val;
                         }
                     }
-                    if ui.small_button("RTS ⏱").on_hover_text("RTS 脉冲(LOW 100ms→HIGH)").clicked() {
+                    if ui
+                        .small_button("RTS ⏱")
+                        .on_hover_text("RTS 脉冲(LOW 100ms→HIGH)")
+                        .clicked()
+                    {
                         let _ = self.transport.set_rts(&port, false);
                         std::thread::sleep(std::time::Duration::from_millis(100));
                         let _ = self.transport.set_rts(&port, true);
@@ -320,74 +358,6 @@ impl WorkbenchApp {
                 }
             });
     }
-
-    pub(crate) fn show_bottom_panel_contents(&mut self, ui: &mut egui::Ui) {
-        self.ensure_bottom_tab_available();
-        let visible_tabs = self.available_bottom_tabs();
-
-        // 顶部标签栏：固定在底部面板顶部
-        ui.horizontal_wrapped(|ui| {
-            for tab in &visible_tabs {
-                if ui
-                    .selectable_label(self.bottom_tab == *tab, tab.label())
-                    .clicked()
-                {
-                    self.bottom_tab = *tab;
-                }
-            }
-        });
-        ui.separator();
-
-        let body_height = ui.available_height();
-
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), body_height),
-            egui::Layout::bottom_up(egui::Align::Min),
-            |ui| {
-                // 1. 状态栏固定在最底部
-                self.status_bar(ui);
-
-                // 2. 发送区固定在状态栏上方（仅 Terminal 显示）
-                if !self.send.popup_open && self.bottom_tab == BottomTab::Terminal {
-                    ui.separator();
-                    self.send_bar(ui);
-                }
-
-                ui.separator();
-
-                // 3. 剩余空间全部给接收区 / 日志区
-                let receive_area_total_height = ui.available_height().max(80.0);
-
-                match self.bottom_tab {
-                    BottomTab::Terminal => {
-                        // TerminalPanel 内部自己还有 RX/TX/HEX 工具栏 + separator
-                        let terminal_header_height = 42.0;
-
-                        self.terminal_panel.height =
-                            (receive_area_total_height - terminal_header_height).max(40.0);
-
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(ui.available_width(), receive_area_total_height),
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| {
-                                self.terminal_panel.ui(ui);
-                            },
-                        );
-                    }
-
-                    BottomTab::Logs => {
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(ui.available_width(), receive_area_total_height),
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| {
-                                self.bottom_log_panel.ui(ui);
-                            },
-                        );
-                    }
-                }
-            },
-        );
-    }
 }
 
 use tool_transport::TransportManager;
@@ -400,14 +370,32 @@ pub(crate) fn hex_preview(input: &str) -> String {
     match tool_transport::parse_hex(input) {
         Ok(bytes) if !bytes.is_empty() => {
             let count = bytes.len();
-            let ascii: String = bytes.iter().take(MAX_PREVIEW).map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' }).collect();
+            let ascii: String = bytes
+                .iter()
+                .take(MAX_PREVIEW)
+                .map(|&b| {
+                    if b.is_ascii_graphic() || b == b' ' {
+                        b as char
+                    } else {
+                        '.'
+                    }
+                })
+                .collect();
             let hex = if count > MAX_PREVIEW {
                 format!(
                     "{}… (共{count}B)",
-                    bytes[..MAX_PREVIEW].iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
+                    bytes[..MAX_PREVIEW]
+                        .iter()
+                        .map(|b| format!("{b:02X}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 )
             } else {
-                bytes.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
+                bytes
+                    .iter()
+                    .map(|b| format!("{b:02X}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
             };
             format!("{hex}  |{ascii}|")
         }
@@ -436,12 +424,10 @@ pub(crate) fn send_impl_to(
             if hex_strict {
                 let compact: String = x.chars().filter(|c| !c.is_whitespace()).collect();
                 if compact.len() % 2 != 0 {
-                    return Err(tool_transport::TransportError::Io(
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("HEX 严格模式: 奇数字节数 \"{x}\", 请补0或关闭严格模式"),
-                        ),
-                    ));
+                    return Err(tool_transport::TransportError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("HEX 严格模式: 奇数字节数 \"{x}\", 请补0或关闭严格模式"),
+                    )));
                 }
             }
             t.send_hex_to(port, x)?;

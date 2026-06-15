@@ -5,7 +5,7 @@ use crate::ui::top_bar::{pdb, ppar, psb};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
-use tool_core::{LogLevel, now_timestamp_ms};
+use tool_core::now_timestamp_ms;
 use tool_transport::SerialConfig;
 
 impl WorkbenchApp {
@@ -153,25 +153,16 @@ impl WorkbenchApp {
                                     self.pending_reconnect = None;
                                 } else {
                                     pending.attempts += 1;
-                                    let backoff_ms =
-                                        (2u64.pow(pending.attempts) * 100).min(30_000);
-                                    pending.next_try_at =
-                                        now + backoff_ms as f64 / 1000.0;
+                                    let backoff_ms = (2u64.pow(pending.attempts) * 100).min(30_000);
+                                    pending.next_try_at = now + backoff_ms as f64 / 1000.0;
 
-                                    match self
-                                        .transport
-                                        .open_serial(pending.config.clone())
-                                    {
+                                    match self.transport.open_serial(pending.config.clone()) {
                                         Ok(()) => {
-                                            self.selected_port =
-                                                Some(pending.port_name.clone());
+                                            self.selected_port = Some(pending.port_name.clone());
                                             self.pending_reconnect = None;
                                             self.set_status_force(
                                                 StatusLevel::Info,
-                                                format!(
-                                                    "已自动重连 {}",
-                                                    pending.port_name
-                                                ),
+                                                format!("已自动重连 {}", pending.port_name),
                                             );
                                         }
                                         Err(e) => {
@@ -179,8 +170,7 @@ impl WorkbenchApp {
                                                 StatusLevel::Warn,
                                                 format!(
                                                     "自动重连 {} 失败 (第 {} 次): {e}",
-                                                    pending.port_name,
-                                                    pending.attempts
+                                                    pending.port_name, pending.attempts
                                                 ),
                                             );
                                             self.pending_reconnect = Some(pending);
@@ -189,12 +179,15 @@ impl WorkbenchApp {
                                 }
                             }
                         }
-                    // else: port not yet reappeared, keep waiting
+                        // else: port not yet reappeared, keep waiting
                     }
                 }
 
                 if show_status {
-                    self.set_status_force(StatusLevel::Info, format!("{} 个串口", self.ports.len()));
+                    self.set_status_force(
+                        StatusLevel::Info,
+                        format!("{} 个串口", self.ports.len()),
+                    );
                     return;
                 }
 
@@ -233,13 +226,36 @@ impl WorkbenchApp {
 
     fn open_selected_port_result(&mut self) -> Result<(), String> {
         self.refresh_ports_silent();
-        let Some(p) = self.selected_port.clone() else { return Err("请选择串口".to_owned()) };
-        if !self.ports.iter().any(|port| port.port_name == p) { return Err(format!("{p} 不存在")) }
-        let baud_rate = self.baud_rate.trim().parse::<u32>().map_err(|_| "波特率格式错误".to_owned())?;
-        if baud_rate == 0 { return Err("波特率格式错误".to_owned()) }
-        let timeout_ms = self.timeout_ms.trim().parse::<u64>().map_err(|_| "超时格式错误".to_owned())?;
-        if !(1..=1000).contains(&timeout_ms) { return Err("超时 1..=1000 ms".to_owned()) }
-        let cfg = SerialConfig { port_name: p, baud_rate, data_bits: pdb(&self.data_bits), stop_bits: psb(&self.stop_bits), parity: ppar(&self.parity), timeout_ms };
+        let Some(p) = self.selected_port.clone() else {
+            return Err("请选择串口".to_owned());
+        };
+        if !self.ports.iter().any(|port| port.port_name == p) {
+            return Err(format!("{p} 不存在"));
+        }
+        let baud_rate = self
+            .baud_rate
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| "波特率格式错误".to_owned())?;
+        if baud_rate == 0 {
+            return Err("波特率格式错误".to_owned());
+        }
+        let timeout_ms = self
+            .timeout_ms
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| "超时格式错误".to_owned())?;
+        if !(1..=1000).contains(&timeout_ms) {
+            return Err("超时 1..=1000 ms".to_owned());
+        }
+        let cfg = SerialConfig {
+            port_name: p,
+            baud_rate,
+            data_bits: pdb(&self.data_bits),
+            stop_bits: psb(&self.stop_bits),
+            parity: ppar(&self.parity),
+            timeout_ms,
+        };
         self.transport.open_serial(cfg).map_err(|e| e.to_string())
     }
 
@@ -257,7 +273,10 @@ impl WorkbenchApp {
         }
 
         // 先关闭，阻塞等待 worker 退出
-        if let Err(e) = self.transport.close_port_blocking(&p, Duration::from_millis(3000)) {
+        if let Err(e) = self
+            .transport
+            .close_port_blocking(&p, Duration::from_millis(3000))
+        {
             self.set_status_force(StatusLevel::Error, format!("关闭 {p} 失败：{e}"));
             return;
         }

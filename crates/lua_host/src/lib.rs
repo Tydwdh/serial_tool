@@ -1859,24 +1859,6 @@ fn create_serial_api(
         })?,
     )?;
 
-    let transport_for_send = transport.clone();
-
-    table.set(
-        "send",
-        lua.create_function(move |_lua, text: String| {
-            let open = transport_for_send.open_ports();
-            if open.len() > 1 {
-                return Err(mlua::Error::RuntimeError(format!(
-                    "ctx.serial.send 在多串口打开时语义不明确（已打开 {} 个端口），请使用 send_to(port, text)",
-                    open.len()
-                )));
-            }
-            transport_for_send
-                .send_text(&text)
-                .map_err(mlua::Error::external)
-        })?,
-    )?;
-
     let transport_for_send_to = transport.clone();
 
     table.set(
@@ -1884,24 +1866,6 @@ fn create_serial_api(
         lua.create_function(move |_lua, (port, text): (String, String)| {
             transport_for_send_to
                 .send_text_to(&port, &text)
-                .map_err(mlua::Error::external)
-        })?,
-    )?;
-
-    let transport_for_send_hex = transport.clone();
-
-    table.set(
-        "send_hex",
-        lua.create_function(move |_lua, text: String| {
-            let open = transport_for_send_hex.open_ports();
-            if open.len() > 1 {
-                return Err(mlua::Error::RuntimeError(format!(
-                    "ctx.serial.send_hex 在多串口打开时语义不明确（已打开 {} 个端口），请使用 send_hex_to(port, hex)",
-                    open.len()
-                )));
-            }
-            transport_for_send_hex
-                .send_hex(&text)
                 .map_err(mlua::Error::external)
         })?,
     )?;
@@ -1914,24 +1878,6 @@ fn create_serial_api(
             transport_for_send_hex_to
                 .send_hex_to(&port, &text)
                 .map_err(mlua::Error::external)
-        })?,
-    )?;
-
-    let transport_for_status = transport.clone();
-
-    table.set(
-        "status",
-        lua.create_function(move |lua, ()| {
-            let status = transport_for_status.status();
-
-            json_to_lua_value(
-                lua,
-                &json!({
-                    "open": status.open,
-                    "port_name": status.port_name,
-                    "baud_rate": status.baud_rate,
-                }),
-            )
         })?,
     )?;
 

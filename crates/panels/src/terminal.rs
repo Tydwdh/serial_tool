@@ -52,7 +52,6 @@ struct TerminalEntry {
     /// 全局接收区按这个排序，避免 BTreeMap 端口顺序导致 COM 分组。
     event_id: u64,
 
-    timestamp_ms: u64,
     timestamp_label: String,
     direction: Direction,
 
@@ -394,8 +393,7 @@ impl TerminalPanel {
             }
 
             // 截断提示
-            let total_truncated: u64 =
-                self.ports.values().map(|d| d.truncated_count).sum();
+            let total_truncated: u64 = self.ports.values().map(|d| d.truncated_count).sum();
             if total_truncated > 0 {
                 ui.label(
                     RichText::new(format!(
@@ -544,7 +542,6 @@ impl TerminalPanel {
             id: entry_id,
             event_id: event.id,
 
-            timestamp_ms: event.timestamp_ms,
             timestamp_label: format!("[{}]", fmt_ts(event.timestamp_ms)),
             direction: event.direction,
 

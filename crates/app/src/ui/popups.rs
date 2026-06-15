@@ -300,39 +300,6 @@ impl WorkbenchApp {
             }
         }
     }
-    pub(crate) fn dynamic_tab_cleanup(&mut self) {
-        let stale: Vec<String> = self
-            .panels
-            .tabs
-            .iter()
-            .filter_map(|k| k.dynamic_id().map(str::to_owned))
-            .filter(|id| !self.dynamic_panels.contains(id))
-            .collect();
-        for id in stale {
-            self.detached_dynamic_panels.remove(&id);
-            self.panels.close_tab(PanelKind::Dynamic(id));
-        }
-    }
-
-    pub(crate) fn dynamic_panel_ui(&mut self, ui: &mut egui::Ui, id: &str) {
-        let title = self.dynamic_panels.title(id).unwrap_or(id).to_owned();
-        ui.horizontal(|ui| {
-            ui.heading(&title);
-            if self.detached_dynamic_panels.contains(id) {
-                if ui.button("↙").clicked() {
-                    self.detached_dynamic_panels.remove(id);
-                }
-            } else if ui.button("↗").clicked() {
-                self.detached_dynamic_panels.insert(id.to_owned());
-            }
-        });
-        ui.separator();
-        if self.detached_dynamic_panels.contains(id) {
-            ui.label("已弹出到独立窗口");
-            return;
-        }
-        self.dynamic_panels.ui_body(ui, id);
-    }
 
     pub(crate) fn detached_dynamic_panel_viewports(&mut self, ctx: &egui::Context) {
         let ids: Vec<String> = self.detached_dynamic_panels.iter().cloned().collect();
@@ -360,7 +327,7 @@ impl WorkbenchApp {
 
                 egui::CentralPanel::default()
                     .frame(egui::Frame::default().fill(theme::BG_PRIMARY))
-                    .show(ctx, |ui| {
+                    .show_inside(ctx, |ui| {
                         // 再手动铺一层，避免某些平台 / resize 时出现未清屏黑边。
                         let rect = ui.max_rect();
                         ui.painter().rect_filled(rect, 0.0, theme::BG_PRIMARY);

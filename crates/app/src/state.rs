@@ -33,13 +33,6 @@ pub(crate) enum BottomTab {
 impl BottomTab {
     pub(crate) const ALL: [Self; 2] = [Self::Terminal, Self::Logs];
 
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Terminal => "接收",
-            Self::Logs => "日志",
-        }
-    }
-
     pub(crate) fn is_available(self, terminal_popup_open: bool) -> bool {
         !matches!(self, Self::Terminal) || !terminal_popup_open
     }

@@ -65,7 +65,6 @@ struct DynamicField {
     // ── v0.2 新增 ──
     rows: Option<usize>,
     variant: Option<String>,
-    level: Option<String>,
     text: Option<String>,
     filters: Vec<FieldFilter>,
     enabled: bool,
@@ -1101,10 +1100,6 @@ fn parse_fields(value: Option<&Value>) -> Result<Vec<DynamicField>, String> {
                     .get("variant")
                     .and_then(Value::as_str)
                     .map(String::from),
-                level: object
-                    .get("level")
-                    .and_then(Value::as_str)
-                    .map(String::from),
                 text: object.get("text").and_then(Value::as_str).map(String::from),
                 filters,
                 enabled: object
@@ -1217,13 +1212,6 @@ fn value_to_string(value: &Value) -> String {
         Value::Null => String::new(),
         Value::Array(_) | Value::Object(_) => value.to_string(),
     }
-}
-
-fn parse_bool(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "true" | "1" | "yes" | "on"
-    )
 }
 
 fn compact_number(value: f64) -> String {

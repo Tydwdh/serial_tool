@@ -211,7 +211,7 @@ impl WorkbenchApp {
         );
         painter.galley(rect.center() - gal.size() * 0.5, gal, egui::Color32::WHITE);
 
-        let screen = ctx.screen_rect();
+        let screen = ctx.content_rect();
         let center_rect = screen.shrink2(egui::vec2(180.0, 140.0));
 
         let right_target = egui::Rect::from_min_max(
