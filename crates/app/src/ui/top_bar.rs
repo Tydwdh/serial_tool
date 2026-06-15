@@ -223,6 +223,7 @@ impl WorkbenchApp {
             ui.label("端口");
         }
 
+        let before = self.selected_port.clone();
         serial_combo(
             ui,
             port_combo_id,
@@ -231,6 +232,12 @@ impl WorkbenchApp {
             &mut self.selected_port,
             &self.port_aliases,
         );
+        // 端口切换时：保存旧配置、恢复新配置
+        if self.selected_port != before {
+            if let Some(ref new) = self.selected_port.clone() {
+                self.switch_port_selection(new);
+            }
+        }
 
         if compact {
             // 顶栏只显示连接状态，详细参数统一在设备页

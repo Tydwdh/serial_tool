@@ -3,7 +3,17 @@ use tool_core::now_timestamp_ms;
 use tool_recorder::RecordMode;
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tool_panels::{Activity, PanelManager};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct PortProfile {
+    pub(crate) baud_rate: String,
+    pub(crate) data_bits: String,
+    pub(crate) stop_bits: String,
+    pub(crate) parity: String,
+    pub(crate) timeout_ms: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PersistedConfig {
@@ -24,9 +34,11 @@ pub(crate) struct PersistedConfig {
     #[serde(default)]
     pub(crate) send_popup_always_on_top: bool,
     #[serde(default)]
-    pub(crate) port_aliases: std::collections::HashMap<String, String>,
+    pub(crate) port_aliases: HashMap<String, String>,
     #[serde(default)]
     pub(crate) send_history: Vec<String>,
+    #[serde(default)]
+    pub(crate) port_profiles: HashMap<String, PortProfile>,
 }
 
 pub(crate) fn default_activity_order() -> Vec<Activity> {

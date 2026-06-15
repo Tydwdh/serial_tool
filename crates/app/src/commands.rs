@@ -34,6 +34,32 @@ impl WorkbenchApp {
             self.status.message = "就绪".into();
         }
     }
+    /// 切换串口时：保存旧端口设置到 profile，从 profile 恢复新端口设置。
+    pub(crate) fn switch_port_selection(&mut self, new_port: &str) {
+        // 保存旧端口配置
+        if let Some(ref old) = self.selected_port {
+            self.port_profiles.insert(
+                old.clone(),
+                crate::config::PortProfile {
+                    baud_rate: self.baud_rate.clone(),
+                    data_bits: self.data_bits.clone(),
+                    stop_bits: self.stop_bits.clone(),
+                    parity: self.parity.clone(),
+                    timeout_ms: self.timeout_ms.clone(),
+                },
+            );
+        }
+        // 恢复新端口配置
+        if let Some(profile) = self.port_profiles.get(new_port) {
+            self.baud_rate = profile.baud_rate.clone();
+            self.data_bits = profile.data_bits.clone();
+            self.stop_bits = profile.stop_bits.clone();
+            self.parity = profile.parity.clone();
+            self.timeout_ms = profile.timeout_ms.clone();
+        }
+        self.selected_port = Some(new_port.to_owned());
+    }
+
     pub(crate) fn refresh_ports(&mut self) {
         self.refresh_ports_impl(true);
     }
@@ -289,6 +315,7 @@ impl WorkbenchApp {
             send_popup_always_on_top: self.send_popup_always_on_top,
             port_aliases: self.port_aliases.clone(),
             send_history: self.send.send_history.iter().cloned().collect(),
+            port_profiles: self.port_profiles.clone(),
         };
         let t = serde_json::to_string_pretty(&cfg).map_err(|e| format!("序列化失败：{e}"))?;
         std::fs::write(config_path(), t).map_err(|e| format!("写入失败：{e}"))
