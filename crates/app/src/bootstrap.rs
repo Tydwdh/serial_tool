@@ -16,36 +16,71 @@ pub fn app_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
-// ── 字体 ──
 pub fn setup_fonts(cc: &eframe::CreationContext<'_>) {
     let dir = app_dir();
-    for path in &[
-        dir.join("assets/NotoSansSC-VF.ttf"),
-        PathBuf::from("assets/NotoSansSC-VF.ttf"), // 开发期 fallback
-        PathBuf::from("C:\\Windows\\Fonts\\msyh.ttc"), // 系统字体 fallback
-    ] {
-        if let Ok(fb) = std::fs::read(path) {
-            let mut f = egui::FontDefinitions::default();
-            f.font_data
-                .insert("zh".into(), egui::FontData::from_owned(fb).into());
-            if let Ok(eb) = std::fs::read(dir.join("assets/seguiemj.ttf")) {
-                f.font_data
-                    .insert("emoji".into(), egui::FontData::from_owned(eb).into());
-            }
-            let p = f
-                .families
-                .entry(egui::FontFamily::Proportional)
-                .or_default();
-            p.insert(0, "zh".into());
-            if f.font_data.contains_key("emoji") {
-                p.insert(0, "emoji".into());
-            }
-            f.families
-                .entry(egui::FontFamily::Monospace)
-                .or_default()
-                .push("zh".into());
-            cc.egui_ctx.set_fonts(f);
+
+    let mut fonts = egui::FontDefinitions::default();
+
+    load_font(
+        &mut fonts,
+        "jetbrains",
+        &[
+            dir.join("assets/JetBrainsMonoNerdFontMono-Regular.ttf"),
+            PathBuf::from("assets/JetBrainsMonoNerdFontMono-Regular.ttf"),
+        ],
+    );
+
+    load_font(
+        &mut fonts,
+        "zh",
+        &[
+            dir.join("assets/NotoSansSC-VF.ttf"),
+            PathBuf::from("assets/NotoSansSC-VF.ttf"),
+            PathBuf::from("C:\\Windows\\Fonts\\msyh.ttc"),
+        ],
+    );
+
+    load_font(
+        &mut fonts,
+        "emoji",
+        &[
+            dir.join("assets/seguiemj.ttf"),
+            PathBuf::from("C:\\Windows\\Fonts\\seguiemj.ttf"),
+        ],
+    );
+
+    set_family(
+        &mut fonts,
+        egui::FontFamily::Proportional,
+        &["zh", "jetbrains", "emoji"],
+    );
+
+    set_family(
+        &mut fonts,
+        egui::FontFamily::Monospace,
+        &["jetbrains", "zh", "emoji"],
+    );
+
+    cc.egui_ctx.set_fonts(fonts);
+}
+
+fn load_font(fonts: &mut egui::FontDefinitions, name: &str, paths: &[PathBuf]) {
+    for path in paths {
+        if let Ok(bytes) = std::fs::read(path) {
+            fonts
+                .font_data
+                .insert(name.to_owned(), egui::FontData::from_owned(bytes).into());
             return;
+        }
+    }
+}
+
+fn set_family(fonts: &mut egui::FontDefinitions, family: egui::FontFamily, names: &[&str]) {
+    let list = fonts.families.entry(family).or_default();
+
+    for &name in names.iter().rev() {
+        if fonts.font_data.contains_key(name) {
+            list.insert(0, name.to_owned());
         }
     }
 }

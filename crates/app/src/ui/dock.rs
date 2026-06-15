@@ -12,93 +12,11 @@ impl WorkbenchApp {
             return;
         }
 
-        self.dock_tab_bar(ui, area, &tabs);
-        ui.separator();
-
         let active = self.panels.dock.stack(area).active_or_first();
 
         if let Some(kind) = active {
             self.dock_panel_body(ui, area, kind);
         }
-    }
-
-    fn dock_tab_bar(&mut self, ui: &mut egui::Ui, area: DockArea, tabs: &[PanelKind]) {
-        ui.horizontal_wrapped(|ui| {
-            for kind in tabs {
-                let active = self.panels.dock.stack(area).active.as_ref() == Some(kind);
-                let title = self.panel_title(kind);
-
-                let response = ui
-                    .selectable_label(active, title)
-                    .on_hover_text("拖动到中间 / 底部 / 右侧停靠");
-
-                if response.clicked() {
-                    self.panels.dock.stack_mut(area).active = Some(kind.clone());
-                }
-
-                if response.drag_started() {
-                    self.dock_dragging_panel = Some(kind.clone());
-                }
-
-                response.context_menu(|ui| {
-                    if ui.button("移到主工作区").clicked() {
-                        self.panels.dock.move_panel(kind.clone(), DockArea::Center);
-                        ui.close();
-                    }
-
-                    if ui.button("移到底部").clicked() {
-                        self.panels.dock.move_panel(kind.clone(), DockArea::Bottom);
-                        self.panels.dock.bottom_visible = true;
-                        self.bottom_panel_visible = true;
-                        ui.close();
-                    }
-
-                    if ui.button("移到右侧").clicked() {
-                        self.panels.dock.move_panel(kind.clone(), DockArea::Right);
-                        self.panels.dock.right_visible = true;
-                        ui.close();
-                    }
-
-                    if ui.button("弹出窗口").clicked() {
-                        if let Some(id) = kind.dynamic_id() {
-                            self.detached_dynamic_panels.insert(id.to_owned());
-                            self.panels.dock.stack_mut(area).close(kind);
-                        }
-                        ui.close();
-                    }
-
-                    if ui.button("关闭").clicked() {
-                        self.panels.dock.stack_mut(area).close(kind);
-                        let _ = self.save_config();
-                        ui.close();
-                    }
-                });
-            }
-
-            ui.with_layout(
-                egui::Layout::right_to_left(egui::Align::Center),
-                |ui| match area {
-                    DockArea::Bottom => {
-                        if ui.small_button("×").on_hover_text("隐藏底部面板").clicked() {
-                            self.panels.dock.bottom_visible = false;
-                            self.bottom_panel_visible = false;
-                            let _ = self.save_config();
-                        }
-                    }
-                    DockArea::Right => {
-                        if ui
-                            .small_button("×")
-                            .on_hover_text("隐藏右侧停靠区")
-                            .clicked()
-                        {
-                            self.panels.dock.right_visible = false;
-                            let _ = self.save_config();
-                        }
-                    }
-                    DockArea::Center => {}
-                },
-            );
-        });
     }
 
     fn dock_panel_body(&mut self, ui: &mut egui::Ui, _area: DockArea, kind: PanelKind) {
