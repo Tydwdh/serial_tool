@@ -7,6 +7,7 @@ pub struct PluginsPanel {
     root: String,
     last_error: Option<String>,
     recently_disabled: Vec<String>,
+    pending_enable: Option<PluginSummary>,
 }
 
 impl PluginsPanel {
@@ -15,6 +16,7 @@ impl PluginsPanel {
             root: "plugins".to_owned(),
             last_error: None,
             recently_disabled: Vec::new(),
+            pending_enable: None,
         }
     }
 
@@ -39,6 +41,41 @@ impl PluginsPanel {
 
         if let Some(error) = &self.last_error {
             ui.colored_label(theme::RED, error);
+        }
+
+        // 权限确认对话框
+        if let Some(ref summary) = self.pending_enable.clone() {
+            egui::Window::new("确认启用插件")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.label(format!("「{}」({}) 请求以下权限：", summary.name, summary.id));
+                    ui.separator();
+                    for perm in &summary.permissions {
+                        ui.label(format!("  • {perm}"));
+                    }
+                    if !summary.contributes.subscriptions.is_empty() {
+                        ui.label("订阅主题：");
+                        for sub in &summary.contributes.subscriptions {
+                            ui.label(format!("  • {}", sub.topic));
+                        }
+                    }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("确认启用").clicked() {
+                            let id = summary.id.clone();
+                            match manager.enable(&id) {
+                                Ok(()) => self.last_error = None,
+                                Err(error) => self.last_error = Some(error.to_string()),
+                            }
+                            self.pending_enable = None;
+                        }
+                        if ui.button("取消").clicked() {
+                            self.pending_enable = None;
+                        }
+                    });
+                });
         }
 
         ui.separator();
@@ -179,10 +216,7 @@ end
                 .add_enabled(can_enable, egui::Button::new("启用"))
                 .clicked()
             {
-                match manager.enable(&summary.id) {
-                    Ok(()) => self.last_error = None,
-                    Err(error) => self.last_error = Some(error.to_string()),
-                }
+                self.pending_enable = Some(summary.clone());
             }
             let can_disable = matches!(
                 summary.state,
