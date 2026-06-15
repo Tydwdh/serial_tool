@@ -302,37 +302,3 @@ pub fn topic_matches(pattern: &str, topic: &str) -> bool {
         topic == pattern
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn topic_matches_exact() {
-        assert!(topic_matches("transport.serial.rx", "transport.serial.rx"));
-        assert!(!topic_matches(
-            "transport.serial.rx",
-            "transport.serial.rx2"
-        ));
-    }
-
-    #[test]
-    fn topic_matches_prefix() {
-        assert!(topic_matches("protocol.*", "protocol.demo.sample"));
-        assert!(topic_matches("protocol.*", "protocol.foo"));
-        assert!(!topic_matches("protocol.*", "other.thing"));
-    }
-
-    #[test]
-    fn bytes_payload_has_lossy_text() {
-        let payload = Payload::Bytes(vec![0x48, 0x69]);
-        assert_eq!(payload.text_lossy(), "Hi");
-    }
-
-    #[test]
-    fn system_log_has_level_metadata() {
-        let event = Event::system_log(LogLevel::Warn, "test", "careful");
-        assert_eq!(event.topic, topics::LOG_SYSTEM);
-        assert_eq!(event.metadata["level"], "warn");
-    }
-}

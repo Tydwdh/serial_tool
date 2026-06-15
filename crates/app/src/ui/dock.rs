@@ -12,13 +12,38 @@ impl WorkbenchApp {
             return;
         }
 
+        // 只隐藏主工作区顶部标签；底部和右侧仍然显示标签
+        if area != DockArea::Center {
+            self.dock_tab_bar(ui, area, &tabs);
+            ui.separator();
+        }
+
         let active = self.panels.dock.stack(area).active_or_first();
 
         if let Some(kind) = active {
             self.dock_panel_body(ui, area, kind);
         }
     }
+    fn dock_tab_bar(&mut self, ui: &mut egui::Ui, area: DockArea, tabs: &[PanelKind]) {
+        ui.horizontal_wrapped(|ui| {
+            for kind in tabs {
+                let active = self.panels.dock.stack(area).active.as_ref() == Some(kind);
+                let title = self.panel_title(kind);
 
+                let response = ui
+                    .selectable_label(active, title)
+                    .on_hover_text("拖动到中间 / 底部 / 右侧停靠");
+
+                if response.clicked() {
+                    self.panels.dock.stack_mut(area).active = Some(kind.clone());
+                }
+
+                if response.drag_started() {
+                    self.dock_dragging_panel = Some(kind.clone());
+                }
+            }
+        });
+    }
     fn dock_panel_body(&mut self, ui: &mut egui::Ui, _area: DockArea, kind: PanelKind) {
         match kind {
             PanelKind::Devices => self.device_panel(ui),

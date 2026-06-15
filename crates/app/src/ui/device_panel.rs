@@ -1,6 +1,7 @@
 use crate::app::WorkbenchApp;
 use crate::config::{pick_recorder_path, record_mode_label};
 use crate::state::StatusLevel;
+use crate::ui::baud_combo;
 use eframe::egui;
 use std::collections::BTreeSet;
 use tool_panels::theme;
@@ -9,12 +10,11 @@ use tool_recorder::RecordMode;
 impl WorkbenchApp {
     pub(crate) fn device_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("设备");
+        ui.separator();
 
         ui.horizontal(|ui| {
-            self.serial_connect_controls(ui, "dev-port", "dev-baud", 180.0, 90.0, false);
-        });
-
-        ui.horizontal(|ui| {
+            ui.label("波特率");
+            baud_combo(ui, "dev-port-rate", 180.0, &mut self.baud_rate);
             ui.label("数据位");
             egui::ComboBox::from_id_salt("dev-db")
                 .width(60.0)
@@ -103,7 +103,10 @@ impl WorkbenchApp {
 
             let stopping = self.recorder.is_stopping();
             if ui
-                .add_enabled(!stopping, egui::Button::new(if recording { "停止" } else { "录制" }))
+                .add_enabled(
+                    !stopping,
+                    egui::Button::new(if recording { "停止" } else { "录制" }),
+                )
                 .on_disabled_hover_text("正在停止中...")
                 .clicked()
             {
@@ -112,9 +115,13 @@ impl WorkbenchApp {
             if recording {
                 let paused = self.recorder.is_paused();
                 if ui
-                    .add_enabled(!stopping, egui::Button::new(if paused { "继续" } else { "暂停" }))
+                    .add_enabled(
+                        !stopping,
+                        egui::Button::new(if paused { "继续" } else { "暂停" }),
+                    )
                     .on_disabled_hover_text("正在停止中...")
-                    .clicked() {
+                    .clicked()
+                {
                     if paused {
                         self.recorder.resume();
                     } else {

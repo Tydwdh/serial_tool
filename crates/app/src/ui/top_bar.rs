@@ -52,20 +52,6 @@ pub(crate) fn serial_combo(
         });
 }
 
-pub(crate) fn baud_combo(ui: &mut egui::Ui, id: &'static str, w: f32, baud: &mut String) {
-    let r = [
-        "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600",
-    ];
-    egui::ComboBox::from_id_salt(id)
-        .width(w)
-        .selected_text(baud.clone())
-        .show_ui(ui, |ui| {
-            for x in r {
-                ui.selectable_value(baud, x.to_owned(), x);
-            }
-        });
-}
-
 pub(crate) fn serial_action_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add_sized(SERIAL_ACTION_BUTTON_SIZE, egui::Button::new(text))
 }
@@ -139,7 +125,40 @@ impl WorkbenchApp {
                 self.top_bar_serial_collapsed = !self.top_bar_serial_collapsed;
             }
             if !self.top_bar_serial_collapsed {
-                self.serial_connect_controls(ui, "top-port", "top-baud", 130.0, 80.0, true);
+                let before = self.selected_port.clone();
+                serial_combo(
+                    ui,
+                    "top-port",
+                    180.0,
+                    &self.ports,
+                    &mut self.selected_port,
+                    &self.port_aliases,
+                );
+                // 端口切换时：保存旧配置、恢复新配置
+                if self.selected_port != before {
+                    if let Some(ref new) = self.selected_port.clone() {
+                        self.switch_port_selection(new);
+                    }
+                }
+                let selected_open = self
+                    .selected_port
+                    .as_deref()
+                    .is_some_and(|port| self.transport.status_port(port).open);
+
+                if selected_open {
+                    if serial_action_button(ui, "重连").clicked() {
+                        self.reconnect_selected_port();
+                    }
+                } else if serial_action_button(ui, "打开").clicked() {
+                    self.open_selected_port();
+                }
+
+                if serial_action_button_enabled(ui, selected_open, "关闭").clicked() {
+                    if let Some(ref port) = self.selected_port {
+                        self.transport.close_port(port);
+                        self.set_status(StatusLevel::Info, format!("{port} 已关闭"));
+                    }
+                }
             } else if so {
                 // 折叠时显示当前配置摘要
                 ui.label(
@@ -209,91 +228,4 @@ impl WorkbenchApp {
             });
         });
     }
-
-    pub(crate) fn serial_connect_controls(
-        &mut self,
-        ui: &mut egui::Ui,
-        port_combo_id: &'static str,
-        baud_combo_id: &'static str,
-        port_width: f32,
-        baud_width: f32,
-        compact: bool,
-    ) {
-        if !compact {
-            ui.label("端口");
-        }
-
-        let before = self.selected_port.clone();
-        serial_combo(
-            ui,
-            port_combo_id,
-            port_width,
-            &self.ports,
-            &mut self.selected_port,
-            &self.port_aliases,
-        );
-        // 端口切换时：保存旧配置、恢复新配置
-        if self.selected_port != before {
-            if let Some(ref new) = self.selected_port.clone() {
-                self.switch_port_selection(new);
-            }
-        }
-
-        if compact {
-            // 顶栏只显示连接状态，详细参数统一在设备页
-        } else {
-            ui.label("波特率");
-            baud_combo(ui, baud_combo_id, baud_width, &mut self.baud_rate);
-        }
-
-        let selected_open = self
-            .selected_port
-            .as_deref()
-            .is_some_and(|port| self.transport.status_port(port).open);
-
-        if selected_open {
-            if serial_action_button(ui, "重连").clicked() {
-                self.reconnect_selected_port();
-            }
-        } else if serial_action_button(ui, "打开").clicked() {
-            self.open_selected_port();
-        }
-
-        if serial_action_button_enabled(ui, selected_open, "关闭").clicked() {
-            if let Some(ref port) = self.selected_port {
-                self.transport.close_port(port);
-                self.set_status(StatusLevel::Info, format!("{port} 已关闭"));
-            }
-        }
-
-        if !compact {
-            match self.selected_port.as_deref() {
-                Some(port) => {
-                    let st = self.transport.status_port(port);
-
-                    if st.open {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "● {} @ {} {}N{}",
-                                self.port_label(port),
-                                st.baud_rate.unwrap_or(0),
-                                &self.data_bits,
-                                &self.stop_bits
-                            ))
-                            .color(theme::GREEN),
-                        );
-                    } else {
-                        ui.label(egui::RichText::new("○ 未连接").color(theme::TEXT_SECONDARY));
-                    }
-                }
-                None => {
-                    ui.label(egui::RichText::new("○ 未选择串口").color(theme::TEXT_SECONDARY));
-                }
-            }
-        }
-    }
 }
-
-// ══════════════════════════════════════════
-//  eframe::App
-// ══════════════════════════════════════════

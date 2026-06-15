@@ -81,10 +81,16 @@ impl WorkbenchApp {
                 .show_inside(ui, |ui| self.status_bar(ui));
         }
 
+        //中心面板
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(theme::BG_PRIMARY))
             .show_inside(ui, |ui| {
-                self.dock_stack_ui(ui, DockArea::Center);
+                egui::Frame::default()
+                    .fill(theme::BG_PRIMARY)
+                    .inner_margin(egui::Margin::symmetric(14, 8))
+                    .show(ui, |ui| {
+                        self.dock_stack_ui(ui, DockArea::Center);
+                    });
             });
 
         self.paint_dock_drop_overlay(ctx);
@@ -124,4 +130,18 @@ impl WorkbenchApp {
             );
         }
     }
+}
+
+pub(crate) fn baud_combo(ui: &mut egui::Ui, id: &'static str, w: f32, baud: &mut String) {
+    let r = [
+        "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600",
+    ];
+    egui::ComboBox::from_id_salt(id)
+        .width(w)
+        .selected_text(baud.clone())
+        .show_ui(ui, |ui| {
+            for x in r {
+                ui.selectable_value(baud, x.to_owned(), x);
+            }
+        });
 }
