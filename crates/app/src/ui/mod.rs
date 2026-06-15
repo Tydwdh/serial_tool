@@ -27,7 +27,7 @@ impl WorkbenchApp {
         }
 
         if self.panels.dock.right_visible {
-            egui::Panel::right("right-dock")
+            let shown = egui::Panel::right("right-dock")
                 .resizable(true)
                 .default_size(self.panels.dock.right_size)
                 .min_size(220.0)
@@ -35,36 +35,48 @@ impl WorkbenchApp {
                 .show_inside(ui, |ui| {
                     self.dock_stack_ui(ui, DockArea::Right);
                 });
+
+            self.right_dock_rect = Some(shown.response.rect);
         }
 
         if self.panels.dock.bottom_visible {
-            egui::Panel::bottom("bottom-dock")
+            let shown = egui::Panel::bottom("bottom-dock")
                 .resizable(true)
                 .default_size(self.panels.dock.bottom_size)
                 .min_size(BOTTOM_PANEL_MIN)
                 .show_separator_line(true)
                 .show_inside(ui, |ui| {
-                    let total = ui.available_size();
+                    let total_height = ui.available_height();
                     ui.allocate_ui_with_layout(
-                        total,
+                        ui.available_size(),
                         egui::Layout::bottom_up(egui::Align::Min),
                         |ui| {
                             self.status_bar(ui);
-
                             ui.separator();
 
-                            let bottom_active = self.panels.dock.bottom.active_or_first();
-                            if matches!(bottom_active, Some(PanelKind::Terminal))
+                            // 下层：发送器（固定区域）
+                            if self.panels.dock.bottom_sender_visible
                                 && !self.send.popup_open
-                                && !self.terminal_popup_open
                             {
-                                self.send_bar(ui);
+                                let sender_h = self
+                                    .panels
+                                    .dock
+                                    .bottom_sender_height
+                                    .clamp(72.0, total_height * 0.45);
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(ui.available_width(), sender_h),
+                                    egui::Layout::top_down(egui::Align::Min),
+                                    |ui| {
+                                        self.send_bar(ui);
+                                    },
+                                );
                                 ui.separator();
                             }
 
-                            let dock_height = ui.available_height().max(80.0);
+                            // 上层：接收/日志/图表的 DockStack
+                            let remain_h = ui.available_height().max(80.0);
                             ui.allocate_ui_with_layout(
-                                egui::vec2(ui.available_width(), dock_height),
+                                egui::vec2(ui.available_width(), remain_h),
                                 egui::Layout::top_down(egui::Align::Min),
                                 |ui| {
                                     self.dock_stack_ui(ui, DockArea::Bottom);
@@ -73,14 +85,10 @@ impl WorkbenchApp {
                         },
                     );
                 });
-        } else {
-            egui::Panel::bottom("status-only")
-                .resizable(false)
-                .show_separator_line(false)
-                .default_size(24.0)
-                .show_inside(ui, |ui| self.status_bar(ui));
-        }
 
+            self.bottom_dock_rect = Some(shown.response.rect);
+            self.panels.dock.bottom_size = shown.response.rect.height().max(BOTTOM_PANEL_MIN);
+        }
         //中心面板
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(theme::BG_PRIMARY))

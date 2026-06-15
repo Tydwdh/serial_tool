@@ -45,6 +45,7 @@ pub enum PanelKind {
     Plugins,
     Settings,
     Terminal,
+    Sender,
     Logs,
     Dynamic(String),
 }
@@ -56,7 +57,8 @@ impl PanelKind {
             Self::Replay => "回放".to_owned(),
             Self::Plugins => "插件".to_owned(),
             Self::Settings => "设置".to_owned(),
-            Self::Terminal => "终端".to_owned(),
+            Self::Terminal => "接收".to_owned(),
+            Self::Sender => "发送器".to_owned(),
             Self::Logs => "日志".to_owned(),
             Self::Dynamic(id) => id.clone(),
         }
@@ -69,6 +71,7 @@ impl PanelKind {
             Self::Plugins => Some(Activity::Plugins),
             Self::Settings => Some(Activity::Settings),
             Self::Terminal => Some(Activity::Terminal),
+            Self::Sender => None,
             Self::Logs => Some(Activity::Logs),
             Self::Dynamic(_) => None,
         }
@@ -154,6 +157,28 @@ impl DockStack {
             self.active = self.tabs.last().cloned();
         }
     }
+    pub fn reorder(&mut self, kind: &PanelKind, mut insert_index: usize) -> bool {
+        let Some(source_index) = self.tabs.iter().position(|tab| tab == kind) else {
+            return false;
+        };
+
+        insert_index = insert_index.min(self.tabs.len());
+
+        if insert_index > source_index {
+            insert_index -= 1;
+        }
+
+        if insert_index == source_index {
+            return false;
+        }
+
+        let item = self.tabs.remove(source_index);
+        let insert_index = insert_index.min(self.tabs.len());
+        self.tabs.insert(insert_index, item.clone());
+        self.active = Some(item);
+
+        true
+    }
 }
 
 fn default_true() -> bool {
@@ -166,6 +191,9 @@ fn default_bottom_size() -> f32 {
 
 fn default_right_size() -> f32 {
     320.0
+}
+fn default_bottom_sender_height() -> f32 {
+    118.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -180,6 +208,10 @@ pub struct DockLayout {
     pub bottom_size: f32,
     #[serde(default = "default_right_size")]
     pub right_size: f32,
+    #[serde(default = "default_true")]
+    pub bottom_sender_visible: bool,
+    #[serde(default = "default_bottom_sender_height")]
+    pub bottom_sender_height: f32,
     #[serde(default)]
     pub center: DockStack,
     #[serde(default)]
@@ -204,6 +236,8 @@ impl Default for DockLayout {
             right_visible: false,
             bottom_size: default_bottom_size(),
             right_size: default_right_size(),
+            bottom_sender_visible: true,
+            bottom_sender_height: default_bottom_sender_height(),
             center,
             bottom,
             right: DockStack::default(),
@@ -254,6 +288,34 @@ impl DockLayout {
         self.center.discard_dynamic_tabs();
         self.bottom.discard_dynamic_tabs();
         self.right.discard_dynamic_tabs();
+    }
+
+    pub fn normalize_tool_layout(&mut self) {
+        for kind in [PanelKind::Terminal, PanelKind::Logs, PanelKind::Sender] {
+            if self.center.remove(&kind) {
+                match kind {
+                    PanelKind::Sender => {
+                        self.bottom_sender_visible = true;
+                        self.right.remove(&PanelKind::Sender);
+                    }
+                    _ => {
+                        if !self.bottom.contains(&kind) && !self.right.contains(&kind) {
+                            self.bottom.open(kind);
+                        }
+                        self.bottom_visible = true;
+                    }
+                }
+            }
+        }
+        if !self.bottom_sender_visible && !self.right.contains(&PanelKind::Sender) {
+            self.bottom_sender_visible = true;
+        }
+        if self.bottom.active.is_none() && !self.bottom.tabs.is_empty() {
+            self.bottom.active = self.bottom.tabs.first().cloned();
+        }
+        if self.right.active.is_none() && !self.right.tabs.is_empty() {
+            self.right.active = self.right.tabs.first().cloned();
+        }
     }
 }
 

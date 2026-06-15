@@ -12,8 +12,8 @@ impl WorkbenchApp {
             return;
         }
 
-        // 只隐藏主工作区顶部标签；底部和右侧仍然显示标签
-        if area != DockArea::Center {
+        // Center 是主工作区，不画 dock tab，不参与拖拽
+        if matches!(area, DockArea::Bottom | DockArea::Right) {
             self.dock_tab_bar(ui, area, &tabs);
             ui.separator();
         }
@@ -25,14 +25,23 @@ impl WorkbenchApp {
         }
     }
     fn dock_tab_bar(&mut self, ui: &mut egui::Ui, area: DockArea, tabs: &[PanelKind]) {
-        ui.horizontal_wrapped(|ui| {
+        let pointer = ui.ctx().pointer_latest_pos();
+        let mut tab_rects: Vec<(PanelKind, egui::Rect)> = Vec::with_capacity(tabs.len());
+
+        ui.horizontal(|ui| {
             for kind in tabs {
                 let active = self.panels.dock.stack(area).active.as_ref() == Some(kind);
+                let dragging = self.dock_dragging_panel.as_ref() == Some(kind);
                 let title = self.panel_title(kind);
 
-                let response = ui
-                    .selectable_label(active, title)
-                    .on_hover_text("拖动到中间 / 底部 / 右侧停靠");
+                let width = (title.chars().count() as f32 * 14.0 + 28.0).clamp(64.0, 180.0);
+
+                let (rect, response) =
+                    ui.allocate_exact_size(egui::vec2(width, 28.0), egui::Sense::click_and_drag());
+
+                let response = response.on_hover_text("拖动调整位置，右键移动到其他区域");
+
+                tab_rects.push((kind.clone(), rect));
 
                 if response.clicked() {
                     self.panels.dock.stack_mut(area).active = Some(kind.clone());
@@ -41,10 +50,129 @@ impl WorkbenchApp {
                 if response.drag_started() {
                     self.dock_dragging_panel = Some(kind.clone());
                 }
+
+                if response.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                    ui.ctx().request_repaint();
+                }
+
+                let bg = if dragging {
+                    theme::BG_TERTIARY
+                } else if active {
+                    theme::BG_SELECTION
+                } else if response.hovered() {
+                    theme::WIDGET_HOVER
+                } else {
+                    theme::BG_SECONDARY
+                };
+
+                let fg = if active {
+                    theme::TEXT_WHITE
+                } else {
+                    theme::TEXT_PRIMARY
+                };
+
+                ui.painter().rect_filled(rect, 4.0, bg);
+                ui.painter().rect_stroke(
+                    rect,
+                    4.0,
+                    egui::Stroke::new(1.0, theme::BORDER_LIGHT),
+                    egui::StrokeKind::Inside,
+                );
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    &title,
+                    egui::FontId::proportional(13.0),
+                    fg,
+                );
+
+                response.context_menu(|ui| {
+                    match area {
+                        DockArea::Bottom => {
+                            if ui.button("移到右侧").clicked() {
+                                self.panels.dock.move_panel(kind.clone(), DockArea::Right);
+                                self.panels.dock.right_visible = true;
+                                let _ = self.save_config();
+                                ui.close();
+                            }
+                        }
+                        DockArea::Right => {
+                            if ui.button("移到底部").clicked() {
+                                self.panels.dock.move_panel(kind.clone(), DockArea::Bottom);
+                                self.set_bottom_visible(true);
+                                let _ = self.save_config();
+                                ui.close();
+                            }
+                        }
+                        DockArea::Center => {}
+                    }
+
+                    if ui.button("关闭").clicked() {
+                        self.panels.dock.stack_mut(area).close(kind);
+                        let _ = self.save_config();
+                        ui.close();
+                    }
+                });
             }
+
+            ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| match area {
+                    DockArea::Bottom => {
+                        if ui.small_button("×").on_hover_text("隐藏底部面板").clicked() {
+                            self.panels.dock.bottom_visible = false;
+                            self.bottom_panel_visible = false;
+                            let _ = self.save_config();
+                        }
+                    }
+                    DockArea::Right => {
+                        if ui
+                            .small_button("×")
+                            .on_hover_text("隐藏右侧停靠区")
+                            .clicked()
+                        {
+                            self.panels.dock.right_visible = false;
+                            let _ = self.save_config();
+                        }
+                    }
+                    DockArea::Center => {}
+                },
+            );
         });
+
+        let insert_index = if self.dock_dragging_panel.is_some() {
+            pointer.and_then(|pos| horizontal_insert_index_from_pointer(&tab_rects, pos))
+        } else {
+            None
+        };
+
+        if let Some(index) = insert_index {
+            paint_dock_insert_line(ui, &tab_rects, index);
+        }
+
+        // 只在“释放在当前 tab bar 上”时处理同区域重排。
+        // 不要无条件 take()，否则跨区域 drop overlay 没机会处理。
+        if ui.input(|i| i.pointer.any_released()) {
+            if let Some(kind) = self.dock_dragging_panel.clone() {
+                if self.panels.dock.stack(area).contains(&kind) {
+                    if let Some(insert_index) = insert_index {
+                        self.dock_dragging_panel = None;
+
+                        if self
+                            .panels
+                            .dock
+                            .stack_mut(area)
+                            .reorder(&kind, insert_index)
+                        {
+                            let _ = self.save_config();
+                        }
+                    }
+                }
+            }
+        }
     }
-    fn dock_panel_body(&mut self, ui: &mut egui::Ui, _area: DockArea, kind: PanelKind) {
+    fn dock_panel_body(&mut self, ui: &mut egui::Ui, area: DockArea, kind: PanelKind) {
         match kind {
             PanelKind::Devices => self.device_panel(ui),
             PanelKind::Replay => self.replay_panel.ui(ui),
@@ -62,6 +190,9 @@ impl WorkbenchApp {
                 } else {
                     self.terminal_panel.ui(ui);
                 }
+            }
+            PanelKind::Sender => {
+                self.send_bar(ui);
             }
             PanelKind::Logs => self.bottom_log_panel.ui(ui),
             PanelKind::Dynamic(id) => {
@@ -113,82 +244,49 @@ impl WorkbenchApp {
     }
 
     pub(crate) fn paint_dock_drop_overlay(&mut self, ctx: &egui::Context) {
-        // 兜底清理：鼠标在窗口外释放时清除拖拽状态
-        if ctx.input(|i| !i.pointer.primary_down()) {
-            self.dock_dragging_panel = None;
-        }
-
         let Some(kind) = self.dock_dragging_panel.clone() else {
             return;
         };
 
-        let pointer_released = ctx.input(|i| i.pointer.any_released());
-        let pointer_pos = ctx.pointer_latest_pos();
+        let primary_down = ctx.input(|i| i.pointer.primary_down());
+        let released = ctx.input(|i| i.pointer.any_released());
 
-        let Some(pointer_pos) = pointer_pos else {
+        let Some(pos) = ctx.pointer_latest_pos() else {
+            if !primary_down {
+                self.dock_dragging_panel = None;
+            }
             return;
         };
 
-        // 绘制拖拽面板名
-        let title = self.panel_title(&kind);
-        let painter = ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Foreground,
-            egui::Id::new("dock-drag-ghost"),
-        ));
-        let gal = ctx.fonts_mut(|f| {
-            f.layout(
-                title.clone(),
-                egui::FontId::proportional(13.0),
-                egui::Color32::WHITE,
-                f32::INFINITY,
-            )
-        });
-        let rect = egui::Rect::from_min_size(
-            pointer_pos + egui::vec2(12.0, -16.0),
-            egui::vec2(gal.size().x + 16.0, 24.0),
-        );
-        painter.rect_filled(
-            rect,
-            4.0,
-            egui::Color32::from_rgba_premultiplied(40, 70, 110, 220),
-        );
-        painter.galley(rect.center() - gal.size() * 0.5, gal, egui::Color32::WHITE);
+        let right_hit = self.right_dock_rect.is_some_and(|rect| rect.contains(pos));
 
-        let screen = ctx.content_rect();
-        let center_rect = screen.shrink2(egui::vec2(180.0, 140.0));
+        let bottom_hit = self.bottom_dock_rect.is_some_and(|rect| rect.contains(pos));
 
-        let right_target = egui::Rect::from_min_max(
-            egui::pos2(screen.right() - 260.0, screen.top() + 80.0),
-            egui::pos2(screen.right() - 80.0, screen.bottom() - 80.0),
-        );
+        // 可选：只在真实区域上画一个很轻的 hover 边框，不再画假的目标区
+        if right_hit {
+            if let Some(rect) = self.right_dock_rect {
+                paint_real_dock_hover(ctx, rect, "右侧");
+            }
+        } else if bottom_hit {
+            if let Some(rect) = self.bottom_dock_rect {
+                paint_real_dock_hover(ctx, rect, "底部");
+            }
+        }
 
-        let bottom_target = egui::Rect::from_min_max(
-            egui::pos2(screen.left() + 220.0, screen.bottom() - 180.0),
-            egui::pos2(screen.right() - 220.0, screen.bottom() - 60.0),
-        );
-
-        let painter = ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Foreground,
-            egui::Id::new("dock-drop-overlay"),
-        ));
-
-        paint_drop_target(&painter, center_rect, pointer_pos, "主工作区");
-        paint_drop_target(&painter, right_target, pointer_pos, "右侧");
-        paint_drop_target(&painter, bottom_target, pointer_pos, "底部");
-
-        if pointer_released {
-            if right_target.contains(pointer_pos) {
+        if released {
+            if right_hit {
                 self.panels.dock.move_panel(kind, DockArea::Right);
                 self.panels.dock.right_visible = true;
-            } else if bottom_target.contains(pointer_pos) {
+                let _ = self.save_config();
+            } else if bottom_hit {
                 self.panels.dock.move_panel(kind, DockArea::Bottom);
                 self.set_bottom_visible(true);
-            } else if center_rect.contains(pointer_pos) {
-                self.panels.dock.move_panel(kind, DockArea::Center);
+                let _ = self.save_config();
             }
 
             self.dock_dragging_panel = None;
-            let _ = self.save_config();
+        } else if !primary_down {
+            self.dock_dragging_panel = None;
         }
     }
 }
@@ -217,5 +315,76 @@ fn paint_drop_target(painter: &egui::Painter, rect: egui::Rect, pointer: egui::P
         label,
         egui::FontId::proportional(16.0),
         egui::Color32::WHITE,
+    );
+}
+
+fn horizontal_insert_index_from_pointer(
+    rects: &[(PanelKind, egui::Rect)],
+    pos: egui::Pos2,
+) -> Option<usize> {
+    if rects.is_empty() {
+        return None;
+    }
+
+    let top = rects
+        .iter()
+        .map(|(_, rect)| rect.top())
+        .fold(f32::INFINITY, f32::min);
+
+    let bottom = rects
+        .iter()
+        .map(|(_, rect)| rect.bottom())
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    if pos.y < top - 8.0 || pos.y > bottom + 8.0 {
+        return None;
+    }
+
+    for (index, (_, rect)) in rects.iter().enumerate() {
+        if pos.x < rect.center().x {
+            return Some(index);
+        }
+    }
+
+    Some(rects.len())
+}
+
+fn paint_dock_insert_line(ui: &egui::Ui, rects: &[(PanelKind, egui::Rect)], index: usize) {
+    if rects.is_empty() {
+        return;
+    }
+
+    let x = if index >= rects.len() {
+        rects.last().unwrap().1.right() + 3.0
+    } else {
+        rects[index].1.left() - 3.0
+    };
+
+    let top = rects
+        .iter()
+        .map(|(_, rect)| rect.top())
+        .fold(f32::INFINITY, f32::min);
+
+    let bottom = rects
+        .iter()
+        .map(|(_, rect)| rect.bottom())
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    ui.painter().line_segment(
+        [egui::pos2(x, top), egui::pos2(x, bottom)],
+        egui::Stroke::new(2.0, theme::BLUE),
+    );
+}
+fn paint_real_dock_hover(ctx: &egui::Context, rect: egui::Rect, label: &str) {
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new(("real-dock-hover", label)),
+    ));
+
+    painter.rect_stroke(
+        rect.shrink(2.0),
+        4.0,
+        egui::Stroke::new(2.0, theme::BLUE),
+        egui::StrokeKind::Inside,
     );
 }

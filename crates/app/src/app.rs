@@ -68,6 +68,8 @@ pub(crate) struct WorkbenchApp {
     pub(crate) file_browse_subscription: tool_databus::Subscription,
     pub(crate) replay_analyzer_job: Option<ReplayAnalyzerJob>,
     pub(crate) replay_analyzer_generation: u64,
+    pub(crate) bottom_dock_rect: Option<egui::Rect>,
+    pub(crate) right_dock_rect: Option<egui::Rect>,
 }
 
 pub(crate) struct ReplayAnalyzerJob {
@@ -238,6 +240,8 @@ impl WorkbenchApp {
             )),
             replay_analyzer_job: None,
             replay_analyzer_generation: 0,
+            bottom_dock_rect: None,
+            right_dock_rect: None,
         };
         app.refresh_ports();
         let enabled: Vec<String> = config
