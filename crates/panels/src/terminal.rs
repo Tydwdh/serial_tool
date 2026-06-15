@@ -41,6 +41,7 @@ struct PortData {
     entries: VecDeque<TerminalEntry>,
     show_rx: bool,
     show_tx: bool,
+    truncated_count: u64,
 }
 
 struct TerminalEntry {
@@ -392,6 +393,19 @@ impl TerminalPanel {
                 );
             }
 
+            // 截断提示
+            let total_truncated: u64 =
+                self.ports.values().map(|d| d.truncated_count).sum();
+            if total_truncated > 0 {
+                ui.label(
+                    RichText::new(format!(
+                        "已截断 {total_truncated} 条，当前仅保留最近 {} 条",
+                        self.max_entries
+                    ))
+                    .color(theme::YELLOW),
+                );
+            }
+
             // 关键修复：
             // 全局视图按 DataBus 发布顺序显示，不按端口名分组，也不按毫秒时间排序。
             //
@@ -553,6 +567,7 @@ impl TerminalPanel {
                     self.detail_entry_id = None;
                 }
             }
+            data.truncated_count += 1;
         }
     }
 
@@ -665,6 +680,7 @@ impl Default for PortData {
             entries: VecDeque::new(),
             show_rx: true,
             show_tx: true,
+            truncated_count: 0,
         }
     }
 }

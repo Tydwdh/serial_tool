@@ -105,9 +105,6 @@ impl WorkbenchApp {
                 .show_inside(ui, |ui| {
                     self.ensure_send_target_port();
                     let send_port_open = self.send_target_port_open();
-                    let ctrl_enter = ui
-                        .ctx()
-                        .input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter));
                     ui.horizontal(|ui| {
                         ui.heading("发送");
 
@@ -152,27 +149,45 @@ impl WorkbenchApp {
                                     egui::Button::new("发送 (Ctrl+Enter)"),
                                 )
                                 .clicked()
-                                || (ctrl_enter && send_port_open && !self.send.input.is_empty())
                             {
                                 self.do_send();
                             }
                             if ui.button("清空").clicked() {
                                 self.send.input.clear();
                                 self.send.error = None;
+                                self.send.periodic_send_count = 0;
                             }
                             self.send_history_combo(ui, "send-popup-history");
                             self.ui_contribution_slot(ui, "send.toolbar");
                         });
                     });
                     ui.separator();
-                    ui.add(
+                    let text_edit_resp = ui.add(
                         egui::TextEdit::multiline(&mut self.send.input)
                             .desired_width(f32::INFINITY)
                             .desired_rows(24)
                             .hint_text("Ctrl+Enter 发送"),
                     );
+                    // Ctrl+Enter 仅当发送输入框有焦点时触发
+                    if text_edit_resp.has_focus()
+                        && ui
+                            .ctx()
+                            .input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter))
+                        && send_port_open
+                        && !self.send.input.is_empty()
+                    {
+                        self.do_send();
+                    }
                     if let Some(e) = &self.send.error {
                         ui.colored_label(theme::RED, translate_error(e));
+                    }
+                    if self.send.hex_mode && !self.send.input.trim().is_empty() {
+                        let preview = crate::ui::bottom_panel::hex_preview(&self.send.input);
+                        ui.label(
+                            egui::RichText::new(format!("HEX 预览: {preview}"))
+                                .color(theme::TEXT_SECONDARY)
+                                .monospace(),
+                        );
                     }
                     false
                 })

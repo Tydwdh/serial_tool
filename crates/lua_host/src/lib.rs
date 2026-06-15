@@ -1225,8 +1225,16 @@ fn create_task_api(
             state.set("error", Value::Nil)?;
             state.set("logs", lua.create_table()?)?;
 
-            // 存入全局任务表
+            // 存入全局任务表 — 检查同 ID 是否已有未完成任务
             let tasks: Table = lua.globals().get("__plugin_tasks")?;
+            if let Ok(existing) = tasks.get::<Table>(id.as_str()) {
+                let finished: bool = existing.get("finished").unwrap_or(true);
+                if !finished {
+                    return Err(mlua::Error::external(format!(
+                        "task id '{id}' is already running"
+                    )));
+                }
+            }
             tasks.set(id.clone(), &state)?;
 
             // 创建用户可见的 task 对象
@@ -2652,12 +2660,14 @@ fn create_fs_api(
                     "文件未授权: {path}. 请先通过文件选择对话框选择文件。"
                 )));
             }
-            let content = std::fs::read_to_string(&p)
-                .map_err(|e| mlua::Error::RuntimeError(format!("读取文件失败: {e}")))?;
-            // 16 MiB 上限
-            if content.len() > 16 * 1024 * 1024 {
+            // 先查 metadata，避免读超大文件
+            let meta = std::fs::metadata(&p)
+                .map_err(|e| mlua::Error::RuntimeError(format!("无法获取文件信息: {e}")))?;
+            if meta.len() > 16 * 1024 * 1024 {
                 return Err(mlua::Error::RuntimeError("文件超过 16 MiB 上限".to_owned()));
             }
+            let content = std::fs::read_to_string(&p)
+                .map_err(|e| mlua::Error::RuntimeError(format!("读取文件失败: {e}")))?;
             Ok(content)
         })?,
     )?;
@@ -2673,11 +2683,14 @@ fn create_fs_api(
                     "文件未授权: {path}. 请先通过文件选择对话框选择文件。"
                 )));
             }
-            let content = std::fs::read_to_string(&p)
-                .map_err(|e| mlua::Error::RuntimeError(format!("读取文件失败: {e}")))?;
-            if content.len() > 16 * 1024 * 1024 {
+            // 先查 metadata，避免读超大文件
+            let meta = std::fs::metadata(&p)
+                .map_err(|e| mlua::Error::RuntimeError(format!("无法获取文件信息: {e}")))?;
+            if meta.len() > 16 * 1024 * 1024 {
                 return Err(mlua::Error::RuntimeError("文件超过 16 MiB 上限".to_owned()));
             }
+            let content = std::fs::read_to_string(&p)
+                .map_err(|e| mlua::Error::RuntimeError(format!("读取文件失败: {e}")))?;
             let lines: Arc<Vec<String>> = Arc::new(content.lines().map(String::from).collect());
             let index = Arc::new(ParkingMutex::new(0usize));
             let lines_len = lines.len();

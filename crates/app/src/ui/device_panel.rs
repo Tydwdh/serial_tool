@@ -104,6 +104,16 @@ impl WorkbenchApp {
             if ui.button(if recording { "停止" } else { "录制" }).clicked() {
                 self.start_or_stop_recording();
             }
+            if recording {
+                let paused = self.recorder.is_paused();
+                if ui.button(if paused { "继续" } else { "暂停" }).clicked() {
+                    if paused {
+                        self.recorder.resume();
+                    } else {
+                        self.recorder.pause();
+                    }
+                }
+            }
         });
 
         ui.horizontal(|ui| {

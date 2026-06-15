@@ -82,7 +82,7 @@ impl WorkbenchApp {
             });
         });
 
-        ui.add(
+        let text_edit_resp = ui.add(
             egui::TextEdit::multiline(&mut self.send.input)
                 .desired_width(f32::INFINITY)
                 .desired_rows(5)
@@ -93,9 +93,10 @@ impl WorkbenchApp {
                 }),
         );
 
-        let ctrl_enter = ui
-            .ctx()
-            .input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter));
+        let ctrl_enter = text_edit_resp.has_focus()
+            && ui
+                .ctx()
+                .input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter));
 
         ui.horizontal(|ui| {
             if ui
@@ -112,6 +113,7 @@ impl WorkbenchApp {
             if ui.button("清空").clicked() {
                 self.send.input.clear();
                 self.send.error = None;
+                self.send.periodic_send_count = 0;
             }
 
             self.ui_contribution_slot(ui, "send.toolbar");
@@ -123,6 +125,14 @@ impl WorkbenchApp {
             if let Some(e) = &self.send.error {
                 ui.colored_label(theme::RED, translate_error(e));
             }
+            if self.send.hex_mode && !self.send.input.trim().is_empty() {
+                let preview = hex_preview(&self.send.input);
+                ui.label(
+                    egui::RichText::new(format!("HEX 预览: {preview}"))
+                        .color(theme::TEXT_SECONDARY)
+                        .monospace(),
+                );
+            }
         });
 
         ui.horizontal(|ui| {
@@ -131,6 +141,7 @@ impl WorkbenchApp {
                 .changed()
             {
                 if self.send.periodic_enabled {
+                    self.send.periodic_send_count = 0;
                     let now = ui.ctx().input(|i| i.time);
                     let interval_ms = self
                         .send
@@ -149,10 +160,18 @@ impl WorkbenchApp {
             );
             ui.label("ms");
 
+            if self.send.periodic_enabled {
+                let now = ui.ctx().input(|i| i.time);
+                let remaining = (self.send.next_periodic_send_time - now).max(0.0);
+                ui.label(format!("{:.1}s 后", remaining));
+                ui.label(format!("已发送 {} 次", self.send.periodic_send_count));
+            }
+
             self.send_history_combo(ui, "send-history");
 
             if ui.button("重置周期").clicked() {
                 self.send.next_periodic_send_time = 0.0;
+                self.send.periodic_send_count = 0;
             }
         });
 
@@ -324,6 +343,21 @@ impl WorkbenchApp {
 }
 
 use tool_transport::TransportManager;
+
+pub(crate) fn hex_preview(input: &str) -> String {
+    if input.trim().is_empty() {
+        return "—".to_owned();
+    }
+    match tool_transport::parse_hex(input) {
+        Ok(bytes) if !bytes.is_empty() => bytes
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .join(" "),
+        Ok(_) => "空".to_owned(),
+        Err(_) => "解析失败".to_owned(),
+    }
+}
 
 pub(crate) fn send_impl_to(
     port: &str,

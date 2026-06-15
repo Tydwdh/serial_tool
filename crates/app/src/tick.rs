@@ -175,7 +175,7 @@ impl WorkbenchApp {
         let _terminal_ingested = self.terminal_panel.ingest_pending();
         let n = self.plugin_manager.process_pending();
         if n > 0 {
-            self.set_status(StatusLevel::Info, format!("{n} 个插件事件"));
+            self.set_status_force(StatusLevel::Info, format!("{n} 个插件事件"));
         }
         self.handle_keys(&ctx);
 
@@ -228,6 +228,7 @@ impl WorkbenchApp {
 
         if self.send_target_port_open() && !self.send.input.is_empty() {
             self.do_send();
+            self.send.periodic_send_count += 1;
 
             if self.send.error.is_some() {
                 self.send.periodic_enabled = false;

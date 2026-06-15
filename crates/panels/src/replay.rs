@@ -257,6 +257,7 @@ impl ReplayPanel {
                     ] {
                         if ui
                             .selectable_value(&mut policy, p, policy_label(p))
+                            .on_hover_text(policy_description(p))
                             .changed()
                         {
                             changed = true;
@@ -555,6 +556,14 @@ fn policy_label(policy: ReplayPolicy) -> &'static str {
         ReplayPolicy::AutoPreferRecorded => "自动",
         ReplayPolicy::ExactRecorded => "精确回放",
         ReplayPolicy::ReparseRaw => "重新解析",
+    }
+}
+
+fn policy_description(policy: ReplayPolicy) -> &'static str {
+    match policy {
+        ReplayPolicy::AutoPreferRecorded => "有录制解析结果则直接使用，否则自动重新解析",
+        ReplayPolicy::ExactRecorded => "强制使用录制时的解析结果，不运行 Analyzer",
+        ReplayPolicy::ReparseRaw => "忽略录制时的解析，强制运行 Replay Analyzer 重新解析原始数据",
     }
 }
 

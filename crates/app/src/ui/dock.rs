@@ -69,6 +69,7 @@ impl WorkbenchApp {
 
                     if ui.button("关闭").clicked() {
                         self.panels.dock.stack_mut(area).close(kind);
+                        let _ = self.save_config();
                         ui.close();
                     }
                 });
@@ -81,6 +82,7 @@ impl WorkbenchApp {
                         if ui.small_button("×").on_hover_text("隐藏底部面板").clicked() {
                             self.panels.dock.bottom_visible = false;
                             self.bottom_panel_visible = false;
+                            let _ = self.save_config();
                         }
                     }
                     DockArea::Right => {
@@ -90,6 +92,7 @@ impl WorkbenchApp {
                             .clicked()
                         {
                             self.panels.dock.right_visible = false;
+                            let _ = self.save_config();
                         }
                     }
                     DockArea::Center => {}
@@ -167,6 +170,11 @@ impl WorkbenchApp {
     }
 
     pub(crate) fn paint_dock_drop_overlay(&mut self, ctx: &egui::Context) {
+        // 兜底清理：鼠标在窗口外释放时清除拖拽状态
+        if ctx.input(|i| !i.pointer.primary_down()) {
+            self.dock_dragging_panel = None;
+        }
+
         let Some(kind) = self.dock_dragging_panel.clone() else {
             return;
         };
@@ -177,6 +185,31 @@ impl WorkbenchApp {
         let Some(pointer_pos) = pointer_pos else {
             return;
         };
+
+        // 绘制拖拽面板名
+        let title = self.panel_title(&kind);
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("dock-drag-ghost"),
+        ));
+        let gal = ctx.fonts_mut(|f| {
+            f.layout(
+                title.clone(),
+                egui::FontId::proportional(13.0),
+                egui::Color32::WHITE,
+                f32::INFINITY,
+            )
+        });
+        let rect = egui::Rect::from_min_size(
+            pointer_pos + egui::vec2(12.0, -16.0),
+            egui::vec2(gal.size().x + 16.0, 24.0),
+        );
+        painter.rect_filled(
+            rect,
+            4.0,
+            egui::Color32::from_rgba_premultiplied(40, 70, 110, 220),
+        );
+        painter.galley(rect.center() - gal.size() * 0.5, gal, egui::Color32::WHITE);
 
         let screen = ctx.screen_rect();
         let center_rect = screen.shrink2(egui::vec2(180.0, 140.0));

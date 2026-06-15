@@ -535,6 +535,13 @@ impl TransportManager {
                 .map(|(name, _)| name.clone())
                 .collect()
         };
+        for name in &dead_names {
+            self.bus.publish(Event::system_log(
+                LogLevel::Error,
+                "transport.serial",
+                format!("串口 {name} 已断开连接"),
+            ));
+        }
         for name in dead_names {
             self.close_port(&name);
         }

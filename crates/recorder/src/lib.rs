@@ -51,6 +51,7 @@ pub struct RecorderStats {
     pub last_error: Option<String>,
     pub running: bool,
     pub stopping: bool,
+    pub paused: bool,
 }
 
 pub struct JsonlRecorder {
@@ -70,6 +71,7 @@ struct StoppingRecorder {
 
 struct RecorderWorker {
     stop: Arc<AtomicBool>,
+    pause: Arc<AtomicBool>,
     finished: Arc<AtomicBool>,
     last_error: Arc<Mutex<Option<String>>>,
     join: Option<JoinHandle<()>>,
@@ -102,13 +104,26 @@ impl JsonlRecorder {
     }
 
     pub fn start(&mut self, path: impl AsRef<Path>) -> io::Result<()> {
+        if self.is_running() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "recorder is already running, stop it first",
+            ));
+        }
         if self.is_stopping() {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "recorder is still stopping previous session, please wait",
             ));
         }
-        self.stop();
+        // 同步清理上一个 worker（如果有残留的 finished worker）
+        if let Some(mut worker) = self.worker.take() {
+            worker.stop.store(true, Ordering::Relaxed);
+            if let Some(join) = worker.join.take() {
+                let _ = join.join();
+            }
+        }
+        self.stopping = None;
 
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent()
@@ -123,6 +138,8 @@ impl JsonlRecorder {
         // UI 面板可以 bounded，recorder 必须 lossless。
         let subscription = self.bus.subscribe_lossless(TopicFilter::All);
         let stop = Arc::new(AtomicBool::new(false));
+        let pause = Arc::new(AtomicBool::new(false));
+        let pause_for_worker = Arc::clone(&pause);
         let stop_thread = Arc::clone(&stop);
         let finished = Arc::new(AtomicBool::new(false));
         let finished_thread = Arc::clone(&finished);
@@ -150,6 +167,10 @@ impl JsonlRecorder {
             while !stop_thread.load(Ordering::Relaxed) {
                 match subscription.recv_timeout(Duration::from_millis(100)) {
                     Ok(event) => {
+                        // 暂停时只消费事件不写入
+                        if pause_for_worker.load(Ordering::Relaxed) {
+                            continue;
+                        }
                         if should_record_event_with_mode(&event, mode) {
                             match write_event_counted(&mut writer, &event) {
                                 Ok(bytes) => {
@@ -275,6 +296,7 @@ impl JsonlRecorder {
 
         self.worker = Some(RecorderWorker {
             stop,
+            pause,
             finished,
             last_error,
             join: Some(join),
@@ -309,6 +331,36 @@ impl JsonlRecorder {
 
     pub fn is_running(&self) -> bool {
         self.worker.is_some()
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.worker
+            .as_ref()
+            .is_some_and(|w| w.pause.load(Ordering::Relaxed))
+    }
+
+    pub fn pause(&mut self) {
+        if let Some(ref worker) = self.worker {
+            worker.pause.store(true, Ordering::Relaxed);
+            self.stats.lock().unwrap().paused = true;
+            self.bus.publish(Event::system_log(
+                LogLevel::Info,
+                "recorder",
+                "recording paused",
+            ));
+        }
+    }
+
+    pub fn resume(&mut self) {
+        if let Some(ref worker) = self.worker {
+            worker.pause.store(false, Ordering::Relaxed);
+            self.stats.lock().unwrap().paused = false;
+            self.bus.publish(Event::system_log(
+                LogLevel::Info,
+                "recorder",
+                "recording resumed",
+            ));
+        }
     }
 
     pub fn is_stopping(&self) -> bool {

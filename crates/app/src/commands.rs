@@ -4,6 +4,7 @@ use crate::state::{BottomTab, MAX_SEND_HISTORY, StatusLevel};
 use crate::ui::top_bar::{pdb, ppar, psb};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::time::Duration;
 use tool_core::{LogLevel, now_timestamp_ms};
 use tool_transport::SerialConfig;
 
@@ -104,47 +105,83 @@ impl WorkbenchApp {
                     }
                 }
 
-                // 自动重连：使用完整配置快照直接打开
+                // 自动重连：使用完整配置快照，带 backoff 和最大尝试次数
                 if self.auto_reconnect {
-                    if let Some(ref pending) = self.pending_reconnect.clone() {
+                    let pending = self.pending_reconnect.clone();
+                    if let Some(mut pending) = pending {
                         if new_names.contains(&pending.port_name) {
-                            match self.transport.open_serial(pending.config.clone()) {
-                                Ok(()) => {
-                                    self.selected_port = Some(pending.port_name.clone());
-                                    self.pending_reconnect = None;
-                                    self.set_status_force(
-                                        StatusLevel::Info,
-                                        format!("已自动重连 {}", pending.port_name),
-                                    );
-                                }
-                                Err(e) => {
+                            let now = now_timestamp_ms() as f64 / 1000.0;
+                            if now < pending.next_try_at {
+                                // cooldown not expired, keep waiting
+                            } else {
+                                if pending.attempts >= 10 {
                                     self.set_status(
-                                        StatusLevel::Warn,
-                                        format!("自动重连失败：{e}"),
+                                        StatusLevel::Error,
+                                        format!(
+                                            "自动重连 {} 失败，已达最大尝试次数，放弃",
+                                            pending.port_name
+                                        ),
                                     );
+                                    self.pending_reconnect = None;
+                                } else {
+                                    pending.attempts += 1;
+                                    let backoff_ms =
+                                        (2u64.pow(pending.attempts) * 100).min(30_000);
+                                    pending.next_try_at =
+                                        now + backoff_ms as f64 / 1000.0;
+
+                                    match self
+                                        .transport
+                                        .open_serial(pending.config.clone())
+                                    {
+                                        Ok(()) => {
+                                            self.selected_port =
+                                                Some(pending.port_name.clone());
+                                            self.pending_reconnect = None;
+                                            self.set_status_force(
+                                                StatusLevel::Info,
+                                                format!(
+                                                    "已自动重连 {}",
+                                                    pending.port_name
+                                                ),
+                                            );
+                                        }
+                                        Err(e) => {
+                                            self.set_status_force(
+                                                StatusLevel::Warn,
+                                                format!(
+                                                    "自动重连 {} 失败 (第 {} 次): {e}",
+                                                    pending.port_name,
+                                                    pending.attempts
+                                                ),
+                                            );
+                                            self.pending_reconnect = Some(pending);
+                                        }
+                                    }
                                 }
                             }
                         }
+                    // else: port not yet reappeared, keep waiting
                     }
                 }
 
                 if show_status {
-                    self.set_status(StatusLevel::Info, format!("{} 个串口", self.ports.len()));
+                    self.set_status_force(StatusLevel::Info, format!("{} 个串口", self.ports.len()));
                     return;
                 }
 
                 if !added_ports.is_empty() {
-                    self.set_status(
+                    self.set_status_force(
                         StatusLevel::Info,
                         format!("发现串口 {}", added_ports.join(", ")),
                     );
                 } else if !removed_ports.is_empty() {
-                    self.set_status(
+                    self.set_status_force(
                         StatusLevel::Info,
                         format!("移除串口 {}", removed_ports.join(", ")),
                     );
                 } else if self.selected_port != old_selected {
-                    self.set_status(StatusLevel::Info, "请选择串口");
+                    self.set_status_force(StatusLevel::Info, "请选择串口");
                 }
             }
             Err(error) => {
@@ -204,6 +241,31 @@ impl WorkbenchApp {
             }
         }
     }
+
+    /// 真正重连：先关闭端口并等待 worker 退出，再用当前配置重新打开。
+    pub(crate) fn reconnect_selected_port(&mut self) {
+        let Some(p) = self.selected_port.clone() else {
+            self.set_status(StatusLevel::Warn, "请选择串口");
+            return;
+        };
+
+        let selected_exists = self.ports.iter().any(|port| port.port_name == p);
+        if !selected_exists {
+            self.set_status(StatusLevel::Error, format!("串口 {p} 不存在"));
+            return;
+        }
+
+        // 先关闭，阻塞等待 worker 退出
+        self.transport.close_port_blocking(
+            &p,
+            Duration::from_millis(3000),
+        );
+
+        // 重新打开
+        self.open_selected_port();
+        self.set_status_force(StatusLevel::Info, format!("{p} 已重新连接"));
+    }
+
     pub(crate) fn start_or_stop_recording(&mut self) {
         if self.recorder.is_running() || self.recorder.is_stopping() {
             self.recorder.stop();

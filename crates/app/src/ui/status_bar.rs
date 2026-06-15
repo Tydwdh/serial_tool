@@ -12,7 +12,8 @@ impl WorkbenchApp {
             .unwrap_or_else(TransportStatus::closed);
         ui.horizontal(|ui| {
             let (d, l) = if let (Some(p), Some(b)) = (self.selected_port.clone(), st.baud_rate) {
-                (if st.open { "●" } else { "○" }, format!("{p} @ {b}"))
+                let label = self.port_label(&p);
+                (if st.open { "●" } else { "○" }, format!("{label} @ {b}"))
             } else {
                 ("○", "串口已关闭".into())
             };
@@ -29,7 +30,12 @@ impl WorkbenchApp {
             } else {
                 theme::TEXT_SECONDARY
             }));
-            ui.label(if rec { "录制中" } else { "未录制" });
+            if rec {
+                let stats = self.recorder.stats();
+                ui.label(format!("录制中 {} 条 {:.1}MB", stats.events_written, stats.bytes_written as f64 / 1024.0 / 1024.0));
+            } else {
+                ui.label("未录制");
+            }
             ui.separator();
             ui.label(format!("{:.0} 事件/秒", self.event_rate));
             ui.separator();

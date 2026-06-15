@@ -454,24 +454,57 @@ impl PluginManager {
                 continue;
             }
 
-            let manifest = load_manifest(&manifest_path)?;
-            self.permission_manager.check(&manifest)?;
+            let manifest = match load_manifest(&manifest_path) {
+                Ok(m) => m,
+                Err(e) => {
+                    self.bus.publish(Event::system_log(
+                        LogLevel::Warn,
+                        "extension",
+                        format!("跳过损坏插件 {}: {e}", path.display()),
+                    ));
+                    continue;
+                }
+            };
+
+            if let Err(e) = self.permission_manager.check(&manifest) {
+                self.bus.publish(Event::system_log(
+                    LogLevel::Warn,
+                    "extension",
+                    format!("跳过无权限插件 {} ({}) : {e}", manifest.id, path.display()),
+                ));
+                continue;
+            }
 
             let id = manifest.id.clone();
 
-            // 重复 ID 检测：非同一目录时告警
+            // 重复 ID 检测：非同一目录时处理
             if let Some(existing) = self.records.get(&id)
                 && existing.root != path
             {
+                let is_running = matches!(
+                    existing.state,
+                    PluginState::Running | PluginState::Enabled
+                );
                 self.bus.publish(Event::system_log(
                     LogLevel::Warn,
                     "extension",
                     format!(
-                        "插件 ID 冲突: '{id}' 同时存在于 {} 和 {}，后者将覆盖",
+                        "插件 ID 冲突: '{id}' 同时存在于 {} 和 {}",
                         existing.root.display(),
                         path.display()
                     ),
                 ));
+                if is_running {
+                    self.bus.publish(Event::system_log(
+                        LogLevel::Warn,
+                        "extension",
+                        format!(
+                            "插件 '{id}' 已有实例在运行中，跳过 {} 的覆盖",
+                            path.display()
+                        ),
+                    ));
+                    continue;
+                }
             }
 
             let existing_state = self

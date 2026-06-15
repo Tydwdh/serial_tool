@@ -118,7 +118,13 @@ impl WorkbenchApp {
                 .as_deref()
                 .is_some_and(|p| self.transport.status_port(p).open);
             let sl = if so {
-                format!("串口 ▸ {}", self.selected_port.as_deref().unwrap_or("?"))
+                format!(
+                    "串口 ▸ {}",
+                    self.selected_port
+                        .as_deref()
+                        .map(|p| self.port_label(p))
+                        .unwrap_or_else(|| "?".to_owned())
+                )
             } else {
                 "串口 ▸ 未连接".into()
             };
@@ -134,6 +140,15 @@ impl WorkbenchApp {
             }
             if !self.top_bar_serial_collapsed {
                 self.serial_connect_controls(ui, "top-port", "top-baud", 130.0, 80.0, true);
+            } else if so {
+                // 折叠时显示当前配置摘要
+                ui.label(
+                    egui::RichText::new(format!(
+                        "· {} {}N{} · {}ms",
+                        self.baud_rate, self.data_bits, self.stop_bits, self.timeout_ms
+                    ))
+                    .color(theme::TEXT_SECONDARY),
+                );
             }
             ui.separator();
             let rec = self.recorder.is_running();
@@ -231,7 +246,7 @@ impl WorkbenchApp {
 
         if selected_open {
             if serial_action_button(ui, "重连").clicked() {
-                self.open_selected_port();
+                self.reconnect_selected_port();
             }
         } else if serial_action_button(ui, "打开").clicked() {
             self.open_selected_port();
@@ -253,7 +268,7 @@ impl WorkbenchApp {
                         ui.label(
                             egui::RichText::new(format!(
                                 "● {} @ {} {}N{}",
-                                port,
+                                self.port_label(port),
                                 st.baud_rate.unwrap_or(0),
                                 &self.data_bits,
                                 &self.stop_bits
