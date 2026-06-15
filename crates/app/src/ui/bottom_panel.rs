@@ -186,6 +186,16 @@ impl WorkbenchApp {
                     .hint_text("ms"),
             );
             ui.label("ms");
+            ui.label("最多");
+            let mut max_str = self.send.periodic_max_count.map_or(String::new(), |v| v.to_string());
+            ui.add_enabled(!self.send.periodic_enabled, egui::TextEdit::singleline(&mut max_str).desired_width(40.0).hint_text("不限"));
+            if !self.send.periodic_enabled && ui.ctx().input(|i| i.pointer.any_released()) { // lazy parse
+                if max_str.trim().is_empty() {
+                    self.send.periodic_max_count = None;
+                } else if let Ok(v) = max_str.trim().parse::<u64>() {
+                    self.send.periodic_max_count = if v > 0 { Some(v) } else { None };
+                }
+            }
 
             if self.send.periodic_enabled {
                 let now = ui.ctx().input(|i| i.time);
@@ -390,19 +400,16 @@ pub(crate) fn hex_preview(input: &str) -> String {
     match tool_transport::parse_hex(input) {
         Ok(bytes) if !bytes.is_empty() => {
             let count = bytes.len();
-            let display = if count > MAX_PREVIEW {
+            let ascii: String = bytes.iter().take(MAX_PREVIEW).map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' }).collect();
+            let hex = if count > MAX_PREVIEW {
                 format!(
-                    "{}… (共{count}字节)",
-                    bytes[..MAX_PREVIEW]
-                        .iter()
-                        .map(|b| format!("{b:02X}"))
-                        .collect::<Vec<_>>()
-                        .join(" ")
+                    "{}… (共{count}B)",
+                    bytes[..MAX_PREVIEW].iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
                 )
             } else {
                 bytes.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
             };
-            display
+            format!("{hex}  |{ascii}|")
         }
         Ok(_) => "空".to_owned(),
         Err(_) => "解析失败".to_owned(),

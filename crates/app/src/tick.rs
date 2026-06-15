@@ -236,6 +236,17 @@ impl WorkbenchApp {
             self.do_send();
             if self.send.error.is_none() {
                 self.send.periodic_send_count += 1;
+                if let Some(max) = self.send.periodic_max_count {
+                    if self.send.periodic_send_count >= max {
+                        self.send.periodic_enabled = false;
+                        self.send.periodic_send_count = 0;
+                        self.set_status_force(
+                            crate::state::StatusLevel::Info,
+                            format!("周期发送已完成 ({max} 次)"),
+                        );
+                        return;
+                    }
+                }
             } else {
                 self.send.periodic_enabled = false;
                 self.set_status_force(crate::state::StatusLevel::Error, "周期发送已停止：发送失败");
