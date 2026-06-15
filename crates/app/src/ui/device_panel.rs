@@ -179,9 +179,12 @@ impl WorkbenchApp {
         ui.checkbox(&mut self.auto_reconnect, "串口拔出后自动重连");
         if self.auto_reconnect {
             if let Some(ref pending) = self.pending_reconnect {
+                let now = tool_core::now_timestamp_ms() as f64 / 1000.0;
+                let remaining = (pending.next_try_at - now).max(0.0);
                 ui.label(format!(
-                    "等待 {} 重新插入... (第 {} 次)",
+                    "等待 {} {:2.1}s 后重试 (第 {}/10 次)",
                     pending.port_name,
+                    remaining,
                     pending.attempts + 1
                 ));
             }
@@ -201,6 +204,8 @@ impl WorkbenchApp {
                 let mut alias_buf = self.port_aliases.get(&name).cloned().unwrap_or_default();
 
                 ui.horizontal(|ui| {
+                    let open = self.transport.status_port(name).open;
+                    ui.label(if open { "●" } else { "○" });
                     ui.monospace(&name);
                     ui.label(format!("{}", port.port_type));
 

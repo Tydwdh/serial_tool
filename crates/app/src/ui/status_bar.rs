@@ -40,6 +40,12 @@ impl WorkbenchApp {
             } else {
                 ui.label("未录制");
             }
+            if rec {
+                let stats = self.recorder.stats();
+                if let Some(ref err) = stats.last_error {
+                    ui.colored_label(theme::RED, format!("错误: {err}"));
+                }
+            }
             ui.separator();
             ui.label(format!("{:.0} 事件/秒", self.event_rate));
             ui.separator();
