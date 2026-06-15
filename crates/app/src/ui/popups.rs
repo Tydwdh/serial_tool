@@ -129,6 +129,10 @@ impl WorkbenchApp {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.radio_value(&mut self.send.hex_mode, false, "文本");
                             ui.radio_value(&mut self.send.hex_mode, true, "HEX");
+                            if self.send.hex_mode {
+                                ui.checkbox(&mut self.send.hex_strict, "严格")
+                                    .on_hover_text("严格模式：奇数 HEX 长度报错而非自动补0");
+                            }
                             ui.add_enabled_ui(!self.send.hex_mode, |ui| {
                                 egui::ComboBox::from_id_salt("send-popup-line-ending")
                                     .width(60.0)

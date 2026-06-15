@@ -63,6 +63,10 @@ impl WorkbenchApp {
 
             ui.radio_value(&mut self.send.hex_mode, false, "文本");
             ui.radio_value(&mut self.send.hex_mode, true, "HEX");
+            if self.send.hex_mode {
+                ui.checkbox(&mut self.send.hex_strict, "严格")
+                    .on_hover_text("严格模式：奇数 HEX 长度报错而非自动补0");
+            }
 
             ui.add_enabled_ui(!self.send.hex_mode, |ui| {
                 egui::ComboBox::from_id_salt("line-ending")
@@ -141,15 +145,35 @@ impl WorkbenchApp {
                 .changed()
             {
                 if self.send.periodic_enabled {
-                    self.send.periodic_send_count = 0;
-                    let now = ui.ctx().input(|i| i.time);
-                    let interval_ms = self
-                        .send
-                        .periodic_interval_ms
-                        .trim()
-                        .parse::<u64>()
-                        .unwrap_or(1000);
-                    self.send.next_periodic_send_time = now + interval_ms as f64 / 1000.0;
+                    // 开启前预检
+                    let mut disable = false;
+                    if !self.send_target_port_open() {
+                        self.send.error = Some("请先选择并打开目标串口".into());
+                        disable = true;
+                    } else if self.send.input.trim().is_empty() {
+                        self.send.error = Some("请先输入发送内容".into());
+                        disable = true;
+                    } else if self.send.hex_mode {
+                        let interval = self.send.periodic_interval_ms.trim().parse::<u64>().unwrap_or(0);
+                        if interval < 10 {
+                            self.send.error = Some("周期发送间隔必须 >= 10ms".into());
+                            disable = true;
+                        }
+                    }
+                    if disable {
+                        self.send.periodic_enabled = false;
+                    } else {
+                        self.send.periodic_send_count = 0;
+                        self.send.error = None;
+                        let now = ui.ctx().input(|i| i.time);
+                        let interval_ms = self
+                            .send
+                            .periodic_interval_ms
+                            .trim()
+                            .parse::<u64>()
+                            .unwrap_or(1000);
+                        self.send.next_periodic_send_time = now + interval_ms as f64 / 1000.0;
+                    }
                 }
             }
             ui.add_enabled(
@@ -214,6 +238,7 @@ impl WorkbenchApp {
             &self.send.input,
             self.send.hex_mode,
             self.send.line_ending,
+            self.send.hex_strict,
             &self.transport,
         )
         .err()
@@ -364,6 +389,7 @@ pub(crate) fn send_impl_to(
     input: &str,
     hex: bool,
     line_ending: LineEnding,
+    hex_strict: bool,
     t: &TransportManager,
 ) -> Result<(), tool_transport::TransportError> {
     if input.trim().is_empty() {
@@ -374,6 +400,17 @@ pub(crate) fn send_impl_to(
             let x = line.trim();
             if x.is_empty() {
                 continue;
+            }
+            if hex_strict {
+                let compact: String = x.chars().filter(|c| !c.is_whitespace()).collect();
+                if compact.len() % 2 != 0 {
+                    return Err(tool_transport::TransportError::Io(
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("HEX 严格模式: 奇数字节数 \"{x}\", 请补0或关闭严格模式"),
+                        ),
+                    ));
+                }
             }
             t.send_hex_to(port, x)?;
         }
