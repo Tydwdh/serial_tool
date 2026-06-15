@@ -203,24 +203,22 @@ impl WorkbenchApp {
             if self.transport.status_port(&port).open {
                 ui.horizontal(|ui| {
                     ui.label("信号");
-                    if ui.small_button("DTR ON").clicked() {
-                        if let Err(e) = self.transport.set_dtr(&port, true) {
+                    let dtr_label = if self.send.dtr_high { "DTR ⬆" } else { "DTR ⬇" };
+                    let rts_label = if self.send.rts_high { "RTS ⬆" } else { "RTS ⬇" };
+                    if ui.small_button(dtr_label).on_hover_text("切换 DTR").clicked() {
+                        let new_val = !self.send.dtr_high;
+                        if let Err(e) = self.transport.set_dtr(&port, new_val) {
                             self.set_status_force(StatusLevel::Error, e.to_string());
+                        } else {
+                            self.send.dtr_high = new_val;
                         }
                     }
-                    if ui.small_button("DTR OFF").clicked() {
-                        if let Err(e) = self.transport.set_dtr(&port, false) {
+                    if ui.small_button(rts_label).on_hover_text("切换 RTS").clicked() {
+                        let new_val = !self.send.rts_high;
+                        if let Err(e) = self.transport.set_rts(&port, new_val) {
                             self.set_status_force(StatusLevel::Error, e.to_string());
-                        }
-                    }
-                    if ui.small_button("RTS ON").clicked() {
-                        if let Err(e) = self.transport.set_rts(&port, true) {
-                            self.set_status_force(StatusLevel::Error, e.to_string());
-                        }
-                    }
-                    if ui.small_button("RTS OFF").clicked() {
-                        if let Err(e) = self.transport.set_rts(&port, false) {
-                            self.set_status_force(StatusLevel::Error, e.to_string());
+                        } else {
+                            self.send.rts_high = new_val;
                         }
                     }
                 });
