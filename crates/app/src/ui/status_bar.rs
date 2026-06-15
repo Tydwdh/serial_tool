@@ -32,7 +32,11 @@ impl WorkbenchApp {
             }));
             if rec {
                 let stats = self.recorder.stats();
-                ui.label(format!("录制中 {} 条 {:.1}MB", stats.events_written, stats.bytes_written as f64 / 1024.0 / 1024.0));
+                if stats.paused {
+                    ui.label(format!("已暂停 {} 条 {:.1}MB", stats.events_written, stats.bytes_written as f64 / 1024.0 / 1024.0));
+                } else {
+                    ui.label(format!("录制中 {} 条 {:.1}MB", stats.events_written, stats.bytes_written as f64 / 1024.0 / 1024.0));
+                }
             } else {
                 ui.label("未录制");
             }
