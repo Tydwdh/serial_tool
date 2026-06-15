@@ -50,52 +50,63 @@ impl WorkbenchApp {
                 .min_size(BOTTOM_PANEL_MIN)
                 .show_separator_line(true)
                 .show_inside(ui, |ui| {
-                    let total_height = ui.available_height();
+                    let width = ui.available_width();
+                    let total_h = ui.available_height();
+                    let status_h = 26.0;
+                    let sep_h = 8.0;
+
+                    let sender_h = if self.panels.dock.bottom_sender_visible
+                        && !self.send.popup_open
+                    {
+                        self.panels
+                            .dock
+                            .bottom_sender_height
+                            .clamp(150.0, total_h * 0.45)
+                    } else {
+                        0.0
+                    };
+
+                    let output_h =
+                        (total_h - sender_h - status_h - sep_h * 2.0).max(100.0);
+
+                    // 上层：接收 / 日志
                     ui.allocate_ui_with_layout(
-                        ui.available_size(),
-                        egui::Layout::bottom_up(egui::Align::Min),
+                        egui::vec2(width, output_h),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            self.dock_stack_ui(ui, DockArea::Bottom);
+                        },
+                    );
+
+                    ui.separator();
+
+                    // 中层：发送器
+                    if sender_h > 0.0 {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(width, sender_h),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                self.send_bar(ui);
+                            },
+                        );
+                        ui.separator();
+                    }
+
+                    // 底层：状态栏
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(width, status_h),
+                        egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
                             self.status_bar(ui);
-                            ui.separator();
-
-                            // 下层：发送器（固定区域）
-                            if self.panels.dock.bottom_sender_visible
-                                && !self.send.popup_open
-                            {
-                                let sender_h = self
-                                    .panels
-                                    .dock
-                                    .bottom_sender_height
-                                    .clamp(72.0, total_height * 0.45);
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(ui.available_width(), sender_h),
-                                    egui::Layout::top_down(egui::Align::Min),
-                                    |ui| {
-                                        self.send_bar(ui);
-                                    },
-                                );
-                                ui.separator();
-                            }
-
-                            // 上层：接收/日志/图表的 DockStack
-                            let remain_h = ui.available_height().max(80.0);
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(ui.available_width(), remain_h),
-                                egui::Layout::top_down(egui::Align::Min),
-                                |ui| {
-                                    self.dock_stack_ui(ui, DockArea::Bottom);
-                                },
-                            );
                         },
                     );
                 });
 
             self.bottom_dock_rect = Some(shown.response.rect);
-            self.panels.dock.bottom_size = shown.response.rect.height().max(BOTTOM_PANEL_MIN);
-            // 同步发送器区域高度
-            if self.panels.dock.bottom_sender_visible {
-                self.panels.dock.bottom_sender_height =
-                    (shown.response.rect.height() * 0.25).clamp(72.0, 200.0);
+            // 保存高度（仅变化>1px时，避免干扰拖拽）
+            let h = shown.response.rect.height();
+            if (h - self.panels.dock.bottom_size).abs() > 1.0 {
+                self.panels.dock.bottom_size = h.max(BOTTOM_PANEL_MIN);
             }
         }
         //中心面板
