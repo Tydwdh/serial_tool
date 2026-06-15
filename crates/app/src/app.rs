@@ -143,6 +143,7 @@ impl WorkbenchApp {
             .map(|c| c.panels.clone())
             .unwrap_or_default();
         rp.discard_dynamic_tabs();
+        rp.dock.normalize_tool_layout();
         let mut send = SendUiState::default();
         if let Some(cfg) = config.as_ref() {
             send.send_history = cfg

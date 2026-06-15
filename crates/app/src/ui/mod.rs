@@ -88,6 +88,11 @@ impl WorkbenchApp {
 
             self.bottom_dock_rect = Some(shown.response.rect);
             self.panels.dock.bottom_size = shown.response.rect.height().max(BOTTOM_PANEL_MIN);
+            // 同步发送器区域高度
+            if self.panels.dock.bottom_sender_visible {
+                self.panels.dock.bottom_sender_height =
+                    (shown.response.rect.height() * 0.25).clamp(72.0, 200.0);
+            }
         }
         //中心面板
         egui::CentralPanel::default()
