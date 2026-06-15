@@ -101,12 +101,20 @@ impl WorkbenchApp {
                 }
             }
 
-            if ui.button(if recording { "停止" } else { "录制" }).clicked() {
+            let stopping = self.recorder.is_stopping();
+            if ui
+                .add_enabled(!stopping, egui::Button::new(if recording { "停止" } else { "录制" }))
+                .on_disabled_hover_text("正在停止中...")
+                .clicked()
+            {
                 self.start_or_stop_recording();
             }
             if recording {
                 let paused = self.recorder.is_paused();
-                if ui.button(if paused { "继续" } else { "暂停" }).clicked() {
+                if ui
+                    .add_enabled(!stopping, egui::Button::new(if paused { "继续" } else { "暂停" }))
+                    .on_disabled_hover_text("正在停止中...")
+                    .clicked() {
                     if paused {
                         self.recorder.resume();
                     } else {
