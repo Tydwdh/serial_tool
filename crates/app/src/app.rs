@@ -190,7 +190,10 @@ impl WorkbenchApp {
             panels: rp.clone(),
             status: StatusState::default(),
             last_port_refresh: 0.0,
-            auto_reconnect: true,
+            auto_reconnect: config
+                .as_ref()
+                .map(|c| c.auto_reconnect)
+                .unwrap_or(true),
             pending_reconnect: None,
             port_aliases: config
                 .as_ref()

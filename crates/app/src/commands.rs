@@ -336,6 +336,7 @@ impl WorkbenchApp {
             send_history: self.send.send_history.iter().cloned().collect(),
             port_profiles: self.port_profiles.clone(),
             recent_workspaces: self.recent_workspaces.clone(),
+            auto_reconnect: self.auto_reconnect,
         };
         let path = config_path();
         // 备份旧文件
@@ -378,6 +379,7 @@ impl WorkbenchApp {
             send_history: self.send.send_history.iter().cloned().collect(),
             port_profiles: self.port_profiles.clone(),
             recent_workspaces: self.recent_workspaces.clone(),
+            auto_reconnect: self.auto_reconnect,
         };
         let t = serde_json::to_string_pretty(&cfg).map_err(|e| format!("序列化失败：{e}"))?;
         std::fs::write(path, t).map_err(|e| format!("写入失败：{e}"))

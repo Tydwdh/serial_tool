@@ -41,6 +41,12 @@ pub(crate) struct PersistedConfig {
     pub(crate) port_profiles: HashMap<String, PortProfile>,
     #[serde(default)]
     pub(crate) recent_workspaces: Vec<String>,
+    #[serde(default = "default_true")]
+    pub(crate) auto_reconnect: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 pub(crate) fn default_activity_order() -> Vec<Activity> {
