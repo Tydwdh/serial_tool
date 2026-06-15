@@ -19,11 +19,11 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT])
             .with_min_inner_size([960.0, 640.0]),
+
+        renderer: eframe::Renderer::Glow,
+        vsync: true,
         persist_window: true,
-        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
-            present_mode: eframe::wgpu::PresentMode::Immediate,
-            ..Default::default()
-        },
+
         ..Default::default()
     };
     eframe::run_native(
