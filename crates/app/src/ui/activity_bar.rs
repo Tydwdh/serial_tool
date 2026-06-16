@@ -84,22 +84,22 @@ impl WorkbenchApp {
             paint_activity_insert_line(ui, &activity_rects, insert_index);
         }
 
-        if self.activity_drag_source.is_some() && ui.input(|i| i.pointer.any_released()) {
-            if let Some(source_index) = self.activity_drag_source.take() {
-                if let Some(mut insert_index) = drag_insert_index {
-                    insert_index = insert_index.min(self.activity_order.len());
+        if self.activity_drag_source.is_some()
+            && ui.input(|i| i.pointer.any_released())
+            && let Some(source_index) = self.activity_drag_source.take()
+            && let Some(mut insert_index) = drag_insert_index
+        {
+            insert_index = insert_index.min(self.activity_order.len());
 
-                    if insert_index > source_index {
-                        insert_index -= 1;
-                    }
+            if insert_index > source_index {
+                insert_index -= 1;
+            }
 
-                    if insert_index != source_index {
-                        let item = self.activity_order.remove(source_index);
-                        let insert_index = insert_index.min(self.activity_order.len());
-                        self.activity_order.insert(insert_index, item);
-                        let _ = self.save_config();
-                    }
-                }
+            if insert_index != source_index {
+                let item = self.activity_order.remove(source_index);
+                let insert_index = insert_index.min(self.activity_order.len());
+                self.activity_order.insert(insert_index, item);
+                let _ = self.save_config();
             }
         }
 
@@ -205,12 +205,12 @@ impl WorkbenchApp {
             paint_vertical_insert_line(ui, &rects, insert_index);
         }
 
-        if self.dynamic_drag_source.is_some() && ui.input(|input| input.pointer.any_released()) {
-            if let Some(source_index) = self.dynamic_drag_source.take() {
-                if let Some(insert_index) = insert_index {
-                    self.reorder_dynamic_tabs(source_index, insert_index);
-                }
-            }
+        if self.dynamic_drag_source.is_some()
+            && ui.input(|input| input.pointer.any_released())
+            && let Some(source_index) = self.dynamic_drag_source.take()
+            && let Some(insert_index) = insert_index
+        {
+            self.reorder_dynamic_tabs(source_index, insert_index);
         }
 
         if self.dynamic_drag_source.is_some() && !ui.input(|input| input.pointer.primary_down()) {
@@ -247,10 +247,10 @@ impl WorkbenchApp {
         let mut dynamic_iter = dynamic_tabs.into_iter();
 
         for kind in &mut self.panels.tabs {
-            if kind.dynamic_id().is_some() {
-                if let Some(next) = dynamic_iter.next() {
-                    *kind = next;
-                }
+            if kind.dynamic_id().is_some()
+                && let Some(next) = dynamic_iter.next()
+            {
+                *kind = next;
             }
         }
 

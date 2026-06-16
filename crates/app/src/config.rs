@@ -62,26 +62,25 @@ pub(crate) fn load_config() -> Option<PersistedConfig> {
     let primary = config_path();
 
     // 尝试读主路径
-    match std::fs::read_to_string(&primary) {
-        Ok(t) => match serde_json::from_str(&t) {
+    if let Ok(t) = std::fs::read_to_string(&primary) {
+        match serde_json::from_str(&t) {
             Ok(cfg) => return Some(cfg),
             Err(e) => {
                 eprintln!("配置解析失败 {}: {e}，尝试降级", primary.display());
             }
-        },
-        Err(_) => {}
+        }
     }
 
     // 从旧路径 (CWD/workspace.json) 迁移
     let legacy = std::env::current_dir().ok()?.join("workspace.json");
-    if let Ok(t) = std::fs::read_to_string(&legacy) {
-        if let Ok(cfg) = serde_json::from_str::<PersistedConfig>(&t) {
-            if let Some(parent) = primary.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::copy(&legacy, &primary);
-            return Some(cfg);
+    if let Ok(t) = std::fs::read_to_string(&legacy)
+        && let Ok(cfg) = serde_json::from_str::<PersistedConfig>(&t)
+    {
+        if let Some(parent) = primary.parent() {
+            let _ = std::fs::create_dir_all(parent);
         }
+        let _ = std::fs::copy(&legacy, &primary);
+        return Some(cfg);
     }
     None
 }

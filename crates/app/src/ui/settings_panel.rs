@@ -22,35 +22,35 @@ impl WorkbenchApp {
                 }
             }
 
-            if ui.button("另存为...").clicked() {
-                if let Some(path) = pick_workspace_save_path() {
-                    match self.save_config_to_path(&path) {
-                        Ok(()) => {
-                            self.add_recent_workspace(&path);
-                            self.set_status_force(
-                                StatusLevel::Info,
-                                format!("工作区已保存: {}", path.display()),
-                            );
-                        }
-                        Err(e) => {
-                            self.set_status_force(StatusLevel::Error, format!("保存失败：{e}"));
-                        }
+            if ui.button("另存为...").clicked()
+                && let Some(path) = pick_workspace_save_path()
+            {
+                match self.save_config_to_path(&path) {
+                    Ok(()) => {
+                        self.add_recent_workspace(&path);
+                        self.set_status_force(
+                            StatusLevel::Info,
+                            format!("工作区已保存: {}", path.display()),
+                        );
+                    }
+                    Err(e) => {
+                        self.set_status_force(StatusLevel::Error, format!("保存失败：{e}"));
                     }
                 }
             }
 
-            if ui.button("打开...").clicked() {
-                if let Some(path) = pick_workspace_open_path() {
-                    match self.load_config_from_path(&path) {
-                        Ok(()) => {
-                            self.set_status_force(
-                                StatusLevel::Info,
-                                format!("工作区已加载: {}", path.display()),
-                            );
-                        }
-                        Err(e) => {
-                            self.set_status_force(StatusLevel::Error, format!("加载失败：{e}"));
-                        }
+            if ui.button("打开...").clicked()
+                && let Some(path) = pick_workspace_open_path()
+            {
+                match self.load_config_from_path(&path) {
+                    Ok(()) => {
+                        self.set_status_force(
+                            StatusLevel::Info,
+                            format!("工作区已加载: {}", path.display()),
+                        );
+                    }
+                    Err(e) => {
+                        self.set_status_force(StatusLevel::Error, format!("加载失败：{e}"));
                     }
                 }
             }
@@ -85,7 +85,12 @@ impl WorkbenchApp {
         if !self.recent_workspaces.is_empty() {
             ui.separator();
             ui.label("最近工作区：");
-            let paths: Vec<(usize, std::path::PathBuf)> = self.recent_workspaces.iter().enumerate().map(|(i, p)| (i, std::path::PathBuf::from(p))).collect();
+            let paths: Vec<(usize, std::path::PathBuf)> = self
+                .recent_workspaces
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (i, std::path::PathBuf::from(p)))
+                .collect();
             let mut to_remove: Option<usize> = None;
             for (i, path) in paths {
                 let path_str = path.display().to_string();
@@ -94,7 +99,10 @@ impl WorkbenchApp {
                         match self.load_config_from_path(&path) {
                             Ok(()) => {
                                 self.apply_loaded_workspace_postprocess();
-                                self.set_status_force(StatusLevel::Info, format!("已加载: {path_str}"));
+                                self.set_status_force(
+                                    StatusLevel::Info,
+                                    format!("已加载: {path_str}"),
+                                );
                             }
                             Err(e) => self.set_status_force(StatusLevel::Error, e),
                         }

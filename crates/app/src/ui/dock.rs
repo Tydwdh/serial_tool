@@ -172,22 +172,20 @@ impl WorkbenchApp {
 
         // 只在“释放在当前 tab bar 上”时处理同区域重排。
         // 不要无条件 take()，否则跨区域 drop overlay 没机会处理。
-        if ui.input(|i| i.pointer.any_released()) {
-            if let Some(kind) = self.dock_dragging_panel.clone() {
-                if self.panels.dock.stack(area).contains(&kind) {
-                    if let Some(insert_index) = insert_index {
-                        self.dock_dragging_panel = None;
+        if ui.input(|i| i.pointer.any_released())
+            && let Some(kind) = self.dock_dragging_panel.clone()
+            && self.panels.dock.stack(area).contains(&kind)
+            && let Some(insert_index) = insert_index
+        {
+            self.dock_dragging_panel = None;
 
-                        if self
-                            .panels
-                            .dock
-                            .stack_mut(area)
-                            .reorder(&kind, insert_index)
-                        {
-                            let _ = self.save_config();
-                        }
-                    }
-                }
+            if self
+                .panels
+                .dock
+                .stack_mut(area)
+                .reorder(&kind, insert_index)
+            {
+                let _ = self.save_config();
             }
         }
     }
@@ -292,10 +290,8 @@ impl WorkbenchApp {
             if let Some(rect) = self.right_dock_rect {
                 paint_real_dock_hover(ctx, rect, "右侧");
             }
-        } else if bottom_hit {
-            if let Some(rect) = self.bottom_dock_rect {
-                paint_real_dock_hover(ctx, rect, "底部");
-            }
+        } else if bottom_hit && let Some(rect) = self.bottom_dock_rect {
+            paint_real_dock_hover(ctx, rect, "底部");
         }
 
         if released {
@@ -314,33 +310,6 @@ impl WorkbenchApp {
             self.dock_dragging_panel = None;
         }
     }
-}
-
-fn paint_drop_target(painter: &egui::Painter, rect: egui::Rect, pointer: egui::Pos2, label: &str) {
-    let hovered = rect.contains(pointer);
-
-    let fill = if hovered {
-        egui::Color32::from_rgba_unmultiplied(80, 140, 220, 80)
-    } else {
-        egui::Color32::from_rgba_unmultiplied(80, 80, 80, 40)
-    };
-
-    let stroke = if hovered {
-        egui::Stroke::new(2.0, egui::Color32::from_rgb(110, 170, 255))
-    } else {
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 120, 120))
-    };
-
-    painter.rect_filled(rect, 8.0, fill);
-    painter.rect_stroke(rect, 8.0, stroke, egui::StrokeKind::Inside);
-
-    painter.text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        label,
-        egui::FontId::proportional(16.0),
-        egui::Color32::WHITE,
-    );
 }
 
 fn horizontal_insert_index_from_pointer(

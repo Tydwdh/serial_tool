@@ -819,173 +819,170 @@ fn process_tasks(
 
     // 先收集需要恢复的 task id
     let mut ready_ids: Vec<String> = Vec::new();
-    for pair in tasks.pairs::<String, Table>() {
-        if let Ok((id, state)) = pair {
-            if state.get::<bool>("finished").unwrap_or(true) {
-                continue;
-            }
+    for (id, state) in tasks.pairs::<String, Table>().flatten() {
+        if state.get::<bool>("finished").unwrap_or(true) {
+            continue;
+        }
 
-            // ── cancelled 优先：打断 sleep/read_line/expect/paused 等一切等待 ──
-            let cancelled: bool = state.get("cancelled").unwrap_or(false);
-            if cancelled {
-                let yield_op: Option<Table> = state.get("yield_op").ok();
-                if let Some(ref op) = yield_op {
-                    let kind: String = op.get("kind").unwrap_or_default();
-                    match kind.as_str() {
-                        "read_line" => {
-                            let _ = state.set("_read_result", Value::Nil);
-                            let _ = state.set(
-                                "_read_result_err",
-                                lua.create_string("cancelled")
-                                    .map(Value::String)
-                                    .unwrap_or(Value::Nil),
-                            );
-                        }
-                        "write_line_and_expect" => {
-                            let _ = state.set("_expect_result", Value::Nil);
-                            let _ = state.set(
-                                "_expect_err",
-                                lua.create_string("cancelled")
-                                    .map(Value::String)
-                                    .unwrap_or(Value::Nil),
-                            );
-                        }
-                        _ => {
-                            // sleep / wait_paused / unknown: 直接恢复
-                        }
-                    }
-                }
-                ready_ids.push(id);
-                continue;
-            }
-
-            // ── 非 cancelled：正常调度 ──
-            let paused: bool = state.get("paused").unwrap_or(false);
-            if paused {
-                continue;
-            }
-
+        // ── cancelled 优先：打断 sleep/read_line/expect/paused 等一切等待 ──
+        let cancelled: bool = state.get("cancelled").unwrap_or(false);
+        if cancelled {
             let yield_op: Option<Table> = state.get("yield_op").ok();
             if let Some(ref op) = yield_op {
                 let kind: String = op.get("kind").unwrap_or_default();
                 match kind.as_str() {
-                    "sleep" => {
-                        let wake_at_ms: u64 = state.get("wake_at_ms").unwrap_or(0);
-                        if now_ms < wake_at_ms {
-                            continue;
-                        }
-                    }
-                    "wait_paused" => {
-                        continue;
-                    }
                     "read_line" => {
-                        let port: String = op.get("port").unwrap_or_default();
-                        let deadline_ms: u64 = op.get("deadline_ms").unwrap_or(0);
-                        if deadline_ms > 0 && now_ms > deadline_ms {
-                            let _ = state.set("_read_result", Value::Nil);
-                            let _ = state.set(
-                                "_read_result_err",
-                                lua.create_string("timeout")
-                                    .map(Value::String)
-                                    .unwrap_or(Value::Nil),
-                            );
-                        } else if let Some(ref map) = host_services.line_buffers {
-                            let key = line_buffer_key(&host_services.plugin_id, &port);
-                            let mut map_lock = map.lock();
-                            if let Some(buffer) = map_lock.get_mut(&key) {
-                                if let Some(line) = buffer.next_line() {
-                                    let _ = state.set(
-                                        "_read_result",
-                                        lua.create_string(&line)
-                                            .map(Value::String)
-                                            .unwrap_or(Value::Nil),
-                                    );
-                                    let _ = state.set("_read_result_err", Value::Nil);
-                                } else {
-                                    continue;
-                                }
-                            } else {
-                                continue;
-                            }
-                        } else {
-                            continue;
-                        }
+                        let _ = state.set("_read_result", Value::Nil);
+                        let _ = state.set(
+                            "_read_result_err",
+                            lua.create_string("cancelled")
+                                .map(Value::String)
+                                .unwrap_or(Value::Nil),
+                        );
                     }
                     "write_line_and_expect" => {
-                        let port: String = op.get("port").unwrap_or_default();
-                        let deadline_ms: u64 = op.get("deadline_ms").unwrap_or(0);
-                        if deadline_ms > 0 && now_ms > deadline_ms {
-                            let _ = state.set("_expect_result", Value::Nil);
-                            let _ = state.set(
-                                "_expect_err",
-                                lua.create_string("timeout")
-                                    .map(Value::String)
-                                    .unwrap_or(Value::Nil),
-                            );
-                        } else if let Some(ref map) = host_services.line_buffers {
-                            let key = line_buffer_key(&host_services.plugin_id, &port);
-                            let mut map_lock = map.lock();
-                            if let Some(buffer) = map_lock.get_mut(&key) {
-                                let mut matched = None;
-                                while let Some(line) = buffer.next_line() {
-                                    let patterns: Option<Table> = op.get("patterns").ok();
-                                    if let Some(ref pts) = patterns {
-                                        for pair in pts.pairs::<Value, Table>().flatten() {
-                                            let p: Table = pair.1;
-                                            let pat: String = p.get("pattern").unwrap_or_default();
-                                            let action: String = p
-                                                .get("action")
-                                                .unwrap_or_else(|_| "return".to_owned());
-                                            let pname: String = p.get("name").unwrap_or_default();
-                                            let hit = match_pat(&line, &pat);
-                                            if hit {
-                                                if action == "continue" {
-                                                    let _ = state.set(
-                                                        "status",
-                                                        format!("设备忙: {pname}: {line}"),
-                                                    );
-                                                    break;
-                                                }
-                                                matched = Some((
-                                                    p.get::<String>("name").unwrap_or_default(),
-                                                    line.clone(),
-                                                ));
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    if matched.is_some() {
-                                        break;
-                                    }
-                                }
-                                if let Some((name, line)) = matched {
-                                    let result = lua.create_table().ok();
-                                    if let Some(ref r) = result {
-                                        let _ = r.set("name", name.as_str());
-                                        let _ = r.set("line", line.as_str());
-                                        let _ = r.set("elapsed_ms", 0_u64);
-                                    }
-                                    let _ = state.set(
-                                        "_expect_result",
-                                        result.map(Value::Table).unwrap_or(Value::Nil),
-                                    );
-                                } else {
-                                    continue;
-                                }
-                            } else {
-                                continue;
-                            }
-                        } else {
-                            continue;
-                        }
+                        let _ = state.set("_expect_result", Value::Nil);
+                        let _ = state.set(
+                            "_expect_err",
+                            lua.create_string("cancelled")
+                                .map(Value::String)
+                                .unwrap_or(Value::Nil),
+                        );
                     }
                     _ => {
-                        continue;
+                        // sleep / wait_paused / unknown: 直接恢复
                     }
                 }
             }
             ready_ids.push(id);
+            continue;
         }
+
+        // ── 非 cancelled：正常调度 ──
+        let paused: bool = state.get("paused").unwrap_or(false);
+        if paused {
+            continue;
+        }
+
+        let yield_op: Option<Table> = state.get("yield_op").ok();
+        if let Some(ref op) = yield_op {
+            let kind: String = op.get("kind").unwrap_or_default();
+            match kind.as_str() {
+                "sleep" => {
+                    let wake_at_ms: u64 = state.get("wake_at_ms").unwrap_or(0);
+                    if now_ms < wake_at_ms {
+                        continue;
+                    }
+                }
+                "wait_paused" => {
+                    continue;
+                }
+                "read_line" => {
+                    let port: String = op.get("port").unwrap_or_default();
+                    let deadline_ms: u64 = op.get("deadline_ms").unwrap_or(0);
+                    if deadline_ms > 0 && now_ms > deadline_ms {
+                        let _ = state.set("_read_result", Value::Nil);
+                        let _ = state.set(
+                            "_read_result_err",
+                            lua.create_string("timeout")
+                                .map(Value::String)
+                                .unwrap_or(Value::Nil),
+                        );
+                    } else if let Some(ref map) = host_services.line_buffers {
+                        let key = line_buffer_key(&host_services.plugin_id, &port);
+                        let mut map_lock = map.lock();
+                        if let Some(buffer) = map_lock.get_mut(&key) {
+                            if let Some(line) = buffer.next_line() {
+                                let _ = state.set(
+                                    "_read_result",
+                                    lua.create_string(&line)
+                                        .map(Value::String)
+                                        .unwrap_or(Value::Nil),
+                                );
+                                let _ = state.set("_read_result_err", Value::Nil);
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                "write_line_and_expect" => {
+                    let port: String = op.get("port").unwrap_or_default();
+                    let deadline_ms: u64 = op.get("deadline_ms").unwrap_or(0);
+                    if deadline_ms > 0 && now_ms > deadline_ms {
+                        let _ = state.set("_expect_result", Value::Nil);
+                        let _ = state.set(
+                            "_expect_err",
+                            lua.create_string("timeout")
+                                .map(Value::String)
+                                .unwrap_or(Value::Nil),
+                        );
+                    } else if let Some(ref map) = host_services.line_buffers {
+                        let key = line_buffer_key(&host_services.plugin_id, &port);
+                        let mut map_lock = map.lock();
+                        if let Some(buffer) = map_lock.get_mut(&key) {
+                            let mut matched = None;
+                            while let Some(line) = buffer.next_line() {
+                                let patterns: Option<Table> = op.get("patterns").ok();
+                                if let Some(ref pts) = patterns {
+                                    for pair in pts.pairs::<Value, Table>().flatten() {
+                                        let p: Table = pair.1;
+                                        let pat: String = p.get("pattern").unwrap_or_default();
+                                        let action: String =
+                                            p.get("action").unwrap_or_else(|_| "return".to_owned());
+                                        let pname: String = p.get("name").unwrap_or_default();
+                                        let hit = match_pat(&line, &pat);
+                                        if hit {
+                                            if action == "continue" {
+                                                let _ = state.set(
+                                                    "status",
+                                                    format!("设备忙: {pname}: {line}"),
+                                                );
+                                                break;
+                                            }
+                                            matched = Some((
+                                                p.get::<String>("name").unwrap_or_default(),
+                                                line.clone(),
+                                            ));
+                                            break;
+                                        }
+                                    }
+                                }
+                                if matched.is_some() {
+                                    break;
+                                }
+                            }
+                            if let Some((name, line)) = matched {
+                                let result = lua.create_table().ok();
+                                if let Some(ref r) = result {
+                                    let _ = r.set("name", name.as_str());
+                                    let _ = r.set("line", line.as_str());
+                                    let _ = r.set("elapsed_ms", 0_u64);
+                                }
+                                let _ = state.set(
+                                    "_expect_result",
+                                    result.map(Value::Table).unwrap_or(Value::Nil),
+                                );
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                _ => {
+                    continue;
+                }
+            }
+        }
+        ready_ids.push(id);
     }
 
     for id in &ready_ids {
@@ -1026,7 +1023,7 @@ fn process_tasks(
             Err(e) => {
                 // CoroutineUnresumable — 记录错误并标记完成
                 let _ = state.set("finished", true);
-                let _ = state.set("last_error", lua.create_string(&e.to_string()).ok());
+                let _ = state.set("last_error", lua.create_string(e.to_string()).ok());
                 _bus.publish(Event::system_log(
                     LogLevel::Error,
                     &_config.source,
@@ -1057,7 +1054,7 @@ fn create_task_methods_table(lua: &Lua) -> mlua::Result<Table> {
     tbl.set(
         "is_cancelled",
         lua.create_function(|lua, task: Table| {
-            let state = get_state_for_task(&lua, &task)?;
+            let state = get_state_for_task(lua, &task)?;
             Ok(state.get::<bool>("cancelled").unwrap_or(false))
         })?,
     )?;
@@ -1066,7 +1063,7 @@ fn create_task_methods_table(lua: &Lua) -> mlua::Result<Table> {
     tbl.set(
         "is_paused",
         lua.create_function(|lua, task: Table| {
-            let state = get_state_for_task(&lua, &task)?;
+            let state = get_state_for_task(lua, &task)?;
             Ok(state.get::<bool>("paused").unwrap_or(false))
         })?,
     )?;
@@ -1075,7 +1072,7 @@ fn create_task_methods_table(lua: &Lua) -> mlua::Result<Table> {
     tbl.set(
         "__sleep_ms_begin",
         lua.create_function(|lua, (task, ms): (Table, u64)| {
-            let state = get_state_for_task(&lua, &task)?;
+            let state = get_state_for_task(lua, &task)?;
             let _ = state.set("wake_at_ms", tool_core::now_timestamp_ms() + ms);
             let op = lua.create_table()?;
             op.set("kind", "sleep")?;
@@ -1089,7 +1086,7 @@ fn create_task_methods_table(lua: &Lua) -> mlua::Result<Table> {
     tbl.set(
         "__wait_if_paused_begin",
         lua.create_function(|lua, task: Table| {
-            let state = get_state_for_task(&lua, &task)?;
+            let state = get_state_for_task(lua, &task)?;
             if !state.get::<bool>("paused").unwrap_or(false) {
                 return Ok(Value::Nil);
             }
@@ -1104,7 +1101,7 @@ fn create_task_methods_table(lua: &Lua) -> mlua::Result<Table> {
     tbl.set(
         "set_progress",
         lua.create_function(|lua, (task, current, total): (Table, u64, u64)| {
-            let state = get_state_for_task(&lua, &task)?;
+            let state = get_state_for_task(lua, &task)?;
             let _ = state.set("progress_current", current);
             let _ = state.set("progress_total", total);
             Ok(())
@@ -1115,7 +1112,7 @@ fn create_task_methods_table(lua: &Lua) -> mlua::Result<Table> {
     tbl.set(
         "set_progress_percent",
         lua.create_function(|lua, (task, percent): (Table, f64)| {
-            let state = get_state_for_task(&lua, &task)?;
+            let state = get_state_for_task(lua, &task)?;
             let _ = state.set("progress_percent", percent.clamp(0.0, 100.0));
             Ok(())
         })?,
@@ -1125,7 +1122,7 @@ fn create_task_methods_table(lua: &Lua) -> mlua::Result<Table> {
     tbl.set(
         "set_status",
         lua.create_function(|lua, (task, text): (Table, String)| {
-            let state = get_state_for_task(&lua, &task)?;
+            let state = get_state_for_task(lua, &task)?;
             let _ = state.set("status", text);
             Ok(())
         })?,
@@ -1135,7 +1132,7 @@ fn create_task_methods_table(lua: &Lua) -> mlua::Result<Table> {
     tbl.set(
         "log",
         lua.create_function(|lua, (task, level, message): (Table, String, String)| {
-            let state = get_state_for_task(&lua, &task)?;
+            let state = get_state_for_task(lua, &task)?;
             let logs: Table = state
                 .get("logs")
                 .unwrap_or_else(|_| lua.create_table().unwrap());
@@ -1354,31 +1351,29 @@ fn create_task_api(
             let tasks: Table = lua.globals().get("__plugin_tasks")?;
             let result = lua.create_table()?;
             let mut idx = 0_u32;
-            for pair in tasks.pairs::<String, Table>() {
-                if let Ok((_id, state)) = pair {
-                    idx += 1;
-                    let summary = lua.create_table()?;
-                    summary.set("id", state.get::<String>("id").unwrap_or_default())?;
-                    summary.set("title", state.get::<String>("title").unwrap_or_default())?;
-                    summary.set("cancelled", state.get::<bool>("cancelled").unwrap_or(false))?;
-                    summary.set("paused", state.get::<bool>("paused").unwrap_or(false))?;
-                    summary.set("finished", state.get::<bool>("finished").unwrap_or(false))?;
-                    summary.set(
-                        "progress_current",
-                        state.get::<u64>("progress_current").unwrap_or(0),
-                    )?;
-                    summary.set(
-                        "progress_total",
-                        state.get::<u64>("progress_total").unwrap_or(0),
-                    )?;
-                    summary.set(
-                        "progress_percent",
-                        state.get::<f64>("progress_percent").unwrap_or(0.0),
-                    )?;
-                    summary.set("status", state.get::<String>("status").unwrap_or_default())?;
-                    summary.set("error", state.get::<String>("error").unwrap_or_default())?;
-                    result.set(idx, summary)?;
-                }
+            for (_id, state) in tasks.pairs::<String, Table>().flatten() {
+                idx += 1;
+                let summary = lua.create_table()?;
+                summary.set("id", state.get::<String>("id").unwrap_or_default())?;
+                summary.set("title", state.get::<String>("title").unwrap_or_default())?;
+                summary.set("cancelled", state.get::<bool>("cancelled").unwrap_or(false))?;
+                summary.set("paused", state.get::<bool>("paused").unwrap_or(false))?;
+                summary.set("finished", state.get::<bool>("finished").unwrap_or(false))?;
+                summary.set(
+                    "progress_current",
+                    state.get::<u64>("progress_current").unwrap_or(0),
+                )?;
+                summary.set(
+                    "progress_total",
+                    state.get::<u64>("progress_total").unwrap_or(0),
+                )?;
+                summary.set(
+                    "progress_percent",
+                    state.get::<f64>("progress_percent").unwrap_or(0.0),
+                )?;
+                summary.set("status", state.get::<String>("status").unwrap_or_default())?;
+                summary.set("error", state.get::<String>("error").unwrap_or_default())?;
+                result.set(idx, summary)?;
             }
             Ok(Value::Table(result))
         })?,
@@ -1395,12 +1390,10 @@ fn cancel_all_tasks(lua: &Lua, bus: &DataBus, config: &LuaRunConfig) {
     };
 
     let mut task_ids: Vec<String> = Vec::new();
-    for pair in tasks.pairs::<String, Table>() {
-        if let Ok((id, state)) = pair {
-            let _ = state.set("cancelled", true);
-            let _ = state.set("paused", false);
-            task_ids.push(id);
-        }
+    for (id, state) in tasks.pairs::<String, Table>().flatten() {
+        let _ = state.set("cancelled", true);
+        let _ = state.set("paused", false);
+        task_ids.push(id);
     }
 
     // 唤醒所有 task coroutine 让它们发现 cancelled
@@ -1921,10 +1914,10 @@ fn create_serial_api(
                 let deadline = Instant::now() + Duration::from_millis(timeout_ms.unwrap_or(1_000));
 
                 loop {
-                    if let Some(ref stop) = expect_from_stop {
-                        if stop.load(Ordering::Relaxed) {
-                            return Ok(Value::Nil);
-                        }
+                    if let Some(ref stop) = expect_from_stop
+                        && stop.load(Ordering::Relaxed)
+                    {
+                        return Ok(Value::Nil);
                     }
                     let now = Instant::now();
                     if now >= deadline {
@@ -1976,11 +1969,10 @@ fn create_serial_api(
             let deadline = Instant::now() + Duration::from_millis(timeout_ms.unwrap_or(1_000));
 
             loop {
-                if let Some(ref stop) = expect_stop {
-                    if stop.load(Ordering::Relaxed) {
+                if let Some(ref stop) = expect_stop
+                    && stop.load(Ordering::Relaxed) {
                         return Ok(Value::Nil);
                     }
-                }
 
                 let now = Instant::now();
 
@@ -2031,10 +2023,10 @@ fn create_serial_api(
 
             // 3. 匹配响应
             loop {
-                if let Some(ref stop) = rq_stop {
-                    if stop.load(Ordering::Relaxed) {
-                        return Ok(Value::Nil);
-                    }
+                if let Some(ref stop) = rq_stop
+                    && stop.load(Ordering::Relaxed)
+                {
+                    return Ok(Value::Nil);
                 }
                 let now = Instant::now();
                 if now >= deadline {
@@ -2124,16 +2116,16 @@ fn create_serial_api(
 
             // 先检查行缓冲区是否已有数据
             let key = line_buffer_key(&pid_read, &port);
-            if let Some(ref map) = lb_read {
-                if let Some(line) = map.lock().get_mut(&key).and_then(|b| b.next_line()) {
-                    let result = lua.create_table()?;
-                    result.set("line", lua.create_string(&line)?)?;
-                    result.set("err", Value::Nil)?;
-                    let ready = lua.create_table()?;
-                    ready.set("__ready", true)?;
-                    ready.set("value", result)?;
-                    return Ok(Value::Table(ready));
-                }
+            if let Some(ref map) = lb_read
+                && let Some(line) = map.lock().get_mut(&key).and_then(|b| b.next_line())
+            {
+                let result = lua.create_table()?;
+                result.set("line", lua.create_string(&line)?)?;
+                result.set("err", Value::Nil)?;
+                let ready = lua.create_table()?;
+                ready.set("__ready", true)?;
+                ready.set("value", result)?;
+                return Ok(Value::Table(ready));
             }
 
             // 无数据，返回 yield op，由 Lua wrapper 执行 coroutine.yield。
@@ -2523,10 +2515,10 @@ fn create_dialog_api(
 
             // 100ms 轮询，支持插件停止时及时返回
             let result = loop {
-                if let Some(ref stop) = stop_flag {
-                    if stop.load(Ordering::Relaxed) {
-                        break None;
-                    }
+                if let Some(ref stop) = stop_flag
+                    && stop.load(Ordering::Relaxed)
+                {
+                    break None;
                 }
                 match response_receiver.recv_timeout(Duration::from_millis(100)) {
                     Ok(Some(path)) => {
@@ -2707,7 +2699,7 @@ fn create_config_api(lua: &Lua, store: Arc<ConfigStore>, plugin_id: String) -> m
         lua.create_function(move |lua, (key, default): (String, Value)| {
             let default_json = lua_value_to_json(default).unwrap_or(serde_json::Value::Null);
             let value = store_get.get(&pid_get, &key, default_json);
-            json_to_lua_value(&lua, &value)
+            json_to_lua_value(lua, &value)
         })?,
     )?;
 
@@ -2775,7 +2767,7 @@ fn create_config_api(lua: &Lua, store: Arc<ConfigStore>, plugin_id: String) -> m
         "profile_load",
         lua.create_function(move |lua, name: String| {
             match store_pload.profile_load(&pid_pload, &name) {
-                Some(data) => json_to_lua_value(&lua, &data),
+                Some(data) => json_to_lua_value(lua, &data),
                 None => Ok(Value::Nil),
             }
         })?,
@@ -3399,10 +3391,10 @@ fn wait_for_event(
     let deadline = Instant::now() + Duration::from_millis(timeout_ms.unwrap_or(1_000));
 
     loop {
-        if let Some(ref stop) = stop_flag {
-            if stop.load(Ordering::Relaxed) {
-                return Ok(Value::Nil);
-            }
+        if let Some(ref stop) = stop_flag
+            && stop.load(Ordering::Relaxed)
+        {
+            return Ok(Value::Nil);
         }
         let now = Instant::now();
         if now >= deadline {
@@ -4276,7 +4268,8 @@ end
             Payload::Text("test".to_owned()),
         );
 
-        let output = run_replay_analyzer(source.to_owned(), config, &[input.clone()]).unwrap();
+        let output =
+            run_replay_analyzer(source.to_owned(), config, std::slice::from_ref(&input)).unwrap();
         assert_eq!(output.events.len(), 1);
 
         let derived = &output.events[0];

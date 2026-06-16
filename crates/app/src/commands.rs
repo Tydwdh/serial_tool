@@ -136,51 +136,49 @@ impl WorkbenchApp {
                 // 自动重连：使用完整配置快照，带 backoff 和最大尝试次数
                 if self.auto_reconnect {
                     let pending = self.pending_reconnect.clone();
-                    if let Some(mut pending) = pending {
-                        if new_names.contains(&pending.port_name) {
-                            let now = now_timestamp_ms() as f64 / 1000.0;
-                            if now < pending.next_try_at {
-                                // cooldown not expired, keep waiting
-                            } else {
-                                if pending.attempts >= 10 {
-                                    self.set_status(
-                                        StatusLevel::Error,
+                    if let Some(mut pending) = pending
+                        && new_names.contains(&pending.port_name)
+                    {
+                        let now = now_timestamp_ms() as f64 / 1000.0;
+                        if now < pending.next_try_at {
+                            // cooldown not expired, keep waiting
+                        } else if pending.attempts >= 10 {
+                            self.set_status(
+                                StatusLevel::Error,
+                                format!(
+                                    "自动重连 {} 失败，已达最大尝试次数，放弃",
+                                    pending.port_name
+                                ),
+                            );
+                            self.pending_reconnect = None;
+                        } else {
+                            pending.attempts += 1;
+                            let backoff_ms = (2u64.pow(pending.attempts) * 100).min(30_000);
+                            pending.next_try_at = now + backoff_ms as f64 / 1000.0;
+
+                            match self.transport.open_serial(pending.config.clone()) {
+                                Ok(()) => {
+                                    self.selected_port = Some(pending.port_name.clone());
+                                    self.pending_reconnect = None;
+                                    self.set_status_force(
+                                        StatusLevel::Info,
+                                        format!("已自动重连 {}", pending.port_name),
+                                    );
+                                }
+                                Err(e) => {
+                                    self.set_status_force(
+                                        StatusLevel::Warn,
                                         format!(
-                                            "自动重连 {} 失败，已达最大尝试次数，放弃",
-                                            pending.port_name
+                                            "自动重连 {} 失败 (第 {} 次): {e}",
+                                            pending.port_name, pending.attempts
                                         ),
                                     );
-                                    self.pending_reconnect = None;
-                                } else {
-                                    pending.attempts += 1;
-                                    let backoff_ms = (2u64.pow(pending.attempts) * 100).min(30_000);
-                                    pending.next_try_at = now + backoff_ms as f64 / 1000.0;
-
-                                    match self.transport.open_serial(pending.config.clone()) {
-                                        Ok(()) => {
-                                            self.selected_port = Some(pending.port_name.clone());
-                                            self.pending_reconnect = None;
-                                            self.set_status_force(
-                                                StatusLevel::Info,
-                                                format!("已自动重连 {}", pending.port_name),
-                                            );
-                                        }
-                                        Err(e) => {
-                                            self.set_status_force(
-                                                StatusLevel::Warn,
-                                                format!(
-                                                    "自动重连 {} 失败 (第 {} 次): {e}",
-                                                    pending.port_name, pending.attempts
-                                                ),
-                                            );
-                                            self.pending_reconnect = Some(pending);
-                                        }
-                                    }
+                                    self.pending_reconnect = Some(pending);
                                 }
                             }
                         }
-                        // else: port not yet reappeared, keep waiting
                     }
+                    // else: port not yet reappeared, keep waiting
                 }
 
                 if show_status {

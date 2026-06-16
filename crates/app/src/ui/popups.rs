@@ -283,7 +283,7 @@ impl WorkbenchApp {
                 } else {
                     self.log(
                         LogLevel::Warn,
-                        &format!("file 字段 {panel_id}/{field_id} 没有 owner plugin，跳过授权"),
+                        format!("file 字段 {panel_id}/{field_id} 没有 owner plugin，跳过授权"),
                     );
                 }
 

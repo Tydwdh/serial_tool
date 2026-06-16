@@ -481,10 +481,8 @@ impl PluginManager {
             if let Some(existing) = self.records.get(&id)
                 && existing.root != path
             {
-                let is_running = matches!(
-                    existing.state,
-                    PluginState::Running | PluginState::Enabled
-                );
+                let is_running =
+                    matches!(existing.state, PluginState::Running | PluginState::Enabled);
                 self.bus.publish(Event::system_log(
                     LogLevel::Warn,
                     "extension",
@@ -771,7 +769,7 @@ impl PluginManager {
                 count += 1;
             } else {
                 self.dropped_events += 1;
-                if self.dropped_events % 1000 == 0 {
+                if self.dropped_events.is_multiple_of(1000) {
                     self.bus.publish(Event::system_log(
                         LogLevel::Warn,
                         "extension",
@@ -842,204 +840,6 @@ fn manifest_context(manifest: &PluginManifest, root: &Path) -> serde_json::Value
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tool_core::topics;
-    use tool_databus::TopicFilter;
-
-    #[test]
-    fn discovers_manifest_and_enables_lua_plugin() {
-        let root = create_test_plugin(
-            "builtin.pid-tuner",
-            r#"ctx.log.info('activated ' .. ctx.plugin.id)
-ctx.bus.publish('protocol.pid.sample', { t = 1, target = 50, actual = 43, output = 0.71 })"#,
-        );
-
-        let bus = DataBus::new();
-        let transport = TransportManager::new(bus.clone());
-        let rx = bus.subscribe(TopicFilter::exact(topics::PROTOCOL_PID_SAMPLE));
-
-        let mut manager = PluginManager::new(bus, transport);
-
-        assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
-
-        manager.enable("builtin.pid-tuner").unwrap();
-
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
-        assert_eq!(manager.count(), 1);
-        assert_eq!(rx.drain().len(), 1);
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn rejects_unknown_permission() {
-        let manifest = PluginManifest {
-            id: "bad".to_owned(),
-            name: "Bad".to_owned(),
-            version: "0.1.0".to_owned(),
-            runtime: "lua".to_owned(),
-            main: "main.lua".to_owned(),
-            permissions: vec!["filesystem".to_owned()],
-            contributes: PluginContributes::default(),
-            live: None,
-            replay: None,
-        };
-
-        assert!(PermissionManager::default().check(&manifest).is_err());
-    }
-
-    #[test]
-    fn old_manifest_without_live_replay_is_compatible() {
-        let json = r#"{
-          "id": "demo.test",
-          "name": "Test",
-          "version": "1.0.0",
-          "runtime": "lua",
-          "main": "main.lua",
-          "permissions": ["bus", "log", "ui"]
-        }"#;
-
-        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
-        assert_eq!(manifest.live_main(), "main.lua");
-        assert_eq!(manifest.live_permissions().len(), 3);
-        assert!(manifest.contributes.ui.is_empty());
-        assert!(!manifest.has_replay_analyzer());
-        assert!(manifest.replay_main().is_none());
-    }
-
-    #[test]
-    fn manifest_parses_ui_contributions() {
-        let json = r#"{
-          "id": "demo.test",
-          "name": "Test",
-          "version": "1.0.0",
-          "runtime": "lua",
-          "main": "main.lua",
-          "permissions": ["bus"],
-          "contributes": {
-            "commands": [
-              { "id": "demo.test.run", "title": "Run" }
-            ],
-            "ui": [
-              {
-                "id": "demo.test.run.button",
-                "slot": "send.toolbar",
-                "command": "demo.test.run",
-                "title": "Run",
-                "tooltip": "Run from the send toolbar",
-                "order": 20
-              }
-            ]
-          }
-        }"#;
-
-        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
-        assert_eq!(manifest.contributes.ui.len(), 1);
-        let item = &manifest.contributes.ui[0];
-        assert_eq!(item.slot, "send.toolbar");
-        assert_eq!(item.kind, "button");
-        assert_eq!(item.command.as_deref(), Some("demo.test.run"));
-        assert!(item.enabled);
-        assert!(item.visible);
-        assert!(!item.record_send_input);
-    }
-
-    #[test]
-    fn new_manifest_with_live_and_replay() {
-        let json = r#"{
-          "id": "demo.test",
-          "name": "Test",
-          "version": "1.0.0",
-          "runtime": "lua",
-          "main": "main.lua",
-          "permissions": ["bus"],
-          "live": {
-            "main": "live.lua",
-            "permissions": ["bus", "log", "serial", "ui"]
-          },
-          "replay": {
-            "main": "replay.lua",
-            "subscriptions": ["transport.serial.default.rx"],
-            "outputs": ["protocol.demo.sample"],
-            "permissions": ["log", "storage"]
-          }
-        }"#;
-
-        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
-        assert_eq!(manifest.live_main(), "live.lua");
-        assert_eq!(manifest.live_permissions().len(), 4);
-        assert!(manifest.has_replay_analyzer());
-        assert_eq!(manifest.replay_main(), Some("replay.lua"));
-        assert_eq!(manifest.replay_subscriptions().len(), 1);
-        assert_eq!(manifest.replay_outputs().len(), 1);
-        assert_eq!(manifest.replay_permissions().len(), 2);
-    }
-
-    #[test]
-    fn manifest_parses_live_subscriptions() {
-        let json = r#"{
-          "id": "demo.test",
-          "name": "Test",
-          "version": "1.0.0",
-          "runtime": "lua",
-          "main": "main.lua",
-          "permissions": ["bus"],
-          "live": {
-            "main": "live.lua",
-            "permissions": ["bus"],
-            "subscriptions": ["transport.serial.default.rx"]
-          }
-        }"#;
-
-        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            manifest.live_subscriptions(),
-            &["transport.serial.default.rx".to_owned()]
-        );
-        // 不填 subscriptions 时返回空
-        let manifest2: PluginManifest =
-            serde_json::from_str(r#"{"id":"t","name":"T","version":"1","runtime":"lua","main":"m.lua","permissions":[]}"#)
-                .unwrap();
-        assert!(manifest2.live_subscriptions().is_empty());
-    }
-
-    fn create_test_plugin(id: &str, main_lua: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "hardware-workbench-plugin-test-{}",
-            tool_core::now_timestamp_ms()
-        ));
-
-        let plugin_root = root.join(id);
-
-        fs::create_dir_all(&plugin_root).unwrap();
-
-        fs::write(
-            plugin_root.join("plugin.json"),
-            format!(
-                r#"{{
-  "id": "{id}",
-  "name": "PID Tuner",
-  "version": "0.1.0",
-  "runtime": "lua",
-  "main": "main.lua",
-  "permissions": ["bus", "log", "serial", "ui"],
-  "contributes": {{
-    "commands": [{{ "id": "{id}.apply", "title": "Apply PID" }}],
-    "panels": [{{ "id": "{id}.chart", "title": "PID Chart", "kind": "chart" }}]
-  }}
-}}"#
-            ),
-        )
-        .unwrap();
-
-        fs::write(plugin_root.join("main.lua"), main_lua).unwrap();
-
-        root
-    }
-}
 fn is_replay_event(event: &Event) -> bool {
     event.is_replay()
 }

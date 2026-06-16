@@ -95,10 +95,9 @@ impl WorkbenchApp {
                     "选择录制保存路径"
                 })
                 .clicked()
+                && let Some(path) = pick_recorder_path(&self.recorder_path)
             {
-                if let Some(path) = pick_recorder_path(&self.recorder_path) {
-                    self.recorder_path = path.display().to_string();
-                }
+                self.recorder_path = path.display().to_string();
             }
 
             let stopping = self.recorder.is_stopping();
@@ -173,7 +172,7 @@ impl WorkbenchApp {
                 ui.label(format!("flush {} ms 前", stats.last_flush_elapsed_ms));
             });
 
-            if let Some(ref path) = self.recorder.current_path() {
+            if let Some(path) = self.recorder.current_path() {
                 ui.label(format!("路径：{}", path.display()));
             }
             if let Some(ref error) = stats.last_error {
@@ -184,17 +183,17 @@ impl WorkbenchApp {
         ui.separator();
 
         ui.checkbox(&mut self.auto_reconnect, "串口拔出后自动重连");
-        if self.auto_reconnect {
-            if let Some(ref pending) = self.pending_reconnect {
-                let now = tool_core::now_timestamp_ms() as f64 / 1000.0;
-                let remaining = (pending.next_try_at - now).max(0.0);
-                ui.label(format!(
-                    "等待 {} {:2.1}s 后重试 (第 {}/10 次)",
-                    pending.port_name,
-                    remaining,
-                    pending.attempts + 1
-                ));
-            }
+        if self.auto_reconnect
+            && let Some(ref pending) = self.pending_reconnect
+        {
+            let now = tool_core::now_timestamp_ms() as f64 / 1000.0;
+            let remaining = (pending.next_try_at - now).max(0.0);
+            ui.label(format!(
+                "等待 {} {:2.1}s 后重试 (第 {}/10 次)",
+                pending.port_name,
+                remaining,
+                pending.attempts + 1
+            ));
         }
 
         ui.separator();
@@ -214,7 +213,7 @@ impl WorkbenchApp {
                     let open = self.transport.status_port(&name).open;
                     ui.label(if open { "●" } else { "○" });
                     ui.monospace(&name);
-                    ui.label(format!("{}", port.port_type));
+                    ui.label(port.port_type.to_string());
 
                     ui.label("别名");
                     let resp = ui.add(

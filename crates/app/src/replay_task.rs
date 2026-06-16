@@ -10,12 +10,11 @@ impl WorkbenchApp {
     pub(crate) fn launch_replay_analyzer_background(&mut self) {
         self.replay_panel.want_run_analyzers = false;
 
-        if let Some(ref job) = self.replay_analyzer_job {
-            if !job.handle.is_finished() {
+        if let Some(ref job) = self.replay_analyzer_job
+            && !job.handle.is_finished() {
                 self.set_status(StatusLevel::Warn, "回放：analyzer 正在运行中，请等待完成");
                 return;
             }
-        }
 
         let entries = self.plugin_manager.replay_analyzer_entries();
         if entries.is_empty() {

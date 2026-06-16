@@ -164,10 +164,10 @@ impl ConfigStore {
         self.ensure_loaded(plugin_id);
         {
             let mut cache = self.cache.lock();
-            if let Some(obj) = cache.get_mut(plugin_id).and_then(|v| v.as_object_mut()) {
-                if let Some(profiles) = obj.get_mut("$profiles").and_then(|v| v.as_object_mut()) {
-                    profiles.remove(name);
-                }
+            if let Some(obj) = cache.get_mut(plugin_id).and_then(|v| v.as_object_mut())
+                && let Some(profiles) = obj.get_mut("$profiles").and_then(|v| v.as_object_mut())
+            {
+                profiles.remove(name);
             }
         }
         self.write(plugin_id)

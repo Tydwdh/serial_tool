@@ -135,10 +135,10 @@ impl WorkbenchApp {
                     &self.port_aliases,
                 );
                 // 端口切换时：保存旧配置、恢复新配置
-                if self.selected_port != before {
-                    if let Some(ref new) = self.selected_port.clone() {
-                        self.switch_port_selection(new);
-                    }
+                if self.selected_port != before
+                    && let Some(ref new) = self.selected_port.clone()
+                {
+                    self.switch_port_selection(new);
                 }
                 let selected_open = self
                     .selected_port
@@ -153,11 +153,11 @@ impl WorkbenchApp {
                     self.open_selected_port();
                 }
 
-                if serial_action_button_enabled(ui, selected_open, "关闭").clicked() {
-                    if let Some(ref port) = self.selected_port {
-                        self.transport.close_port(port);
-                        self.set_status(StatusLevel::Info, format!("{port} 已关闭"));
-                    }
+                if serial_action_button_enabled(ui, selected_open, "关闭").clicked()
+                    && let Some(ref port) = self.selected_port
+                {
+                    self.transport.close_port(port);
+                    self.set_status(StatusLevel::Info, format!("{port} 已关闭"));
                 }
             } else if so {
                 // 折叠时显示当前配置摘要

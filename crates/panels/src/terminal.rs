@@ -155,11 +155,10 @@ impl TerminalPanel {
     pub fn export_visible_csv(&self) -> String {
         let mut out = String::from("time,port,direction,text,hex\n");
         for (port, data) in &self.ports {
-            if let Some(ref filter) = self.port_filter {
-                if filter != port {
+            if let Some(ref filter) = self.port_filter
+                && filter != port {
                     continue;
                 }
-            }
             for entry in &data.entries {
                 if !entry_visible(entry.direction, self.show_rx, self.show_tx) {
                     continue;
@@ -189,11 +188,10 @@ impl TerminalPanel {
     pub fn export_visible_jsonl(&self) -> String {
         let mut out = String::new();
         for (port, data) in &self.ports {
-            if let Some(ref filter) = self.port_filter {
-                if filter != port {
+            if let Some(ref filter) = self.port_filter
+                && filter != port {
                     continue;
                 }
-            }
             for entry in &data.entries {
                 if !entry_visible(entry.direction, self.show_rx, self.show_tx) {
                     continue;
@@ -365,11 +363,10 @@ impl TerminalPanel {
             let mut rows: Vec<VisibleRow<'_>> = Vec::new();
 
             for (port, data) in &self.ports {
-                if let Some(filter_port) = &self.port_filter {
-                    if filter_port != port {
+                if let Some(filter_port) = &self.port_filter
+                    && filter_port != port {
                         continue;
                     }
-                }
 
                 for entry in data
                     .entries

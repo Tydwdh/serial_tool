@@ -161,11 +161,9 @@ fn create_utils_table(lua: &Lua, (): ()) -> mlua::Result<Value> {
         lua.create_function(|lua, t: Table| {
             let arr = lua.create_table()?;
             let mut i = 0;
-            for pair in t.pairs::<Value, Value>() {
-                if let Ok((key, _)) = pair {
-                    i += 1;
-                    arr.set(i, key)?;
-                }
+            for (key, _) in t.pairs::<Value, Value>().flatten() {
+                i += 1;
+                arr.set(i, key)?;
             }
             Ok(Value::Table(arr))
         })?,

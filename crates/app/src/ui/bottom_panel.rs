@@ -53,241 +53,240 @@ impl WorkbenchApp {
             });
     }
 
-    pub(crate) fn send_bar(&mut self, ui: &mut egui::Ui) {
-        self.ensure_send_target_port();
-        let send_port_open = self.send_target_port_open();
+    // pub(crate) fn send_bar(&mut self, ui: &mut egui::Ui) {
+    //     self.ensure_send_target_port();
+    //     let send_port_open = self.send_target_port_open();
 
-        ui.horizontal(|ui| {
-            ui.label("发送到");
-            self.send_target_port_combo(ui, "send-target-port");
+    //     ui.horizontal(|ui| {
+    //         ui.label("发送到");
+    //         self.send_target_port_combo(ui, "send-target-port");
 
-            ui.radio_value(&mut self.send.hex_mode, false, "文本");
-            ui.radio_value(&mut self.send.hex_mode, true, "HEX");
-            if self.send.hex_mode {
-                ui.checkbox(&mut self.send.hex_strict, "严格")
-                    .on_hover_text("严格模式：奇数 HEX 长度报错而非自动补0");
-            }
+    //         ui.radio_value(&mut self.send.hex_mode, false, "文本");
+    //         ui.radio_value(&mut self.send.hex_mode, true, "HEX");
+    //         if self.send.hex_mode {
+    //             ui.checkbox(&mut self.send.hex_strict, "严格")
+    //                 .on_hover_text("严格模式：奇数 HEX 长度报错而非自动补0");
+    //         }
 
-            ui.add_enabled_ui(!self.send.hex_mode, |ui| {
-                egui::ComboBox::from_id_salt("line-ending")
-                    .width(60.0)
-                    .selected_text(self.send.line_ending.label())
-                    .show_ui(ui, |ui| {
-                        for &le in LineEnding::ALL.iter() {
-                            ui.selectable_value(&mut self.send.line_ending, le, le.label());
-                        }
-                    });
-            });
+    //         ui.add_enabled_ui(!self.send.hex_mode, |ui| {
+    //             egui::ComboBox::from_id_salt("line-ending")
+    //                 .width(60.0)
+    //                 .selected_text(self.send.line_ending.label())
+    //                 .show_ui(ui, |ui| {
+    //                     for &le in LineEnding::ALL.iter() {
+    //                         ui.selectable_value(&mut self.send.line_ending, le, le.label());
+    //                     }
+    //                 });
+    //         });
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("⛶").on_hover_text("放大编辑").clicked() {
-                    self.send.popup_open = true;
-                }
-            });
-        });
+    //         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+    //             if ui.small_button("⛶").on_hover_text("放大编辑").clicked() {
+    //                 self.send.popup_open = true;
+    //             }
+    //         });
+    //     });
 
-        let text_edit_resp = ui.add(
-            egui::TextEdit::multiline(&mut self.send.input)
-                .desired_width(f32::INFINITY)
-                .desired_rows(5)
-                .hint_text(if send_port_open {
-                    "Ctrl+Enter 发送 | ⛶ 放大编辑"
-                } else {
-                    "请选择已打开的串口"
-                }),
-        );
-        if text_edit_resp.changed() {
-            self.send.periodic_send_count = 0;
-        }
+    //     let text_edit_resp = ui.add(
+    //         egui::TextEdit::multiline(&mut self.send.input)
+    //             .desired_width(f32::INFINITY)
+    //             .desired_rows(5)
+    //             .hint_text(if send_port_open {
+    //                 "Ctrl+Enter 发送 | ⛶ 放大编辑"
+    //             } else {
+    //                 "请选择已打开的串口"
+    //             }),
+    //     );
+    //     if text_edit_resp.changed() {
+    //         self.send.periodic_send_count = 0;
+    //     }
 
-        let ctrl_enter = text_edit_resp.has_focus()
-            && ui
-                .ctx()
-                .input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter));
+    //     let ctrl_enter = text_edit_resp.has_focus()
+    //         && ui
+    //             .ctx()
+    //             .input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter));
 
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    send_port_open && !self.send.input.is_empty(),
-                    egui::Button::new("发送"),
-                )
-                .clicked()
-                || (ctrl_enter && send_port_open && !self.send.input.is_empty())
-            {
-                self.do_send();
-            }
+    //     ui.horizontal(|ui| {
+    //         if ui
+    //             .add_enabled(
+    //                 send_port_open && !self.send.input.is_empty(),
+    //                 egui::Button::new("发送"),
+    //             )
+    //             .clicked()
+    //             || (ctrl_enter && send_port_open && !self.send.input.is_empty())
+    //         {
+    //             self.do_send();
+    //         }
 
-            if ui.button("清空").clicked() {
-                self.send.input.clear();
-                self.send.error = None;
-                self.send.periodic_send_count = 0;
-            }
+    //         if ui.button("清空").clicked() {
+    //             self.send.input.clear();
+    //             self.send.error = None;
+    //             self.send.periodic_send_count = 0;
+    //         }
 
-            self.ui_contribution_slot(ui, "send.toolbar");
+    //         self.ui_contribution_slot(ui, "send.toolbar");
 
-            if !send_port_open {
-                ui.colored_label(theme::YELLOW, "\u{26a0} 请先选择并打开串口");
-            }
+    //         if !send_port_open {
+    //             ui.colored_label(theme::YELLOW, "\u{26a0} 请先选择并打开串口");
+    //         }
 
-            if let Some(e) = &self.send.error {
-                ui.colored_label(theme::RED, translate_error(e));
-            }
-            if self.send.hex_mode && !self.send.input.trim().is_empty() {
-                let preview = hex_preview(&self.send.input);
-                ui.label(
-                    egui::RichText::new(format!("HEX 预览: {preview}"))
-                        .color(theme::TEXT_SECONDARY)
-                        .monospace(),
-                );
-            }
-        });
+    //         if let Some(e) = &self.send.error {
+    //             ui.colored_label(theme::RED, translate_error(e));
+    //         }
+    //         if self.send.hex_mode && !self.send.input.trim().is_empty() {
+    //             let preview = hex_preview(&self.send.input);
+    //             ui.label(
+    //                 egui::RichText::new(format!("HEX 预览: {preview}"))
+    //                     .color(theme::TEXT_SECONDARY)
+    //                     .monospace(),
+    //             );
+    //         }
+    //     });
 
-        ui.horizontal(|ui| {
-            if ui
-                .checkbox(&mut self.send.periodic_enabled, "周期发送")
-                .changed()
-            {
-                if self.send.periodic_enabled {
-                    // 开启前预检
-                    let mut disable = false;
-                    if !self.send_target_port_open() {
-                        self.send.error = Some("请先选择并打开目标串口".into());
-                        disable = true;
-                    } else if self.send.input.trim().is_empty() {
-                        self.send.error = Some("请先输入发送内容".into());
-                        disable = true;
-                    } else if self.send.hex_mode {
-                        let interval = self
-                            .send
-                            .periodic_interval_ms
-                            .trim()
-                            .parse::<u64>()
-                            .unwrap_or(0);
-                        if interval < 10 {
-                            self.send.error = Some("周期发送间隔必须 >= 10ms".into());
-                            disable = true;
-                        }
-                    }
-                    if disable {
-                        self.send.periodic_enabled = false;
-                    } else {
-                        self.send.periodic_send_count = 0;
-                        self.send.error = None;
-                        let now = ui.ctx().input(|i| i.time);
-                        let interval_ms = self
-                            .send
-                            .periodic_interval_ms
-                            .trim()
-                            .parse::<u64>()
-                            .unwrap_or(1000);
-                        self.send.next_periodic_send_time = now + interval_ms as f64 / 1000.0;
-                    }
-                }
-            }
-            ui.add_enabled(
-                self.send.periodic_enabled,
-                egui::TextEdit::singleline(&mut self.send.periodic_interval_ms)
-                    .desired_width(60.0)
-                    .hint_text("ms"),
-            );
-            ui.label("ms");
-            ui.label("最多");
-            let mut max_str = self
-                .send
-                .periodic_max_count
-                .map_or(String::new(), |v| v.to_string());
-            ui.add_enabled(
-                !self.send.periodic_enabled,
-                egui::TextEdit::singleline(&mut max_str)
-                    .desired_width(40.0)
-                    .hint_text("不限"),
-            );
-            if !self.send.periodic_enabled && ui.ctx().input(|i| i.pointer.any_released()) {
-                // lazy parse
-                if max_str.trim().is_empty() {
-                    self.send.periodic_max_count = None;
-                } else if let Ok(v) = max_str.trim().parse::<u64>() {
-                    self.send.periodic_max_count = if v > 0 { Some(v) } else { None };
-                }
-            }
+    //     ui.horizontal(|ui| {
+    //         if ui
+    //             .checkbox(&mut self.send.periodic_enabled, "周期发送")
+    //             .changed()
+    //             && self.send.periodic_enabled
+    //         {
+    //             // 开启前预检
+    //             let mut disable = false;
+    //             if !self.send_target_port_open() {
+    //                 self.send.error = Some("请先选择并打开目标串口".into());
+    //                 disable = true;
+    //             } else if self.send.input.trim().is_empty() {
+    //                 self.send.error = Some("请先输入发送内容".into());
+    //                 disable = true;
+    //             } else if self.send.hex_mode {
+    //                 let interval = self
+    //                     .send
+    //                     .periodic_interval_ms
+    //                     .trim()
+    //                     .parse::<u64>()
+    //                     .unwrap_or(0);
+    //                 if interval < 10 {
+    //                     self.send.error = Some("周期发送间隔必须 >= 10ms".into());
+    //                     disable = true;
+    //                 }
+    //             }
+    //             if disable {
+    //                 self.send.periodic_enabled = false;
+    //             } else {
+    //                 self.send.periodic_send_count = 0;
+    //                 self.send.error = None;
+    //                 let now = ui.ctx().input(|i| i.time);
+    //                 let interval_ms = self
+    //                     .send
+    //                     .periodic_interval_ms
+    //                     .trim()
+    //                     .parse::<u64>()
+    //                     .unwrap_or(1000);
+    //                 self.send.next_periodic_send_time = now + interval_ms as f64 / 1000.0;
+    //             }
+    //         }
+    //         ui.add_enabled(
+    //             self.send.periodic_enabled,
+    //             egui::TextEdit::singleline(&mut self.send.periodic_interval_ms)
+    //                 .desired_width(60.0)
+    //                 .hint_text("ms"),
+    //         );
+    //         ui.label("ms");
+    //         ui.label("最多");
+    //         let mut max_str = self
+    //             .send
+    //             .periodic_max_count
+    //             .map_or(String::new(), |v| v.to_string());
+    //         ui.add_enabled(
+    //             !self.send.periodic_enabled,
+    //             egui::TextEdit::singleline(&mut max_str)
+    //                 .desired_width(40.0)
+    //                 .hint_text("不限"),
+    //         );
+    //         if !self.send.periodic_enabled && ui.ctx().input(|i| i.pointer.any_released()) {
+    //             // lazy parse
+    //             if max_str.trim().is_empty() {
+    //                 self.send.periodic_max_count = None;
+    //             } else if let Ok(v) = max_str.trim().parse::<u64>() {
+    //                 self.send.periodic_max_count = if v > 0 { Some(v) } else { None };
+    //             }
+    //         }
 
-            if self.send.periodic_enabled {
-                let now = ui.ctx().input(|i| i.time);
-                let remaining = (self.send.next_periodic_send_time - now).max(0.0);
-                ui.label(format!("{:.1}s 后", remaining));
-                ui.label(format!("已发送 {} 次", self.send.periodic_send_count));
-            }
+    //         if self.send.periodic_enabled {
+    //             let now = ui.ctx().input(|i| i.time);
+    //             let remaining = (self.send.next_periodic_send_time - now).max(0.0);
+    //             ui.label(format!("{:.1}s 后", remaining));
+    //             ui.label(format!("已发送 {} 次", self.send.periodic_send_count));
+    //         }
 
-            self.send_history_combo(ui, "send-history");
+    //         self.send_history_combo(ui, "send-history");
 
-            if ui.button("重置周期").clicked() {
-                self.send.next_periodic_send_time = 0.0;
-                self.send.periodic_send_count = 0;
-            }
-        });
+    //         if ui.button("重置周期").clicked() {
+    //             self.send.next_periodic_send_time = 0.0;
+    //             self.send.periodic_send_count = 0;
+    //         }
+    //     });
 
-        if let Some(port) = self.send.target_port.clone() {
-            if self.transport.status_port(&port).open {
-                ui.horizontal(|ui| {
-                    ui.label("信号");
-                    let dtr_label = if self.send.dtr_high {
-                        "DTR ⬆"
-                    } else {
-                        "DTR ⬇"
-                    };
-                    let rts_label = if self.send.rts_high {
-                        "RTS ⬆"
-                    } else {
-                        "RTS ⬇"
-                    };
-                    if ui
-                        .small_button(dtr_label)
-                        .on_hover_text("切换 DTR")
-                        .clicked()
-                    {
-                        let new_val = !self.send.dtr_high;
-                        if let Err(e) = self.transport.set_dtr(&port, new_val) {
-                            self.set_status_force(StatusLevel::Error, e.to_string());
-                        } else {
-                            self.send.dtr_high = new_val;
-                        }
-                    }
-                    if ui
-                        .small_button("DTR ⏱")
-                        .on_hover_text("DTR 脉冲(LOW 100ms→HIGH)")
-                        .clicked()
-                    {
-                        let _ = self.transport.set_dtr(&port, false);
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                        let _ = self.transport.set_dtr(&port, true);
-                        self.send.dtr_high = true;
-                    }
-                    if ui
-                        .small_button(rts_label)
-                        .on_hover_text("切换 RTS")
-                        .clicked()
-                    {
-                        let new_val = !self.send.rts_high;
-                        if let Err(e) = self.transport.set_rts(&port, new_val) {
-                            self.set_status_force(StatusLevel::Error, e.to_string());
-                        } else {
-                            self.send.rts_high = new_val;
-                        }
-                    }
-                    if ui
-                        .small_button("RTS ⏱")
-                        .on_hover_text("RTS 脉冲(LOW 100ms→HIGH)")
-                        .clicked()
-                    {
-                        let _ = self.transport.set_rts(&port, false);
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                        let _ = self.transport.set_rts(&port, true);
-                        self.send.rts_high = true;
-                    }
-                });
-            }
-        }
-    }
+    //     if let Some(port) = self.send.target_port.clone()
+    //         && self.transport.status_port(&port).open
+    //     {
+    //         ui.horizontal(|ui| {
+    //             ui.label("信号");
+    //             let dtr_label = if self.send.dtr_high {
+    //                 "DTR ⬆"
+    //             } else {
+    //                 "DTR ⬇"
+    //             };
+    //             let rts_label = if self.send.rts_high {
+    //                 "RTS ⬆"
+    //             } else {
+    //                 "RTS ⬇"
+    //             };
+    //             if ui
+    //                 .small_button(dtr_label)
+    //                 .on_hover_text("切换 DTR")
+    //                 .clicked()
+    //             {
+    //                 let new_val = !self.send.dtr_high;
+    //                 if let Err(e) = self.transport.set_dtr(&port, new_val) {
+    //                     self.set_status_force(StatusLevel::Error, e.to_string());
+    //                 } else {
+    //                     self.send.dtr_high = new_val;
+    //                 }
+    //             }
+    //             if ui
+    //                 .small_button("DTR ⏱")
+    //                 .on_hover_text("DTR 脉冲(LOW 100ms→HIGH)")
+    //                 .clicked()
+    //             {
+    //                 let _ = self.transport.set_dtr(&port, false);
+    //                 std::thread::sleep(std::time::Duration::from_millis(100));
+    //                 let _ = self.transport.set_dtr(&port, true);
+    //                 self.send.dtr_high = true;
+    //             }
+    //             if ui
+    //                 .small_button(rts_label)
+    //                 .on_hover_text("切换 RTS")
+    //                 .clicked()
+    //             {
+    //                 let new_val = !self.send.rts_high;
+    //                 if let Err(e) = self.transport.set_rts(&port, new_val) {
+    //                     self.set_status_force(StatusLevel::Error, e.to_string());
+    //                 } else {
+    //                     self.send.rts_high = new_val;
+    //                 }
+    //             }
+    //             if ui
+    //                 .small_button("RTS ⏱")
+    //                 .on_hover_text("RTS 脉冲(LOW 100ms→HIGH)")
+    //                 .clicked()
+    //             {
+    //                 let _ = self.transport.set_rts(&port, false);
+    //                 std::thread::sleep(std::time::Duration::from_millis(100));
+    //                 let _ = self.transport.set_rts(&port, true);
+    //                 self.send.rts_high = true;
+    //             }
+    //         });
+    //     }
+    // }
 
     pub(crate) fn send_panel_horizontal(&mut self, ui: &mut egui::Ui) {
         self.ensure_send_target_port();
@@ -379,13 +378,11 @@ impl WorkbenchApp {
                         .parse::<u64>()
                         .unwrap_or(1000)
                         .max(10);
-                    self.send.next_periodic_send_time =
-                        now + ms as f64 / 1000.0;
+                    self.send.next_periodic_send_time = now + ms as f64 / 1000.0;
                 }
             }
             ui.add(
-                egui::TextEdit::singleline(&mut self.send.periodic_interval_ms)
-                    .desired_width(54.0),
+                egui::TextEdit::singleline(&mut self.send.periodic_interval_ms).desired_width(54.0),
             );
             ui.label("ms");
             if self.send.periodic_enabled {
@@ -459,8 +456,7 @@ impl WorkbenchApp {
         ui.horizontal(|ui| {
             ui.label("间隔");
             ui.add(
-                egui::TextEdit::singleline(&mut self.send.periodic_interval_ms)
-                    .desired_width(72.0),
+                egui::TextEdit::singleline(&mut self.send.periodic_interval_ms).desired_width(72.0),
             );
             ui.label("ms");
         });
@@ -634,7 +630,7 @@ pub(crate) fn send_impl_to(
             }
             if hex_strict {
                 let compact: String = x.chars().filter(|c| !c.is_whitespace()).collect();
-                if compact.len() % 2 != 0 {
+                if !compact.len().is_multiple_of(2) {
                     return Err(tool_transport::TransportError::Io(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         format!("HEX 严格模式: 奇数字节数 \"{x}\", 请补0或关闭严格模式"),

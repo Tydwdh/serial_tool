@@ -186,10 +186,10 @@ impl DynamicPanels {
                 }) = self.panels.get_mut(panel_id)
                 {
                     // owner 校验：拒绝非 owner 插件的写入
-                    if let Some(owner) = owner_plugin_id.as_deref() {
-                        if owner != actual_plugin_id {
-                            continue;
-                        }
+                    if let Some(owner) = owner_plugin_id.as_deref()
+                        && owner != actual_plugin_id
+                    {
+                        continue;
                     }
                     entries.push_back(LogEntry {
                         timestamp_ms: tool_core::now_timestamp_ms(),
@@ -224,10 +224,10 @@ impl DynamicPanels {
                             ..
                         }
                     );
-                    if let DynamicPanel::Form { fields, .. } = panel {
-                        if let Some(field) = fields.iter_mut().find(|f| f.id == field_id) {
-                            field.value = Value::String(path.to_owned());
-                        }
+                    if let DynamicPanel::Form { fields, .. } = panel
+                        && let Some(field) = fields.iter_mut().find(|f| f.id == field_id)
+                    {
+                        field.value = Value::String(path.to_owned());
                     }
                     if auto {
                         let panel_id = panel_id.to_owned();

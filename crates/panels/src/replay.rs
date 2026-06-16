@@ -192,10 +192,8 @@ impl ReplayPanel {
                 if ui.button("取消").clicked() {
                     self.want_cancel_analyzers = true;
                 }
-            } else {
-                if ui.button("运行 Analyzer").clicked() {
-                    self.want_run_analyzers = true;
-                }
+            } else if ui.button("运行 Analyzer").clicked() {
+                self.want_run_analyzers = true;
             }
 
             let status = self.manager.status();
@@ -297,7 +295,7 @@ impl ReplayPanel {
             ui.colored_label(theme::RED, format!("错误: {error}"));
         }
         if let Some(warning) = self.manager.analyzer_warning() {
-            ui.colored_label(theme::YELLOW, format!("{warning}"));
+            ui.colored_label(theme::YELLOW, warning.to_string());
         }
     }
 
@@ -503,7 +501,7 @@ impl ReplayPanel {
                 self.manager.add_bookmark();
             }
             for &pos_ms in &bookmarks {
-                if ui.small_button(format!("{}", ms_to_hms(pos_ms))).clicked() {
+                if ui.small_button(ms_to_hms(pos_ms).to_string()).clicked() {
                     self.want_seek_replay = Some(pos_ms);
                 }
                 if ui.small_button("×").on_hover_text("删除此书签").clicked() {
@@ -537,8 +535,8 @@ impl ReplayPanel {
         });
 
         // 加载报告：坏行警告
-        if let Some(report) = status.load_report.as_ref() {
-            if report.skipped > 0 {
+        if let Some(report) = status.load_report.as_ref()
+            && report.skipped > 0 {
                 ui.colored_label(
                     theme::YELLOW,
                     format!("加载 {} 条，跳过 {} 条坏行", report.loaded, report.skipped),
@@ -547,7 +545,6 @@ impl ReplayPanel {
                     ui.colored_label(theme::TEXT_SECONDARY, first);
                 }
             }
-        }
     }
 }
 

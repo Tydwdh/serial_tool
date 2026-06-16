@@ -94,19 +94,12 @@ pub enum DockArea {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Default)]
 pub struct DockStack {
     pub tabs: Vec<PanelKind>,
     pub active: Option<PanelKind>,
 }
 
-impl Default for DockStack {
-    fn default() -> Self {
-        Self {
-            tabs: Vec::new(),
-            active: None,
-        }
-    }
-}
 
 impl DockStack {
     pub fn open(&mut self, kind: PanelKind) {
@@ -339,7 +332,7 @@ impl DockLayout {
                 .bottom
                 .active
                 .as_ref()
-                .map_or(true, |k| !self.bottom.contains(k))
+                .is_none_or(|k| !self.bottom.contains(k))
         {
             self.bottom.active = self.bottom.tabs.first().cloned();
         }
@@ -348,7 +341,7 @@ impl DockLayout {
                 .right
                 .active
                 .as_ref()
-                .map_or(true, |k| !self.right.contains(k))
+                .is_none_or(|k| !self.right.contains(k))
         {
             self.right.active = self.right.tabs.first().cloned();
         }

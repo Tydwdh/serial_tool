@@ -210,11 +210,10 @@ impl TransportManager {
         // 同配置重复打开：直接成功
         {
             let guard = self.ports.lock();
-            if let Some(existing) = guard.get(&config.port_name) {
-                if existing.alive.load(Ordering::Relaxed) && existing.config == config {
+            if let Some(existing) = guard.get(&config.port_name)
+                && existing.alive.load(Ordering::Relaxed) && existing.config == config {
                     return Ok(());
                 }
-            }
         }
 
         // 同名端口正在关闭中，返回错误

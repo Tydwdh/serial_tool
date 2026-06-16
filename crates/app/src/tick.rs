@@ -177,7 +177,7 @@ impl WorkbenchApp {
         if n > 0 {
             self.set_status_force(StatusLevel::Info, format!("{n} 个插件事件"));
         }
-        self.handle_keys(&ctx);
+        self.handle_keys(ctx);
 
         // 速率统计
         let now = ctx.input(|i| i.time);
@@ -236,8 +236,8 @@ impl WorkbenchApp {
             self.do_send();
             if self.send.error.is_none() {
                 self.send.periodic_send_count += 1;
-                if let Some(max) = self.send.periodic_max_count {
-                    if self.send.periodic_send_count >= max {
+                if let Some(max) = self.send.periodic_max_count
+                    && self.send.periodic_send_count >= max {
                         self.send.periodic_enabled = false;
                         self.send.periodic_send_count = 0;
                         self.set_status_force(
@@ -246,7 +246,6 @@ impl WorkbenchApp {
                         );
                         return;
                     }
-                }
             } else {
                 self.send.periodic_enabled = false;
                 self.set_status_force(crate::state::StatusLevel::Error, "周期发送已停止：发送失败");
@@ -258,8 +257,8 @@ impl WorkbenchApp {
     }
     pub(crate) fn tick_post_ui(&mut self, ctx: &egui::Context) {
         self.bottom_log_panel.ingest_pending();
-        self.detached_dynamic_panel_viewports(&ctx);
-        self.send_popup(&ctx);
-        self.terminal_popup(&ctx);
+        self.detached_dynamic_panel_viewports(ctx);
+        self.send_popup(ctx);
+        self.terminal_popup(ctx);
     }
 }
