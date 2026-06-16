@@ -17,9 +17,7 @@ use eframe::egui;
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT])
-            .with_min_inner_size([960.0, 640.0]),
-
+            .with_inner_size([DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT]),
         renderer: eframe::Renderer::Glow,
         vsync: true,
         persist_window: true,

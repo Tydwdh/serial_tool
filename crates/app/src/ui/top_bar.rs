@@ -16,9 +16,9 @@ pub(crate) fn serial_combo(
         .and_then(|name| {
             ports.iter().find(|p| p.port_name == name).map(|p| {
                 if let Some(alias) = aliases.get(&p.port_name).filter(|s| !s.trim().is_empty()) {
-                    format!("{alias} ({})  {}", p.port_name, p.port_type)
+                    format!("{alias} ({})", p.port_name)
                 } else {
-                    format!("{}  {}", p.port_name, p.port_type)
+                    p.port_name.to_string()
                 }
             })
         })
@@ -42,9 +42,9 @@ pub(crate) fn serial_combo(
                         .get(&port.port_name)
                         .filter(|s| !s.trim().is_empty())
                     {
-                        format!("{alias} ({})  {}", port.port_name, port.port_type)
+                        format!("{alias} ({})", port.port_name)
                     } else {
-                        format!("{}  {}", port.port_name, port.port_type)
+                        format!("{}", port.port_name)
                     };
                     ui.selectable_value(sel, Some(port.port_name.clone()), label);
                 }
@@ -129,7 +129,7 @@ impl WorkbenchApp {
                 serial_combo(
                     ui,
                     "top-port",
-                    180.0,
+                    120.0,
                     &self.ports,
                     &mut self.selected_port,
                     &self.port_aliases,
