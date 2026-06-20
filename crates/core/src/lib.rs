@@ -469,10 +469,10 @@ mod tests {
         assert!(event.is_replay());
         assert_eq!(event.origin(), Some("replay_derived"));
         assert_eq!(event.category(), Some("derived"));
-        assert_eq!(event.meta_bool("derived"), true);
+        assert!(event.meta_bool("derived"));
         assert_eq!(event.meta_str("plugin_id"), Some("myplugin"));
         assert_eq!(event.meta_str("plugin_version"), Some("1.2.3"));
-        assert_eq!(event.meta_bool("recordable"), false);
+        assert!(!event.meta_bool("recordable"));
         // derived_from 为数组 [10, 20]
         let derived_from = event.meta_get("derived_from").unwrap();
         assert_eq!(derived_from, &json!([10, 20]));

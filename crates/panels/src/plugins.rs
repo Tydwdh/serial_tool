@@ -6,6 +6,8 @@ use tool_extension::{PluginManager, PluginState, PluginSummary};
 pub struct PluginsPanel {
     root: String,
     recently_disabled: Vec<String>,
+    /// disable 后待重新启用的插件 ID（用于 restart）
+    pending_restart: Vec<String>,
 }
 
 impl PluginsPanel {
@@ -13,6 +15,7 @@ impl PluginsPanel {
         Self {
             root: "plugins".to_owned(),
             recently_disabled: Vec::new(),
+            pending_restart: Vec::new(),
         }
     }
 
@@ -22,6 +25,17 @@ impl PluginsPanel {
 
     /// 渲染插件面板 UI，返回 (消息内容, 是否错误) 供调用方显示到状态栏。
     pub fn ui(&mut self, ui: &mut egui::Ui, manager: &mut PluginManager) -> Option<(String, bool)> {
+        // 重试 pending restart：上一帧 disable 后等待线程退出，现在尝试 enable
+        let pending: Vec<String> = std::mem::take(&mut self.pending_restart);
+        for id in pending {
+            if let Err(e) = manager.enable(&id) {
+                // 如果还在关闭中，放回队列下帧重试
+                if matches!(e, tool_extension::ExtensionError::Stopping(_)) {
+                    self.pending_restart.push(id);
+                }
+            }
+        }
+
         let toolbar_status = ui.horizontal(|ui| -> Option<(String, bool)> {
             ui.label("根目录");
             ui.add(TextEdit::singleline(&mut self.root).desired_width(240.0));
@@ -30,9 +44,6 @@ impl PluginsPanel {
                     Ok(count) => return Some((format!("发现了 {count} 个插件"), false)),
                     Err(error) => return Some((error.to_string(), true)),
                 }
-            }
-            if ui.button("创建插件...").clicked() {
-                return self.scaffold_plugin();
             }
             if ui.button("打开目录").clicked() {
                 let _ = open::that(&self.root);
@@ -64,64 +75,6 @@ impl PluginsPanel {
             });
 
         status.or(scroll_result.inner)
-    }
-
-    fn scaffold_plugin(&mut self) -> Option<(String, bool)> {
-        let name = "my-plugin";
-        let dir = PathBuf::from(self.root.trim()).join(name);
-        if dir.exists() {
-            return Some((format!("{name} 已存在"), true));
-        }
-        match std::fs::create_dir_all(&dir) {
-            Ok(()) => {
-                let plugin_json = serde_json::json!({
-                    "id": name,
-                    "name": "我的插件",
-                    "version": "0.1.0",
-                    "runtime": "lua",
-                    "main": "main.lua",
-                    "permissions": ["bus", "log", "ui", "storage"],
-                });
-                if let Err(e) = std::fs::write(
-                    dir.join("plugin.json"),
-                    serde_json::to_string_pretty(&plugin_json).unwrap_or_default(),
-                ) {
-                    return Some((format!("写入 plugin.json 失败：{e}"), true));
-                }
-
-                let main_lua = r#"local PANEL_ID = "my-panel"
-
-function on_init(ctx)
-    ctx.log("info", "插件已加载")
-
-    ctx.ui.create_form({
-        id = PANEL_ID,
-        title = "我的面板",
-        fields = {
-            { id = "msg", kind = "TextArea", title = "消息", value = "Hello!", rows = 1 },
-            { id = "btn", kind = "Button", title = "发送日志", action = "my.send" },
-        },
-    })
-end
-
-function on_form_changed(ctx, panel_id, values)
-    -- 处理表单变更
-end
-
-function on_form_action(ctx, panel_id, field_id, action, values)
-    if action == "my.send" then
-        ctx.log("info", "发送: " .. tostring(values.msg or ""))
-    end
-end
-"#;
-                if let Err(e) = std::fs::write(dir.join("main.lua"), main_lua) {
-                    return Some((format!("写入 main.lua 失败：{e}"), true));
-                }
-
-                Some((format!("已创建插件 {name}，请点击刷新后启用"), false))
-            }
-            Err(e) => Some((format!("创建失败：{e}"), true)),
-        }
     }
 
     fn plugin_row(
@@ -176,7 +129,9 @@ end
         }
 
         // 按钮行：通过闭包返回值传递操作结果
-        let row_status = ui.horizontal(|ui| -> Option<(String, bool)> {
+        
+
+        ui.horizontal(|ui| -> Option<(String, bool)> {
             let can_enable = !matches!(summary.state, PluginState::Running | PluginState::Enabled);
             if ui
                 .add_enabled(can_enable, egui::Button::new("启用"))
@@ -213,16 +168,12 @@ end
             {
                 if let Err(e) = manager.disable(&summary.id) {
                     return Some((format!("禁用失败：{e}"), true));
-                } else if let Err(e) = manager.enable(&summary.id) {
-                    return Some((format!("启用失败：{e}"), true));
-                } else {
-                    return Some((format!("{} 已重启", summary.id), false));
                 }
+                // 不立即 enable：等待下一帧 reap_stopping_plugins 收割后再启用
+                self.pending_restart.push(summary.id.clone());
             }
             None
-        }).inner;
-
-        row_status
+        }).inner
     }
 }
 

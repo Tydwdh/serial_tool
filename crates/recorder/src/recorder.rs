@@ -266,11 +266,10 @@ impl JsonlRecorder {
                 "app_version": env!("CARGO_PKG_VERSION"),
                 "error": error_clone,
             });
-            if let Ok(text) = serde_json::to_string_pretty(&summary) {
-                if let Err(e) = std::fs::write(&summary_path, text) {
+            if let Ok(text) = serde_json::to_string_pretty(&summary)
+                && let Err(e) = std::fs::write(&summary_path, text) {
                     log::warn!("recorder: failed to write summary {}: {e}", summary_path.display());
                 }
-            }
 
             finished_thread.store(true, Ordering::SeqCst);
         });

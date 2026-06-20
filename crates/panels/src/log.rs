@@ -80,7 +80,10 @@ impl LogPanel {
         let mut force_scroll_to_bottom = false;
 
         ui.horizontal(|ui| {
-            ui.label("级别");
+            // 预计算标签所需宽度：按钮 padding + 最宽文字，避免 hover 框撑大时抖动
+            let padding = ui.spacing().button_padding.x * 2.0;
+            let char_w = 10.0; // 近似等宽字符宽度
+            let btn_w = padding + 5.0 * char_w + 4.0;
 
             for level in [
                 LogLevel::Trace,
@@ -89,21 +92,19 @@ impl LogPanel {
                 LogLevel::Warn,
                 LogLevel::Error,
             ] {
-                let is_selected = self.min_level == level;
-                let text = level.as_str();
-                let color = if is_selected {
-                    theme::TEXT_PRIMARY
-                } else {
-                    theme::TEXT_SECONDARY
-                };
-                let response = ui.add_sized(
-                    [40.0, 0.0],
-                    egui::Button::new(egui::RichText::new(text).color(color))
-                        .frame(is_selected),
+                ui.allocate_ui_with_layout(
+                    egui::vec2(btn_w, ui.available_height()),
+                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                    |ui| {
+                        ui.set_min_size(egui::vec2(btn_w, ui.available_height()));
+                        if ui
+                            .selectable_label(self.min_level == level, level.as_str())
+                            .clicked()
+                        {
+                            self.min_level = level;
+                        }
+                    },
                 );
-                if response.clicked() {
-                    self.min_level = level;
-                }
             }
 
             force_scroll_to_bottom |= crate::theme::auto_scroll_button(ui, &mut self.auto_scroll);

@@ -215,14 +215,14 @@ impl PluginManager {
 
     pub fn enable(&mut self, plugin_id: &str) -> ExtensionResult<()> {
         self.update_runtime_states();
+        // 收割已停止的插件，避免 restart 时误判为 Stopping
+        self.reap_stopping_plugins();
 
         if self.lua_runtimes.contains_key(plugin_id) {
             return Err(ExtensionError::AlreadyEnabled(plugin_id.to_owned()));
         }
 
         // 检查是否正在关闭中，防止同一插件同时存在两个运行时。
-        // 不在 UI 线程上忙等待：直接返回 Stopping 错误，调用方（如 plugins_panel）
-        // 可通过下次重试处理。忙等待会阻塞 UI 线程长达 timeout。
         if self.stopping_plugins.iter().any(|(id, _)| id == plugin_id) {
             return Err(ExtensionError::Stopping(plugin_id.to_owned()));
         }
@@ -296,11 +296,10 @@ impl PluginManager {
         }
 
         // 先标记为 Disabled：防止 Lua 侧在 stop 窗口内重新创建面板
-        if let Some(record) = self.records.get_mut(plugin_id) {
-            if matches!(record.state, PluginState::Running | PluginState::Enabled) {
+        if let Some(record) = self.records.get_mut(plugin_id)
+            && matches!(record.state, PluginState::Running | PluginState::Enabled) {
                 record.state = PluginState::Disabled;
             }
-        }
 
         // 异步停止：设 stop 后移入 stopping_plugins，不 join（避免卡 UI）
         if let Some(runtime) = self.lua_runtimes.remove(plugin_id) {

@@ -278,9 +278,10 @@ mod tests {
 
     #[test]
     fn lua_float_to_json() {
-        let result = lua_value_to_json(Value::Number(3.14)).unwrap();
+        let val = 1.234_f64;
+        let result = lua_value_to_json(Value::Number(val)).unwrap();
         assert!(result.is_number());
-        assert!((result.as_f64().unwrap() - 3.14).abs() < f64::EPSILON);
+        assert!((result.as_f64().unwrap() - val).abs() < f64::EPSILON);
     }
 
     #[test]

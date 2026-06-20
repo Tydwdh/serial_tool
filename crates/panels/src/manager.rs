@@ -301,7 +301,7 @@ impl DockLayout {
     }
 
     pub fn normalize_tool_layout(&mut self) {
-        // 工具面板不允许留在 Center
+        // 工具面板不允许留在 Center：如果被放在 Center，移到底部
         for kind in [PanelKind::Terminal, PanelKind::Logs] {
             if self.center.remove(&kind) {
                 if !self.bottom.contains(&kind) && !self.right.contains(&kind) {
@@ -314,8 +314,10 @@ impl DockLayout {
         // Sender 不允许在 Center stack 中存在
         self.center.remove(&PanelKind::Sender);
 
-        // 确保 Sender 在 bottom dock 中（兼容旧工作空间文件）
-        if !self.bottom.contains(&PanelKind::Sender) {
+        // Sender 如果没有在任何区域，默认放到底部
+        if !self.bottom.contains(&PanelKind::Sender)
+            && !self.right.contains(&PanelKind::Sender)
+        {
             self.bottom.open(PanelKind::Sender);
         }
 

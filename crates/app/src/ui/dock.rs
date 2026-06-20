@@ -168,9 +168,7 @@ impl WorkbenchApp {
                 .dock
                 .stack_mut(area)
                 .reorder(&kind, insert_index)
-            {
-                if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
-            }
+                && let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
         }
     }
     fn dock_panel_body(&mut self, ui: &mut egui::Ui, area: DockArea, kind: PanelKind) {
@@ -233,16 +231,9 @@ impl WorkbenchApp {
                 }
                 DockArea::Bottom => {
                     ui.label("底部面板为空");
-                    if ui.button("打开终端").clicked() {
-                        self.panels
-                            .dock
-                            .move_panel(PanelKind::Terminal, DockArea::Bottom);
-                        self.panels.sync_tabs_from_dock();
-                    }
                 }
                 DockArea::Right => {
                     ui.label("右侧停靠区为空");
-                    ui.label("以后可放属性、选中事件详情、图表配置、插件参数");
                 }
             }
         });

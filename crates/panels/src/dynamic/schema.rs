@@ -439,7 +439,7 @@ mod tests {
     #[test]
     fn compact_number_trims_trailing_zeros() {
         assert_eq!(compact_number(3.0), "3");
-        assert_eq!(compact_number(3.14000), "3.14");
+        assert_eq!(compact_number(3.15), "3.15");
         assert_eq!(compact_number(3.0), "3");
         // 5 位小数截断到 4 位后去尾零
         assert_eq!(compact_number(1.5), "1.5");

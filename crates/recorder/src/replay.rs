@@ -133,7 +133,7 @@ impl ReplayManager {
 
         // 文件大小检查：防止加载超大文件导致 OOM
         let metadata = std::fs::metadata(&path)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("获取文件大小失败: {e}")))?;
+            .map_err(|e| io::Error::other(format!("获取文件大小失败: {e}")))?;
         if metadata.len() > MAX_FILE_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

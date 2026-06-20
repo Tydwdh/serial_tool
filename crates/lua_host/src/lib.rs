@@ -911,8 +911,8 @@ fn install_ctx(
     }
 
     // 沙箱加固：锁定 package.preload 为只读，防止插件注入恶意模块
-    if let Ok(preload) = lua.globals().get::<Table>("package") {
-        if let Ok(preload_table) = preload.get::<Table>("preload") {
+    if let Ok(preload) = lua.globals().get::<Table>("package")
+        && let Ok(preload_table) = preload.get::<Table>("preload") {
             // 将 preload 替换为冻结副本：插件的 require 可从 preload 读取，
             // 但无法写入新条目（写入被 metatable __newindex 拦截）
             let frozen = lua.create_table()?;
@@ -934,7 +934,6 @@ fn install_ctx(
             let _ = frozen.set_metatable(Some(mt));
             let _ = preload.set("preload", frozen);
         }
-    }
 
     ctx.set(
         "now_ms",

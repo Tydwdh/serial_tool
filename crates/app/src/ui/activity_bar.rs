@@ -256,7 +256,7 @@ impl WorkbenchApp {
                 && let Some(next) = dynamic_iter.next()
             {
                 new_center.push(next);
-            } else if !kind.dynamic_id().is_some() {
+            } else if kind.dynamic_id().is_none() {
                 new_center.push(kind.clone());
             }
         }

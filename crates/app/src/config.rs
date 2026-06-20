@@ -19,11 +19,10 @@ fn atomic_write_json<T: Serialize>(path: &std::path::Path, value: &T) -> Result<
     std::fs::write(&temp_path, data).map_err(|e| format!("写入临时文件失败：{e}"))?;
 
     // 3. 备份旧文件（如果存在）
-    if path.exists() {
-        if let Err(e) = std::fs::copy(path, &backup_path) {
+    if path.exists()
+        && let Err(e) = std::fs::copy(path, &backup_path) {
             log::warn!("config: failed to backup to {}: {e}", backup_path.display());
         }
-    }
 
     // 4. 原子替换
     std::fs::rename(&temp_path, path).map_err(|e| format!("原子替换失败：{e}"))

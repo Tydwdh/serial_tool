@@ -29,7 +29,7 @@ fn create_codec_table(lua: &Lua, (): ()) -> mlua::Result<Value> {
         lua.create_function(|lua, hex: mlua::String| {
             let hex_str = hex.to_str()?;
             let hex_clean: String = hex_str.chars().filter(|c| !c.is_whitespace()).collect();
-            if hex_clean.len() % 2 != 0 {
+            if !hex_clean.len().is_multiple_of(2) {
                 return Err(mlua::Error::RuntimeError(
                     "hex string must have even length".into(),
                 ));

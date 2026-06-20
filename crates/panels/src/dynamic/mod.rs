@@ -430,10 +430,10 @@ mod tests {
         panels.ingest(&mut manager);
 
         // 值不应被修改（仍是默认值 0.0）
-        if let Some(DynamicPanel::Form { fields, .. }) = panels.panels.get("a.form") {
-            if let Some(field) = fields.iter().find(|f| f.id == "val") {
-                assert_eq!(field.value.as_f64(), Some(0.0));
-            }
+        if let Some(DynamicPanel::Form { fields, .. }) = panels.panels.get("a.form")
+            && let Some(field) = fields.iter().find(|f| f.id == "val")
+        {
+            assert_eq!(field.value.as_f64(), Some(0.0));
         }
     }
 
@@ -474,10 +474,10 @@ mod tests {
 
         panels.ingest(&mut manager);
 
-        if let Some(DynamicPanel::Form { fields, .. }) = panels.panels.get("a.form") {
-            if let Some(field) = fields.iter().find(|f| f.id == "val") {
-                assert_eq!(field.value.as_f64(), Some(42.0));
-            }
+        if let Some(DynamicPanel::Form { fields, .. }) = panels.panels.get("a.form")
+            && let Some(field) = fields.iter().find(|f| f.id == "val")
+        {
+            assert_eq!(field.value.as_f64(), Some(42.0));
         }
     }
 

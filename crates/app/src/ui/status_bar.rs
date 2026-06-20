@@ -13,26 +13,6 @@ impl WorkbenchApp {
             .map(|p| self.transport.status_port(p))
             .unwrap_or_else(TransportStatus::closed);
         ui.horizontal(|ui| {
-            // 状态消息：优先显示在最左边，确保可见
-            let status_color = match self.status.level {
-                StatusLevel::Info => theme::TEXT_SECONDARY,
-                StatusLevel::Warn => theme::YELLOW,
-                StatusLevel::Error => theme::RED,
-            };
-            let shown = {
-                let mut chars = self.status.message.chars();
-                let head: String = chars.by_ref().take(80).collect();
-                if chars.next().is_some() {
-                    format!("{head}…")
-                } else {
-                    head
-                }
-            };
-            ui.label(egui::RichText::new(&shown).color(status_color))
-                .on_hover_text(&self.status.message);
-
-            ui.separator();
-
             // 串口状态
             let (d, l) =
                 if let (Some(p), Some(b)) = (self.serial.selected_port.clone(), st.baud_rate) {
@@ -95,6 +75,27 @@ impl WorkbenchApp {
                     "RTS⬇"
                 };
                 ui.label(format!("{dtr} {rts}"));
+            }
+
+            // 状态消息：放在最右边，不挤占固定信息空间
+            if !self.status.message.is_empty() {
+                ui.separator();
+                let status_color = match self.status.level {
+                    StatusLevel::Info => theme::TEXT_SECONDARY,
+                    StatusLevel::Warn => theme::YELLOW,
+                    StatusLevel::Error => theme::RED,
+                };
+                let shown = {
+                    let mut chars = self.status.message.chars();
+                    let head: String = chars.by_ref().take(80).collect();
+                    if chars.next().is_some() {
+                        format!("{head}…")
+                    } else {
+                        head
+                    }
+                };
+                ui.label(egui::RichText::new(&shown).color(status_color))
+                    .on_hover_text(&self.status.message);
             }
         });
     }
