@@ -344,17 +344,10 @@ impl WorkbenchApp {
             .changed()
         {
             self.send.periodic_send_count = 0;
-            if self.send.periodic_enabled {
-                let now = ui.ctx().input(|i| i.time);
-                let ms = self
-                    .send
-                    .periodic_interval_ms
-                    .trim()
-                    .parse::<f64>()
-                    .unwrap_or(1000.0)
-                    .max(1.0);
-                self.send.next_periodic_send_time = now + ms / 1000.0;
-            }
+            if !self.send.periodic_enabled
+                && let Some(cancel) = self.periodic_send_cancel.take() {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
         }
         ui.add(
             egui::TextEdit::singleline(&mut self.send.periodic_interval_ms).desired_width(width),

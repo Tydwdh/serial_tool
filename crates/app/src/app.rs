@@ -54,6 +54,8 @@ pub(crate) struct WorkbenchApp {
     pub(crate) file_browse_subscription: tool_databus::Subscription,
     pub(crate) replay_analyzer_job: Option<ReplayAnalyzerJob>,
     pub(crate) replay_analyzer_generation: u64,
+    /// 周期发送后台线程的取消信号
+    pub(crate) periodic_send_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 pub(crate) struct ReplayAnalyzerJob {
@@ -220,6 +222,7 @@ impl WorkbenchApp {
             )),
             replay_analyzer_job: None,
             replay_analyzer_generation: 0,
+            periodic_send_cancel: None,
             dock_dragging_panel: None,
             bottom_dock_rect: None,
             right_dock_rect: None,

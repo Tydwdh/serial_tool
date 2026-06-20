@@ -25,10 +25,6 @@ impl WorkbenchApp {
 
     pub(crate) fn open_bottom_panel(&mut self) {
         self.set_bottom_visible(true);
-        self.panels.dock.move_panel(
-            tool_panels::PanelKind::Terminal,
-            tool_panels::DockArea::Bottom,
-        );
     }
 
     pub(crate) fn set_bottom_visible(&mut self, visible: bool) {
