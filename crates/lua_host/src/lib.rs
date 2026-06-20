@@ -877,6 +877,15 @@ fn install_ctx(
         }
     }
 
+    // ── 在沙箱加固前注册 codec 模块 ──
+    // 沙箱会将 package.preload 替换为只读副本，所以 codec 必须在沙箱之前注册。
+    if let Err(e) = codec::register_codec(lua) {
+        log::warn!("failed to register hw.codec: {e}");
+    }
+    if let Err(e) = codec::register_utils(lua) {
+        log::warn!("failed to register hw.utils: {e}");
+    }
+
     // 沙箱加固：锁定 package.preload 为只读，防止插件注入恶意模块
     if let Ok(preload) = lua.globals().get::<Table>("package") {
         if let Ok(preload_table) = preload.get::<Table>("preload") {
@@ -909,13 +918,6 @@ fn install_ctx(
     )?;
 
     ctx.set("plugin", json_to_lua_value(lua, &config.context)?)?;
-
-    if let Err(e) = codec::register_codec(lua) {
-        log::warn!("failed to register hw.codec: {e}");
-    }
-    if let Err(e) = codec::register_utils(lua) {
-        log::warn!("failed to register hw.utils: {e}");
-    }
 
     lua.globals().set("ctx", &ctx)?;
 
