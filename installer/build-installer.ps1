@@ -30,6 +30,21 @@ function Resolve-IsccPath {
     return $null
 }
 
+function Get-AppVersion {
+    $metadataText = & cargo metadata --no-deps --format-version 1
+    if ($LASTEXITCODE -ne 0) {
+        throw "cargo metadata failed with exit code $LASTEXITCODE"
+    }
+
+    $metadata = $metadataText | ConvertFrom-Json
+    $package = $metadata.packages | Where-Object { $_.name -eq "hardware-workbench-app" } | Select-Object -First 1
+    if ($null -eq $package -or [string]::IsNullOrWhiteSpace($package.version)) {
+        throw "Could not find hardware-workbench-app version in cargo metadata."
+    }
+
+    return $package.version
+}
+
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $ScriptRoot
 $PackageScript = Join-Path $RepoRoot "package.bat"
@@ -56,8 +71,9 @@ try {
         throw "ISCC.exe was not found. Install Inno Setup 6 or set INNOSETUP_ISCC to the full ISCC.exe path."
     }
 
-    Write-Host "Compiling installer with $IsccPath..."
-    & $IsccPath $InstallerScript
+    $AppVersion = Get-AppVersion
+    Write-Host "Compiling installer $AppVersion with $IsccPath..."
+    & $IsccPath "/DMyAppVersion=$AppVersion" $InstallerScript
     if ($LASTEXITCODE -ne 0) {
         throw "Inno Setup failed with exit code $LASTEXITCODE"
     }

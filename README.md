@@ -66,6 +66,8 @@ Set-Location "C:\Users\tyd27\Desktop\tool"
 .\installer\build-installer.ps1
 ```
 
+版本号以根目录 `Cargo.toml` 的 `[workspace.package].version` 为准，安装器会自动读取该版本。
+
 ## 项目结构
 
 ```text

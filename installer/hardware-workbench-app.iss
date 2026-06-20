@@ -1,5 +1,7 @@
 #define MyAppName "Hardware Workbench"
-#define MyAppVersion "0.1.0"
+#ifndef MyAppVersion
+  #error MyAppVersion must be passed by build-installer.ps1 with /DMyAppVersion=<version>
+#endif
 #define MyAppExeName "hardware-workbench-app.exe"
 
 [Setup]

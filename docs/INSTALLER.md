@@ -55,6 +55,24 @@ installer\hardware-workbench-app.iss
 dist\HardwareWorkbenchSetup.exe
 ```
 
+## 版本号来源
+
+项目版本以根目录 `Cargo.toml` 的 `[workspace.package].version` 为准。安装器构建脚本会通过 `cargo metadata` 读取 `hardware-workbench-app` 的版本，并传给 Inno Setup。
+
+发布新版本时只需要：
+
+1. 修改 `Cargo.toml` 中的版本号。
+2. 提交版本变更。
+3. 打同名 tag，例如版本 `0.1.1` 对应 `v0.1.1`。
+
+Windows PowerShell 5.1：
+
+```powershell
+Set-Location "C:\Users\tyd27\Desktop\tool"
+git tag -a v0.1.1 -m "v0.1.1"
+git push origin v0.1.1
+```
+
 ## 安装位置
 
 安装器默认安装到当前用户目录：
