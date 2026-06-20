@@ -62,6 +62,9 @@ struct TerminalEntry {
 
     /// 预缓存的小写字段，用于搜索时避免每帧分配
     search_lower: String,
+
+    /// 显示文本的行数（预计算，避免渲染时重复 count）
+    line_count: usize,
 }
 
 struct VisibleRow<'a> {
@@ -538,6 +541,7 @@ impl TerminalPanel {
 
         let raw_text = event.payload.text_lossy();
         let display_text = format_terminal_text(&raw_text);
+        let line_count = display_text.lines().count().max(1);
 
         let hex_text = format_hex(&bytes);
         let utf8_preview = format_utf8_preview(&bytes);
@@ -580,6 +584,7 @@ impl TerminalPanel {
             hex_text,
             hex_preview,
             search_lower,
+            line_count,
         });
 
         while data.entries.len() > self.max_entries {
@@ -727,7 +732,7 @@ fn render_rows_view(
     selected_entry_id: Option<u64>,
 ) -> RenderOutcome {
     let height = height.max(40.0);
-    let row_height = terminal_row_height(ui);
+    let base_row_height = terminal_row_height(ui);
 
     if rows.is_empty() {
         let scroll_output = ScrollArea::vertical()
@@ -750,6 +755,12 @@ fn render_rows_view(
     let mut clicked_entry_id = None;
     let mut open_detail_entry_id = None;
 
+    // 计算总内容高度：每条 entry 根据行数分配高度
+    let total_content_height: f32 = rows
+        .iter()
+        .map(|row| base_row_height * row.entry.line_count.max(1) as f32)
+        .sum();
+
     let mut scroll_area = ScrollArea::vertical()
         .max_height(height)
         .auto_shrink([false, false])
@@ -760,46 +771,77 @@ fn render_rows_view(
         scroll_area = scroll_area.vertical_scroll_offset(1e9);
     }
 
-    let scroll_output = scroll_area.show_rows(ui, row_height, rows.len(), |ui, row_range| {
-        for row_index in row_range {
-            let row = &rows[row_index];
-            let selected = selected_entry_id == Some(row.entry.id);
+    let scroll_output = scroll_area.show(ui, |ui| {
+        // 手动 layout：为每条 entry 分配可变高度
+        let clip_rect = ui.clip_rect();
 
-            let response = show_entry_fast(ui, row.port, row.entry, show_hex, row_height, selected);
+        let mut y_cursor = 0.0_f32;
+        for row in rows {
+            let entry_height = base_row_height * row.entry.line_count.max(1) as f32;
+            let entry_rect = egui::Rect::from_min_size(
+                egui::pos2(ui.min_rect().left(), ui.min_rect().top() + y_cursor),
+                egui::vec2(ui.available_width(), entry_height),
+            );
 
-            if response.clicked() {
-                clicked_entry_id = Some(row.entry.id);
-            }
+            // 视口裁剪：只渲染可见区域内的条目
+            if entry_rect.bottom() >= clip_rect.top() - entry_height
+                && entry_rect.top() <= clip_rect.bottom() + entry_height
+            {
+                let mut child_ui = ui.child_ui(
+                    entry_rect,
+                    egui::Layout::top_down(egui::Align::Min),
+                    None,
+                );
 
-            if response.double_clicked() {
-                clicked_entry_id = Some(row.entry.id);
-                open_detail_entry_id = Some(row.entry.id);
-            }
+                let selected = selected_entry_id == Some(row.entry.id);
+                let response = show_entry_multiline(
+                    &mut child_ui,
+                    row.port,
+                    row.entry,
+                    show_hex,
+                    base_row_height,
+                    selected,
+                );
 
-            response.context_menu(|ui| {
-                if ui.button("复制内容").clicked() {
-                    ui.ctx().copy_text(row.entry.raw_text.clone());
-                    ui.close();
+                if response.clicked() {
+                    clicked_entry_id = Some(row.entry.id);
                 }
 
-                if ui.button("复制显示文本").clicked() {
-                    ui.ctx().copy_text(row.entry.display_text.clone());
-                    ui.close();
-                }
-
-                if ui.button("复制 HEX").clicked() {
-                    ui.ctx().copy_text(row.entry.hex_text.clone());
-                    ui.close();
-                }
-
-                ui.separator();
-
-                if ui.button("查看详情").clicked() {
+                if response.double_clicked() {
+                    clicked_entry_id = Some(row.entry.id);
                     open_detail_entry_id = Some(row.entry.id);
-                    ui.close();
                 }
-            });
+
+                response.context_menu(|ctx_ui| {
+                    if ctx_ui.button("复制内容").clicked() {
+                        ctx_ui.ctx().copy_text(row.entry.raw_text.clone());
+                        ctx_ui.close();
+                    }
+
+                    if ctx_ui.button("复制显示文本").clicked() {
+                        ctx_ui.ctx().copy_text(row.entry.display_text.clone());
+                        ctx_ui.close();
+                    }
+
+                    if ctx_ui.button("复制 HEX").clicked() {
+                        ctx_ui.ctx().copy_text(row.entry.hex_text.clone());
+                        ctx_ui.close();
+                    }
+
+                    ctx_ui.separator();
+
+                    if ctx_ui.button("查看详情").clicked() {
+                        open_detail_entry_id = Some(row.entry.id);
+                        ctx_ui.close();
+                    }
+                });
+            }
+
+            y_cursor += entry_height;
         }
+
+        // 为 ScrollArea 提供正确的 content size
+        ui.allocate_space(egui::vec2(ui.available_width(), total_content_height));
     });
 
     RenderOutcome {
@@ -858,14 +900,13 @@ fn format_utf8_preview(bytes: &[u8]) -> String {
 }
 
 fn format_terminal_text(text: &str) -> String {
-    let mut output = String::new();
+    let mut output = String::with_capacity(text.len());
 
     for ch in text.chars() {
         match ch {
-            '\r' => output.push_str("\\r"),
-            '\n' => output.push_str("\\n"),
-            '\t' => output.push_str("\\t"),
-            ch if ch.is_control() => output.push('·'),
+            '\r' => {} // 跳过独立的 \r，\r\n 由 \n 处理
+            '\t' => output.push('\t'),
+            ch if ch.is_control() && ch != '\n' => output.push('\u{00B7}'), // 中间点
             ch => output.push(ch),
         }
     }
@@ -883,18 +924,19 @@ fn direction_label(direction: Direction) -> (&'static str, Color32) {
     }
 }
 
-fn show_entry_fast(
+fn show_entry_multiline(
     ui: &mut egui::Ui,
     port: Option<&str>,
     entry: &TerminalEntry,
     show_hex: bool,
-    row_height: f32,
+    base_row_height: f32,
     selected: bool,
 ) -> egui::Response {
     let row_width = ui.available_width();
+    let entry_height = base_row_height * entry.line_count.max(1) as f32;
 
     let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(row_width, row_height), egui::Sense::click());
+        ui.allocate_exact_size(egui::vec2(row_width, entry_height), egui::Sense::click());
 
     let bg = if selected {
         theme::BG_SELECTION
@@ -911,10 +953,11 @@ fn show_entry_fast(
     }
 
     let font_id = egui::TextStyle::Monospace.resolve(ui.style());
-    let text_y = rect.center().y;
+    let text_y = rect.top() + base_row_height * 0.5;
 
     let mut x = rect.left() + ROW_LEFT_PADDING;
 
+    // 时间戳 — 第一行居中
     painter.text(
         egui::pos2(x, text_y),
         egui::Align2::LEFT_CENTER,
@@ -924,6 +967,7 @@ fn show_entry_fast(
     );
     x += TIME_COL_WIDTH + COL_GAP;
 
+    // 端口 — 第一行居中
     if let Some(port) = port {
         painter.text(
             egui::pos2(x, text_y),
@@ -935,8 +979,8 @@ fn show_entry_fast(
         x += PORT_COL_WIDTH + COL_GAP;
     }
 
+    // 方向 — 第一行居中
     let (dir_label, dir_color) = direction_label(entry.direction);
-
     painter.text(
         egui::pos2(x, text_y),
         egui::Align2::LEFT_CENTER,
@@ -946,6 +990,7 @@ fn show_entry_fast(
     );
     x += DIR_COL_WIDTH + COL_GAP;
 
+    // 内容区域 — 逐行渲染
     let payload = if show_hex {
         &entry.hex_preview
     } else {
@@ -956,16 +1001,18 @@ fn show_entry_fast(
         egui::pos2(x, rect.top()),
         egui::pos2(rect.right(), rect.bottom()),
     );
-
     let payload_painter = ui.painter().with_clip_rect(payload_clip);
 
-    payload_painter.text(
-        egui::pos2(x, text_y),
-        egui::Align2::LEFT_CENTER,
-        payload,
-        font_id,
-        theme::TEXT_PRIMARY,
-    );
+    for (line_idx, line) in payload.lines().enumerate() {
+        let line_y = rect.top() + base_row_height * (line_idx as f32 + 0.5);
+        payload_painter.text(
+            egui::pos2(x, line_y),
+            egui::Align2::LEFT_CENTER,
+            line,
+            font_id.clone(),
+            theme::TEXT_PRIMARY,
+        );
+    }
 
     response
 }

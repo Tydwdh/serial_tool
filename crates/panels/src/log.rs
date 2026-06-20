@@ -25,6 +25,8 @@ struct LogEntry {
     level: LogLevel,
     source: String,
     message: String,
+    /// 消息的行数（预计算，避免渲染时重复 count）
+    line_count: usize,
 }
 
 struct LogRenderOutcome {
@@ -156,11 +158,14 @@ impl LogPanel {
             .unwrap_or(&event.source)
             .to_owned();
 
+        let message = event.payload.text_lossy();
+
         self.entries.push_back(LogEntry {
             timestamp_label: format!("[{}]", fmt_ts(event.timestamp_ms)),
             level,
             source,
-            message: event.payload.text_lossy(),
+            line_count: message.lines().count().max(1),
+            message,
         });
 
         while self.entries.len() > self.max_entries {
@@ -205,7 +210,7 @@ fn render_log_rows(
     rows: &[&LogEntry],
     stick_to_bottom: bool,
 ) -> LogRenderOutcome {
-    let row_height = log_row_height(ui);
+    let base_row_height = log_row_height(ui);
 
     if rows.is_empty() {
         let scroll_output = ScrollArea::vertical()
@@ -222,34 +227,62 @@ fn render_log_rows(
         };
     }
 
+    // 计算总内容高度
+    let total_content_height: f32 = rows
+        .iter()
+        .map(|entry| base_row_height * entry.line_count.max(1) as f32)
+        .sum();
+
     let scroll_output = ScrollArea::vertical()
         .auto_shrink([false, false])
         .stick_to_bottom(stick_to_bottom)
         .id_salt("log-scroll")
-        .show_rows(ui, row_height, rows.len(), |ui, row_range| {
-            for row_index in row_range {
-                let entry = rows[row_index];
+        .show(ui, |ui| {
+            let clip_rect = ui.clip_rect();
+            let mut y_cursor = 0.0_f32;
 
-                let response = show_log_entry(ui, entry, row_height);
+            for entry in rows {
+                let entry_height = base_row_height * entry.line_count.max(1) as f32;
+                let entry_rect = egui::Rect::from_min_size(
+                    egui::pos2(ui.min_rect().left(), ui.min_rect().top() + y_cursor),
+                    egui::vec2(ui.available_width(), entry_height),
+                );
 
-                response.context_menu(|ui| {
-                    if ui.button("复制消息").clicked() {
-                        ui.ctx().copy_text(entry.message.clone());
-                        ui.close();
-                    }
+                // 视口裁剪
+                if entry_rect.bottom() >= clip_rect.top() - entry_height
+                    && entry_rect.top() <= clip_rect.bottom() + entry_height
+                {
+                    let mut child_ui = ui.child_ui(
+                        entry_rect,
+                        egui::Layout::top_down(egui::Align::Min),
+                        None,
+                    );
 
-                    if ui.button("复制整行").clicked() {
-                        ui.ctx().copy_text(format!(
-                            "{} {} {} {}",
-                            entry.timestamp_label,
-                            entry.level.as_str(),
-                            entry.source,
-                            entry.message
-                        ));
-                        ui.close();
-                    }
-                });
+                    let response = show_log_entry(&mut child_ui, entry, base_row_height);
+
+                    response.context_menu(|ctx_ui| {
+                        if ctx_ui.button("复制消息").clicked() {
+                            ctx_ui.ctx().copy_text(entry.message.clone());
+                            ctx_ui.close();
+                        }
+
+                        if ctx_ui.button("复制整行").clicked() {
+                            ctx_ui.ctx().copy_text(format!(
+                                "{} {} {} {}",
+                                entry.timestamp_label,
+                                entry.level.as_str(),
+                                entry.source,
+                                entry.message
+                            ));
+                            ctx_ui.close();
+                        }
+                    });
+                }
+
+                y_cursor += entry_height;
             }
+
+            ui.allocate_space(egui::vec2(ui.available_width(), total_content_height));
         });
 
     LogRenderOutcome {
@@ -259,11 +292,12 @@ fn render_log_rows(
     }
 }
 
-fn show_log_entry(ui: &mut egui::Ui, entry: &LogEntry, row_height: f32) -> egui::Response {
+fn show_log_entry(ui: &mut egui::Ui, entry: &LogEntry, base_row_height: f32) -> egui::Response {
     let row_width = ui.available_width();
+    let entry_height = base_row_height * entry.line_count.max(1) as f32;
 
     let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(row_width, row_height), egui::Sense::click());
+        ui.allocate_exact_size(egui::vec2(row_width, entry_height), egui::Sense::click());
 
     let bg = if response.hovered() {
         theme::WIDGET_HOVER
@@ -278,12 +312,13 @@ fn show_log_entry(ui: &mut egui::Ui, entry: &LogEntry, row_height: f32) -> egui:
     }
 
     let font_id = egui::TextStyle::Monospace.resolve(ui.style());
-    let text_y = rect.center().y;
+    let first_line_y = rect.top() + base_row_height * 0.5;
 
     let mut x = rect.left() + ROW_LEFT_PADDING;
 
+    // 时间戳 — 第一行居中
     painter.text(
-        egui::pos2(x, text_y),
+        egui::pos2(x, first_line_y),
         egui::Align2::LEFT_CENTER,
         &entry.timestamp_label,
         font_id.clone(),
@@ -292,8 +327,9 @@ fn show_log_entry(ui: &mut egui::Ui, entry: &LogEntry, row_height: f32) -> egui:
 
     x += TIME_COL_WIDTH + COL_GAP;
 
+    // 级别 — 第一行居中
     painter.text(
-        egui::pos2(x, text_y),
+        egui::pos2(x, first_line_y),
         egui::Align2::LEFT_CENTER,
         entry.level.as_str(),
         font_id.clone(),
@@ -302,6 +338,7 @@ fn show_log_entry(ui: &mut egui::Ui, entry: &LogEntry, row_height: f32) -> egui:
 
     x += LEVEL_COL_WIDTH + COL_GAP;
 
+    // 来源 — 第一行居中
     let source_clip = egui::Rect::from_min_max(
         egui::pos2(x, rect.top()),
         egui::pos2((x + SOURCE_COL_WIDTH).min(rect.right()), rect.bottom()),
@@ -311,7 +348,7 @@ fn show_log_entry(ui: &mut egui::Ui, entry: &LogEntry, row_height: f32) -> egui:
     let source_text = crate::compact_middle(&entry.source, SOURCE_TEXT_MAX_CHARS);
 
     source_painter.text(
-        egui::pos2(x, text_y),
+        egui::pos2(x, first_line_y),
         egui::Align2::LEFT_CENTER,
         source_text,
         font_id.clone(),
@@ -320,6 +357,7 @@ fn show_log_entry(ui: &mut egui::Ui, entry: &LogEntry, row_height: f32) -> egui:
 
     x += SOURCE_COL_WIDTH + COL_GAP;
 
+    // 消息 — 逐行渲染
     let message_clip = egui::Rect::from_min_max(
         egui::pos2(x, rect.top()),
         egui::pos2(rect.right(), rect.bottom()),
@@ -327,13 +365,16 @@ fn show_log_entry(ui: &mut egui::Ui, entry: &LogEntry, row_height: f32) -> egui:
 
     let message_painter = ui.painter().with_clip_rect(message_clip);
 
-    message_painter.text(
-        egui::pos2(x, text_y),
-        egui::Align2::LEFT_CENTER,
-        &entry.message,
-        font_id,
-        theme::TEXT_PRIMARY,
-    );
+    for (line_idx, line) in entry.message.lines().enumerate() {
+        let line_y = rect.top() + base_row_height * (line_idx as f32 + 0.5);
+        message_painter.text(
+            egui::pos2(x, line_y),
+            egui::Align2::LEFT_CENTER,
+            line,
+            font_id.clone(),
+            theme::TEXT_PRIMARY,
+        );
+    }
 
     response
 }
