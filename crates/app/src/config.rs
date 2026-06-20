@@ -266,3 +266,196 @@ impl WorkbenchApp {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use tool_recorder::RecordMode;
+
+    // ── ensure_jsonl_extension ──
+
+    #[test]
+    fn ensure_jsonl_extension_no_extension_adds_jsonl() {
+        let path = PathBuf::from("/tmp/session-12345");
+        let result = ensure_jsonl_extension(path);
+        assert_eq!(result.extension().unwrap(), "jsonl");
+        assert!(result.to_string_lossy().ends_with(".jsonl"));
+    }
+
+    #[test]
+    fn ensure_jsonl_extension_already_jsonl_unchanged() {
+        let path = PathBuf::from("/tmp/session-12345.jsonl");
+        let result = ensure_jsonl_extension(path.clone());
+        assert_eq!(result, path);
+    }
+
+    #[test]
+    fn ensure_jsonl_extension_case_insensitive_jsonl_unchanged() {
+        let path = PathBuf::from("/tmp/session-12345.JSONL");
+        let result = ensure_jsonl_extension(path.clone());
+        assert_eq!(result, path);
+    }
+
+    #[test]
+    fn ensure_jsonl_extension_other_extension_replaced() {
+        let path = PathBuf::from("/tmp/session-12345.txt");
+        let result = ensure_jsonl_extension(path);
+        assert_eq!(result.extension().unwrap(), "jsonl");
+    }
+
+    // ── record_mode_label ──
+
+    #[test]
+    fn record_mode_label_all_variants_non_empty() {
+        let modes = [
+            RecordMode::StandardReplay,
+            RecordMode::RawSerial,
+            RecordMode::FullDebug,
+        ];
+        for mode in &modes {
+            let label = record_mode_label(*mode);
+            assert!(!label.is_empty(), "label for {mode:?} should not be empty");
+        }
+    }
+
+    #[test]
+    fn record_mode_label_standard_replay() {
+        assert_eq!(record_mode_label(RecordMode::StandardReplay), "标准回放");
+    }
+
+    #[test]
+    fn record_mode_label_raw_serial() {
+        assert_eq!(record_mode_label(RecordMode::RawSerial), "原始串口");
+    }
+
+    #[test]
+    fn record_mode_label_full_debug() {
+        assert_eq!(record_mode_label(RecordMode::FullDebug), "完整调试");
+    }
+
+    // ── default_recorder_path ──
+
+    #[test]
+    fn default_recorder_path_contains_session_and_jsonl() {
+        let path = default_recorder_path();
+        assert!(path.contains("session-"), "path should contain 'session-': {path}");
+        assert!(path.ends_with(".jsonl"), "path should end with .jsonl: {path}");
+    }
+
+    // ── default_activity_order ──
+
+    #[test]
+    fn default_activity_order_non_empty() {
+        let order = default_activity_order();
+        assert!(!order.is_empty(), "activity order should not be empty");
+    }
+
+    #[test]
+    fn default_activity_order_contains_expected_activities() {
+        let order = default_activity_order();
+        // 顺序必须匹配
+        assert_eq!(order[0], Activity::Devices);
+        assert_eq!(order[1], Activity::Replay);
+        assert_eq!(order[2], Activity::Plugins);
+        assert_eq!(order[3], Activity::Settings);
+        assert_eq!(order.len(), 4);
+    }
+
+    // ── default_true ──
+
+    #[test]
+    fn default_true_returns_true() {
+        assert!(default_true());
+    }
+
+    // ── atomic_write_json ──
+
+    #[test]
+    fn atomic_write_json_basic_write_and_read_back() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("test.json");
+
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct Data {
+            key: String,
+            value: i32,
+        }
+
+        let original = Data {
+            key: "hello".into(),
+            value: 42,
+        };
+
+        atomic_write_json(&path, &original).expect("write should succeed");
+        assert!(path.exists(), "file should exist after write");
+
+        let read_back: Data =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(read_back, original);
+    }
+
+    #[test]
+    fn atomic_write_json_overwrite() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("test.json");
+
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct Data {
+            value: i32,
+        }
+
+        let first = Data { value: 1 };
+        let second = Data { value: 2 };
+
+        atomic_write_json(&path, &first).expect("first write");
+        atomic_write_json(&path, &second).expect("second write");
+
+        let read_back: Data =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(read_back, second);
+    }
+
+    #[test]
+    fn atomic_write_json_creates_backup() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("test.json");
+        let backup_path = dir.path().join("test.json.backup");
+
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct Data {
+            value: i32,
+        }
+
+        let first = Data { value: 1 };
+        let second = Data { value: 2 };
+
+        // 第一次写入不会创建备份（因为目标文件还不存在）
+        atomic_write_json(&path, &first).expect("first write");
+        assert!(!backup_path.exists(), "no backup on first write");
+
+        // 第二次写入应该创建备份
+        atomic_write_json(&path, &second).expect("second write");
+        assert!(backup_path.exists(), "backup should exist after overwrite");
+
+        // 备份文件应该包含第一次写入的内容
+        let backup_data: Data =
+            serde_json::from_str(&std::fs::read_to_string(&backup_path).unwrap()).unwrap();
+        assert_eq!(backup_data, first);
+    }
+
+    #[test]
+    fn atomic_write_json_no_temp_file_left_behind() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("test.json");
+        let temp_path = dir.path().join("test.tmp");
+
+        #[derive(Serialize)]
+        struct Data {
+            value: i32,
+        }
+
+        atomic_write_json(&path, &Data { value: 1 }).expect("write should succeed");
+        assert!(!temp_path.exists(), "temp file should not remain after write");
+    }
+}

@@ -1452,6 +1452,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "tempfile",
  "tool-core",
  "tool-databus",
  "tool-extension",

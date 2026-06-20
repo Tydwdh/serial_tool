@@ -438,3 +438,252 @@ impl Drop for JsonlRecorder {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::Duration;
+    use tool_core::{Direction, Event, Payload};
+
+    fn test_event(topic: &str) -> Event {
+        Event::new(topic, "test", Direction::Internal, Payload::Text("test".into()))
+    }
+
+    fn temp_file(name: &str) -> PathBuf {
+        std::env::temp_dir().join(name)
+    }
+
+    // ── Test 1: new recorder is not running ──
+
+    #[test]
+    fn new_recorder_is_not_running() {
+        let bus = DataBus::new();
+        let rec = JsonlRecorder::new(bus);
+        assert!(!rec.is_running());
+        assert!(!rec.is_stopping());
+        assert!(!rec.is_paused());
+        let s = rec.stats();
+        assert!(!s.running);
+        assert!(!s.stopping);
+        assert!(!s.paused);
+    }
+
+    // ── Test 2: start/stop lifecycle ──
+
+    #[test]
+    fn start_stop_lifecycle() {
+        let bus = DataBus::new();
+        let mut rec = JsonlRecorder::new(bus);
+        let path = temp_file(&format!("test-lifecycle-{}.jsonl", tool_core::now_timestamp_ms()));
+
+        // Before start
+        assert!(!rec.is_running());
+        assert!(rec.current_path().is_none());
+
+        // Start
+        rec.start(&path).unwrap();
+        assert!(rec.is_running());
+        assert!(!rec.is_stopping());
+        assert!(rec.current_path().is_some());
+
+        // Stop
+        rec.stop();
+        assert!(!rec.is_running());
+        assert!(rec.is_stopping());
+
+        // Reap — wait for worker thread to finish
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let result = loop {
+            if let Some(r) = rec.reap_stopping() {
+                break r;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for recorder to stop"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(result.is_ok());
+        assert!(!rec.is_stopping());
+
+        // Verify file was created
+        assert!(path.exists());
+
+        // Cleanup
+        let _ = fs::remove_file(&path);
+        let summary = path.with_extension("summary.json");
+        if summary.exists() {
+            let _ = fs::remove_file(&summary);
+        }
+    }
+
+    // ── Test 3: pause/resume ──
+
+    #[test]
+    fn pause_resume() {
+        let bus = DataBus::new();
+        let mut rec = JsonlRecorder::new(bus);
+        let path = temp_file(&format!("test-pause-{}.jsonl", tool_core::now_timestamp_ms()));
+
+        rec.start(&path).unwrap();
+        assert!(!rec.is_paused());
+
+        rec.pause();
+        assert!(rec.is_paused());
+        assert!(rec.stats().paused);
+
+        rec.resume();
+        assert!(!rec.is_paused());
+        assert!(!rec.stats().paused);
+
+        rec.stop();
+        while rec.reap_stopping().is_none() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let _ = fs::remove_file(&path);
+        let summary = path.with_extension("summary.json");
+        if summary.exists() {
+            let _ = fs::remove_file(&summary);
+        }
+    }
+
+    // ── Test 4: start fails when already running ──
+
+    #[test]
+    fn start_fails_when_already_running() {
+        let bus = DataBus::new();
+        let mut rec = JsonlRecorder::new(bus);
+        let path1 = temp_file(&format!("test-double1-{}.jsonl", tool_core::now_timestamp_ms()));
+        let path2 = temp_file(&format!("test-double2-{}.jsonl", tool_core::now_timestamp_ms()));
+
+        rec.start(&path1).unwrap();
+        assert!(rec.is_running());
+
+        let err = rec.start(&path2).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+
+        // Cleanup: stop the running recorder
+        rec.stop();
+        while rec.reap_stopping().is_none() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = fs::remove_file(&path1);
+        let _ = fs::remove_file(&path2);
+        let s1 = path1.with_extension("summary.json");
+        if s1.exists() {
+            let _ = fs::remove_file(&s1);
+        }
+    }
+
+    // ── Test 5: stats are updated during recording ──
+
+    #[test]
+    fn stats_updated_during_recording() {
+        let bus = DataBus::new();
+        let mut rec = JsonlRecorder::new(bus);
+        let path = temp_file(&format!("test-stats-{}.jsonl", tool_core::now_timestamp_ms()));
+
+        // Set FullDebug mode before start so the worker captures it
+        rec.set_mode(RecordMode::FullDebug);
+        rec.start(&path).unwrap();
+        let s = rec.stats();
+        assert!(s.running);
+        assert_eq!(s.events_written, 0);
+
+        // Publish events that will be recorded (FullDebug mode records everything)
+        for i in 0..10 {
+            rec.bus.publish(test_event(&format!("test.stats.{i}")));
+        }
+
+        // Give the worker time to process
+        std::thread::sleep(Duration::from_millis(500));
+
+        let s = rec.stats();
+        assert!(
+            s.events_written > 0,
+            "expected some events written, got {}",
+            s.events_written
+        );
+
+        rec.stop();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if rec.reap_stopping().is_some() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for recorder to stop"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let _ = fs::remove_file(&path);
+        let summary = path.with_extension("summary.json");
+        if summary.exists() {
+            let _ = fs::remove_file(&summary);
+        }
+    }
+
+    // ── Test 6: stop is idempotent (calling stop when not running doesn't crash) ──
+
+    #[test]
+    fn stop_is_idempotent() {
+        let bus = DataBus::new();
+        let mut rec = JsonlRecorder::new(bus);
+
+        // Calling stop on a fresh recorder should not panic
+        rec.stop();
+        assert!(!rec.is_running());
+        assert!(!rec.is_stopping());
+
+        // Start, stop, then stop again
+        let path = temp_file(&format!("test-idempotent-{}.jsonl", tool_core::now_timestamp_ms()));
+        rec.start(&path).unwrap();
+        rec.stop();
+        // Second stop on already-stopping recorder should not panic
+        rec.stop();
+        assert!(!rec.is_running());
+
+        while rec.reap_stopping().is_none() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // Stop after reap should not panic
+        rec.stop();
+        assert!(!rec.is_running());
+        assert!(!rec.is_stopping());
+
+        let _ = fs::remove_file(&path);
+        let summary = path.with_extension("summary.json");
+        if summary.exists() {
+            let _ = fs::remove_file(&summary);
+        }
+    }
+
+    // ── Test 7: recording to an invalid path fails ──
+
+    #[test]
+    fn start_fails_with_invalid_path() {
+        let bus = DataBus::new();
+        let mut rec = JsonlRecorder::new(bus);
+
+        // On Windows, a path with invalid characters like NUL should fail
+        // Use a path to a non-existent directory under a file (not a directory)
+        let invalid_path = temp_file(&format!(
+            "test-invalid-{}.jsonl",
+            tool_core::now_timestamp_ms()
+        ));
+        // Create a file at that path, then try to use it as a directory
+        fs::write(&invalid_path, b"blocker").unwrap();
+        let nested = invalid_path.join("subdir").join("recording.jsonl");
+
+        let result = rec.start(&nested);
+        assert!(result.is_err(), "expected error for invalid path, got Ok");
+        assert!(!rec.is_running());
+
+        let _ = fs::remove_file(&invalid_path);
+    }
+}

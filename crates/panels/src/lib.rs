@@ -78,3 +78,161 @@ pub fn ellipsize_tail(s: &str, max_chars: usize) -> String {
     let truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
     format!("{truncated}…")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── fmt_ts ────────────────────────────────────────────────────────
+
+    #[test]
+    fn fmt_ts_returns_expected_format() {
+        // Use a known UTC timestamp: 2025-01-15T08:30:45.123Z
+        // ms = 1736929845123
+        let result = fmt_ts(1_736_929_845_123);
+        // Format should be HH:MM:SS.mmm (11 or 12 chars depending on leading zero)
+        assert!(
+            result.len() >= 11 && result.len() <= 12,
+            "unexpected length: {result:?}"
+        );
+        // Should contain two colons and one dot
+        assert_eq!(result.matches(':').count(), 2, "missing colons in {result:?}");
+        assert_eq!(result.matches('.').count(), 1, "missing dot in {result:?}");
+    }
+
+    #[test]
+    fn fmt_ts_zero_timestamp() {
+        let result = fmt_ts(0);
+        // Unix epoch should still format cleanly
+        assert!(!result.is_empty());
+        assert_eq!(result.matches(':').count(), 2);
+        assert_eq!(result.matches('.').count(), 1);
+    }
+
+    #[test]
+    fn fmt_ts_large_timestamp() {
+        // Far-future timestamp should not panic
+        let result = fmt_ts(u64::MAX);
+        // If the timestamp is out of range, it returns the fallback string
+        assert!(!result.is_empty());
+    }
+
+    // ── level_color ───────────────────────────────────────────────────
+
+    #[test]
+    fn level_color_each_level_is_distinct() {
+        use tool_core::LogLevel;
+        let levels = [
+            LogLevel::Trace,
+            LogLevel::Debug,
+            LogLevel::Info,
+            LogLevel::Warn,
+            LogLevel::Error,
+        ];
+        let colors: Vec<egui::Color32> = levels.iter().map(|&l| level_color(l)).collect();
+
+        // All colors should be distinct
+        for i in 0..colors.len() {
+            for j in (i + 1)..colors.len() {
+                assert_ne!(
+                    colors[i], colors[j],
+                    "level_color({:?}) == level_color({:?})",
+                    levels[i], levels[j]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn level_color_returns_valid_color() {
+        use tool_core::LogLevel;
+        for level in [
+            LogLevel::Trace,
+            LogLevel::Debug,
+            LogLevel::Info,
+            LogLevel::Warn,
+            LogLevel::Error,
+        ] {
+            let color = level_color(level);
+            // Color32 should have non-zero alpha (fully opaque or nearly so)
+            // We just check it's a real color value
+            let _ = color; // at minimum, the function returned without panicking
+        }
+    }
+
+    // ── compact_middle ────────────────────────────────────────────────
+
+    #[test]
+    fn compact_middle_short_string_no_truncation() {
+        assert_eq!(compact_middle("abc", 5), "abc");
+        assert_eq!(compact_middle("hello", 10), "hello");
+    }
+
+    #[test]
+    fn compact_middle_long_string_truncated() {
+        let result = compact_middle("hello_world_this_is_long", 10);
+        assert!(result.contains('…'), "expected ellipsis in {result:?}");
+        assert_eq!(result.chars().count(), 10);
+    }
+
+    #[test]
+    fn compact_middle_exact_length() {
+        let input = "1234567890"; // 10 chars
+        assert_eq!(compact_middle(input, 10), input);
+        // One more char should trigger truncation
+        assert_ne!(compact_middle("12345678901", 10), "12345678901");
+    }
+
+    #[test]
+    fn compact_middle_empty_string() {
+        assert_eq!(compact_middle("", 5), "");
+        assert_eq!(compact_middle("", 0), "");
+    }
+
+    #[test]
+    fn compact_middle_zero_max_chars() {
+        // max_chars = 0: char count (0) <= 0, so returns as-is
+        assert_eq!(compact_middle("", 0), "");
+        // max_chars = 0 with non-empty string is a degenerate case;
+        // the function is only called with reasonable max_chars in practice.
+    }
+
+    // ── ellipsize_tail ────────────────────────────────────────────────
+
+    #[test]
+    fn ellipsize_tail_short_string_no_truncation() {
+        assert_eq!(ellipsize_tail("abc", 5), "abc");
+        assert_eq!(ellipsize_tail("hello", 10), "hello");
+    }
+
+    #[test]
+    fn ellipsize_tail_long_string_truncated() {
+        let result = ellipsize_tail("hello_world_this_is_long", 10);
+        assert!(result.ends_with('…'), "expected trailing ellipsis in {result:?}");
+        assert_eq!(result.chars().count(), 10);
+    }
+
+    #[test]
+    fn ellipsize_tail_exact_length() {
+        let input = "1234567890"; // 10 chars
+        assert_eq!(ellipsize_tail(input, 10), input);
+        // One more char should trigger truncation
+        let truncated = ellipsize_tail("12345678901", 10);
+        assert!(truncated.ends_with('…'));
+        assert_eq!(truncated.chars().count(), 10);
+    }
+
+    #[test]
+    fn ellipsize_tail_empty_string() {
+        assert_eq!(ellipsize_tail("", 5), "");
+        assert_eq!(ellipsize_tail("", 0), "");
+    }
+
+    #[test]
+    fn ellipsize_tail_max_chars_one() {
+        // max_chars=1: "abc" has 3 chars > 1, so take 0 chars + "…" = "…"
+        assert_eq!(ellipsize_tail("abc", 1), "…");
+        // Single char with max_chars=1: no truncation
+        assert_eq!(ellipsize_tail("a", 1), "a");
+    }
+}

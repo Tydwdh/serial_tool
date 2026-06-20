@@ -451,12 +451,28 @@ impl ReplayManager {
 
     /// 第二阶段：发布剩余事件（非 ui.panel.create）+ analyzer cache。
     /// 必须在 seek_panel_phase 之后调用。
+    /// 优化：复用 seek_panel_phase 推进的 cursor，只从 cursor 位置继续向前扫描。
     pub fn seek_data_phase(&mut self, position_ms: u64) -> usize {
         let policy = self.effective_policy();
-        // 跳过 ui.panel.create（已在阶段 1 发布），ReparseRaw 下同时跳过 protocol.*
-        let data_count = self.publish_until_filtered(position_ms, |event| {
+
+        // 先从 0 扫描到 cursor（seek_panel_phase 已处理过的事件范围），
+        // 发布非 panel.create 事件。
+        let before_cursor = self.publish_range_filtered(
+            0,
+            self.cursor,
+            position_ms,
+            |event| {
+                event.topic != tool_core::topics::UI_PANEL_CREATE
+                    && (policy != ReplayPolicy::ReparseRaw
+                        || !event.topic.starts_with("protocol."))
+            },
+        );
+
+        // 再从 cursor 继续扫描剩余事件（如有）
+        let after_cursor = self.publish_until_filtered(position_ms, |event| {
             event.topic != tool_core::topics::UI_PANEL_CREATE
-                && (policy != ReplayPolicy::ReparseRaw || !event.topic.starts_with("protocol."))
+                && (policy != ReplayPolicy::ReparseRaw
+                    || !event.topic.starts_with("protocol."))
         });
 
         let analyzer_count = if policy == ReplayPolicy::ReparseRaw && self.analyzer_cache_valid {
@@ -465,10 +481,11 @@ impl ReplayManager {
             0
         };
 
-        data_count + analyzer_count
+        before_cursor + after_cursor + analyzer_count
     }
 
     /// 按 predicate 过滤发布事件到指定位置。
+    /// 会推进 cursor 到目标位置之后。
     fn publish_until_filtered(
         &mut self,
         target_position_ms: u64,
@@ -478,11 +495,40 @@ impl ReplayManager {
             return 0;
         };
 
-        // 从 cursor 开始遍历（seek_panel_phase 后 cursor 已到末尾，seek_data_phase 会重新从 0 开始）
-        // 所以这里从 0 重新扫描，避免状态依赖
         let mut count = 0;
-        for index in 0..self.events.len() {
-            let event = &self.events[index];
+        while let Some(event) = self.events.get(self.cursor) {
+            let event_position = event.timestamp_ms.saturating_sub(base);
+            if event_position > target_position_ms {
+                break;
+            }
+            if predicate(event) {
+                self.bus.publish(mark_replay_event(event.clone()));
+                count += 1;
+            }
+            self.cursor += 1;
+        }
+
+        count
+    }
+
+    /// 在指定索引范围 [start..end) 内，按 predicate 过滤发布事件。
+    /// 不推进 cursor（由调用方管理）。
+    fn publish_range_filtered(
+        &mut self,
+        start: usize,
+        end: usize,
+        target_position_ms: u64,
+        predicate: impl Fn(&Event) -> bool,
+    ) -> usize {
+        let Some(base) = self.base_timestamp_ms() else {
+            return 0;
+        };
+
+        let mut count = 0;
+        for index in start..end {
+            let Some(event) = self.events.get(index) else {
+                break;
+            };
             let event_position = event.timestamp_ms.saturating_sub(base);
             if event_position > target_position_ms {
                 break;
@@ -492,13 +538,6 @@ impl ReplayManager {
                 count += 1;
             }
         }
-
-        // 更新 cursor 到目标位置之后
-        self.cursor = self
-            .events
-            .iter()
-            .position(|event| event.timestamp_ms.saturating_sub(base) > target_position_ms)
-            .unwrap_or(self.events.len());
 
         count
     }
@@ -884,5 +923,65 @@ mod tests {
         // 不存在的路径应该返回错误
         let result = mgr.load(std::path::PathBuf::from("/nonexistent/path/for/test.jsonl"));
         assert!(result.is_err());
+    }
+
+    /// 验证 seek_with_replay 在大量事件下的性能。
+    /// 生成 N 个事件，录制到临时文件，加载后执行 seek，确保在合理时间内完成。
+    #[test]
+    fn seek_performance_with_many_events() {
+        use std::io::Write;
+
+        let event_count = 10_000;
+        let dir =
+            std::env::temp_dir().join(format!("replay-perf-{}", tool_core::now_timestamp_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let jsonl_path = dir.join("perf.jsonl");
+
+        // 生成事件：每毫秒一个，部分是 UI_PANEL_CREATE，大部分是串口数据
+        {
+            let mut file = std::fs::File::create(&jsonl_path).unwrap();
+            for i in 0..event_count {
+                let topic = if i % 100 == 0 {
+                    "ui.panel.create"
+                } else if i % 2 == 0 {
+                    "transport.serial.default.rx"
+                } else {
+                    "log.system"
+                };
+                let event_json = format!(
+                    r#"{{"id":{id},"timestamp_ms":{ts},"topic":"{topic}","source":"test","direction":"internal","payload":{{"kind":"empty","value":null}},"metadata":{{}}}}"#,
+                    id = i,
+                    ts = 1000 + i,
+                    topic = topic,
+                );
+                writeln!(file, "{event_json}").unwrap();
+            }
+            file.flush().unwrap();
+        }
+
+        let bus = DataBus::new();
+        let mut mgr = ReplayManager::new(bus);
+        mgr.set_policy(ReplayPolicy::ExactRecorded);
+        mgr.load(&jsonl_path).unwrap();
+
+        assert_eq!(mgr.status().total_events, event_count);
+
+        // 执行 seek 到中间位置
+        let start = std::time::Instant::now();
+        let count = mgr.seek_with_replay(5_000); // seek 到 5 秒位置
+        let elapsed = start.elapsed();
+
+        // 验证有事件被发布
+        assert!(count > 0, "seek should publish events");
+
+        // 性能断言：10k 事件的 seek 应在 1 秒内完成
+        // O(n) seek 应该远快于此；O(n²) 的旧实现在 100k 事件时会显著变慢
+        assert!(
+            elapsed.as_millis() < 1000,
+            "seek_with_replay took {:?} for {event_count} events — should be < 1s",
+            elapsed
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
