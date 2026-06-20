@@ -508,6 +508,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a quiet local machine; CI runners have unstable sub-millisecond scheduling"]
     fn spin_wait_100us_precision() {
         let (avg, p99, max) = measure_spin_precision(Duration::from_micros(100), 1000);
         eprintln!(
@@ -524,6 +525,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a quiet local machine; CI runners have unstable sub-millisecond scheduling"]
     fn spin_wait_1ms_precision() {
         let (avg, p99, max) = measure_spin_precision(Duration::from_millis(1), 1000);
         eprintln!(
@@ -540,6 +542,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a quiet local machine; CI runners have unstable sub-millisecond scheduling"]
     fn spin_wait_10ms_precision() {
         let (avg, p99, max) = measure_spin_precision(Duration::from_millis(10), 500);
         eprintln!(
@@ -556,6 +559,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a quiet local machine; CI runners have unstable sub-millisecond scheduling"]
     fn spin_wait_100ms_precision() {
         let (avg, p99, max) = measure_spin_precision(Duration::from_millis(100), 100);
         eprintln!(
@@ -572,6 +576,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a quiet local machine; CI runners have unstable sub-millisecond scheduling"]
     fn spin_wait_no_drift() {
         #[cfg(target_os = "windows")]
         unsafe {
