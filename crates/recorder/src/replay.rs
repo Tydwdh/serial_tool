@@ -457,22 +457,15 @@ impl ReplayManager {
 
         // 先从 0 扫描到 cursor（seek_panel_phase 已处理过的事件范围），
         // 发布非 panel.create 事件。
-        let before_cursor = self.publish_range_filtered(
-            0,
-            self.cursor,
-            position_ms,
-            |event| {
-                event.topic != tool_core::topics::UI_PANEL_CREATE
-                    && (policy != ReplayPolicy::ReparseRaw
-                        || !event.topic.starts_with("protocol."))
-            },
-        );
+        let before_cursor = self.publish_range_filtered(0, self.cursor, position_ms, |event| {
+            event.topic != tool_core::topics::UI_PANEL_CREATE
+                && (policy != ReplayPolicy::ReparseRaw || !event.topic.starts_with("protocol."))
+        });
 
         // 再从 cursor 继续扫描剩余事件（如有）
         let after_cursor = self.publish_until_filtered(position_ms, |event| {
             event.topic != tool_core::topics::UI_PANEL_CREATE
-                && (policy != ReplayPolicy::ReparseRaw
-                    || !event.topic.starts_with("protocol."))
+                && (policy != ReplayPolicy::ReparseRaw || !event.topic.starts_with("protocol."))
         });
 
         let analyzer_count = if policy == ReplayPolicy::ReparseRaw && self.analyzer_cache_valid {

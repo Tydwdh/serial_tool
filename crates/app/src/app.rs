@@ -1,5 +1,5 @@
 use crate::config::default_activity_order;
-use crate::config::{default_recorder_path, load_config, ConfigLoadResult, PersistedConfig};
+use crate::config::{ConfigLoadResult, PersistedConfig, default_recorder_path, load_config};
 use crate::state::{MAX_SEND_HISTORY, SendUiState, SerialUiState, StatusState};
 use eframe::egui;
 use std::collections::{BTreeSet, VecDeque};
@@ -121,7 +121,10 @@ impl WorkbenchApp {
         let config_result = load_config();
         let config: Option<PersistedConfig> = match config_result {
             ConfigLoadResult::Ok(cfg) => Some(cfg),
-            ConfigLoadResult::ParseError { ref path, ref error } => {
+            ConfigLoadResult::ParseError {
+                ref path,
+                ref error,
+            } => {
                 bus.publish(Event::system_log(
                     LogLevel::Error,
                     "app",
@@ -270,7 +273,9 @@ impl WorkbenchApp {
 impl Drop for WorkbenchApp {
     fn drop(&mut self) {
         // 退出前自动保存工作区
-        if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+        if let Err(e) = self.save_config() {
+            log::warn!("save_config failed: {e}")
+        };
         self.recorder.stop();
         self.transport.close_serial();
     }

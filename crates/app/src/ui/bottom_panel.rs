@@ -162,7 +162,9 @@ impl WorkbenchApp {
                         .clicked()
                     {
                         self.send_popup_always_on_top = !self.send_popup_always_on_top;
-                        if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+                        if let Err(e) = self.save_config() {
+                            log::warn!("save_config failed: {e}")
+                        };
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -345,9 +347,10 @@ impl WorkbenchApp {
         {
             self.send.periodic_send_count = 0;
             if !self.send.periodic_enabled
-                && let Some(cancel) = self.periodic_send_cancel.take() {
-                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
+                && let Some(cancel) = self.periodic_send_cancel.take()
+            {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         }
         ui.add(
             egui::TextEdit::singleline(&mut self.send.periodic_interval_ms).desired_width(width),

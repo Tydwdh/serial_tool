@@ -118,7 +118,9 @@ impl WorkbenchApp {
             }
             if let Some(i) = to_remove {
                 self.recent_workspaces.remove(i);
-                if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+                if let Err(e) = self.save_config() {
+                    log::warn!("save_config failed: {e}")
+                };
             }
         }
 
@@ -127,7 +129,9 @@ impl WorkbenchApp {
         let mut bottom_visible = self.panels.dock.bottom_visible;
         if ui.checkbox(&mut bottom_visible, "底部面板").changed() {
             self.set_bottom_visible(bottom_visible);
-            if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+            if let Err(e) = self.save_config() {
+                log::warn!("save_config failed: {e}")
+            };
         }
         ui.separator();
         ui.heading("快捷键");
@@ -159,7 +163,12 @@ impl WorkbenchApp {
                 ui.end_row();
 
                 for action in Action::ALL {
-                    let bindings = self.keymap.bindings.get(action).cloned().unwrap_or_default();
+                    let bindings = self
+                        .keymap
+                        .bindings
+                        .get(action)
+                        .cloned()
+                        .unwrap_or_default();
                     let action_label = action.label();
 
                     ui.label(action_label);
@@ -181,7 +190,9 @@ impl WorkbenchApp {
                     // 清除按钮
                     if !bindings.is_empty() && ui.button("清除").clicked() {
                         self.keymap.set_bindings(*action, vec![]);
-                        if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+                        if let Err(e) = self.save_config() {
+                            log::warn!("save_config failed: {e}")
+                        };
                     }
                     ui.end_row();
                 }
@@ -189,7 +200,12 @@ impl WorkbenchApp {
 
         // 处理录制结果
         if let (Some(action), Some(key_name)) = (recording_action, pressed_key) {
-            let mut bindings = self.keymap.bindings.get(&action).cloned().unwrap_or_default();
+            let mut bindings = self
+                .keymap
+                .bindings
+                .get(&action)
+                .cloned()
+                .unwrap_or_default();
             // 录制新快捷键：替换同修饰键的旧绑定，或追加
             let ctrl = ui.ctx().input(|i| i.modifiers.ctrl);
             let shift = ui.ctx().input(|i| i.modifiers.shift);
@@ -199,7 +215,9 @@ impl WorkbenchApp {
             bindings.retain(|b| !(b.ctrl == ctrl && b.shift == shift && b.alt == alt));
             bindings.push(new_binding);
             self.keymap.set_bindings(action, bindings);
-            if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+            if let Err(e) = self.save_config() {
+                log::warn!("save_config failed: {e}")
+            };
             self.set_status_force(
                 StatusLevel::Info,
                 format!("{} 快捷键已更新", action.label()),
@@ -209,7 +227,9 @@ impl WorkbenchApp {
         ui.separator();
         if ui.button("恢复默认快捷键").clicked() {
             self.keymap = Keymap::default();
-            if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+            if let Err(e) = self.save_config() {
+                log::warn!("save_config failed: {e}")
+            };
             self.set_status_force(StatusLevel::Warn, "快捷键已恢复默认");
         }
     }

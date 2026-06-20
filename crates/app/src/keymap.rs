@@ -83,15 +83,26 @@ pub(crate) struct KeyBinding {
 
 impl KeyBinding {
     pub(crate) fn new(key: impl Into<String>, ctrl: bool, shift: bool, alt: bool) -> Self {
-        Self { key: key.into(), ctrl, shift, alt }
+        Self {
+            key: key.into(),
+            ctrl,
+            shift,
+            alt,
+        }
     }
 
     /// 用户可读的显示字符串，如 "Ctrl+Shift+O"。
     pub(crate) fn display(&self) -> String {
         let mut parts = Vec::new();
-        if self.ctrl { parts.push("Ctrl"); }
-        if self.alt { parts.push("Alt"); }
-        if self.shift { parts.push("Shift"); }
+        if self.ctrl {
+            parts.push("Ctrl");
+        }
+        if self.alt {
+            parts.push("Alt");
+        }
+        if self.shift {
+            parts.push("Shift");
+        }
         parts.push(&self.key);
         parts.join("+")
     }
@@ -106,7 +117,9 @@ pub(crate) struct Keymap {
 
 impl Default for Keymap {
     fn default() -> Self {
-        Self { bindings: default_bindings() }
+        Self {
+            bindings: default_bindings(),
+        }
     }
 }
 
@@ -136,16 +149,37 @@ fn default_bindings() -> HashMap<Action, Vec<KeyBinding>> {
     use Action::*;
     let mut m = HashMap::new();
 
-    m.insert(RefreshPorts,       vec![KeyBinding::new("R", true, false, false)]);
-    m.insert(OpenPort,           vec![KeyBinding::new("O", true, true, false)]);
-    m.insert(ToggleActivityBar,  vec![KeyBinding::new("B", true, false, false)]);
-    m.insert(ToggleBottomPanel,  vec![KeyBinding::new("Backtick", true, false, false)]);
-    m.insert(ToggleRightSidebar, vec![KeyBinding::new("B", true, false, true)]);
-    m.insert(SelectActivity1,    vec![KeyBinding::new("Num1", true, false, false)]);
-    m.insert(SelectActivity2,    vec![KeyBinding::new("Num2", true, false, false)]);
-    m.insert(SelectActivity3,    vec![KeyBinding::new("Num3", true, false, false)]);
-    m.insert(SelectActivity4,    vec![KeyBinding::new("Num4", true, false, false)]);
-    m.insert(Send,               vec![KeyBinding::new("Enter", true, false, false)]);
+    m.insert(RefreshPorts, vec![KeyBinding::new("R", true, false, false)]);
+    m.insert(OpenPort, vec![KeyBinding::new("O", true, true, false)]);
+    m.insert(
+        ToggleActivityBar,
+        vec![KeyBinding::new("B", true, false, false)],
+    );
+    m.insert(
+        ToggleBottomPanel,
+        vec![KeyBinding::new("Backtick", true, false, false)],
+    );
+    m.insert(
+        ToggleRightSidebar,
+        vec![KeyBinding::new("B", true, false, true)],
+    );
+    m.insert(
+        SelectActivity1,
+        vec![KeyBinding::new("Num1", true, false, false)],
+    );
+    m.insert(
+        SelectActivity2,
+        vec![KeyBinding::new("Num2", true, false, false)],
+    );
+    m.insert(
+        SelectActivity3,
+        vec![KeyBinding::new("Num3", true, false, false)],
+    );
+    m.insert(
+        SelectActivity4,
+        vec![KeyBinding::new("Num4", true, false, false)],
+    );
+    m.insert(Send, vec![KeyBinding::new("Enter", true, false, false)]);
     // StartRecording 和 ReconnectPort 默认无快捷键
 
     m
@@ -160,7 +194,9 @@ mod tests {
         let km = Keymap::default();
         for action in Action::ALL {
             assert!(
-                km.bindings.contains_key(action) || *action == Action::StartRecording || *action == Action::ReconnectPort,
+                km.bindings.contains_key(action)
+                    || *action == Action::StartRecording
+                    || *action == Action::ReconnectPort,
                 "action {action:?} should have a default binding or be explicitly unbound"
             );
         }

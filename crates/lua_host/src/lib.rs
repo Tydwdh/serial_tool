@@ -912,28 +912,29 @@ fn install_ctx(
 
     // 沙箱加固：锁定 package.preload 为只读，防止插件注入恶意模块
     if let Ok(preload) = lua.globals().get::<Table>("package")
-        && let Ok(preload_table) = preload.get::<Table>("preload") {
-            // 将 preload 替换为冻结副本：插件的 require 可从 preload 读取，
-            // 但无法写入新条目（写入被 metatable __newindex 拦截）
-            let frozen = lua.create_table()?;
-            for pair in preload_table.pairs::<String, Function>().flatten() {
-                frozen.set(pair.0, pair.1)?;
-            }
-            let mt = lua.create_table()?;
-            mt.set(
-                "__newindex",
-                lua.create_function(
-                    |_lua, (_key, _value): (String, Value)| -> Result<(), mlua::Error> {
-                        Err(mlua::Error::RuntimeError(
-                            "package.preload is read-only".into(),
-                        ))
-                    },
-                )?,
-            )?;
-            mt.set("__metatable", "protected")?;
-            let _ = frozen.set_metatable(Some(mt));
-            let _ = preload.set("preload", frozen);
+        && let Ok(preload_table) = preload.get::<Table>("preload")
+    {
+        // 将 preload 替换为冻结副本：插件的 require 可从 preload 读取，
+        // 但无法写入新条目（写入被 metatable __newindex 拦截）
+        let frozen = lua.create_table()?;
+        for pair in preload_table.pairs::<String, Function>().flatten() {
+            frozen.set(pair.0, pair.1)?;
         }
+        let mt = lua.create_table()?;
+        mt.set(
+            "__newindex",
+            lua.create_function(
+                |_lua, (_key, _value): (String, Value)| -> Result<(), mlua::Error> {
+                    Err(mlua::Error::RuntimeError(
+                        "package.preload is read-only".into(),
+                    ))
+                },
+            )?,
+        )?;
+        mt.set("__metatable", "protected")?;
+        let _ = frozen.set_metatable(Some(mt));
+        let _ = preload.set("preload", frozen);
+    }
 
     ctx.set(
         "now_ms",

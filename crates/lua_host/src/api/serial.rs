@@ -176,11 +176,8 @@ pub(crate) fn create_serial_api(
                     expect_from_bus.subscribe(TopicFilter::exact(serial_topics::SERIAL_RX));
                 let deadline = Instant::now() + Duration::from_millis(timeout_ms.unwrap_or(1_000));
 
-                let result = poll_until_match(
-                    &subscription,
-                    &expect_from_stop,
-                    deadline,
-                    |event| {
+                let result =
+                    poll_until_match(&subscription, &expect_from_stop, deadline, |event| {
                         let event_port = event
                             .metadata
                             .get("port")
@@ -195,8 +192,7 @@ pub(crate) fn create_serial_api(
                         } else {
                             None
                         }
-                    },
-                );
+                    });
                 match result {
                     Some(text) => Ok(Value::String(lua.create_string(&text)?)),
                     None => Ok(Value::Nil),
@@ -266,7 +262,11 @@ pub(crate) fn create_serial_api(
                     return None;
                 }
                 let text = event.payload.text_lossy();
-                if text.contains(&expect) { Some(text) } else { None }
+                if text.contains(&expect) {
+                    Some(text)
+                } else {
+                    None
+                }
             });
             match result {
                 Some(text) => Ok(Value::String(lua.create_string(&text)?)),
@@ -360,7 +360,10 @@ pub(crate) fn create_serial_api(
             op.set(YIELD_PORT, port)?;
             op.set("delimiter", delimiter)?;
             op.set(YIELD_TIMEOUT_MS, timeout_ms)?;
-            op.set(YIELD_DEADLINE_MS, tool_core::now_timestamp_ms() + timeout_ms)?;
+            op.set(
+                YIELD_DEADLINE_MS,
+                tool_core::now_timestamp_ms() + timeout_ms,
+            )?;
 
             let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
             if let Ok(state) = tasks.get::<Table>(task_id.as_str()) {
@@ -475,8 +478,7 @@ pub(crate) fn create_serial_api(
                                         .get::<String>(CURRENT_TASK_ID)
                                         .unwrap_or_default();
                                     if !tid.is_empty() {
-                                        let tasks: Table =
-                                            lua.globals().get(PLUGIN_TASKS)?;
+                                        let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
                                         if let Ok(s) = tasks.get::<Table>(tid.as_str()) {
                                             let pname: String = p.get("name").unwrap_or_default();
                                             let _ = s.set(
@@ -521,7 +523,10 @@ pub(crate) fn create_serial_api(
             yield_data.set(YIELD_PORT, port.as_str())?;
             yield_data.set("delimiter", delimiter.as_str())?;
             yield_data.set(YIELD_TIMEOUT_MS, timeout_ms)?;
-            yield_data.set(YIELD_DEADLINE_MS, tool_core::now_timestamp_ms() + timeout_ms)?;
+            yield_data.set(
+                YIELD_DEADLINE_MS,
+                tool_core::now_timestamp_ms() + timeout_ms,
+            )?;
             let _ = yield_data.set("patterns", patterns);
 
             let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;

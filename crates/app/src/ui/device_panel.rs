@@ -259,7 +259,8 @@ impl WorkbenchApp {
                 }
             }
         }
-        if has_changes
-            && let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+        if has_changes && let Err(e) = self.save_config() {
+            log::warn!("save_config failed: {e}")
+        };
     }
 }

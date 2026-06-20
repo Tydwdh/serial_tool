@@ -60,7 +60,9 @@ impl WorkbenchApp {
                             .clicked()
                         {
                             self.terminal_popup_always_on_top = !self.terminal_popup_always_on_top;
-                            if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+                            if let Err(e) = self.save_config() {
+                                log::warn!("save_config failed: {e}")
+                            };
                         }
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

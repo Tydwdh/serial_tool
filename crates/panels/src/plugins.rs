@@ -36,20 +36,22 @@ impl PluginsPanel {
             }
         }
 
-        let toolbar_status = ui.horizontal(|ui| -> Option<(String, bool)> {
-            ui.label("根目录");
-            ui.add(TextEdit::singleline(&mut self.root).desired_width(240.0));
-            if ui.button("刷新").clicked() {
-                match manager.discover_roots([PathBuf::from(self.root.trim())]) {
-                    Ok(count) => return Some((format!("发现了 {count} 个插件"), false)),
-                    Err(error) => return Some((error.to_string(), true)),
+        let toolbar_status = ui
+            .horizontal(|ui| -> Option<(String, bool)> {
+                ui.label("根目录");
+                ui.add(TextEdit::singleline(&mut self.root).desired_width(240.0));
+                if ui.button("刷新").clicked() {
+                    match manager.discover_roots([PathBuf::from(self.root.trim())]) {
+                        Ok(count) => return Some((format!("发现了 {count} 个插件"), false)),
+                        Err(error) => return Some((error.to_string(), true)),
+                    }
                 }
-            }
-            if ui.button("打开目录").clicked() {
-                let _ = open::that(&self.root);
-            }
-            None
-        }).inner;
+                if ui.button("打开目录").clicked() {
+                    let _ = open::that(&self.root);
+                }
+                None
+            })
+            .inner;
 
         let status = toolbar_status;
 
@@ -60,9 +62,9 @@ impl PluginsPanel {
             return status;
         }
 
-        let scroll_result = ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| -> Option<(String, bool)> {
+        let scroll_result = ScrollArea::vertical().auto_shrink([false, false]).show(
+            ui,
+            |ui| -> Option<(String, bool)> {
                 let mut row_status: Option<(String, bool)> = None;
                 for summary in summaries {
                     let s = self.plugin_row(ui, manager, summary);
@@ -72,7 +74,8 @@ impl PluginsPanel {
                     ui.separator();
                 }
                 row_status
-            });
+            },
+        );
 
         status.or(scroll_result.inner)
     }
@@ -129,7 +132,6 @@ impl PluginsPanel {
         }
 
         // 按钮行：通过闭包返回值传递操作结果
-        
 
         ui.horizontal(|ui| -> Option<(String, bool)> {
             let can_enable = !matches!(summary.state, PluginState::Running | PluginState::Enabled);
@@ -173,7 +175,8 @@ impl PluginsPanel {
                 self.pending_restart.push(summary.id.clone());
             }
             None
-        }).inner
+        })
+        .inner
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::{fmt_ts, theme, MAX_INGEST_PER_FRAME};
+use crate::{MAX_INGEST_PER_FRAME, fmt_ts, theme};
 use egui::{Color32, RichText, ScrollArea, UiBuilder};
 use std::collections::VecDeque;
 use tool_core::{Event, LogLevel};

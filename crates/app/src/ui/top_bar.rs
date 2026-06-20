@@ -175,7 +175,9 @@ impl WorkbenchApp {
                 .clicked()
                 {
                     self.panels.dock.right_visible = !self.panels.dock.right_visible;
-                    if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+                    if let Err(e) = self.save_config() {
+                        log::warn!("save_config failed: {e}")
+                    };
                 }
 
                 if layout_icon_button(
@@ -187,7 +189,9 @@ impl WorkbenchApp {
                 .clicked()
                 {
                     self.toggle_bottom_panel();
-                    if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+                    if let Err(e) = self.save_config() {
+                        log::warn!("save_config failed: {e}")
+                    };
                 }
 
                 if layout_icon_button(
@@ -199,13 +203,17 @@ impl WorkbenchApp {
                 .clicked()
                 {
                     self.panels.dock.activity_bar_visible = !self.panels.dock.activity_bar_visible;
-                    if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+                    if let Err(e) = self.save_config() {
+                        log::warn!("save_config failed: {e}")
+                    };
                 }
 
                 if layout_icon_button(ui, LayoutButtonKind::Menu, false, "重置布局").clicked() {
                     self.panels.dock = tool_panels::DockLayout::default();
                     self.set_bottom_visible(self.panels.dock.bottom_visible);
-                    if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+                    if let Err(e) = self.save_config() {
+                        log::warn!("save_config failed: {e}")
+                    };
                 }
             });
         });

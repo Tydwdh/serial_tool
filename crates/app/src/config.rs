@@ -20,9 +20,10 @@ fn atomic_write_json<T: Serialize>(path: &std::path::Path, value: &T) -> Result<
 
     // 3. 备份旧文件（如果存在）
     if path.exists()
-        && let Err(e) = std::fs::copy(path, &backup_path) {
-            log::warn!("config: failed to backup to {}: {e}", backup_path.display());
-        }
+        && let Err(e) = std::fs::copy(path, &backup_path)
+    {
+        log::warn!("config: failed to backup to {}: {e}", backup_path.display());
+    }
 
     // 4. 原子替换
     std::fs::rename(&temp_path, path).map_err(|e| format!("原子替换失败：{e}"))
@@ -85,6 +86,7 @@ pub(crate) fn default_activity_order() -> Vec<Activity> {
 
 /// 配置加载结果：区分"无配置文件"和"配置损坏"两种情况。
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ConfigLoadResult {
     /// 成功加载
     Ok(PersistedConfig),
@@ -111,17 +113,18 @@ pub(crate) fn load_config() -> ConfigLoadResult {
     }
 
     // 从旧路径 (CWD/workspace.json) 迁移
-    let legacy = std::env::current_dir().ok().map(|d| d.join("workspace.json"));
-    if let Some(ref legacy) = legacy {
-        if let Ok(t) = std::fs::read_to_string(legacy)
-            && let Ok(cfg) = serde_json::from_str::<PersistedConfig>(&t)
-        {
-            if let Some(parent) = primary.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::copy(legacy, &primary);
-            return ConfigLoadResult::Ok(cfg);
+    let legacy = std::env::current_dir()
+        .ok()
+        .map(|d| d.join("workspace.json"));
+    if let Some(ref legacy) = legacy
+        && let Ok(t) = std::fs::read_to_string(legacy)
+        && let Ok(cfg) = serde_json::from_str::<PersistedConfig>(&t)
+    {
+        if let Some(parent) = primary.parent() {
+            let _ = std::fs::create_dir_all(parent);
         }
+        let _ = std::fs::copy(legacy, &primary);
+        return ConfigLoadResult::Ok(cfg);
     }
     ConfigLoadResult::NotFound
 }
@@ -359,8 +362,14 @@ mod tests {
     #[test]
     fn default_recorder_path_contains_session_and_jsonl() {
         let path = default_recorder_path();
-        assert!(path.contains("session-"), "path should contain 'session-': {path}");
-        assert!(path.ends_with(".jsonl"), "path should end with .jsonl: {path}");
+        assert!(
+            path.contains("session-"),
+            "path should contain 'session-': {path}"
+        );
+        assert!(
+            path.ends_with(".jsonl"),
+            "path should end with .jsonl: {path}"
+        );
     }
 
     // ── default_activity_order ──
@@ -476,6 +485,9 @@ mod tests {
         }
 
         atomic_write_json(&path, &Data { value: 1 }).expect("write should succeed");
-        assert!(!temp_path.exists(), "temp file should not remain after write");
+        assert!(
+            !temp_path.exists(),
+            "temp file should not remain after write"
+        );
     }
 }

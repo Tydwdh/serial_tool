@@ -315,9 +315,7 @@ impl DockLayout {
         self.center.remove(&PanelKind::Sender);
 
         // Sender 如果没有在任何区域，默认放到底部
-        if !self.bottom.contains(&PanelKind::Sender)
-            && !self.right.contains(&PanelKind::Sender)
-        {
+        if !self.bottom.contains(&PanelKind::Sender) && !self.right.contains(&PanelKind::Sender) {
             self.bottom.open(PanelKind::Sender);
         }
 

@@ -4,8 +4,8 @@ use crate::keymap::Action;
 use crate::state::StatusLevel;
 use eframe::egui;
 use tool_core::{Direction, Event, Payload};
-use tool_transport::send_impl_to;
 use tool_panels::Activity;
+use tool_transport::send_impl_to;
 
 impl WorkbenchApp {
     pub(crate) fn handle_keys(&mut self, ctx: &egui::Context) {
@@ -46,12 +46,16 @@ impl WorkbenchApp {
             Action::OpenPort => self.open_selected_port(),
             Action::ToggleActivityBar => {
                 self.panels.dock.activity_bar_visible = !self.panels.dock.activity_bar_visible;
-                if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+                if let Err(e) = self.save_config() {
+                    log::warn!("save_config failed: {e}")
+                };
             }
             Action::ToggleBottomPanel => self.toggle_bottom_panel(),
             Action::ToggleRightSidebar => {
                 self.panels.dock.right_visible = !self.panels.dock.right_visible;
-                if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+                if let Err(e) = self.save_config() {
+                    log::warn!("save_config failed: {e}")
+                };
             }
             Action::SelectActivity1 => self.panels.select_activity(Activity::Devices),
             Action::SelectActivity2 => self.panels.select_activity(Activity::Replay),
@@ -272,7 +276,9 @@ impl WorkbenchApp {
         let now = ctx.input(|i| i.time);
         if now - self.last_auto_save_time > 60.0 {
             self.last_auto_save_time = now;
-            if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+            if let Err(e) = self.save_config() {
+                log::warn!("save_config failed: {e}")
+            };
         }
     }
 
@@ -355,7 +361,10 @@ impl WorkbenchApp {
         };
         if !self.send_target_port_open() {
             self.send.periodic_enabled = false;
-            self.set_status_force(crate::state::StatusLevel::Error, "周期发送已停止：目标串口未打开");
+            self.set_status_force(
+                crate::state::StatusLevel::Error,
+                "周期发送已停止：目标串口未打开",
+            );
             return;
         }
         if self.send.input.is_empty() {
@@ -381,7 +390,10 @@ impl WorkbenchApp {
             // 提升为实时优先级，减少 OS 调度延迟
             #[cfg(target_os = "windows")]
             unsafe {
-                unsafe extern "system" { fn SetThreadPriority(thread: isize, priority: i32) -> i32; fn GetCurrentThread() -> isize; }
+                unsafe extern "system" {
+                    fn SetThreadPriority(thread: isize, priority: i32) -> i32;
+                    fn GetCurrentThread() -> isize;
+                }
                 SetThreadPriority(GetCurrentThread(), 15); // THREAD_PRIORITY_TIME_CRITICAL
             }
 
@@ -452,11 +464,17 @@ impl WorkbenchApp {
 mod tests {
     use std::time::{Duration, Instant};
 
-    fn measure_spin_precision(interval: Duration, samples: usize) -> (Duration, Duration, Duration) {
+    fn measure_spin_precision(
+        interval: Duration,
+        samples: usize,
+    ) -> (Duration, Duration, Duration) {
         // 提升实时优先级
         #[cfg(target_os = "windows")]
         unsafe {
-            unsafe extern "system" { fn SetThreadPriority(thread: isize, priority: i32) -> i32; fn GetCurrentThread() -> isize; }
+            unsafe extern "system" {
+                fn SetThreadPriority(thread: isize, priority: i32) -> i32;
+                fn GetCurrentThread() -> isize;
+            }
             SetThreadPriority(GetCurrentThread(), 15);
         }
 
@@ -482,46 +500,85 @@ mod tests {
         // P99：排除极端 OS 调度 spike（非实时 OS 偶尔会有 1-50ms 的调度延迟）
         let p99_index = (lates.len() * 99) / 100;
         lates.sort_unstable();
-        (avg, lates[p99_index.min(lates.len() - 1)], lates[lates.len() - 1])
+        (
+            avg,
+            lates[p99_index.min(lates.len() - 1)],
+            lates[lates.len() - 1],
+        )
     }
 
     #[test]
     fn spin_wait_100us_precision() {
         let (avg, p99, max) = measure_spin_precision(Duration::from_micros(100), 1000);
-        eprintln!("100us: avg_late={}us p99_late={}us max_late={}us",
-            avg.as_micros(), p99.as_micros(), max.as_micros());
-        assert!(p99 <= Duration::from_micros(500), "p99_late {}us > 500us", p99.as_micros());
+        eprintln!(
+            "100us: avg_late={}us p99_late={}us max_late={}us",
+            avg.as_micros(),
+            p99.as_micros(),
+            max.as_micros()
+        );
+        assert!(
+            p99 <= Duration::from_micros(500),
+            "p99_late {}us > 500us",
+            p99.as_micros()
+        );
     }
 
     #[test]
     fn spin_wait_1ms_precision() {
         let (avg, p99, max) = measure_spin_precision(Duration::from_millis(1), 1000);
-        eprintln!("1ms: avg_late={}us p99_late={}us max_late={}us",
-            avg.as_micros(), p99.as_micros(), max.as_micros());
-        assert!(p99 <= Duration::from_millis(2), "p99_late {}us > 2ms", p99.as_micros());
+        eprintln!(
+            "1ms: avg_late={}us p99_late={}us max_late={}us",
+            avg.as_micros(),
+            p99.as_micros(),
+            max.as_micros()
+        );
+        assert!(
+            p99 <= Duration::from_millis(2),
+            "p99_late {}us > 2ms",
+            p99.as_micros()
+        );
     }
 
     #[test]
     fn spin_wait_10ms_precision() {
         let (avg, p99, max) = measure_spin_precision(Duration::from_millis(10), 500);
-        eprintln!("10ms: avg_late={}us p99_late={}us max_late={}us",
-            avg.as_micros(), p99.as_micros(), max.as_micros());
-        assert!(p99 <= Duration::from_micros(300), "p99_late {}us > 300us", p99.as_micros());
+        eprintln!(
+            "10ms: avg_late={}us p99_late={}us max_late={}us",
+            avg.as_micros(),
+            p99.as_micros(),
+            max.as_micros()
+        );
+        assert!(
+            p99 <= Duration::from_micros(300),
+            "p99_late {}us > 300us",
+            p99.as_micros()
+        );
     }
 
     #[test]
     fn spin_wait_100ms_precision() {
         let (avg, p99, max) = measure_spin_precision(Duration::from_millis(100), 100);
-        eprintln!("100ms: avg_late={}us p99_late={}us max_late={}us",
-            avg.as_micros(), p99.as_micros(), max.as_micros());
-        assert!(p99 <= Duration::from_micros(300), "p99_late {}us > 300us", p99.as_micros());
+        eprintln!(
+            "100ms: avg_late={}us p99_late={}us max_late={}us",
+            avg.as_micros(),
+            p99.as_micros(),
+            max.as_micros()
+        );
+        assert!(
+            p99 <= Duration::from_micros(300),
+            "p99_late {}us > 300us",
+            p99.as_micros()
+        );
     }
 
     #[test]
     fn spin_wait_no_drift() {
         #[cfg(target_os = "windows")]
         unsafe {
-            unsafe extern "system" { fn SetThreadPriority(thread: isize, priority: i32) -> i32; fn GetCurrentThread() -> isize; }
+            unsafe extern "system" {
+                fn SetThreadPriority(thread: isize, priority: i32) -> i32;
+                fn GetCurrentThread() -> isize;
+            }
             SetThreadPriority(GetCurrentThread(), 15);
         }
         let interval = Duration::from_millis(1);
@@ -536,8 +593,16 @@ mod tests {
         let expected = interval * samples as u32;
         let elapsed = Instant::now().saturating_duration_since(start);
         let drift = elapsed.abs_diff(expected);
-        eprintln!("1000x1ms: expected={}ms actual={}ms drift={}us",
-            expected.as_millis(), elapsed.as_millis(), drift.as_micros());
-        assert!(drift <= Duration::from_millis(5), "drift {}us", drift.as_micros());
+        eprintln!(
+            "1000x1ms: expected={}ms actual={}ms drift={}us",
+            expected.as_millis(),
+            elapsed.as_millis(),
+            drift.as_micros()
+        );
+        assert!(
+            drift <= Duration::from_millis(5),
+            "drift {}us",
+            drift.as_micros()
+        );
     }
 }

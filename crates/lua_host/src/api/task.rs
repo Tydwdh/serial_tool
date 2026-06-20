@@ -1,12 +1,12 @@
 //! ctx.task.* — Task API（start/cancel/pause/resume/list）+ task coroutine 调度。
 
+use crate::LuaRunConfig;
+use crate::api::serial::match_pat;
 use crate::globals::{
     CURRENT_TASK_ID, PLUGIN_DISABLE, PLUGIN_TASKS, TASK_CANCELLED, TASK_FINISHED, TASK_YIELD_OP,
     YIELD_DEADLINE_MS, YIELD_KIND, YIELD_PORT, YIELD_READ_LINE, YIELD_SLEEP, YIELD_WAIT_PAUSED,
     YIELD_WRITE_LINE_AND_EXPECT,
 };
-use crate::LuaRunConfig;
-use crate::api::serial::match_pat;
 use crate::host_services::{LuaHostServices, line_buffer_key};
 use mlua::{Function, Lua, Table, Thread, Value};
 use tool_core::{Event, LogLevel};
@@ -241,9 +241,7 @@ pub(crate) fn process_tasks(
         let _ = state.set(TASK_YIELD_OP, Value::Nil);
 
         // 设置当前 task id，供 read_line 等函数使用
-        let _ = lua
-            .globals()
-            .set(CURRENT_TASK_ID, id.as_str());
+        let _ = lua.globals().set(CURRENT_TASK_ID, id.as_str());
 
         // resume coroutine
         match thread.resume::<Value>(()) {
@@ -275,9 +273,7 @@ pub(crate) fn process_tasks(
     }
 
     // 清除当前 task id
-    let _ = lua
-        .globals()
-        .set(CURRENT_TASK_ID, Value::Nil);
+    let _ = lua.globals().set(CURRENT_TASK_ID, Value::Nil);
 }
 
 /// 从 task 对象获取 state table
@@ -513,13 +509,9 @@ pub(crate) fn create_task_api(
             // 首次 resume：把 task_obj 传给 function(task)
             // 如果 task 立即 yield（如 sleep），resume 返回 yield 值
             // coroutine 的 yield_op / wake_at_ms 已在 sleep_ms 等函数中设置
-            let _ = lua
-                .globals()
-                .set(CURRENT_TASK_ID, id.as_str());
+            let _ = lua.globals().set(CURRENT_TASK_ID, id.as_str());
             let resume_result = thread.resume::<Value>(task_obj.clone());
-            let _ = lua
-                .globals()
-                .set(CURRENT_TASK_ID, Value::Nil);
+            let _ = lua.globals().set(CURRENT_TASK_ID, Value::Nil);
 
             match resume_result {
                 Ok(_) => {
@@ -601,9 +593,15 @@ pub(crate) fn create_task_api(
                 let summary = lua.create_table()?;
                 summary.set("id", state.get::<String>("id").unwrap_or_default())?;
                 summary.set("title", state.get::<String>("title").unwrap_or_default())?;
-                summary.set(TASK_CANCELLED, state.get::<bool>(TASK_CANCELLED).unwrap_or(false))?;
+                summary.set(
+                    TASK_CANCELLED,
+                    state.get::<bool>(TASK_CANCELLED).unwrap_or(false),
+                )?;
                 summary.set("paused", state.get::<bool>("paused").unwrap_or(false))?;
-                summary.set(TASK_FINISHED, state.get::<bool>(TASK_FINISHED).unwrap_or(false))?;
+                summary.set(
+                    TASK_FINISHED,
+                    state.get::<bool>(TASK_FINISHED).unwrap_or(false),
+                )?;
                 summary.set(
                     "progress_current",
                     state.get::<u64>("progress_current").unwrap_or(0),
@@ -678,9 +676,7 @@ pub(crate) fn call_disable(lua: &Lua, bus: &DataBus, config: &LuaRunConfig) {
     // 先取消所有 task，让它们检测 cancelled 并退出
     cancel_all_tasks(lua, bus, config);
 
-    if let Ok(function) = lua
-        .globals()
-        .get::<Function>(PLUGIN_DISABLE)
+    if let Ok(function) = lua.globals().get::<Function>(PLUGIN_DISABLE)
         && let Err(error) = function.call::<()>(())
     {
         bus.publish(Event::system_log(

@@ -95,7 +95,9 @@ impl WorkbenchApp {
                                 self.panels.dock.move_panel(kind.clone(), DockArea::Right);
                                 self.panels.dock.right_visible = true;
                                 self.panels.sync_tabs_from_dock();
-                                if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+                                if let Err(e) = self.save_config() {
+                                    log::warn!("save_config failed: {e}")
+                                };
                                 ui.close();
                             }
                         }
@@ -104,7 +106,9 @@ impl WorkbenchApp {
                                 self.panels.dock.move_panel(kind.clone(), DockArea::Bottom);
                                 self.panels.sync_tabs_from_dock();
                                 self.set_bottom_visible(true);
-                                if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+                                if let Err(e) = self.save_config() {
+                                    log::warn!("save_config failed: {e}")
+                                };
                                 ui.close();
                             }
                         }
@@ -113,7 +117,9 @@ impl WorkbenchApp {
 
                     if ui.button("关闭").clicked() {
                         self.panels.dock.stack_mut(area).close(kind);
-                        if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+                        if let Err(e) = self.save_config() {
+                            log::warn!("save_config failed: {e}")
+                        };
                         ui.close();
                     }
                 });
@@ -126,7 +132,9 @@ impl WorkbenchApp {
                         if ui.small_button("×").on_hover_text("隐藏底部面板").clicked() {
                             self.panels.dock.bottom_visible = false;
                             self.bottom_panel_visible = false;
-                            if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+                            if let Err(e) = self.save_config() {
+                                log::warn!("save_config failed: {e}")
+                            };
                         }
                     }
                     DockArea::Right => {
@@ -136,7 +144,9 @@ impl WorkbenchApp {
                             .clicked()
                         {
                             self.panels.dock.right_visible = false;
-                            if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+                            if let Err(e) = self.save_config() {
+                                log::warn!("save_config failed: {e}")
+                            };
                         }
                     }
                     DockArea::Center => {}
@@ -168,7 +178,10 @@ impl WorkbenchApp {
                 .dock
                 .stack_mut(area)
                 .reorder(&kind, insert_index)
-                && let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+                && let Err(e) = self.save_config()
+            {
+                log::warn!("save_config failed: {e}")
+            };
         }
     }
     fn dock_panel_body(&mut self, ui: &mut egui::Ui, area: DockArea, kind: PanelKind) {
@@ -181,8 +194,14 @@ impl WorkbenchApp {
             }
             PanelKind::Plugins => {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    if let Some((msg, is_error)) = self.plugins_panel.ui(ui, &mut self.plugin_manager) {
-                        let level = if is_error { StatusLevel::Error } else { StatusLevel::Info };
+                    if let Some((msg, is_error)) =
+                        self.plugins_panel.ui(ui, &mut self.plugin_manager)
+                    {
+                        let level = if is_error {
+                            StatusLevel::Error
+                        } else {
+                            StatusLevel::Info
+                        };
                         self.set_status_force(level, msg);
                     }
                 });
@@ -208,7 +227,9 @@ impl WorkbenchApp {
                 DockArea::Bottom => self.send_panel_horizontal(ui),
                 DockArea::Center => {
                     ui.colored_label(theme::YELLOW, "发送器不支持放在主工作区，已自动移到底部");
-                    self.panels.dock.move_panel(PanelKind::Sender, DockArea::Bottom);
+                    self.panels
+                        .dock
+                        .move_panel(PanelKind::Sender, DockArea::Bottom);
                     self.panels.dock.bottom_visible = true;
                     self.set_bottom_visible(true);
                     self.panels.sync_tabs_from_dock();
@@ -219,7 +240,8 @@ impl WorkbenchApp {
                 if self.detached_dynamic_panels.contains(&id) {
                     ui.label("已弹出到独立窗口");
                 } else if self.dynamic_panels.contains(&id) {
-                    egui::ScrollArea::vertical().show(ui, |ui| self.dynamic_panels.ui_body(ui, &id));
+                    egui::ScrollArea::vertical()
+                        .show(ui, |ui| self.dynamic_panels.ui_body(ui, &id));
                 } else {
                     ui.colored_label(theme::RED, format!("动态面板不存在：{id}"));
                 }
@@ -297,12 +319,16 @@ impl WorkbenchApp {
                 self.panels.dock.move_panel(kind, DockArea::Right);
                 self.panels.dock.right_visible = true;
                 self.panels.sync_tabs_from_dock();
-                if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+                if let Err(e) = self.save_config() {
+                    log::warn!("save_config failed: {e}")
+                };
             } else if bottom_hit {
                 self.panels.dock.move_panel(kind, DockArea::Bottom);
                 self.panels.sync_tabs_from_dock();
                 self.set_bottom_visible(true);
-                if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+                if let Err(e) = self.save_config() {
+                    log::warn!("save_config failed: {e}")
+                };
             }
 
             self.dock_dragging_panel = None;

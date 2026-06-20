@@ -297,9 +297,10 @@ impl PluginManager {
 
         // 先标记为 Disabled：防止 Lua 侧在 stop 窗口内重新创建面板
         if let Some(record) = self.records.get_mut(plugin_id)
-            && matches!(record.state, PluginState::Running | PluginState::Enabled) {
-                record.state = PluginState::Disabled;
-            }
+            && matches!(record.state, PluginState::Running | PluginState::Enabled)
+        {
+            record.state = PluginState::Disabled;
+        }
 
         // 异步停止：设 stop 后移入 stopping_plugins，不 join（避免卡 UI）
         if let Some(runtime) = self.lua_runtimes.remove(plugin_id) {

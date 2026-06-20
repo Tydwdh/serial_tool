@@ -267,9 +267,13 @@ impl JsonlRecorder {
                 "error": error_clone,
             });
             if let Ok(text) = serde_json::to_string_pretty(&summary)
-                && let Err(e) = std::fs::write(&summary_path, text) {
-                    log::warn!("recorder: failed to write summary {}: {e}", summary_path.display());
-                }
+                && let Err(e) = std::fs::write(&summary_path, text)
+            {
+                log::warn!(
+                    "recorder: failed to write summary {}: {e}",
+                    summary_path.display()
+                );
+            }
 
             finished_thread.store(true, Ordering::SeqCst);
         });
@@ -446,7 +450,12 @@ mod tests {
     use tool_core::{Direction, Event, Payload};
 
     fn test_event(topic: &str) -> Event {
-        Event::new(topic, "test", Direction::Internal, Payload::Text("test".into()))
+        Event::new(
+            topic,
+            "test",
+            Direction::Internal,
+            Payload::Text("test".into()),
+        )
     }
 
     fn temp_file(name: &str) -> PathBuf {
@@ -474,7 +483,10 @@ mod tests {
     fn start_stop_lifecycle() {
         let bus = DataBus::new();
         let mut rec = JsonlRecorder::new(bus);
-        let path = temp_file(&format!("test-lifecycle-{}.jsonl", tool_core::now_timestamp_ms()));
+        let path = temp_file(&format!(
+            "test-lifecycle-{}.jsonl",
+            tool_core::now_timestamp_ms()
+        ));
 
         // Before start
         assert!(!rec.is_running());
@@ -523,7 +535,10 @@ mod tests {
     fn pause_resume() {
         let bus = DataBus::new();
         let mut rec = JsonlRecorder::new(bus);
-        let path = temp_file(&format!("test-pause-{}.jsonl", tool_core::now_timestamp_ms()));
+        let path = temp_file(&format!(
+            "test-pause-{}.jsonl",
+            tool_core::now_timestamp_ms()
+        ));
 
         rec.start(&path).unwrap();
         assert!(!rec.is_paused());
@@ -554,8 +569,14 @@ mod tests {
     fn start_fails_when_already_running() {
         let bus = DataBus::new();
         let mut rec = JsonlRecorder::new(bus);
-        let path1 = temp_file(&format!("test-double1-{}.jsonl", tool_core::now_timestamp_ms()));
-        let path2 = temp_file(&format!("test-double2-{}.jsonl", tool_core::now_timestamp_ms()));
+        let path1 = temp_file(&format!(
+            "test-double1-{}.jsonl",
+            tool_core::now_timestamp_ms()
+        ));
+        let path2 = temp_file(&format!(
+            "test-double2-{}.jsonl",
+            tool_core::now_timestamp_ms()
+        ));
 
         rec.start(&path1).unwrap();
         assert!(rec.is_running());
@@ -582,7 +603,10 @@ mod tests {
     fn stats_updated_during_recording() {
         let bus = DataBus::new();
         let mut rec = JsonlRecorder::new(bus);
-        let path = temp_file(&format!("test-stats-{}.jsonl", tool_core::now_timestamp_ms()));
+        let path = temp_file(&format!(
+            "test-stats-{}.jsonl",
+            tool_core::now_timestamp_ms()
+        ));
 
         // Set FullDebug mode before start so the worker captures it
         rec.set_mode(RecordMode::FullDebug);
@@ -639,7 +663,10 @@ mod tests {
         assert!(!rec.is_stopping());
 
         // Start, stop, then stop again
-        let path = temp_file(&format!("test-idempotent-{}.jsonl", tool_core::now_timestamp_ms()));
+        let path = temp_file(&format!(
+            "test-idempotent-{}.jsonl",
+            tool_core::now_timestamp_ms()
+        ));
         rec.start(&path).unwrap();
         rec.stop();
         // Second stop on already-stopping recorder should not panic

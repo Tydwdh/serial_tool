@@ -96,7 +96,11 @@ mod tests {
             "unexpected length: {result:?}"
         );
         // Should contain two colons and one dot
-        assert_eq!(result.matches(':').count(), 2, "missing colons in {result:?}");
+        assert_eq!(
+            result.matches(':').count(),
+            2,
+            "missing colons in {result:?}"
+        );
         assert_eq!(result.matches('.').count(), 1, "missing dot in {result:?}");
     }
 
@@ -208,7 +212,10 @@ mod tests {
     #[test]
     fn ellipsize_tail_long_string_truncated() {
         let result = ellipsize_tail("hello_world_this_is_long", 10);
-        assert!(result.ends_with('…'), "expected trailing ellipsis in {result:?}");
+        assert!(
+            result.ends_with('…'),
+            "expected trailing ellipsis in {result:?}"
+        );
         assert_eq!(result.chars().count(), 10);
     }
 
