@@ -14,7 +14,9 @@ Thumbs.db
 
 # ── App runtime data ──
 logs/
+plugin-config/
 workspace.json
+workspace.json.backup
 
 # ── Claude ──
 .claude/
