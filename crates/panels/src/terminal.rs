@@ -193,7 +193,13 @@ impl TerminalPanel {
     }
 
     pub fn export_visible_csv(&self) -> String {
-        let mut out = String::from("time,port,direction,text,hex\n");
+        let show_hex = self.show_hex;
+        let header = if show_hex {
+            "time,port,direction,hex\n"
+        } else {
+            "time,port,direction,text\n"
+        };
+        let mut out = String::from(header);
         for (port, entry) in self.filtered_entries() {
             out.push_str(&csv_cell(&entry.timestamp_label));
             out.push(',');
@@ -205,28 +211,43 @@ impl TerminalPanel {
                 Direction::Internal => "INTERNAL",
             }));
             out.push(',');
-            out.push_str(&csv_cell(&entry.raw_text));
-            out.push(',');
-            out.push_str(&csv_cell(&entry.hex_text));
+            if show_hex {
+                out.push_str(&csv_cell(&entry.hex_text));
+            } else {
+                out.push_str(&csv_cell(&entry.raw_text));
+            }
             out.push('\n');
         }
         out
     }
 
     pub fn export_visible_jsonl(&self) -> String {
+        let show_hex = self.show_hex;
         let mut out = String::new();
         for (port, entry) in self.filtered_entries() {
-            let line = serde_json::json!({
-                "time": entry.timestamp_label,
-                "port": port,
-                "direction": match entry.direction {
-                    Direction::Rx => "RX",
-                    Direction::Tx => "TX",
-                    Direction::Internal => "INTERNAL",
-                },
-                "text": entry.raw_text,
-                "hex": entry.hex_text,
-            });
+            let line = if show_hex {
+                serde_json::json!({
+                    "time": entry.timestamp_label,
+                    "port": port,
+                    "direction": match entry.direction {
+                        Direction::Rx => "RX",
+                        Direction::Tx => "TX",
+                        Direction::Internal => "INTERNAL",
+                    },
+                    "hex": entry.hex_text,
+                })
+            } else {
+                serde_json::json!({
+                    "time": entry.timestamp_label,
+                    "port": port,
+                    "direction": match entry.direction {
+                        Direction::Rx => "RX",
+                        Direction::Tx => "TX",
+                        Direction::Internal => "INTERNAL",
+                    },
+                    "text": entry.raw_text,
+                })
+            };
             out.push_str(&serde_json::to_string(&line).unwrap_or_else(|_| "{}".to_owned()));
             out.push('\n');
         }
