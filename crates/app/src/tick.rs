@@ -258,14 +258,18 @@ impl WorkbenchApp {
                 SetThreadPriority(GetCurrentThread(), 15); // THREAD_PRIORITY_TIME_CRITICAL
             }
 
+            let start = std::time::Instant::now();
             let mut count: u64 = 0;
-            let mut next = std::time::Instant::now() + interval;
 
             loop {
-                // 纯 spin-wait：不依赖 sleep，us 级精度。
-                // cancel 检查每 256 轮一次，减少 spin loop 内部开销。
+                // 基于 start_time + count * interval 计算 absolute deadline，而非累加。
+                // 累加方案：每次发送后 next += interval，但发送本身耗时会被包含进去，导致长期漂移。
+                // 本方案：deadline = start + (count + 1) * interval，完全消除累积误差。
+                let deadline = start + interval * (count as u32 + 1);
+
+                // 纯 spin-wait 到 deadline
                 let mut spin_count = 0u32;
-                while std::time::Instant::now() < next {
+                while std::time::Instant::now() < deadline {
                     std::hint::spin_loop();
                     spin_count = spin_count.wrapping_add(1);
                     if spin_count & 0xFF == 0 && cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -305,11 +309,6 @@ impl WorkbenchApp {
                     ));
                     return;
                 }
-
-                next += interval;
-                if next <= std::time::Instant::now() {
-                    next = std::time::Instant::now() + interval;
-                }
             }
         });
     }
@@ -334,19 +333,16 @@ mod tests {
             SetThreadPriority(GetCurrentThread(), 15);
         }
 
+        let start = Instant::now();
         let mut lates: Vec<Duration> = Vec::with_capacity(samples);
-        let mut next = Instant::now() + interval;
-        for _ in 0..samples {
-            while Instant::now() < next {
+        for i in 0..samples {
+            let deadline = start + interval * (i as u32 + 1);
+            while Instant::now() < deadline {
                 std::hint::spin_loop();
             }
             let now = Instant::now();
-            if now > next {
-                lates.push(now - next);
-            }
-            next += interval;
-            if next <= Instant::now() {
-                next = Instant::now() + interval;
+            if now > deadline {
+                lates.push(now - deadline);
             }
         }
 
@@ -404,12 +400,11 @@ mod tests {
         let interval = Duration::from_millis(1);
         let samples = 1000;
         let start = Instant::now();
-        let mut next = start + interval;
-        for _ in 0..samples {
-            while Instant::now() < next {
+        for i in 0..samples {
+            let deadline = start + interval * (i as u32 + 1);
+            while Instant::now() < deadline {
                 std::hint::spin_loop();
             }
-            next += interval;
         }
         let expected = interval * samples as u32;
         let elapsed = Instant::now().saturating_duration_since(start);
