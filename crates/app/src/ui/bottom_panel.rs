@@ -86,13 +86,14 @@ impl WorkbenchApp {
         let send_port_open = self.send_target_port_open();
 
         // ── 1. 选项栏 ──
-        self.render_send_options(ui, layout, send_port_open);
+        self.render_send_options(ui, layout);
 
         // ── 2. 输入区（固定高度 + 滚动条）──
         let resp = self.render_send_input(ui, layout, send_port_open);
 
         if resp.changed() {
             self.send.periodic_send_count = 0;
+            self.send.error = None;
         }
 
         let ctrl_enter = resp.has_focus()
@@ -115,42 +116,14 @@ impl WorkbenchApp {
 
     // ── 选项栏 ──
 
-    fn render_send_options(&mut self, ui: &mut egui::Ui, layout: SendLayout, send_port_open: bool) {
-        match layout {
-            SendLayout::Horizontal => {
-                ui.horizontal(|ui| {
-                    ui.label("发送到");
-                    self.send_target_port_combo(ui, "send-target-port-bottom");
-                    self.render_hex_toggle(ui);
-                    self.render_line_ending_combo(ui, "line-ending-bottom", 60.0);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("⛶").on_hover_text("放大编辑").clicked() {
-                            self.send.popup_open = true;
-                        }
-                    });
-                });
-            }
-            SendLayout::Vertical => {
-                ui.heading("发送器");
-                ui.separator();
-                ui.label("端口");
-                self.send_target_port_combo(ui, "send-target-port-right");
-                ui.horizontal(|ui| {
-                    self.render_hex_toggle(ui);
-                });
-                if !self.send.hex_mode {
-                    ui.horizontal(|ui| {
-                        ui.label("换行");
-                        self.render_line_ending_combo(ui, "line-ending-right", 80.0);
-                    });
-                }
-            }
-            SendLayout::Popup => {
-                ui.horizontal(|ui| {
-                    ui.heading("发送");
-                    ui.label("目标");
-                    self.send_target_port_combo(ui, "send-popup-target-port");
+    fn render_send_options(&mut self, ui: &mut egui::Ui, layout: SendLayout) {
+        let is_popup = matches!(layout, SendLayout::Popup);
 
+        // ── 标题（Popup）──
+        if is_popup {
+            ui.horizontal(|ui| {
+                ui.heading("发送");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let pin_label = if self.send_popup_always_on_top {
                         "\u{1f4cc} 置顶"
                     } else {
@@ -166,33 +139,37 @@ impl WorkbenchApp {
                             log::warn!("save_config failed: {e}")
                         };
                     }
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        self.render_hex_toggle(ui);
-                        self.render_line_ending_combo(ui, "send-popup-line-ending", 60.0);
-                    });
                 });
-                // 主操作行
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(
-                            send_port_open && !self.send.input.trim().is_empty(),
-                            egui::Button::new("发送 (Ctrl+Enter)"),
-                        )
-                        .clicked()
-                    {
-                        self.do_send();
-                    }
-                    if ui.button("清空").clicked() {
-                        self.send.input.clear();
-                        self.send.error = None;
-                        self.send.periodic_send_count = 0;
-                    }
-                    self.send_history_combo(ui, "send-popup-history");
-                    self.ui_contribution_slot(ui, "send.toolbar");
-                });
-            }
+            });
         }
+
+        // ── 目标 / 发送模式 ──
+        self.render_send_target_options(ui, layout);
+    }
+
+    fn render_send_target_options(&mut self, ui: &mut egui::Ui, layout: SendLayout) {
+        let (target_id, line_ending_id, line_ending_width, show_popup_button) = match layout {
+            SendLayout::Horizontal => ("send-target-port-bottom", "line-ending-bottom", 64.0, true),
+            SendLayout::Vertical => ("send-target-port-right", "line-ending-right", 80.0, true),
+            SendLayout::Popup => (
+                "send-popup-target-port",
+                "send-popup-line-ending",
+                64.0,
+                false,
+            ),
+        };
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label("发送到");
+            self.send_target_port_combo(ui, target_id);
+            ui.separator();
+            self.render_hex_toggle(ui);
+            self.render_line_ending_combo(ui, line_ending_id, line_ending_width);
+
+            if show_popup_button && ui.small_button("⛶").on_hover_text("放大编辑").clicked() {
+                self.send.popup_open = true;
+            }
+        });
     }
 
     /// HEX/文本切换 + 严格模式
@@ -229,10 +206,10 @@ impl WorkbenchApp {
     ) -> egui::Response {
         let (max_height, desired_rows, id_salt, hint_text) = match layout {
             SendLayout::Horizontal => {
-                let h = ui.text_style_height(&egui::TextStyle::Monospace) * 4.0 + 8.0;
+                let h = ui.text_style_height(&egui::TextStyle::Monospace) * 6.0 + 8.0;
                 (
                     h,
-                    3,
+                    5,
                     "send-input-scroll-h",
                     if send_port_open {
                         "Ctrl+Enter 发送 | ⛶ 放大编辑"
@@ -246,7 +223,7 @@ impl WorkbenchApp {
                 (h, 8, "send-input-scroll-v", "输入要发送的数据")
             }
             SendLayout::Popup => (
-                f32::INFINITY,
+                popup_send_input_height(ui),
                 24,
                 "send-input-scroll-popup",
                 "Ctrl+Enter 发送",
@@ -276,48 +253,24 @@ impl WorkbenchApp {
     // ── 操作栏 ──
 
     fn render_send_actions(&mut self, ui: &mut egui::Ui, layout: SendLayout, send_port_open: bool) {
-        match layout {
-            SendLayout::Horizontal => {
-                // 主操作行
-                ui.horizontal(|ui| {
-                    self.render_send_and_clear_buttons(ui, send_port_open);
-                    self.send_history_combo(ui, "send-history-bottom");
-                    self.ui_contribution_slot(ui, "send.toolbar");
-                });
-                // 辅助操作行
-                ui.horizontal(|ui| {
-                    self.render_periodic_controls(ui, 54.0);
-                    ui.separator();
-                    self.send_signal_controls(ui);
-                    if self.send.hex_mode && !self.send.input.trim().is_empty() {
-                        let preview = hex_preview(&self.send.input);
-                        ui.label(
-                            egui::RichText::new(format!("HEX: {preview}"))
-                                .color(theme::TEXT_SECONDARY)
-                                .monospace()
-                                .small(),
-                        );
-                    }
-                });
-            }
-            SendLayout::Vertical => {
-                ui.horizontal(|ui| {
-                    self.render_send_and_clear_buttons(ui, send_port_open);
-                    self.send_history_combo(ui, "send-history-right");
-                    self.ui_contribution_slot(ui, "send.toolbar");
-                });
-                ui.separator();
-                self.render_periodic_controls(ui, 72.0);
-                self.send_signal_controls(ui);
-                self.render_hex_preview(ui);
-            }
-            SendLayout::Popup => {
-                ui.separator();
-                self.render_periodic_controls(ui, 54.0);
-                self.send_signal_controls(ui);
-                self.render_hex_preview(ui);
-            }
-        }
+        let (history_id, interval_width) = match layout {
+            SendLayout::Horizontal => ("send-history-bottom", 54.0),
+            SendLayout::Vertical => ("send-history-right", 72.0),
+            SendLayout::Popup => ("send-popup-history", 54.0),
+        };
+
+        ui.horizontal_wrapped(|ui| {
+            self.render_send_and_clear_buttons(ui, send_port_open);
+            self.send_history_combo(ui, history_id);
+            self.ui_contribution_slot(ui, "send.toolbar");
+        });
+
+        ui.horizontal_wrapped(|ui| {
+            self.render_periodic_controls(ui, interval_width);
+            ui.separator();
+            self.send_signal_controls(ui);
+            self.render_hex_preview(ui);
+        });
     }
 
     /// 发送 + 清空 按钮
@@ -485,6 +438,20 @@ impl WorkbenchApp {
 }
 
 use tool_transport::{hex_preview, send_impl_to, translate_error};
+
+fn popup_send_input_height(ui: &egui::Ui) -> f32 {
+    let action_rows = ui.text_style_height(&egui::TextStyle::Button) * 2.0;
+    let spacing = ui.spacing().item_spacing.y * 5.0;
+    let reserved_for_actions = action_rows + spacing + 18.0;
+    let fallback = ui.text_style_height(&egui::TextStyle::Monospace) * 14.0 + 8.0;
+    let available = ui.available_height();
+
+    if available.is_finite() && available > reserved_for_actions {
+        (available - reserved_for_actions).max(120.0)
+    } else {
+        fallback
+    }
+}
 
 fn shorten_for_ui(s: &str, max_chars: usize) -> String {
     let mut out = s.chars().take(max_chars).collect::<String>();
