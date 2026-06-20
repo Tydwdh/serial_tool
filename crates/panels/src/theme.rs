@@ -10,7 +10,7 @@ pub const BG_SELECTION: Color32 = Color32::from_rgb(36, 72, 108);
 // 文本
 pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(205, 211, 222);
 pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(145, 154, 168);
-pub const TEXT_DIMMED: Color32 = Color32::from_rgb(105, 114, 128);
+pub const TEXT_DIMMED: Color32 = Color32::from_rgb(120, 128, 140);
 pub const TEXT_WHITE: Color32 = Color32::from_rgb(232, 236, 243);
 
 // 语义色

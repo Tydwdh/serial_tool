@@ -1,5 +1,6 @@
 use crate::app::WorkbenchApp;
 use crate::config::windows_open_dialog;
+use crate::keymap::Action;
 use crate::state::StatusLevel;
 use eframe::egui;
 use tool_core::{Direction, Event, Payload};
@@ -8,29 +9,151 @@ use tool_panels::Activity;
 
 impl WorkbenchApp {
     pub(crate) fn handle_keys(&mut self, ctx: &egui::Context) {
+        let keymap = self.keymap.clone();
+        let mut triggered: Option<Action> = None;
+
         ctx.input(|i| {
-            if i.modifiers.ctrl && i.key_pressed(egui::Key::R) && !i.modifiers.shift {
-                self.refresh_ports();
-            }
-            if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::O) {
-                self.open_selected_port();
-            }
-            if i.modifiers.ctrl && i.key_pressed(egui::Key::B) {
-                self.toggle_bottom_panel();
-            }
-            if i.modifiers.ctrl {
-                for (k, a) in [
-                    (egui::Key::Num1, Activity::Devices),
-                    (egui::Key::Num2, Activity::Replay),
-                    (egui::Key::Num3, Activity::Plugins),
-                    (egui::Key::Num4, Activity::Settings),
-                ] {
-                    if i.key_pressed(k) {
-                        self.panels.select_activity(a);
+            for (action, bindings) in &keymap.bindings {
+                for binding in bindings {
+                    if let Some(key) = parse_egui_key(&binding.key) {
+                        let mods_match = i.modifiers.ctrl == binding.ctrl
+                            && i.modifiers.shift == binding.shift
+                            && i.modifiers.alt == binding.alt;
+                        if mods_match && i.key_pressed(key) {
+                            triggered = Some(*action);
+                        }
                     }
                 }
             }
         });
+
+        if let Some(action) = triggered {
+            self.pending_action = Some(action);
+        }
+    }
+
+    /// 执行当前帧触发的快捷键动作（在 tick_pre_ui 中调用）。
+    fn flush_pending_action(&mut self) {
+        if let Some(action) = self.pending_action.take() {
+            self.execute_action(action);
+        }
+    }
+
+    /// 执行快捷键对应的操作。
+    fn execute_action(&mut self, action: Action) {
+        match action {
+            Action::RefreshPorts => self.refresh_ports(),
+            Action::OpenPort => self.open_selected_port(),
+            Action::ToggleActivityBar => {
+                self.panels.dock.activity_bar_visible = !self.panels.dock.activity_bar_visible;
+                if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+            }
+            Action::ToggleBottomPanel => self.toggle_bottom_panel(),
+            Action::ToggleRightSidebar => {
+                self.panels.dock.right_visible = !self.panels.dock.right_visible;
+                if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+            }
+            Action::CloseTab => {
+                let active = self.panels.active_tab.clone();
+                if active.activity().is_none() {
+                    self.panels.close_tab(active);
+                    if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
+                }
+            }
+            Action::SelectActivity1 => self.panels.select_activity(Activity::Devices),
+            Action::SelectActivity2 => self.panels.select_activity(Activity::Replay),
+            Action::SelectActivity3 => self.panels.select_activity(Activity::Plugins),
+            Action::SelectActivity4 => self.panels.select_activity(Activity::Settings),
+            Action::Send => {
+                // Ctrl+Enter 发送：仅在底部面板可见且发送目标端口打开时触发
+                if self.send_target_port_open() && !self.send.input.trim().is_empty() {
+                    self.do_send();
+                }
+            }
+            Action::StartRecording => self.start_or_stop_recording(),
+            Action::ReconnectPort => self.reconnect_selected_port(),
+        }
+    }
+}
+
+/// 将 keymap 中的键名字符串转换为 egui::Key。
+fn parse_egui_key(name: &str) -> Option<egui::Key> {
+    match name {
+        "A" => Some(egui::Key::A),
+        "B" => Some(egui::Key::B),
+        "C" => Some(egui::Key::C),
+        "D" => Some(egui::Key::D),
+        "E" => Some(egui::Key::E),
+        "F" => Some(egui::Key::F),
+        "G" => Some(egui::Key::G),
+        "H" => Some(egui::Key::H),
+        "I" => Some(egui::Key::I),
+        "J" => Some(egui::Key::J),
+        "K" => Some(egui::Key::K),
+        "L" => Some(egui::Key::L),
+        "M" => Some(egui::Key::M),
+        "N" => Some(egui::Key::N),
+        "O" => Some(egui::Key::O),
+        "P" => Some(egui::Key::P),
+        "Q" => Some(egui::Key::Q),
+        "R" => Some(egui::Key::R),
+        "S" => Some(egui::Key::S),
+        "T" => Some(egui::Key::T),
+        "U" => Some(egui::Key::U),
+        "V" => Some(egui::Key::V),
+        "W" => Some(egui::Key::W),
+        "X" => Some(egui::Key::X),
+        "Y" => Some(egui::Key::Y),
+        "Z" => Some(egui::Key::Z),
+        "Num0" => Some(egui::Key::Num0),
+        "Num1" => Some(egui::Key::Num1),
+        "Num2" => Some(egui::Key::Num2),
+        "Num3" => Some(egui::Key::Num3),
+        "Num4" => Some(egui::Key::Num4),
+        "Num5" => Some(egui::Key::Num5),
+        "Num6" => Some(egui::Key::Num6),
+        "Num7" => Some(egui::Key::Num7),
+        "Num8" => Some(egui::Key::Num8),
+        "Num9" => Some(egui::Key::Num9),
+        "Escape" => Some(egui::Key::Escape),
+        "Enter" => Some(egui::Key::Enter),
+        "Tab" => Some(egui::Key::Tab),
+        "Space" => Some(egui::Key::Space),
+        "Backspace" => Some(egui::Key::Backspace),
+        "Delete" => Some(egui::Key::Delete),
+        "Insert" => Some(egui::Key::Insert),
+        "Home" => Some(egui::Key::Home),
+        "End" => Some(egui::Key::End),
+        "PageUp" => Some(egui::Key::PageUp),
+        "PageDown" => Some(egui::Key::PageDown),
+        "ArrowUp" => Some(egui::Key::ArrowUp),
+        "ArrowDown" => Some(egui::Key::ArrowDown),
+        "ArrowLeft" => Some(egui::Key::ArrowLeft),
+        "ArrowRight" => Some(egui::Key::ArrowRight),
+        "F1" => Some(egui::Key::F1),
+        "F2" => Some(egui::Key::F2),
+        "F3" => Some(egui::Key::F3),
+        "F4" => Some(egui::Key::F4),
+        "F5" => Some(egui::Key::F5),
+        "F6" => Some(egui::Key::F6),
+        "F7" => Some(egui::Key::F7),
+        "F8" => Some(egui::Key::F8),
+        "F9" => Some(egui::Key::F9),
+        "F10" => Some(egui::Key::F10),
+        "F11" => Some(egui::Key::F11),
+        "F12" => Some(egui::Key::F12),
+        "Backtick" => Some(egui::Key::Backtick),
+        "Minus" => Some(egui::Key::Minus),
+        "Equals" => Some(egui::Key::Equals),
+        "Comma" => Some(egui::Key::Comma),
+        "Period" => Some(egui::Key::Period),
+        "Slash" => Some(egui::Key::Slash),
+        "Backslash" => Some(egui::Key::Backslash),
+        "Semicolon" => Some(egui::Key::Semicolon),
+        "Quote" => Some(egui::Key::Quote),
+        "OpenBracket" => Some(egui::Key::OpenBracket),
+        "CloseBracket" => Some(egui::Key::CloseBracket),
+        _ => None,
     }
 }
 
@@ -42,6 +165,7 @@ impl WorkbenchApp {
         self.tick_replay(ctx);
         self.tick_plugin_lifecycle();
         self.handle_keys(ctx);
+        self.flush_pending_action();
         self.tick_port_refresh(ctx);
         self.tick_periodic_send(ctx);
         self.tick_auto_save(ctx);
@@ -204,11 +328,22 @@ impl WorkbenchApp {
     }
 
     fn tick_periodic_send(&mut self, _ctx: &egui::Context) {
-        // 检查是否被外部关闭
+        // 检查是否被外部关闭，或线程已自然结束（cancel flag 被线程设为 true）
         if self.periodic_send_cancel.is_some() && !self.send.periodic_enabled {
             if let Some(cancel) = self.periodic_send_cancel.take() {
                 cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             }
+            return;
+        }
+        // 线程已结束（cancel flag 为 true），清理状态
+        if self
+            .periodic_send_cancel
+            .as_ref()
+            .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            self.periodic_send_cancel = None;
+            self.send.periodic_enabled = false;
+            self.send.periodic_send_count = 0;
             return;
         }
         if self.periodic_send_cancel.is_some() {
@@ -288,6 +423,7 @@ impl WorkbenchApp {
                 .map(|e| e.to_string());
 
                 if let Some(e) = err {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                     bus.publish(tool_core::Event::system_log(
                         tool_core::LogLevel::Error,
                         "periodic",
@@ -300,6 +436,7 @@ impl WorkbenchApp {
                 if let Some(max) = max_count
                     && count >= max
                 {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                     bus.publish(tool_core::Event::system_log(
                         tool_core::LogLevel::Info,
                         "periodic",

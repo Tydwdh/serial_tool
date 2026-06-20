@@ -248,6 +248,7 @@ impl WorkbenchApp {
                 });
             }
         });
+        let has_changes = !alias_changes.is_empty();
         for (name, new_alias) in alias_changes {
             match new_alias {
                 Some(alias) => {
@@ -257,7 +258,8 @@ impl WorkbenchApp {
                     self.serial.port_aliases.remove(&name);
                 }
             }
-            if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
         }
+        if has_changes
+            && let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
     }
 }

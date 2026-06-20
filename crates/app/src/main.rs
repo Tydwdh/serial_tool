@@ -5,6 +5,7 @@ mod app;
 mod bootstrap;
 mod commands;
 mod config;
+mod keymap;
 mod panels_ops;
 mod replay_task;
 mod state;

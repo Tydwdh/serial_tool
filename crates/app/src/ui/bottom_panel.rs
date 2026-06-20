@@ -353,6 +353,19 @@ impl WorkbenchApp {
             egui::TextEdit::singleline(&mut self.send.periodic_interval_ms).desired_width(width),
         );
         ui.label("ms");
+        // 实时验证：非空且非正数时给出提示
+        let trimmed = self.send.periodic_interval_ms.trim();
+        if !trimmed.is_empty() {
+            match trimmed.parse::<f64>() {
+                Ok(v) if v <= 0.0 => {
+                    ui.colored_label(theme::YELLOW, "间隔必须 > 0ms");
+                }
+                Err(_) => {
+                    ui.colored_label(theme::YELLOW, "请输入有效数字");
+                }
+                _ => {}
+            }
+        }
     }
 
     // ── HEX 预览 ──

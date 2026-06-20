@@ -1,5 +1,5 @@
 use crate::config::default_activity_order;
-use crate::config::{default_recorder_path, load_config};
+use crate::config::{default_recorder_path, load_config, ConfigLoadResult, PersistedConfig};
 use crate::state::{MAX_SEND_HISTORY, SendUiState, SerialUiState, StatusState};
 use eframe::egui;
 use std::collections::{BTreeSet, VecDeque};
@@ -56,6 +56,10 @@ pub(crate) struct WorkbenchApp {
     pub(crate) replay_analyzer_generation: u64,
     /// 周期发送后台线程的取消信号
     pub(crate) periodic_send_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// 可配置快捷键映射
+    pub(crate) keymap: crate::keymap::Keymap,
+    /// 当前帧触发的快捷键动作（handle_keys 设置，tick 执行）
+    pub(crate) pending_action: Option<crate::keymap::Action>,
 }
 
 pub(crate) struct ReplayAnalyzerJob {
@@ -114,14 +118,26 @@ impl WorkbenchApp {
             ));
         }
         let recorder = JsonlRecorder::new(bus.clone());
-        let config = load_config();
-        if config.is_none() {
-            bus.publish(Event::system_log(
-                LogLevel::Warn,
-                "app",
-                "未找到或无法加载配置，使用默认设置",
-            ));
-        }
+        let config_result = load_config();
+        let config: Option<PersistedConfig> = match config_result {
+            ConfigLoadResult::Ok(cfg) => Some(cfg),
+            ConfigLoadResult::ParseError { ref path, ref error } => {
+                bus.publish(Event::system_log(
+                    LogLevel::Error,
+                    "app",
+                    format!("配置文件损坏 {}: {error}，使用默认设置", path.display()),
+                ));
+                None
+            }
+            ConfigLoadResult::NotFound => {
+                bus.publish(Event::system_log(
+                    LogLevel::Warn,
+                    "app",
+                    "未找到配置文件，使用默认设置",
+                ));
+                None
+            }
+        };
         let mut rp = config
             .as_ref()
             .map(|c| c.panels.clone())
@@ -226,6 +242,11 @@ impl WorkbenchApp {
             dock_dragging_panel: None,
             bottom_dock_rect: None,
             right_dock_rect: None,
+            keymap: config
+                .as_ref()
+                .map(|c| c.keymap.clone())
+                .unwrap_or_default(),
+            pending_action: None,
         };
         app.refresh_ports();
         let enabled: Vec<String> = config

@@ -65,6 +65,9 @@ pub(crate) struct PersistedConfig {
     pub(crate) recent_workspaces: Vec<String>,
     #[serde(default = "default_true")]
     pub(crate) auto_reconnect: bool,
+    /// 可配置快捷键映射（默认 VSCode 风格）。
+    #[serde(default)]
+    pub(crate) keymap: crate::keymap::Keymap,
 }
 
 fn default_true() -> bool {
@@ -80,31 +83,47 @@ pub(crate) fn default_activity_order() -> Vec<Activity> {
     ]
 }
 
-pub(crate) fn load_config() -> Option<PersistedConfig> {
+/// 配置加载结果：区分"无配置文件"和"配置损坏"两种情况。
+#[derive(Debug)]
+pub(crate) enum ConfigLoadResult {
+    /// 成功加载
+    Ok(PersistedConfig),
+    /// 配置文件不存在（首次运行或配置被删除）
+    NotFound,
+    /// 配置文件存在但解析失败（配置损坏）
+    ParseError { path: PathBuf, error: String },
+}
+
+pub(crate) fn load_config() -> ConfigLoadResult {
     let primary = config_path();
 
     // 尝试读主路径
     if let Ok(t) = std::fs::read_to_string(&primary) {
         match serde_json::from_str(&t) {
-            Ok(cfg) => return Some(cfg),
+            Ok(cfg) => return ConfigLoadResult::Ok(cfg),
             Err(e) => {
-                eprintln!("配置解析失败 {}: {e}，尝试降级", primary.display());
+                return ConfigLoadResult::ParseError {
+                    path: primary,
+                    error: e.to_string(),
+                };
             }
         }
     }
 
     // 从旧路径 (CWD/workspace.json) 迁移
-    let legacy = std::env::current_dir().ok()?.join("workspace.json");
-    if let Ok(t) = std::fs::read_to_string(&legacy)
-        && let Ok(cfg) = serde_json::from_str::<PersistedConfig>(&t)
-    {
-        if let Some(parent) = primary.parent() {
-            let _ = std::fs::create_dir_all(parent);
+    let legacy = std::env::current_dir().ok().map(|d| d.join("workspace.json"));
+    if let Some(ref legacy) = legacy {
+        if let Ok(t) = std::fs::read_to_string(legacy)
+            && let Ok(cfg) = serde_json::from_str::<PersistedConfig>(&t)
+        {
+            if let Some(parent) = primary.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::copy(legacy, &primary);
+            return ConfigLoadResult::Ok(cfg);
         }
-        let _ = std::fs::copy(&legacy, &primary);
-        return Some(cfg);
     }
-    None
+    ConfigLoadResult::NotFound
 }
 pub(crate) fn config_path() -> PathBuf {
     // 优先使用平台配置目录，避免 CWD 变化导致配置"丢失"
@@ -222,6 +241,7 @@ impl WorkbenchApp {
             port_profiles: self.serial.port_profiles.clone(),
             recent_workspaces: self.recent_workspaces.clone(),
             auto_reconnect: self.serial.auto_reconnect,
+            keymap: self.keymap.clone(),
         }
     }
 
@@ -253,6 +273,7 @@ impl WorkbenchApp {
         self.serial.port_aliases = cfg.port_aliases.clone();
         self.serial.port_profiles = cfg.port_profiles.clone();
         self.serial.auto_reconnect = cfg.auto_reconnect;
+        self.keymap = cfg.keymap.clone();
         self.send.send_history = cfg
             .send_history
             .iter()

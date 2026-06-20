@@ -199,7 +199,12 @@ impl WorkbenchApp {
                 DockArea::Right => self.send_panel_vertical(ui),
                 DockArea::Bottom => self.send_panel_horizontal(ui),
                 DockArea::Center => {
-                    ui.colored_label(theme::YELLOW, "发送器不支持放在主工作区");
+                    ui.colored_label(theme::YELLOW, "发送器不支持放在主工作区，已自动移到底部");
+                    // 自动移到底部
+                    self.panels.dock.move_panel(PanelKind::Sender, DockArea::Bottom);
+                    self.panels.dock.bottom_visible = true;
+                    self.set_bottom_visible(true);
+                    self.panels.sync_tabs_from_dock();
                 }
             },
             PanelKind::Logs => self.bottom_log_panel.ui(ui),
@@ -253,6 +258,13 @@ impl WorkbenchApp {
 
         let primary_down = ctx.input(|i| i.pointer.primary_down());
         let released = ctx.input(|i| i.pointer.any_released());
+        let esc_pressed = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+
+        // ESC 取消拖拽
+        if esc_pressed {
+            self.dock_dragging_panel = None;
+            return;
+        }
 
         let Some(pos) = ctx.pointer_latest_pos() else {
             if !primary_down {
