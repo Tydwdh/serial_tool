@@ -1,11 +1,11 @@
 # 插件开发总览
 
-## 插件是什么
+硬件调试工作台的插件是一组放在 `plugins\<plugin-id>\` 下的文件。主程序启动或刷新插件列表后，会扫描每个子目录中的 `plugin.json`。
 
-硬件调试工作台的插件是一组放在 `plugins/<plugin-id>/` 下的文件。最小插件通常包含：
+最小插件：
 
 ```text
-plugins/my.plugin/
+plugins\my.plugin\
   plugin.json
   main.lua
 ```
@@ -16,17 +16,19 @@ plugins/my.plugin/
   replay.lua
 ```
 
-插件不需要重新编译主程序。主程序启动或刷新插件列表后，会扫描 `plugins/` 目录下的 `plugin.json`。
+插件不需要重新编译主程序。
 
 ## 推荐目录结构
 
 ```text
-plugins/my.serial-analyzer/
-  plugin.json       # 插件声明文件
-  main.lua          # 实时插件入口
-  replay.lua        # 可选：回放解析器入口
-  README.md         # 可选：插件说明
+plugins\my.serial-analyzer\
+  plugin.json       插件声明文件
+  main.lua          实时插件入口
+  replay.lua        可选：回放解析器入口
+  README.md         可选：插件说明
 ```
+
+正式发布主程序时，建议不要把个人脚本、设备专用脚本或测试脚本放进默认 `plugins\` 目录。它们更适合放在独立脚本仓库，由用户按需下载。
 
 ## 两种运行角色
 
@@ -34,13 +36,13 @@ plugins/my.serial-analyzer/
 
 实时插件用于正常运行时：
 
-- 打开或关闭串口
-- 发送串口数据
-- 监听 DataBus 事件
-- 创建动态面板
-- 创建图表或表单
-- 定时执行任务
-- 把串口 RX 解析为 `protocol.*` 事件
+- 打开或关闭串口。
+- 发送串口数据。
+- 监听 DataBus 事件。
+- 创建动态面板。
+- 创建图表或表单。
+- 定时执行任务。
+- 把串口 RX 解析为 `protocol.*` 事件。
 
 典型链路：
 
@@ -118,16 +120,20 @@ end)
 
 ## 插件开发流程
 
-1. 复制模板目录，例如 `plugins/template.hello`。
-2. 修改目录名，例如 `plugins/my.first-plugin`。
-3. 修改 `plugin.json`：
-   - `id` 必须唯一。
-   - `name` 是 UI 显示名。
-   - `permissions` 只声明真正需要的权限。
+1. 复制模板目录，例如 `plugins\template.hello`。
+2. 修改目录名，例如 `plugins\my.first-plugin`。
+3. 修改 `plugin.json`。
 4. 修改 `main.lua`。
 5. 在应用的插件页刷新或重启应用。
 6. 启用插件。
 7. 查看日志面板和动态面板是否正常。
+
+`plugin.json` 里最重要的字段：
+
+- `id` 必须唯一，发布后尽量不要修改。
+- `name` 是 UI 显示名。
+- `version` 用于说明插件版本。
+- `permissions` 只声明真正需要的权限。
 
 ## 常见设计建议
 
@@ -136,9 +142,9 @@ end)
 `id` 一旦发布，尽量不要修改。建议使用命名空间风格：
 
 ```text
-builtin.pid-tuner
-demo.signal-generator
-yourname.my-analyzer
+yourname.pid-tuner
+vendor.imu-viewer
+project.gcode-sender
 ```
 
 ### 面板 ID 也要稳定

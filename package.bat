@@ -66,15 +66,22 @@ if exist "assets" (
     echo   WARNING: assets\ not found
 )
 
-if exist "plugins" (
-    xcopy "plugins" "%OUT_DIR%\plugins\" /E /I /Q /Y >nul
-    if %ERRORLEVEL% neq 0 (
-        echo Failed to copy plugins
-        exit /b %ERRORLEVEL%
+mkdir "%OUT_DIR%\plugins" >nul 2>nul
+echo   plugins\ empty runtime plugin directory
+
+set "EXAMPLE_PLUGINS_DIR=%OUT_DIR%\examples\plugins"
+for %%P in (template.hello template.serial-chart) do (
+    if exist "plugins\%%P" (
+        if not exist "%EXAMPLE_PLUGINS_DIR%" mkdir "%EXAMPLE_PLUGINS_DIR%"
+        xcopy "plugins\%%P" "%EXAMPLE_PLUGINS_DIR%\%%P\" /E /I /Q /Y >nul
+        if !ERRORLEVEL! neq 0 (
+            echo Failed to copy example plugin %%P
+            exit /b !ERRORLEVEL!
+        )
+        echo   examples\plugins\%%P\
+    ) else (
+        echo   WARNING: plugins\%%P not found
     )
-    echo   plugins\
-) else (
-    echo   WARNING: plugins\ not found
 )
 
 if exist "docs" (

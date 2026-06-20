@@ -1,23 +1,33 @@
-# 硬件调试工作台插件开发文档
+# 硬件调试工作台文档
 
-这一组文档面向 `v0.1-preview` 版本，用于帮助插件作者通过 Lua 编写插件，不需要重新编译主程序。
+这些文档面向准备编写、分发或维护 Lua 插件的人。插件不需要重新编译主程序，只要放到应用目录下的 `plugins\<plugin-id>\` 并在插件页刷新即可发现。
 
-## 推荐阅读顺序
+## 阅读顺序
 
-1. [`PLUGIN_DEVELOPMENT.md`](./PLUGIN_DEVELOPMENT.md)：插件开发总览。
-2. [`plugin-manifest.md`](./plugin-manifest.md)：`plugin.json` 字段说明。
-3. [`lua-plugin-api.md`](./lua-plugin-api.md)：实时 Lua 插件可用的 `ctx.*` API。
-4. [`replay-analyzer.md`](./replay-analyzer.md)：`replay.lua` 回放解析器。
-5. [`recording-replay.md`](./recording-replay.md)：录制模式和回放策略。
-6. [`release-checklist.md`](./release-checklist.md)：发布前检查清单。
+1. [插件开发总览](./PLUGIN_DEVELOPMENT.md)：插件目录结构、实时插件、回放解析器和开发流程。
+2. [plugin.json 说明](./plugin-manifest.md)：插件 ID、入口脚本、权限和 UI 贡献项。
+3. [Lua 实时插件 API](./lua-plugin-api.md)：`ctx.*` API、串口、事件总线、UI、文件选择和配置。
+4. [安装器与发布](./INSTALLER.md)：便携包、Windows 安装器和卸载清理范围。
 
-## 示例插件
+## 插件和脚本仓库策略
 
-本压缩包包含两个模板插件：
+主程序仓库只保留插件系统、开发文档和少量模板。正式发布包默认不预装测试脚本或个人脚本，避免用户安装后看到与自己设备无关的功能。
+
+建议另外创建一个脚本仓库，例如 `hardware-workbench-scripts`，专门放：
+
+- `gcode-sender` 这类具体设备/工作流脚本。
+- 社区贡献的协议解析器。
+- 不同硬件项目的示例配置。
+- 插件 README、截图、版本说明和兼容的主程序版本。
+
+用户安装脚本时，只需要把某个插件目录复制到：
 
 ```text
-plugins/template.hello/
-plugins/template.serial-chart/
+<Hardware Workbench 安装目录>\plugins\<plugin-id>\
 ```
 
-复制模板目录，修改 `plugin.json` 的 `id/name/version`，再改 Lua 脚本即可开始开发。
+插件配置会写到用户配置目录下的 `HardwareWorkbench\plugin-config\`。使用 Windows 安装器卸载主程序时，该目录会一起删除。
+
+## 发布包内的示例
+
+`package.bat` 会把模板插件复制到 `examples\plugins\`，它们不会自动加载。需要试用模板时，可以手动复制到应用目录的 `plugins\` 下。

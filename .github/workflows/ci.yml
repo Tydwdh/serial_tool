@@ -31,15 +31,25 @@ jobs:
       - name: Test
         run: cargo test --all-targets
 
-      - name: Build release
-        run: cargo build --release
+      - name: Package portable zip
+        run: .\package.bat
+
+      - name: Install Inno Setup
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: choco install innosetup --yes --no-progress
+
+      - name: Build installer
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: .\installer\build-installer.ps1 -SkipPackage
 
       - name: Upload artifact
         if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
           name: hardware-workbench-windows
-          path: target/release/hardware-workbench-app.exe
+          path: |
+            dist/hardware-workbench-app.zip
+            dist/HardwareWorkbenchSetup.exe
 
   release:
     name: GitHub Release
@@ -57,5 +67,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: Hardware Workbench ${{ github.ref_name }}
-          files: hardware-workbench-app.exe
+          files: |
+            hardware-workbench-app.zip
+            HardwareWorkbenchSetup.exe
           generate_release_notes: true
