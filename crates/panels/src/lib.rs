@@ -9,6 +9,9 @@ mod sender;
 mod terminal;
 pub mod theme;
 
+/// 面板每帧最多摄入的事件数，避免 UI 卡顿。
+pub(crate) const MAX_INGEST_PER_FRAME: usize = 500;
+
 pub use attitude::AttitudePanel;
 pub use chart::ChartPanel;
 pub use dynamic::DynamicPanels;

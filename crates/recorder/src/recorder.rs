@@ -267,7 +267,9 @@ impl JsonlRecorder {
                 "error": error_clone,
             });
             if let Ok(text) = serde_json::to_string_pretty(&summary) {
-                let _ = std::fs::write(&summary_path, text);
+                if let Err(e) = std::fs::write(&summary_path, text) {
+                    log::warn!("recorder: failed to write summary {}: {e}", summary_path.display());
+                }
             }
 
             finished_thread.store(true, Ordering::SeqCst);

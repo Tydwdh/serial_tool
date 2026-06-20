@@ -910,8 +910,12 @@ fn install_ctx(
 
     ctx.set("plugin", json_to_lua_value(lua, &config.context)?)?;
 
-    let _ = codec::register_codec(lua);
-    let _ = codec::register_utils(lua);
+    if let Err(e) = codec::register_codec(lua) {
+        log::warn!("failed to register hw.codec: {e}");
+    }
+    if let Err(e) = codec::register_utils(lua) {
+        log::warn!("failed to register hw.utils: {e}");
+    }
 
     lua.globals().set("ctx", &ctx)?;
 

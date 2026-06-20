@@ -9,6 +9,10 @@ use tool_databus::{DataBus, TopicFilter};
 use tool_transport::{TransportManager, serial_topics};
 
 use crate::convert::{json_to_lua_value, lua_value_to_serial_config};
+use crate::globals::{
+    CURRENT_TASK_ID, EXPECT_ACTION, EXPECT_PATTERN, PLUGIN_TASKS, TASK_YIELD_OP, YIELD_DEADLINE_MS,
+    YIELD_KIND, YIELD_PORT, YIELD_READ_LINE, YIELD_TIMEOUT_MS, YIELD_WRITE_LINE_AND_EXPECT,
+};
 use crate::host_services::{LuaHostServices, line_buffer_key};
 
 /// 简单 Lua pattern 匹配：支持 ^ 锚点和子串匹配。
@@ -17,6 +21,41 @@ pub(crate) fn match_pat(line: &str, pat: &str) -> bool {
         line.starts_with(suffix)
     } else {
         line.contains(pat)
+    }
+}
+
+/// 超时轮询串口事件直到匹配成功或超时。
+/// 返回 `Some(text)` 匹配成功，`None` 表示超时/停止/断开。
+fn poll_until_match(
+    subscription: &tool_databus::Subscription,
+    stop_flag: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    deadline: Instant,
+    mut match_fn: impl FnMut(&tool_core::Event) -> Option<String>,
+) -> Option<String> {
+    loop {
+        if let Some(stop) = stop_flag
+            && stop.load(Ordering::Relaxed)
+        {
+            return None;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return None;
+        }
+        let remaining = deadline
+            .saturating_duration_since(now)
+            .min(Duration::from_millis(50));
+        match subscription.recv_timeout(remaining) {
+            Ok(event) => {
+                if let Some(result) = match_fn(&event) {
+                    return Some(result);
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                return None;
+            }
+        }
     }
 }
 
@@ -137,39 +176,30 @@ pub(crate) fn create_serial_api(
                     expect_from_bus.subscribe(TopicFilter::exact(serial_topics::SERIAL_RX));
                 let deadline = Instant::now() + Duration::from_millis(timeout_ms.unwrap_or(1_000));
 
-                loop {
-                    if let Some(ref stop) = expect_from_stop
-                        && stop.load(Ordering::Relaxed)
-                    {
-                        return Ok(Value::Nil);
-                    }
-                    let now = Instant::now();
-                    if now >= deadline {
-                        return Ok(Value::Nil);
-                    }
-                    let remaining = deadline
-                        .saturating_duration_since(now)
-                        .min(Duration::from_millis(50));
-                    match subscription.recv_timeout(remaining) {
-                        Ok(event) => {
-                            let event_port = event
-                                .metadata
-                                .get("port")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            if event_port != port {
-                                continue;
-                            }
-                            let text = event.payload.text_lossy();
-                            if text.contains(&pattern) {
-                                return Ok(Value::String(lua.create_string(&text)?));
-                            }
+                let result = poll_until_match(
+                    &subscription,
+                    &expect_from_stop,
+                    deadline,
+                    |event| {
+                        let event_port = event
+                            .metadata
+                            .get("port")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if event_port != port {
+                            return None;
                         }
-                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                            return Ok(Value::Nil);
+                        let text = event.payload.text_lossy();
+                        if text.contains(&pattern) {
+                            Some(text)
+                        } else {
+                            None
                         }
-                    }
+                    },
+                );
+                match result {
+                    Some(text) => Ok(Value::String(lua.create_string(&text)?)),
+                    None => Ok(Value::Nil),
                 }
             },
         )?,
@@ -192,34 +222,13 @@ pub(crate) fn create_serial_api(
             let subscription = expect_bus.subscribe(TopicFilter::exact(serial_topics::SERIAL_RX));
             let deadline = Instant::now() + Duration::from_millis(timeout_ms.unwrap_or(1_000));
 
-            loop {
-                if let Some(ref stop) = expect_stop
-                    && stop.load(Ordering::Relaxed)
-                {
-                    return Ok(Value::Nil);
-                }
-
-                let now = Instant::now();
-
-                if now >= deadline {
-                    return Ok(Value::Nil);
-                }
-
-                let remaining = deadline.saturating_duration_since(now);
-
-                match subscription.recv_timeout(remaining.min(Duration::from_millis(50))) {
-                    Ok(event) => {
-                        let text = event.payload.text_lossy();
-
-                        if text.contains(&pattern) {
-                            return Ok(Value::String(lua.create_string(&text)?));
-                        }
-                    }
-                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                        return Ok(Value::Nil);
-                    }
-                }
+            let result = poll_until_match(&subscription, &expect_stop, deadline, |event| {
+                let text = event.payload.text_lossy();
+                if text.contains(&pattern) { Some(text) } else { None }
+            });
+            match result {
+                Some(text) => Ok(Value::String(lua.create_string(&text)?)),
+                None => Ok(Value::Nil),
             }
         })?,
     )?;
@@ -247,39 +256,21 @@ pub(crate) fn create_serial_api(
                 .map_err(mlua::Error::external)?;
 
             // 3. 匹配响应
-            loop {
-                if let Some(ref stop) = rq_stop
-                    && stop.load(Ordering::Relaxed)
-                {
-                    return Ok(Value::Nil);
+            let result = poll_until_match(&subscription, &rq_stop, deadline, |event| {
+                let event_port = event
+                    .metadata
+                    .get("port")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if event_port != port {
+                    return None;
                 }
-                let now = Instant::now();
-                if now >= deadline {
-                    return Ok(Value::Nil);
-                }
-                let remaining = deadline
-                    .saturating_duration_since(now)
-                    .min(Duration::from_millis(50));
-                match subscription.recv_timeout(remaining) {
-                    Ok(event) => {
-                        let event_port = event
-                            .metadata
-                            .get("port")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        if event_port != port {
-                            continue;
-                        }
-                        let text = event.payload.text_lossy();
-                        if text.contains(&expect) {
-                            return Ok(Value::String(lua.create_string(&text)?));
-                        }
-                    }
-                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                        return Ok(Value::Nil);
-                    }
-                }
+                let text = event.payload.text_lossy();
+                if text.contains(&expect) { Some(text) } else { None }
+            });
+            match result {
+                Some(text) => Ok(Value::String(lua.create_string(&text)?)),
+                None => Ok(Value::Nil),
             }
         })?,
     )?;
@@ -356,7 +347,7 @@ pub(crate) fn create_serial_api(
             // 无数据，返回 yield op，由 Lua wrapper 执行 coroutine.yield。
             let task_id: String = lua
                 .globals()
-                .get::<String>(crate::globals::CURRENT_TASK_ID)
+                .get::<String>(CURRENT_TASK_ID)
                 .unwrap_or_default();
             if task_id.is_empty() {
                 return Err(mlua::Error::RuntimeError(
@@ -365,15 +356,15 @@ pub(crate) fn create_serial_api(
             }
 
             let op = lua.create_table()?;
-            op.set("kind", "read_line")?;
-            op.set("port", port)?;
+            op.set(YIELD_KIND, YIELD_READ_LINE)?;
+            op.set(YIELD_PORT, port)?;
             op.set("delimiter", delimiter)?;
-            op.set("timeout_ms", timeout_ms)?;
-            op.set("deadline_ms", tool_core::now_timestamp_ms() + timeout_ms)?;
+            op.set(YIELD_TIMEOUT_MS, timeout_ms)?;
+            op.set(YIELD_DEADLINE_MS, tool_core::now_timestamp_ms() + timeout_ms)?;
 
-            let tasks: Table = lua.globals().get(crate::globals::PLUGIN_TASKS)?;
+            let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
             if let Ok(state) = tasks.get::<Table>(task_id.as_str()) {
-                let _ = state.set("yield_op", op.clone());
+                let _ = state.set(TASK_YIELD_OP, op.clone());
             }
 
             Ok(Value::Table(op))
@@ -386,7 +377,7 @@ pub(crate) fn create_serial_api(
         lua.create_function(move |lua, ()| {
             let task_id: String = lua
                 .globals()
-                .get::<String>(crate::globals::CURRENT_TASK_ID)
+                .get::<String>(CURRENT_TASK_ID)
                 .unwrap_or_default();
             if task_id.is_empty() {
                 return Err(mlua::Error::RuntimeError(
@@ -394,7 +385,7 @@ pub(crate) fn create_serial_api(
                 ));
             }
             // 恢复后，从 state 中读取结果。返回 table { line = ..., err = ... }
-            let tasks: Table = lua.globals().get(crate::globals::PLUGIN_TASKS)?;
+            let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
             if let Ok(state) = tasks.get::<Table>(task_id.as_str()) {
                 let line: Option<String> = state.get("_read_result").ok();
                 let err: Option<String> = state.get("_read_result_err").ok();
@@ -440,8 +431,8 @@ pub(crate) fn create_serial_api(
             let patterns: Table = opts.get("patterns").unwrap_or_else(|_| {
                 let t = lua.create_table().unwrap();
                 let entry = lua.create_table().unwrap();
-                entry.set("pattern", "^ok").unwrap();
-                entry.set("action", "return").unwrap();
+                entry.set(EXPECT_PATTERN, "^ok").unwrap();
+                entry.set(EXPECT_ACTION, "return").unwrap();
                 t.set(1, entry).unwrap();
                 t
             });
@@ -473,19 +464,19 @@ pub(crate) fn create_serial_api(
                     while let Some(candidate) = buffer.next_line() {
                         for pair in patterns.pairs::<Value, Table>().flatten() {
                             let p: Table = pair.1;
-                            let pat: String = p.get("pattern").unwrap_or_default();
+                            let pat: String = p.get(EXPECT_PATTERN).unwrap_or_default();
                             let action: String =
-                                p.get("action").unwrap_or_else(|_| "return".to_owned());
+                                p.get(EXPECT_ACTION).unwrap_or_else(|_| "return".to_owned());
                             if match_pat(&candidate, &pat) {
                                 if action == "continue" {
                                     // 更新 task status 让用户看到设备忙碌
                                     let tid: String = lua
                                         .globals()
-                                        .get::<String>(crate::globals::CURRENT_TASK_ID)
+                                        .get::<String>(CURRENT_TASK_ID)
                                         .unwrap_or_default();
                                     if !tid.is_empty() {
                                         let tasks: Table =
-                                            lua.globals().get(crate::globals::PLUGIN_TASKS)?;
+                                            lua.globals().get(PLUGIN_TASKS)?;
                                         if let Ok(s) = tasks.get::<Table>(tid.as_str()) {
                                             let pname: String = p.get("name").unwrap_or_default();
                                             let _ = s.set(
@@ -516,7 +507,7 @@ pub(crate) fn create_serial_api(
             // 无匹配，返回 yield op，由 Lua wrapper 执行 coroutine.yield。
             let task_id: String = lua
                 .globals()
-                .get::<String>(crate::globals::CURRENT_TASK_ID)
+                .get::<String>(CURRENT_TASK_ID)
                 .unwrap_or_default();
             if task_id.is_empty() {
                 return Err(mlua::Error::RuntimeError(
@@ -526,16 +517,16 @@ pub(crate) fn create_serial_api(
 
             // 构造 yield_op（包含 deadline_ms 供 process_tasks 判断超时）
             let yield_data = lua.create_table()?;
-            yield_data.set("kind", "write_line_and_expect")?;
-            yield_data.set("port", port.as_str())?;
+            yield_data.set(YIELD_KIND, YIELD_WRITE_LINE_AND_EXPECT)?;
+            yield_data.set(YIELD_PORT, port.as_str())?;
             yield_data.set("delimiter", delimiter.as_str())?;
-            yield_data.set("timeout_ms", timeout_ms)?;
-            yield_data.set("deadline_ms", tool_core::now_timestamp_ms() + timeout_ms)?;
+            yield_data.set(YIELD_TIMEOUT_MS, timeout_ms)?;
+            yield_data.set(YIELD_DEADLINE_MS, tool_core::now_timestamp_ms() + timeout_ms)?;
             let _ = yield_data.set("patterns", patterns);
 
-            let tasks: Table = lua.globals().get(crate::globals::PLUGIN_TASKS)?;
+            let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
             if let Ok(state) = tasks.get::<Table>(task_id.as_str()) {
-                let _ = state.set("yield_op", yield_data.clone());
+                let _ = state.set(TASK_YIELD_OP, yield_data.clone());
             }
 
             Ok(Value::Table(yield_data))
@@ -548,7 +539,7 @@ pub(crate) fn create_serial_api(
         lua.create_function(move |lua, ()| {
             let task_id: String = lua
                 .globals()
-                .get::<String>(crate::globals::CURRENT_TASK_ID)
+                .get::<String>(CURRENT_TASK_ID)
                 .unwrap_or_default();
             if task_id.is_empty() {
                 return Err(mlua::Error::RuntimeError(
@@ -556,7 +547,7 @@ pub(crate) fn create_serial_api(
                 ));
             }
             // 恢复后读取结果。返回 table { result = {name,line,elapsed_ms}, err = ... }
-            let tasks: Table = lua.globals().get(crate::globals::PLUGIN_TASKS)?;
+            let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
             if let Ok(state) = tasks.get::<Table>(task_id.as_str()) {
                 let matched: Option<Table> = state.get("_expect_result").ok();
                 let err: Option<String> = state.get("_expect_err").ok();

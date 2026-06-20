@@ -357,9 +357,13 @@ impl PluginManager {
         });
     }
 
-    pub fn summaries(&mut self) -> Vec<PluginSummary> {
+    /// 清理已完成的运行时并更新插件状态。
+    /// 调用后 `summaries()` 返回的 state 将反映最新运行时状态。
+    pub fn reap_finished(&mut self) {
         self.update_runtime_states();
+    }
 
+    pub fn summaries(&self) -> Vec<PluginSummary> {
         self.records
             .values()
             .map(|record| PluginSummary {

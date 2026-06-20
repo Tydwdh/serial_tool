@@ -115,7 +115,7 @@ impl WorkbenchApp {
             }
             if let Some(i) = to_remove {
                 self.recent_workspaces.remove(i);
-                let _ = self.save_config();
+                if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
             }
         }
 
@@ -124,7 +124,7 @@ impl WorkbenchApp {
         let mut bottom_visible = self.panels.dock.bottom_visible;
         if ui.checkbox(&mut bottom_visible, "底部面板").changed() {
             self.set_bottom_visible(bottom_visible);
-            let _ = self.save_config();
+            if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
         }
         ui.separator();
         ui.heading("快捷键");

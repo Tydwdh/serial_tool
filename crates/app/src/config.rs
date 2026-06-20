@@ -20,7 +20,9 @@ fn atomic_write_json<T: Serialize>(path: &std::path::Path, value: &T) -> Result<
 
     // 3. 备份旧文件（如果存在）
     if path.exists() {
-        let _ = std::fs::copy(path, &backup_path);
+        if let Err(e) = std::fs::copy(path, &backup_path) {
+            log::warn!("config: failed to backup to {}: {e}", backup_path.display());
+        }
     }
 
     // 4. 原子替换
@@ -189,7 +191,7 @@ use crate::state::MAX_SEND_HISTORY;
 
 impl WorkbenchApp {
     /// 构建当前配置的快照
-    pub(crate) fn build_config_snapshot(&mut self) -> PersistedConfig {
+    pub(crate) fn build_config_snapshot(&self) -> PersistedConfig {
         let mut p = self.panels.clone();
         p.discard_dynamic_tabs();
         PersistedConfig {
@@ -224,13 +226,13 @@ impl WorkbenchApp {
         }
     }
 
-    pub(crate) fn save_config(&mut self) -> Result<(), String> {
+    pub(crate) fn save_config(&self) -> Result<(), String> {
         let cfg = self.build_config_snapshot();
         let path = config_path();
         atomic_write_json(&path, &cfg)
     }
 
-    pub(crate) fn save_config_to_path(&mut self, path: &std::path::Path) -> Result<(), String> {
+    pub(crate) fn save_config_to_path(&self, path: &std::path::Path) -> Result<(), String> {
         let cfg = self.build_config_snapshot();
         atomic_write_json(path, &cfg)
     }

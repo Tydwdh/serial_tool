@@ -100,7 +100,7 @@ impl WorkbenchApp {
                 let item = self.activity_order.remove(source_index);
                 let insert_index = insert_index.min(self.activity_order.len());
                 self.activity_order.insert(insert_index, item);
-                let _ = self.save_config();
+                if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
             }
         }
 
@@ -262,7 +262,7 @@ impl WorkbenchApp {
         }
         self.panels.dock.center.tabs = new_center;
 
-        let _ = self.save_config();
+        if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
     }
 }
 

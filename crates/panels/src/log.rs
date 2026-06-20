@@ -1,10 +1,8 @@
-use crate::{fmt_ts, theme};
+use crate::{fmt_ts, theme, MAX_INGEST_PER_FRAME};
 use egui::{Color32, RichText, ScrollArea};
 use std::collections::VecDeque;
 use tool_core::{Event, LogLevel};
 use tool_databus::{DataBus, Subscription, TopicFilter};
-
-const MAX_INGEST_PER_FRAME: usize = 500;
 
 const TIME_COL_WIDTH: f32 = 118.0;
 const LEVEL_COL_WIDTH: f32 = 52.0;

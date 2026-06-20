@@ -1448,6 +1448,7 @@ dependencies = [
  "dirs-next",
  "eframe",
  "egui",
+ "log",
  "rfd",
  "serde",
  "serde_json",
@@ -3466,6 +3467,7 @@ name = "tool-lua-host"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
+ "log",
  "mlua",
  "parking_lot",
  "serde",
@@ -3498,6 +3500,7 @@ name = "tool-recorder"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
+ "log",
  "parking_lot",
  "serde",
  "serde_json",

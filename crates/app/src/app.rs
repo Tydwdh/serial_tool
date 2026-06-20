@@ -251,7 +251,7 @@ impl WorkbenchApp {
 impl Drop for WorkbenchApp {
     fn drop(&mut self) {
         // 退出前自动保存工作区
-        let _ = self.save_config();
+        if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
         self.recorder.stop();
         self.transport.close_serial();
     }

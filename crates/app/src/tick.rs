@@ -180,7 +180,7 @@ impl WorkbenchApp {
         let now = ctx.input(|i| i.time);
         if now - self.last_auto_save_time > 60.0 {
             self.last_auto_save_time = now;
-            let _ = self.save_config();
+            if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
         }
     }
 

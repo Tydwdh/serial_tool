@@ -94,7 +94,7 @@ impl WorkbenchApp {
                                 self.panels.dock.move_panel(kind.clone(), DockArea::Right);
                                 self.panels.dock.right_visible = true;
                                 self.panels.sync_tabs_from_dock();
-                                let _ = self.save_config();
+                                if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
                                 ui.close();
                             }
                         }
@@ -103,7 +103,7 @@ impl WorkbenchApp {
                                 self.panels.dock.move_panel(kind.clone(), DockArea::Bottom);
                                 self.panels.sync_tabs_from_dock();
                                 self.set_bottom_visible(true);
-                                let _ = self.save_config();
+                                if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
                                 ui.close();
                             }
                         }
@@ -112,7 +112,7 @@ impl WorkbenchApp {
 
                     if ui.button("关闭").clicked() {
                         self.panels.dock.stack_mut(area).close(kind);
-                        let _ = self.save_config();
+                        if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
                         ui.close();
                     }
                 });
@@ -125,7 +125,7 @@ impl WorkbenchApp {
                         if ui.small_button("×").on_hover_text("隐藏底部面板").clicked() {
                             self.panels.dock.bottom_visible = false;
                             self.bottom_panel_visible = false;
-                            let _ = self.save_config();
+                            if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
                         }
                     }
                     DockArea::Right => {
@@ -135,7 +135,7 @@ impl WorkbenchApp {
                             .clicked()
                         {
                             self.panels.dock.right_visible = false;
-                            let _ = self.save_config();
+                            if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
                         }
                     }
                     DockArea::Center => {}
@@ -168,7 +168,7 @@ impl WorkbenchApp {
                 .stack_mut(area)
                 .reorder(&kind, insert_index)
             {
-                let _ = self.save_config();
+                if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
             }
         }
     }
@@ -281,12 +281,12 @@ impl WorkbenchApp {
                 self.panels.dock.move_panel(kind, DockArea::Right);
                 self.panels.dock.right_visible = true;
                 self.panels.sync_tabs_from_dock();
-                let _ = self.save_config();
+                if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
             } else if bottom_hit {
                 self.panels.dock.move_panel(kind, DockArea::Bottom);
                 self.panels.sync_tabs_from_dock();
                 self.set_bottom_visible(true);
-                let _ = self.save_config();
+                if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
             }
 
             self.dock_dragging_panel = None;

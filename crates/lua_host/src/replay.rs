@@ -239,8 +239,12 @@ fn install_replay_ctx(
     lua.globals()
         .set(crate::globals::PLUGIN_STORAGE, lua.create_table()?)?;
 
-    let _ = codec::register_codec(lua);
-    let _ = codec::register_utils(lua);
+    if let Err(e) = codec::register_codec(lua) {
+        log::warn!("replay: failed to register hw.codec: {e}");
+    }
+    if let Err(e) = codec::register_utils(lua) {
+        log::warn!("replay: failed to register hw.utils: {e}");
+    }
 
     // 注册 ctx 全局变量
     lua.globals().set("ctx", ctx)?;

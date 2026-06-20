@@ -1,5 +1,10 @@
 //! ctx.task.* — Task API（start/cancel/pause/resume/list）+ task coroutine 调度。
 
+use crate::globals::{
+    CURRENT_TASK_ID, PLUGIN_DISABLE, PLUGIN_TASKS, TASK_CANCELLED, TASK_FINISHED, TASK_YIELD_OP,
+    YIELD_DEADLINE_MS, YIELD_KIND, YIELD_PORT, YIELD_READ_LINE, YIELD_SLEEP, YIELD_WAIT_PAUSED,
+    YIELD_WRITE_LINE_AND_EXPECT,
+};
 use crate::LuaRunConfig;
 use crate::api::serial::match_pat;
 use crate::host_services::{LuaHostServices, line_buffer_key};
@@ -31,7 +36,7 @@ pub(crate) fn process_tasks(
     _config: &LuaRunConfig,
     host_services: &LuaHostServices,
 ) {
-    let tasks: Table = match lua.globals().get(crate::globals::PLUGIN_TASKS) {
+    let tasks: Table = match lua.globals().get(PLUGIN_TASKS) {
         Ok(t) => t,
         Err(_) => return,
     };
@@ -42,18 +47,18 @@ pub(crate) fn process_tasks(
     // 先收集需要恢复的 task id
     let mut ready_ids: Vec<String> = Vec::new();
     for (id, state) in tasks.pairs::<String, Table>().flatten() {
-        if state.get::<bool>("finished").unwrap_or(true) {
+        if state.get::<bool>(TASK_FINISHED).unwrap_or(true) {
             continue;
         }
 
         // ── cancelled 优先：打断 sleep/read_line/expect/paused 等一切等待 ──
-        let cancelled: bool = state.get("cancelled").unwrap_or(false);
+        let cancelled: bool = state.get(TASK_CANCELLED).unwrap_or(false);
         if cancelled {
-            let yield_op: Option<Table> = state.get("yield_op").ok();
+            let yield_op: Option<Table> = state.get(TASK_YIELD_OP).ok();
             if let Some(ref op) = yield_op {
-                let kind: String = op.get("kind").unwrap_or_default();
+                let kind: String = op.get(YIELD_KIND).unwrap_or_default();
                 match kind.as_str() {
-                    "read_line" => {
+                    YIELD_READ_LINE => {
                         let _ = state.set("_read_result", Value::Nil);
                         let _ = state.set(
                             "_read_result_err",
@@ -62,7 +67,7 @@ pub(crate) fn process_tasks(
                                 .unwrap_or(Value::Nil),
                         );
                     }
-                    "write_line_and_expect" => {
+                    YIELD_WRITE_LINE_AND_EXPECT => {
                         let _ = state.set("_expect_result", Value::Nil);
                         let _ = state.set(
                             "_expect_err",
@@ -86,22 +91,22 @@ pub(crate) fn process_tasks(
             continue;
         }
 
-        let yield_op: Option<Table> = state.get("yield_op").ok();
+        let yield_op: Option<Table> = state.get(TASK_YIELD_OP).ok();
         if let Some(ref op) = yield_op {
-            let kind: String = op.get("kind").unwrap_or_default();
+            let kind: String = op.get(YIELD_KIND).unwrap_or_default();
             match kind.as_str() {
-                "sleep" => {
+                YIELD_SLEEP => {
                     let wake_at_ms: u64 = state.get("wake_at_ms").unwrap_or(0);
                     if now_ms < wake_at_ms {
                         continue;
                     }
                 }
-                "wait_paused" => {
+                YIELD_WAIT_PAUSED => {
                     continue;
                 }
-                "read_line" => {
-                    let port: String = op.get("port").unwrap_or_default();
-                    let deadline_ms: u64 = op.get("deadline_ms").unwrap_or(0);
+                YIELD_READ_LINE => {
+                    let port: String = op.get(YIELD_PORT).unwrap_or_default();
+                    let deadline_ms: u64 = op.get(YIELD_DEADLINE_MS).unwrap_or(0);
                     if deadline_ms > 0 && now_ms > deadline_ms {
                         let _ = state.set("_read_result", Value::Nil);
                         let _ = state.set(
@@ -132,9 +137,9 @@ pub(crate) fn process_tasks(
                         continue;
                     }
                 }
-                "write_line_and_expect" => {
-                    let port: String = op.get("port").unwrap_or_default();
-                    let deadline_ms: u64 = op.get("deadline_ms").unwrap_or(0);
+                YIELD_WRITE_LINE_AND_EXPECT => {
+                    let port: String = op.get(YIELD_PORT).unwrap_or_default();
+                    let deadline_ms: u64 = op.get(YIELD_DEADLINE_MS).unwrap_or(0);
                     if deadline_ms > 0 && now_ms > deadline_ms {
                         let _ = state.set("_expect_result", Value::Nil);
                         let _ = state.set(
@@ -233,12 +238,12 @@ pub(crate) fn process_tasks(
         };
 
         // 清除 yield_op 标记
-        let _ = state.set("yield_op", Value::Nil);
+        let _ = state.set(TASK_YIELD_OP, Value::Nil);
 
         // 设置当前 task id，供 read_line 等函数使用
         let _ = lua
             .globals()
-            .set(crate::globals::CURRENT_TASK_ID, id.as_str());
+            .set(CURRENT_TASK_ID, id.as_str());
 
         // resume coroutine
         match thread.resume::<Value>(()) {
@@ -250,13 +255,13 @@ pub(crate) fn process_tasks(
                     }
                     _ => {
                         // Finished 或 Error — 标记完成
-                        let _ = state.set("finished", true);
+                        let _ = state.set(TASK_FINISHED, true);
                     }
                 }
             }
             Err(e) => {
                 // CoroutineUnresumable — 记录错误并标记完成
-                let _ = state.set("finished", true);
+                let _ = state.set(TASK_FINISHED, true);
                 let _ = state.set("last_error", lua.create_string(e.to_string()).ok());
                 _bus.publish(Event::system_log(
                     LogLevel::Error,
@@ -272,13 +277,13 @@ pub(crate) fn process_tasks(
     // 清除当前 task id
     let _ = lua
         .globals()
-        .set(crate::globals::CURRENT_TASK_ID, Value::Nil);
+        .set(CURRENT_TASK_ID, Value::Nil);
 }
 
 /// 从 task 对象获取 state table
 fn get_state_for_task(lua: &Lua, task: &Table) -> mlua::Result<Table> {
     let id: String = task.get("id")?;
-    let tasks: Table = lua.globals().get(crate::globals::PLUGIN_TASKS)?;
+    let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
     tasks.get(id.as_str())
 }
 
@@ -291,7 +296,7 @@ fn create_task_methods_table(lua: &Lua) -> mlua::Result<Table> {
         "is_cancelled",
         lua.create_function(|lua, task: Table| {
             let state = get_state_for_task(lua, &task)?;
-            Ok(state.get::<bool>("cancelled").unwrap_or(false))
+            Ok(state.get::<bool>(TASK_CANCELLED).unwrap_or(false))
         })?,
     )?;
 
@@ -311,9 +316,9 @@ fn create_task_methods_table(lua: &Lua) -> mlua::Result<Table> {
             let state = get_state_for_task(lua, &task)?;
             let _ = state.set("wake_at_ms", tool_core::now_timestamp_ms() + ms);
             let op = lua.create_table()?;
-            op.set("kind", "sleep")?;
+            op.set(YIELD_KIND, YIELD_SLEEP)?;
             op.set("ms", ms)?;
-            let _ = state.set("yield_op", op.clone());
+            let _ = state.set(TASK_YIELD_OP, op.clone());
             Ok(Value::Table(op))
         })?,
     )?;
@@ -327,8 +332,8 @@ fn create_task_methods_table(lua: &Lua) -> mlua::Result<Table> {
                 return Ok(Value::Nil);
             }
             let op = lua.create_table()?;
-            op.set("kind", "wait_paused")?;
-            let _ = state.set("yield_op", op.clone());
+            op.set(YIELD_KIND, YIELD_WAIT_PAUSED)?;
+            let _ = state.set(TASK_YIELD_OP, op.clone());
             Ok(Value::Table(op))
         })?,
     )?;
@@ -444,7 +449,7 @@ pub(crate) fn create_task_api(
             state.set("id", id.clone())?;
             state.set("title", title.clone())?;
             state.set("thread", &thread)?;
-            state.set("cancelled", false)?;
+            state.set(TASK_CANCELLED, false)?;
             state.set("paused", false)?;
             state.set("cancellable", cancellable)?;
             state.set("pausable", pausable)?;
@@ -453,13 +458,13 @@ pub(crate) fn create_task_api(
             state.set("progress_percent", Value::Nil)?;
             state.set("status", "running")?;
             state.set("wake_at_ms", 0_u64)?;
-            state.set("yield_op", Value::Nil)?;
-            state.set("finished", false)?;
+            state.set(TASK_YIELD_OP, Value::Nil)?;
+            state.set(TASK_FINISHED, false)?;
             state.set("error", Value::Nil)?;
             state.set("logs", lua.create_table()?)?;
 
             // 存入全局任务表 — 检查同 ID 是否已有未完成任务
-            let tasks: Table = lua.globals().get(crate::globals::PLUGIN_TASKS)?;
+            let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
             if let Ok(existing) = tasks.get::<Table>(id.as_str()) {
                 let finished: bool = existing.get("finished").unwrap_or(true);
                 if !finished {
@@ -488,7 +493,7 @@ pub(crate) fn create_task_api(
                     }
                     // 再查 state
                     let task_id: String = tbl.get("id")?;
-                    let tasks: Table = lua.globals().get(crate::globals::PLUGIN_TASKS)?;
+                    let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
                     if let Ok(s) = tasks.get::<Table>(task_id.as_str())
                         && let Ok(v) = s.get::<Value>(key.as_str())
                     {
@@ -510,11 +515,11 @@ pub(crate) fn create_task_api(
             // coroutine 的 yield_op / wake_at_ms 已在 sleep_ms 等函数中设置
             let _ = lua
                 .globals()
-                .set(crate::globals::CURRENT_TASK_ID, id.as_str());
+                .set(CURRENT_TASK_ID, id.as_str());
             let resume_result = thread.resume::<Value>(task_obj.clone());
             let _ = lua
                 .globals()
-                .set(crate::globals::CURRENT_TASK_ID, Value::Nil);
+                .set(CURRENT_TASK_ID, Value::Nil);
 
             match resume_result {
                 Ok(_) => {
@@ -524,12 +529,12 @@ pub(crate) fn create_task_api(
                             // yielded — yield_op 已由 Lua 侧设置
                         }
                         _ => {
-                            let _ = state.set("finished", true);
+                            let _ = state.set(TASK_FINISHED, true);
                         }
                     }
                 }
                 Err(_) => {
-                    let _ = state.set("finished", true);
+                    let _ = state.set(TASK_FINISHED, true);
                 }
             }
 
@@ -543,9 +548,9 @@ pub(crate) fn create_task_api(
     table.set(
         "cancel",
         lua.create_function(move |lua, id: String| {
-            let tasks: Table = lua.globals().get(crate::globals::PLUGIN_TASKS)?;
+            let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
             if let Ok(state) = tasks.get::<Table>(id.as_str()) {
-                let _ = state.set("cancelled", true);
+                let _ = state.set(TASK_CANCELLED, true);
                 let _ = state.set("paused", false);
                 tasks_ref.publish(Event::system_log(
                     LogLevel::Info,
@@ -561,7 +566,7 @@ pub(crate) fn create_task_api(
     table.set(
         "pause",
         lua.create_function(move |lua, id: String| {
-            let tasks: Table = lua.globals().get(crate::globals::PLUGIN_TASKS)?;
+            let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
             if let Ok(state) = tasks.get::<Table>(id.as_str()) {
                 let pausable: bool = state.get("pausable").unwrap_or(false);
                 if pausable {
@@ -576,7 +581,7 @@ pub(crate) fn create_task_api(
     table.set(
         "resume",
         lua.create_function(move |lua, id: String| {
-            let tasks: Table = lua.globals().get(crate::globals::PLUGIN_TASKS)?;
+            let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
             if let Ok(state) = tasks.get::<Table>(id.as_str()) {
                 let _ = state.set("paused", false);
             }
@@ -588,7 +593,7 @@ pub(crate) fn create_task_api(
     table.set(
         "list",
         lua.create_function(move |lua, ()| {
-            let tasks: Table = lua.globals().get(crate::globals::PLUGIN_TASKS)?;
+            let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
             let result = lua.create_table()?;
             let mut idx = 0_u32;
             for (_id, state) in tasks.pairs::<String, Table>().flatten() {
@@ -596,9 +601,9 @@ pub(crate) fn create_task_api(
                 let summary = lua.create_table()?;
                 summary.set("id", state.get::<String>("id").unwrap_or_default())?;
                 summary.set("title", state.get::<String>("title").unwrap_or_default())?;
-                summary.set("cancelled", state.get::<bool>("cancelled").unwrap_or(false))?;
+                summary.set(TASK_CANCELLED, state.get::<bool>(TASK_CANCELLED).unwrap_or(false))?;
                 summary.set("paused", state.get::<bool>("paused").unwrap_or(false))?;
-                summary.set("finished", state.get::<bool>("finished").unwrap_or(false))?;
+                summary.set(TASK_FINISHED, state.get::<bool>(TASK_FINISHED).unwrap_or(false))?;
                 summary.set(
                     "progress_current",
                     state.get::<u64>("progress_current").unwrap_or(0),
@@ -624,14 +629,14 @@ pub(crate) fn create_task_api(
 
 /// 取消所有 task（插件 disable 时调用），唤醒所有 waiting task 让它们检测取消
 pub(crate) fn cancel_all_tasks(lua: &Lua, bus: &DataBus, config: &LuaRunConfig) {
-    let tasks: Table = match lua.globals().get(crate::globals::PLUGIN_TASKS) {
+    let tasks: Table = match lua.globals().get(PLUGIN_TASKS) {
         Ok(t) => t,
         Err(_) => return,
     };
 
     let mut task_ids: Vec<String> = Vec::new();
     for (id, state) in tasks.pairs::<String, Table>().flatten() {
-        let _ = state.set("cancelled", true);
+        let _ = state.set(TASK_CANCELLED, true);
         let _ = state.set("paused", false);
         task_ids.push(id);
     }
@@ -644,17 +649,17 @@ pub(crate) fn cancel_all_tasks(lua: &Lua, bus: &DataBus, config: &LuaRunConfig) 
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            if state.get::<bool>("finished").unwrap_or(true) {
+            if state.get::<bool>(TASK_FINISHED).unwrap_or(true) {
                 continue;
             }
             let thread: Thread = match state.get("thread") {
                 Ok(t) => t,
                 Err(_) => continue,
             };
-            let _ = state.set("yield_op", Value::Nil);
+            let _ = state.set(TASK_YIELD_OP, Value::Nil);
             // 强制 resume，忽略结果，标记为 finished
             let _ = thread.resume::<Value>(());
-            let _ = state.set("finished", true);
+            let _ = state.set(TASK_FINISHED, true);
             any_resumed = true;
         }
         if !any_resumed {
@@ -675,7 +680,7 @@ pub(crate) fn call_disable(lua: &Lua, bus: &DataBus, config: &LuaRunConfig) {
 
     if let Ok(function) = lua
         .globals()
-        .get::<Function>(crate::globals::PLUGIN_DISABLE)
+        .get::<Function>(PLUGIN_DISABLE)
         && let Err(error) = function.call::<()>(())
     {
         bus.publish(Event::system_log(

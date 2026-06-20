@@ -257,7 +257,7 @@ impl WorkbenchApp {
                     self.serial.port_aliases.remove(&name);
                 }
             }
-            let _ = self.save_config();
+            if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
         }
     }
 }

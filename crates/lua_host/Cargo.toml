@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 crossbeam-channel.workspace = true
+log.workspace = true
 mlua.workspace = true
 parking_lot.workspace = true
 serde.workspace = true

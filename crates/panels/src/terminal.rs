@@ -1,11 +1,9 @@
-use crate::{fmt_ts, theme};
+use crate::{fmt_ts, theme, MAX_INGEST_PER_FRAME};
 use egui::{Color32, RichText, ScrollArea};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use tool_core::{Direction, Event, Payload};
 use tool_databus::{DataBus, Subscription, TopicFilter};
 use tool_transport::serial_topics;
-
-const MAX_INGEST_PER_FRAME: usize = 500;
 
 const TIME_COL_WIDTH: f32 = 118.0;
 const PORT_COL_WIDTH: f32 = 64.0;
@@ -152,6 +150,8 @@ impl TerminalPanel {
         self.search_text.clear();
         self.port_filter = None;
         self.bookmarked_entry_ids.clear();
+        // 清空后重置为自动滚动，与 LogPanel::clear() 保持一致
+        self.auto_scroll = true;
     }
 
     pub fn is_bookmarked(&self, entry_id: u64) -> bool {
