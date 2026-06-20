@@ -6,6 +6,27 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tool_panels::{Activity, PanelManager};
 
+/// 原子写入 JSON 文件：先写临时文件，再 rename 替换目标文件。
+/// 崩溃时不会留下半写的目标文件。旧文件会被备份到 `.backup`。
+fn atomic_write_json<T: Serialize>(path: &std::path::Path, value: &T) -> Result<(), String> {
+    let temp_path = path.with_extension("tmp");
+    let backup_path = path.with_extension("json.backup");
+
+    // 1. 序列化到内存
+    let data = serde_json::to_string_pretty(value).map_err(|e| format!("序列化失败：{e}"))?;
+
+    // 2. 写入临时文件（同目录，保证 rename 是原子操作）
+    std::fs::write(&temp_path, data).map_err(|e| format!("写入临时文件失败：{e}"))?;
+
+    // 3. 备份旧文件（如果存在）
+    if path.exists() {
+        let _ = std::fs::copy(path, &backup_path);
+    }
+
+    // 4. 原子替换
+    std::fs::rename(&temp_path, path).map_err(|e| format!("原子替换失败：{e}"))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct PortProfile {
     pub(crate) baud_rate: String,
@@ -158,4 +179,88 @@ pub(crate) fn record_mode_label(mode: RecordMode) -> &'static str {
 
 pub(crate) fn default_recorder_path() -> String {
     format!("logs/session-{}.jsonl", now_timestamp_ms())
+}
+
+// ── WorkbenchApp 配置持久化方法 ──
+// 从 commands.rs 迁入，集中配置快照/保存/加载职责。
+
+use crate::app::WorkbenchApp;
+use crate::state::MAX_SEND_HISTORY;
+
+impl WorkbenchApp {
+    /// 构建当前配置的快照
+    pub(crate) fn build_config_snapshot(&mut self) -> PersistedConfig {
+        let mut p = self.panels.clone();
+        p.discard_dynamic_tabs();
+        PersistedConfig {
+            panels: p,
+            selected_port: self.serial.selected_port.clone(),
+            baud_rate: self.serial.baud_rate.clone(),
+            data_bits: self.serial.data_bits.clone(),
+            stop_bits: self.serial.stop_bits.clone(),
+            parity: self.serial.parity.clone(),
+            timeout_ms: self.serial.timeout_ms.clone(),
+            recorder_path: self.recorder_path.clone(),
+            activity_order: self.activity_order.clone(),
+            enabled_plugins: self
+                .plugin_manager
+                .summaries()
+                .into_iter()
+                .filter(|s| {
+                    matches!(
+                        s.state,
+                        tool_extension::PluginState::Enabled | tool_extension::PluginState::Running
+                    )
+                })
+                .map(|s| s.id)
+                .collect(),
+            terminal_popup_always_on_top: self.terminal_popup_always_on_top,
+            send_popup_always_on_top: self.send_popup_always_on_top,
+            port_aliases: self.serial.port_aliases.clone(),
+            send_history: self.send.send_history.iter().cloned().collect(),
+            port_profiles: self.serial.port_profiles.clone(),
+            recent_workspaces: self.recent_workspaces.clone(),
+            auto_reconnect: self.serial.auto_reconnect,
+        }
+    }
+
+    pub(crate) fn save_config(&mut self) -> Result<(), String> {
+        let cfg = self.build_config_snapshot();
+        let path = config_path();
+        atomic_write_json(&path, &cfg)
+    }
+
+    pub(crate) fn save_config_to_path(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let cfg = self.build_config_snapshot();
+        atomic_write_json(path, &cfg)
+    }
+
+    pub(crate) fn load_config_from_path(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let t = std::fs::read_to_string(path).map_err(|e| format!("读取失败：{e}"))?;
+        let cfg: PersistedConfig =
+            serde_json::from_str(&t).map_err(|e| format!("解析失败：{e}"))?;
+        self.serial.selected_port = cfg.selected_port.clone();
+        self.serial.baud_rate = cfg.baud_rate.clone();
+        self.serial.data_bits = cfg.data_bits.clone();
+        self.serial.stop_bits = cfg.stop_bits.clone();
+        self.serial.parity = cfg.parity.clone();
+        self.serial.timeout_ms = cfg.timeout_ms.clone();
+        self.recorder_path = cfg.recorder_path.clone();
+        self.activity_order = cfg.activity_order.clone();
+        self.terminal_popup_always_on_top = cfg.terminal_popup_always_on_top;
+        self.send_popup_always_on_top = cfg.send_popup_always_on_top;
+        self.serial.port_aliases = cfg.port_aliases.clone();
+        self.serial.port_profiles = cfg.port_profiles.clone();
+        self.serial.auto_reconnect = cfg.auto_reconnect;
+        self.send.send_history = cfg
+            .send_history
+            .iter()
+            .filter(|item| !item.trim().is_empty())
+            .take(MAX_SEND_HISTORY)
+            .cloned()
+            .collect();
+        self.panels = cfg.panels.clone();
+        self.apply_loaded_workspace_postprocess();
+        Ok(())
+    }
 }

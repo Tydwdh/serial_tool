@@ -13,7 +13,17 @@ pub fn app_dir() -> PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(PathBuf::from))
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .unwrap_or_else(|| {
+            let fallback = std::env::current_dir().unwrap_or_else(|e| {
+                eprintln!("[app] WARNING: current_dir() failed: {e}, falling back to '.'");
+                PathBuf::from(".")
+            });
+            eprintln!(
+                "[app] WARNING: current_exe() unavailable, using CWD: {}",
+                fallback.display()
+            );
+            fallback
+        })
 }
 
 pub fn setup_fonts(cc: &eframe::CreationContext<'_>) {

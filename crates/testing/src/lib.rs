@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io;
 use std::path::Path;
-use tool_core::{Payload, topics};
+use tool_core::{Direction, Payload, topics};
 use tool_databus::{DataBus, Subscription, TopicFilter};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -20,7 +20,7 @@ pub struct TestPacketLog {
     pub id: u64,
     pub timestamp_ms: u64,
     pub topic: String,
-    pub direction: String,
+    pub direction: Direction,
     pub payload_text: String,
     pub payload_hex: String,
 }

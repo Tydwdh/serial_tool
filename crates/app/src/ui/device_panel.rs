@@ -14,46 +14,50 @@ impl WorkbenchApp {
 
         ui.horizontal(|ui| {
             ui.label("波特率");
-            baud_combo(ui, "dev-port-rate", 180.0, &mut self.baud_rate);
+            baud_combo(ui, "dev-port-rate", 180.0, &mut self.serial.baud_rate);
             ui.label("数据位");
             egui::ComboBox::from_id_salt("dev-db")
                 .width(60.0)
-                .selected_text(&self.data_bits)
+                .selected_text(&self.serial.data_bits)
                 .show_ui(ui, |ui| {
                     for &v in &["5", "6", "7", "8"] {
-                        ui.selectable_value(&mut self.data_bits, v.to_owned(), v);
+                        ui.selectable_value(&mut self.serial.data_bits, v.to_owned(), v);
                     }
                 });
 
             ui.label("停止位");
             egui::ComboBox::from_id_salt("dev-sb")
                 .width(60.0)
-                .selected_text(&self.stop_bits)
+                .selected_text(&self.serial.stop_bits)
                 .show_ui(ui, |ui| {
                     for &v in &["1", "2"] {
-                        ui.selectable_value(&mut self.stop_bits, v.to_owned(), v);
+                        ui.selectable_value(&mut self.serial.stop_bits, v.to_owned(), v);
                     }
                 });
 
             ui.label("校验");
             egui::ComboBox::from_id_salt("dev-par")
                 .width(70.0)
-                .selected_text(&self.parity)
+                .selected_text(&self.serial.parity)
                 .show_ui(ui, |ui| {
                     for &(v, l) in &[("none", "无"), ("odd", "奇"), ("even", "偶")] {
-                        ui.selectable_value(&mut self.parity, v.to_owned(), l);
+                        ui.selectable_value(&mut self.serial.parity, v.to_owned(), l);
                     }
                 });
 
             ui.label("超时(ms)");
-            ui.add(egui::TextEdit::singleline(&mut self.timeout_ms).desired_width(50.0));
+            ui.add(egui::TextEdit::singleline(&mut self.serial.timeout_ms).desired_width(50.0));
         });
 
         // 显示已打开但不在系统端口列表中的 stale 连接
         let transport_open = self.transport.open_ports();
         if !transport_open.is_empty() {
-            let system_names: BTreeSet<&str> =
-                self.ports.iter().map(|d| d.port_name.as_str()).collect();
+            let system_names: BTreeSet<&str> = self
+                .serial
+                .ports
+                .iter()
+                .map(|d| d.port_name.as_str())
+                .collect();
             let stale: Vec<&String> = transport_open
                 .iter()
                 .filter(|p| !system_names.contains(p.as_str()))
@@ -182,9 +186,9 @@ impl WorkbenchApp {
 
         ui.separator();
 
-        ui.checkbox(&mut self.auto_reconnect, "串口拔出后自动重连");
-        if self.auto_reconnect
-            && let Some(ref pending) = self.pending_reconnect
+        ui.checkbox(&mut self.serial.auto_reconnect, "串口拔出后自动重连");
+        if self.serial.auto_reconnect
+            && let Some(ref pending) = self.serial.pending_reconnect
         {
             let now = tool_core::now_timestamp_ms() as f64 / 1000.0;
             let remaining = (pending.next_try_at - now).max(0.0);
@@ -205,9 +209,14 @@ impl WorkbenchApp {
         );
         let mut alias_changes: Vec<(String, Option<String>)> = Vec::new();
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for port in &self.ports {
+            for port in &self.serial.ports {
                 let name = port.port_name.clone();
-                let mut alias_buf = self.port_aliases.get(&name).cloned().unwrap_or_default();
+                let mut alias_buf = self
+                    .serial
+                    .port_aliases
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_default();
 
                 ui.horizontal(|ui| {
                     let open = self.transport.status_port(&name).open;
@@ -231,7 +240,8 @@ impl WorkbenchApp {
                         alias_changes.push((name.clone(), new_alias));
                     }
 
-                    if self.port_aliases.contains_key(&name) && ui.small_button("清除").clicked()
+                    if self.serial.port_aliases.contains_key(&name)
+                        && ui.small_button("清除").clicked()
                     {
                         alias_changes.push((name.clone(), None));
                     }
@@ -241,10 +251,10 @@ impl WorkbenchApp {
         for (name, new_alias) in alias_changes {
             match new_alias {
                 Some(alias) => {
-                    self.port_aliases.insert(name, alias);
+                    self.serial.port_aliases.insert(name, alias);
                 }
                 None => {
-                    self.port_aliases.remove(&name);
+                    self.serial.port_aliases.remove(&name);
                 }
             }
             let _ = self.save_config();

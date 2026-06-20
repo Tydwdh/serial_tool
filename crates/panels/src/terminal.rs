@@ -1,8 +1,9 @@
-use crate::theme;
+use crate::{fmt_ts, theme};
 use egui::{Color32, RichText, ScrollArea};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use tool_core::{Direction, Event, Payload, topics};
+use tool_core::{Direction, Event, Payload};
 use tool_databus::{DataBus, Subscription, TopicFilter};
+use tool_transport::serial_topics;
 
 const MAX_INGEST_PER_FRAME: usize = 500;
 
@@ -60,6 +61,9 @@ struct TerminalEntry {
 
     hex_text: String,
     hex_preview: String,
+
+    /// 预缓存的小写字段，用于搜索时避免每帧分配
+    search_lower: String,
 }
 
 struct VisibleRow<'a> {
@@ -115,15 +119,23 @@ impl TerminalPanel {
         }
     }
     pub fn ingest_all_pending(&mut self) -> usize {
+        // 每帧最多摄入 5000 条，防止大量数据突发时 UI 卡顿
+        const MAX_INGEST_ALL: usize = 5000;
         let mut count = 0;
 
         while let Some(event) = self.subscription.try_recv() {
-            if !matches!(event.topic.as_str(), topics::SERIAL_RX | topics::SERIAL_TX) {
+            if !matches!(
+                event.topic.as_str(),
+                serial_topics::SERIAL_RX | serial_topics::SERIAL_TX
+            ) {
                 continue;
             }
 
             self.push_event(event);
             count += 1;
+            if count >= MAX_INGEST_ALL {
+                break;
+            }
         }
 
         count
@@ -152,67 +164,68 @@ impl TerminalPanel {
         }
     }
 
-    pub fn export_visible_csv(&self) -> String {
-        let mut out = String::from("time,port,direction,text,hex\n");
+    /// 返回当前过滤条件下可见的条目迭代器 (port_name, &TerminalEntry)
+    fn filtered_entries(&self) -> Vec<(String, &TerminalEntry)> {
+        // 预计算搜索查询的小写版本，避免在循环中重复分配
+        let search_lower = self.search_text.trim().to_ascii_lowercase();
+        let mut result = Vec::new();
         for (port, data) in &self.ports {
             if let Some(ref filter) = self.port_filter
-                && filter != port {
-                    continue;
-                }
+                && filter != port
+            {
+                continue;
+            }
+            let port_lower = port.to_ascii_lowercase();
             for entry in &data.entries {
                 if !entry_visible(entry.direction, self.show_rx, self.show_tx) {
                     continue;
                 }
-                if !entry_matches_search(port, entry, &self.search_text) {
+                if !entry_matches_search(&port_lower, entry, &search_lower) {
                     continue;
                 }
-                out.push_str(&csv_cell(&entry.timestamp_label));
-                out.push(',');
-                out.push_str(&csv_cell(port));
-                out.push(',');
-                out.push_str(&csv_cell(match entry.direction {
-                    Direction::Rx => "RX",
-                    Direction::Tx => "TX",
-                    Direction::Internal => "INTERNAL",
-                }));
-                out.push(',');
-                out.push_str(&csv_cell(&entry.raw_text));
-                out.push(',');
-                out.push_str(&csv_cell(&entry.hex_text));
-                out.push('\n');
+                result.push((port.clone(), entry));
             }
+        }
+        result
+    }
+
+    pub fn export_visible_csv(&self) -> String {
+        let mut out = String::from("time,port,direction,text,hex\n");
+        for (port, entry) in self.filtered_entries() {
+            out.push_str(&csv_cell(&entry.timestamp_label));
+            out.push(',');
+            out.push_str(&csv_cell(&port));
+            out.push(',');
+            out.push_str(&csv_cell(match entry.direction {
+                Direction::Rx => "RX",
+                Direction::Tx => "TX",
+                Direction::Internal => "INTERNAL",
+            }));
+            out.push(',');
+            out.push_str(&csv_cell(&entry.raw_text));
+            out.push(',');
+            out.push_str(&csv_cell(&entry.hex_text));
+            out.push('\n');
         }
         out
     }
 
     pub fn export_visible_jsonl(&self) -> String {
         let mut out = String::new();
-        for (port, data) in &self.ports {
-            if let Some(ref filter) = self.port_filter
-                && filter != port {
-                    continue;
-                }
-            for entry in &data.entries {
-                if !entry_visible(entry.direction, self.show_rx, self.show_tx) {
-                    continue;
-                }
-                if !entry_matches_search(port, entry, &self.search_text) {
-                    continue;
-                }
-                let line = serde_json::json!({
-                    "time": entry.timestamp_label,
-                    "port": port,
-                    "direction": match entry.direction {
-                        Direction::Rx => "RX",
-                        Direction::Tx => "TX",
-                        Direction::Internal => "INTERNAL",
-                    },
-                    "text": entry.raw_text,
-                    "hex": entry.hex_text,
-                });
-                out.push_str(&serde_json::to_string(&line).unwrap_or_default());
-                out.push('\n');
-            }
+        for (port, entry) in self.filtered_entries() {
+            let line = serde_json::json!({
+                "time": entry.timestamp_label,
+                "port": port,
+                "direction": match entry.direction {
+                    Direction::Rx => "RX",
+                    Direction::Tx => "TX",
+                    Direction::Internal => "INTERNAL",
+                },
+                "text": entry.raw_text,
+                "hex": entry.hex_text,
+            });
+            out.push_str(&serde_json::to_string(&line).unwrap_or_else(|_| "{}".to_owned()));
+            out.push('\n');
         }
         out
     }
@@ -242,7 +255,7 @@ impl TerminalPanel {
                 ui.checkbox(&mut data.show_tx, "TX");
                 ui.checkbox(&mut show_hex, "HEX");
 
-                force_scroll_to_bottom |= auto_scroll_button(ui, &mut auto_scroll);
+                force_scroll_to_bottom |= crate::theme::auto_scroll_button(ui, &mut auto_scroll);
 
                 if ui.button("清空").clicked() {
                     data.entries.clear();
@@ -303,7 +316,7 @@ impl TerminalPanel {
             ui.checkbox(&mut self.show_tx, "TX");
             ui.checkbox(&mut self.show_hex, "HEX");
 
-            force_scroll_to_bottom |= auto_scroll_button(ui, &mut self.auto_scroll);
+            force_scroll_to_bottom |= crate::theme::auto_scroll_button(ui, &mut self.auto_scroll);
 
             if ui.button("清空").clicked() {
                 self.clear();
@@ -360,19 +373,23 @@ impl TerminalPanel {
         let total_all: usize = self.ports.values().map(|d| d.entries.len()).sum();
 
         let render_outcome = {
+            // 预计算搜索查询的小写版本，避免在渲染循环中重复分配
+            let search_lower = self.search_text.trim().to_ascii_lowercase();
             let mut rows: Vec<VisibleRow<'_>> = Vec::new();
 
             for (port, data) in &self.ports {
                 if let Some(filter_port) = &self.port_filter
-                    && filter_port != port {
-                        continue;
-                    }
+                    && filter_port != port
+                {
+                    continue;
+                }
+                let port_lower = port.to_ascii_lowercase();
 
                 for entry in data
                     .entries
                     .iter()
                     .filter(|entry| entry_visible(entry.direction, self.show_rx, self.show_tx))
-                    .filter(|entry| entry_matches_search(port, entry, &self.search_text))
+                    .filter(|entry| entry_matches_search(&port_lower, entry, &search_lower))
                 {
                     rows.push(VisibleRow {
                         port: Some(port.as_str()),
@@ -491,7 +508,10 @@ impl TerminalPanel {
                 break;
             };
 
-            if !matches!(event.topic.as_str(), topics::SERIAL_RX | topics::SERIAL_TX) {
+            if !matches!(
+                event.topic.as_str(),
+                serial_topics::SERIAL_RX | serial_topics::SERIAL_TX
+            ) {
                 continue;
             }
 
@@ -535,6 +555,18 @@ impl TerminalPanel {
 
         let data = self.ports.entry(port).or_default();
 
+        // 预计算搜索用小写字符串，将所有可搜索字段合并
+        let search_lower = {
+            let mut s =
+                String::with_capacity(raw_text.len() + display_text.len() + hex_text.len() + 1);
+            s.push_str(&raw_text.to_ascii_lowercase());
+            s.push('\0'); // 分隔符，防止跨字段匹配
+            s.push_str(&display_text.to_ascii_lowercase());
+            s.push('\0');
+            s.push_str(&hex_text.to_ascii_lowercase());
+            s
+        };
+
         data.entries.push_back(TerminalEntry {
             id: entry_id,
             event_id: event.id,
@@ -547,6 +579,7 @@ impl TerminalPanel {
 
             hex_text,
             hex_preview,
+            search_lower,
         });
 
         while data.entries.len() > self.max_entries {
@@ -560,6 +593,9 @@ impl TerminalPanel {
                 if self.detail_entry_id == Some(removed.id) {
                     self.detail_entry_id = None;
                 }
+
+                // 清理已截断条目的书签，避免内存泄漏
+                self.bookmarked_entry_ids.remove(&removed.id);
             }
             data.truncated_count += 1;
         }
@@ -679,6 +715,7 @@ impl Default for PortData {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_rows_view(
     ui: &mut egui::Ui,
     scroll_key: &str,
@@ -775,7 +812,7 @@ fn render_rows_view(
 }
 
 fn terminal_row_height(ui: &egui::Ui) -> f32 {
-    (ui.text_style_height(&egui::TextStyle::Monospace).ceil() + 6.0).max(20.0)
+    crate::row_height(ui)
 }
 
 fn entry_visible(direction: Direction, show_rx: bool, show_tx: bool) -> bool {
@@ -786,18 +823,13 @@ fn entry_visible(direction: Direction, show_rx: bool, show_tx: bool) -> bool {
     }
 }
 
-fn entry_matches_search(port: &str, entry: &TerminalEntry, search: &str) -> bool {
-    let q = search.trim();
-    if q.is_empty() {
+fn entry_matches_search(port_lower: &str, entry: &TerminalEntry, search_lower: &str) -> bool {
+    if search_lower.is_empty() {
         return true;
     }
 
-    let q = q.to_ascii_lowercase();
-
-    port.to_ascii_lowercase().contains(&q)
-        || entry.raw_text.to_ascii_lowercase().contains(&q)
-        || entry.display_text.to_ascii_lowercase().contains(&q)
-        || entry.hex_text.to_ascii_lowercase().contains(&q)
+    // port_lower 和 search_lower 都由调用端预计算，零额外分配
+    port_lower.contains(search_lower) || entry.search_lower.contains(search_lower)
 }
 
 fn csv_cell(s: &str) -> String {
@@ -805,27 +837,19 @@ fn csv_cell(s: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-fn auto_scroll_button(ui: &mut egui::Ui, auto_scroll: &mut bool) -> bool {
-    if *auto_scroll {
-        if ui.button("⏸").on_hover_text("暂停自动滚动").clicked() {
-            *auto_scroll = false;
-        }
-
-        false
-    } else if ui.button("↓").on_hover_text("滚动到底部").clicked() {
-        *auto_scroll = true;
-        true
-    } else {
-        false
-    }
-}
-
 fn format_hex(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|byte| format!("{byte:02X}"))
-        .collect::<Vec<_>>()
-        .join(" ")
+    if bytes.is_empty() {
+        return String::new();
+    }
+    let mut s = String::with_capacity(bytes.len() * 3 - 1);
+    use std::fmt::Write;
+    for (i, byte) in bytes.iter().enumerate() {
+        if i > 0 {
+            s.push(' ');
+        }
+        write!(s, "{byte:02X}").unwrap();
+    }
+    s
 }
 
 fn format_utf8_preview(bytes: &[u8]) -> String {
@@ -849,16 +873,7 @@ fn format_terminal_text(text: &str) -> String {
     output
 }
 
-fn fmt_ts(ms: u64) -> String {
-    let Some(dt_utc) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64) else {
-        return "--:--:--.---".to_owned();
-    };
-
-    dt_utc
-        .with_timezone(&chrono::Local)
-        .format("%H:%M:%S%.3f")
-        .to_string()
-}
+// fmt_ts 已提取到 crate::fmt_ts
 
 fn direction_label(direction: Direction) -> (&'static str, Color32) {
     match direction {

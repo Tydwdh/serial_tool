@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::theme;
 use egui::{Color32, ComboBox, ProgressBar, RichText, Sense, TextEdit};
 use tool_databus::DataBus;
@@ -32,7 +34,7 @@ pub struct ReplayPanel {
     pub want_cancel_analyzers: bool,
 
     pub analyzer_busy: bool,
-    pub analyzer_logs: Vec<String>,
+    pub analyzer_logs: VecDeque<String>,
 }
 
 impl ReplayPanel {
@@ -56,7 +58,7 @@ impl ReplayPanel {
             want_run_analyzers: false,
             want_cancel_analyzers: false,
             analyzer_busy: false,
-            analyzer_logs: Vec::new(),
+            analyzer_logs: VecDeque::new(),
         }
     }
 
@@ -134,11 +136,10 @@ impl ReplayPanel {
     }
 
     pub fn push_analyzer_log(&mut self, msg: impl Into<String>) {
-        self.analyzer_logs.push(msg.into());
+        self.analyzer_logs.push_back(msg.into());
         const MAX_LOGS: usize = 200;
-        if self.analyzer_logs.len() > MAX_LOGS {
-            let excess = self.analyzer_logs.len() - MAX_LOGS;
-            self.analyzer_logs.drain(0..excess);
+        while self.analyzer_logs.len() > MAX_LOGS {
+            self.analyzer_logs.pop_front();
         }
     }
 
@@ -184,41 +185,44 @@ impl ReplayPanel {
             ui.label(message);
         }
 
-        if self.manager.needs_analyzer() || self.analyzer_busy || self.manager.analyzer_cache_valid() {
-        ui.collapsing("Replay Analyzer", |ui| {
-            if self.analyzer_busy {
-                ui.colored_label(theme::BLUE, "Analyzer 正在运行");
+        if self.manager.needs_analyzer()
+            || self.analyzer_busy
+            || self.manager.analyzer_cache_valid()
+        {
+            ui.collapsing("Replay Analyzer", |ui| {
+                if self.analyzer_busy {
+                    ui.colored_label(theme::BLUE, "Analyzer 正在运行");
 
-                if ui.button("取消").clicked() {
-                    self.want_cancel_analyzers = true;
-                }
-            } else if ui.button("运行 Analyzer").clicked() {
-                self.want_run_analyzers = true;
-            }
-
-            let status = self.manager.status();
-
-            if let Some(error) = &status.analyzer_error {
-                ui.colored_label(theme::RED, error);
-            }
-
-            if let Some(warning) = &status.analyzer_warning {
-                ui.colored_label(theme::YELLOW, warning);
-            }
-
-            ui.label(format!(
-                "Analyzer cache: {} events",
-                status.analyzer_cache_entries
-            ));
-
-            egui::ScrollArea::vertical()
-                .max_height(120.0)
-                .show(ui, |ui| {
-                    for line in &self.analyzer_logs {
-                        ui.monospace(line);
+                    if ui.button("取消").clicked() {
+                        self.want_cancel_analyzers = true;
                     }
-                });
-        });
+                } else if ui.button("运行 Analyzer").clicked() {
+                    self.want_run_analyzers = true;
+                }
+
+                let status = self.manager.status();
+
+                if let Some(error) = &status.analyzer_error {
+                    ui.colored_label(theme::RED, error);
+                }
+
+                if let Some(warning) = &status.analyzer_warning {
+                    ui.colored_label(theme::YELLOW, warning);
+                }
+
+                ui.label(format!(
+                    "Analyzer cache: {} events",
+                    status.analyzer_cache_entries
+                ));
+
+                egui::ScrollArea::vertical()
+                    .max_height(120.0)
+                    .show(ui, |ui| {
+                        for line in &self.analyzer_logs {
+                            ui.monospace(line);
+                        }
+                    });
+            });
         }
     }
 
@@ -395,10 +399,10 @@ impl ReplayPanel {
 
             ui.label("速度");
 
-            let mut speed_log = (self.speed.ln() / 2_f64.ln()).clamp(-3.0, 4.0);
+            let mut speed_log = (self.speed.ln() / 2_f64.ln()).clamp(-3.32, 4.0);
 
             let speed_resp = ui.add(
-                egui::Slider::new(&mut speed_log, -3.0..=4.0)
+                egui::Slider::new(&mut speed_log, -3.32..=4.0)
                     .text(format!("{:.2}x", self.speed))
                     .step_by(0.01),
             );
@@ -497,7 +501,11 @@ impl ReplayPanel {
             return;
         }
         ui.horizontal(|ui| {
-            if ui.small_button("+书签").on_hover_text("在当前时间点添加书签").clicked() {
+            if ui
+                .small_button("+书签")
+                .on_hover_text("在当前时间点添加书签")
+                .clicked()
+            {
                 self.manager.add_bookmark();
             }
             for &pos_ms in &bookmarks {
@@ -536,15 +544,16 @@ impl ReplayPanel {
 
         // 加载报告：坏行警告
         if let Some(report) = status.load_report.as_ref()
-            && report.skipped > 0 {
-                ui.colored_label(
-                    theme::YELLOW,
-                    format!("加载 {} 条，跳过 {} 条坏行", report.loaded, report.skipped),
-                );
-                if let Some(first) = report.first_errors.first() {
-                    ui.colored_label(theme::TEXT_SECONDARY, first);
-                }
+            && report.skipped > 0
+        {
+            ui.colored_label(
+                theme::YELLOW,
+                format!("加载 {} 条，跳过 {} 条坏行", report.loaded, report.skipped),
+            );
+            if let Some(first) = report.first_errors.first() {
+                ui.colored_label(theme::TEXT_SECONDARY, first);
             }
+        }
     }
 }
 

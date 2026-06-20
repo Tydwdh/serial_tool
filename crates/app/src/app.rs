@@ -1,6 +1,6 @@
 use crate::config::default_activity_order;
 use crate::config::{default_recorder_path, load_config};
-use crate::state::{BottomTab, MAX_SEND_HISTORY, SendUiState, StatusState};
+use crate::state::{MAX_SEND_HISTORY, SendUiState, SerialUiState, StatusState};
 use eframe::egui;
 use std::collections::{BTreeSet, VecDeque};
 use std::path::PathBuf;
@@ -14,7 +14,7 @@ use tool_panels::{
     theme,
 };
 use tool_recorder::JsonlRecorder;
-use tool_transport::{SerialPortDescriptor, TransportManager};
+use tool_transport::TransportManager;
 
 use crate::bootstrap::{REPAINT_INTERVAL_MS, app_dir, apply_theme, setup_fonts};
 
@@ -31,33 +31,22 @@ pub(crate) struct WorkbenchApp {
     pub(crate) plugins_panel: PluginsPanel,
     pub(crate) replay_panel: ReplayPanel,
     pub(crate) bottom_log_panel: LogPanel,
-    pub(crate) ports: Vec<SerialPortDescriptor>,
-    pub(crate) selected_port: Option<String>,
-    pub(crate) baud_rate: String,
-    pub(crate) data_bits: String,
-    pub(crate) stop_bits: String,
-    pub(crate) parity: String,
-    pub(crate) timeout_ms: String,
+    pub(crate) serial: SerialUiState,
     pub(crate) recorder_path: String,
     pub(crate) status: StatusState,
-    pub(crate) last_port_refresh: f64,
-    pub(crate) auto_reconnect: bool,
-    pub(crate) pending_reconnect: Option<PendingReconnect>,
-    pub(crate) port_aliases: std::collections::HashMap<String, String>,
-    pub(crate) port_profiles: std::collections::HashMap<String, crate::config::PortProfile>,
     pub(crate) recent_workspaces: Vec<String>,
     pub(crate) bottom_panel_visible: bool,
-    pub(crate) bottom_tab: BottomTab,
     pub(crate) send: SendUiState,
     pub(crate) terminal_popup_open: bool,
     pub(crate) terminal_popup_always_on_top: bool,
     pub(crate) send_popup_always_on_top: bool,
     pub(crate) detached_dynamic_panels: BTreeSet<String>,
-    pub(crate) top_bar_serial_collapsed: bool,
     pub(crate) activity_order: Vec<Activity>,
     pub(crate) activity_drag_source: Option<usize>,
     pub(crate) activity_rects_cache: Vec<egui::Rect>,
     pub(crate) dock_dragging_panel: Option<tool_panels::PanelKind>,
+    pub(crate) bottom_dock_rect: Option<egui::Rect>,
+    pub(crate) right_dock_rect: Option<egui::Rect>,
     pub(crate) last_auto_save_time: f64,
     pub(crate) last_rate_check_time: f64,
     pub(crate) last_event_count: u64,
@@ -68,8 +57,6 @@ pub(crate) struct WorkbenchApp {
     pub(crate) file_browse_subscription: tool_databus::Subscription,
     pub(crate) replay_analyzer_job: Option<ReplayAnalyzerJob>,
     pub(crate) replay_analyzer_generation: u64,
-    pub(crate) bottom_dock_rect: Option<egui::Rect>,
-    pub(crate) right_dock_rect: Option<egui::Rect>,
 }
 
 pub(crate) struct ReplayAnalyzerJob {
@@ -88,21 +75,18 @@ pub(crate) struct ReplayAnalyzerResult {
     pub(crate) logs: Vec<String>,
 }
 
-#[derive(Clone)]
-pub(crate) struct PendingReconnect {
-    pub(crate) port_name: String,
-    pub(crate) config: tool_transport::SerialConfig,
-    pub(crate) attempts: u32,
-    pub(crate) next_try_at: f64,
-}
-
 // ══════════════════════════════════════════
 //  WorkbenchApp impl
 // ══════════════════════════════════════════
 
 impl WorkbenchApp {
     pub(crate) fn port_label(&self, port: &str) -> String {
-        match self.port_aliases.get(port).filter(|s| !s.trim().is_empty()) {
+        match self
+            .serial
+            .port_aliases
+            .get(port)
+            .filter(|s| !s.trim().is_empty())
+        {
             Some(alias) => format!("{alias} ({port})"),
             None => port.to_owned(),
         }
@@ -161,54 +145,53 @@ impl WorkbenchApp {
             plugins_panel: PluginsPanel::new(),
             replay_panel: ReplayPanel::new(&bus),
             bottom_log_panel: LogPanel::new(&bus),
-            ports: Vec::new(),
-            selected_port: config.as_ref().and_then(|c| c.selected_port.clone()),
-            baud_rate: config
-                .as_ref()
-                .map(|c| c.baud_rate.clone())
-                .unwrap_or_else(|| "115200".into()),
-            data_bits: config
-                .as_ref()
-                .map(|c| c.data_bits.clone())
-                .unwrap_or_else(|| "8".into()),
-            stop_bits: config
-                .as_ref()
-                .map(|c| c.stop_bits.clone())
-                .unwrap_or_else(|| "1".into()),
-            parity: config
-                .as_ref()
-                .map(|c| c.parity.clone())
-                .unwrap_or_else(|| "none".into()),
-            timeout_ms: config
-                .as_ref()
-                .map(|c| c.timeout_ms.clone())
-                .unwrap_or_else(|| "50".into()),
+            serial: SerialUiState {
+                ports: Vec::new(),
+                selected_port: config.as_ref().and_then(|c| c.selected_port.clone()),
+                baud_rate: config
+                    .as_ref()
+                    .map(|c| c.baud_rate.clone())
+                    .unwrap_or_else(|| "115200".into()),
+                data_bits: config
+                    .as_ref()
+                    .map(|c| c.data_bits.clone())
+                    .unwrap_or_else(|| "8".into()),
+                stop_bits: config
+                    .as_ref()
+                    .map(|c| c.stop_bits.clone())
+                    .unwrap_or_else(|| "1".into()),
+                parity: config
+                    .as_ref()
+                    .map(|c| c.parity.clone())
+                    .unwrap_or_else(|| "none".into()),
+                timeout_ms: config
+                    .as_ref()
+                    .map(|c| c.timeout_ms.clone())
+                    .unwrap_or_else(|| "50".into()),
+                last_port_refresh: 0.0,
+                auto_reconnect: config.as_ref().map(|c| c.auto_reconnect).unwrap_or(true),
+                pending_reconnect: None,
+                port_aliases: config
+                    .as_ref()
+                    .map(|c| c.port_aliases.clone())
+                    .unwrap_or_default(),
+                port_profiles: config
+                    .as_ref()
+                    .map(|c| c.port_profiles.clone())
+                    .unwrap_or_default(),
+                top_bar_serial_collapsed: false,
+            },
             recorder_path: config
                 .as_ref()
                 .map(|c| c.recorder_path.clone())
                 .unwrap_or_else(default_recorder_path),
             panels: rp.clone(),
             status: StatusState::default(),
-            last_port_refresh: 0.0,
-            auto_reconnect: config
-                .as_ref()
-                .map(|c| c.auto_reconnect)
-                .unwrap_or(true),
-            pending_reconnect: None,
-            port_aliases: config
-                .as_ref()
-                .map(|c| c.port_aliases.clone())
-                .unwrap_or_default(),
-            port_profiles: config
-                .as_ref()
-                .map(|c| c.port_profiles.clone())
-                .unwrap_or_default(),
             recent_workspaces: config
                 .as_ref()
                 .map(|c| c.recent_workspaces.clone())
                 .unwrap_or_default(),
             bottom_panel_visible: rp.dock.bottom_visible,
-            bottom_tab: BottomTab::Terminal,
             send,
             terminal_popup_open: false,
             terminal_popup_always_on_top: config
@@ -220,7 +203,6 @@ impl WorkbenchApp {
                 .map(|c| c.send_popup_always_on_top)
                 .unwrap_or(false),
             detached_dynamic_panels: BTreeSet::new(),
-            top_bar_serial_collapsed: false,
             activity_order: config
                 .as_ref()
                 .map(|c| c.activity_order.clone())
@@ -236,7 +218,6 @@ impl WorkbenchApp {
             plugin_manager: pm,
             recorder,
             dynamic_drag_source: None,
-            dock_dragging_panel: None,
             file_broker,
             dialog_receiver,
             file_browse_subscription: bus.subscribe(tool_databus::TopicFilter::exact(
@@ -244,6 +225,7 @@ impl WorkbenchApp {
             )),
             replay_analyzer_job: None,
             replay_analyzer_generation: 0,
+            dock_dragging_panel: None,
             bottom_dock_rect: None,
             right_dock_rect: None,
         };

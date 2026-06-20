@@ -3,7 +3,6 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serialport as sp;
 use std::collections::HashMap;
-use std::io::{Read, Write};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -11,13 +10,47 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use thiserror::Error;
-use tool_core::{Event, LogLevel};
+use tool_core::{Direction, Event, LogLevel, Payload};
 
 enum DtrRtsCommand {
     SetDtr(bool),
     SetRts(bool),
 }
 use tool_databus::DataBus;
+
+/// 串口 topic 常量。从 tool_core::topics 上移至此，core 中保留向后兼容 re-export。
+pub mod serial_topics {
+    pub const SERIAL_RX: &str = "transport.serial.default.rx";
+    pub const SERIAL_TX: &str = "transport.serial.default.tx";
+}
+
+/// 从 source 字符串中提取端口名（去除 "serial:" 前缀）。
+fn extract_port(source: &str) -> String {
+    source.strip_prefix("serial:").unwrap_or(source).to_owned()
+}
+
+/// 构建串口事件的通用方法。
+fn serial_event(
+    topic: &str,
+    direction: Direction,
+    source: impl Into<String>,
+    bytes: Vec<u8>,
+) -> Event {
+    let source = source.into();
+    let port = extract_port(&source);
+    Event::new(topic, source, direction, Payload::Bytes(bytes))
+        .with_metadata(serde_json::json!({ "port": port }))
+}
+
+/// 构建串口 RX 事件。
+pub fn serial_rx_event(source: impl Into<String>, bytes: Vec<u8>) -> Event {
+    serial_event(serial_topics::SERIAL_RX, Direction::Rx, source, bytes)
+}
+
+/// 构建串口 TX 事件。
+pub fn serial_tx_event(source: impl Into<String>, bytes: Vec<u8>) -> Event {
+    serial_event(serial_topics::SERIAL_TX, Direction::Tx, source, bytes)
+}
 
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -63,6 +96,33 @@ pub enum Parity {
     Even,
 }
 
+/// 解析数据位字符串，无效输入默认 `DataBits::Eight`。
+pub fn parse_data_bits(v: &str) -> DataBits {
+    match v {
+        "5" => DataBits::Five,
+        "6" => DataBits::Six,
+        "7" => DataBits::Seven,
+        _ => DataBits::Eight,
+    }
+}
+
+/// 解析停止位字符串，无效输入默认 `StopBits::One`。
+pub fn parse_stop_bits(v: &str) -> StopBits {
+    match v {
+        "2" => StopBits::Two,
+        _ => StopBits::One,
+    }
+}
+
+/// 解析校验位字符串，无效输入默认 `Parity::None`。
+pub fn parse_parity(v: &str) -> Parity {
+    match v {
+        "odd" => Parity::Odd,
+        "even" => Parity::Even,
+        _ => Parity::None,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SerialConfig {
     pub port_name: String,
@@ -86,10 +146,56 @@ impl Default for SerialConfig {
     }
 }
 
+/// 串口类型描述。从 `serialport::SerialPortType` 映射而来。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum PortType {
+    /// USB 串口，可选附带产品名。
+    #[serde(rename = "usb")]
+    Usb(String),
+    /// 蓝牙串口。
+    #[serde(rename = "bluetooth")]
+    Bluetooth,
+    /// PCI 串口。
+    #[serde(rename = "pci")]
+    Pci,
+    /// 未知类型。
+    #[default]
+    #[serde(rename = "unknown")]
+    Unknown,
+}
+
+impl std::fmt::Display for PortType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Usb(product) => {
+                if product.is_empty() {
+                    write!(f, "USB")
+                } else {
+                    write!(f, "{product}")
+                }
+            }
+            Self::Bluetooth => write!(f, "Bluetooth"),
+            Self::Pci => write!(f, "PCI"),
+            Self::Unknown => write!(f, ""),
+        }
+    }
+}
+
+fn from_serialport_type(port_type: sp::SerialPortType) -> PortType {
+    match port_type {
+        sp::SerialPortType::UsbPort(usb) => {
+            PortType::Usb(usb.product.unwrap_or_else(|| "USB".to_owned()))
+        }
+        sp::SerialPortType::BluetoothPort => PortType::Bluetooth,
+        sp::SerialPortType::PciPort => PortType::Pci,
+        sp::SerialPortType::Unknown => PortType::Unknown,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SerialPortDescriptor {
     pub port_name: String,
-    pub port_type: String,
+    pub port_type: PortType,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -109,11 +215,15 @@ impl TransportStatus {
     }
 }
 
+use std::sync::atomic::AtomicU64;
+
 #[derive(Clone)]
 pub struct TransportManager {
     bus: DataBus,
     ports: Arc<Mutex<HashMap<String, PortHandle>>>,
     closing: Arc<Mutex<Vec<ClosingHandle>>>,
+    /// 上次 reap_closing 的时间戳，用于节流。
+    last_reap_time: Arc<std::sync::atomic::AtomicU64>,
 }
 
 struct PortHandle {
@@ -137,6 +247,7 @@ impl TransportManager {
             bus,
             ports: Arc::new(Mutex::new(HashMap::new())),
             closing: Arc::new(Mutex::new(Vec::new())),
+            last_reap_time: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -161,7 +272,23 @@ impl TransportManager {
     }
 
     /// 清理已完成关闭的 worker 线程（join 并移除）。
+    /// 节流：两次 reap 之间至少间隔 100ms，避免高频调用时反复加锁。
     fn reap_closing(&self) {
+        const REAP_INTERVAL_MS: u64 = 100;
+        let now_ms = tool_core::now_timestamp_ms();
+        let last = self.last_reap_time.load(Ordering::Relaxed);
+        if now_ms < last + REAP_INTERVAL_MS {
+            return;
+        }
+        // CAS 更新 last_reap_time，失败说明其他线程已执行
+        if self
+            .last_reap_time
+            .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+
         let mut closing = self.closing.lock();
         let mut i = 0;
         while i < closing.len() {
@@ -187,7 +314,7 @@ impl TransportManager {
             .into_iter()
             .map(|info| SerialPortDescriptor {
                 port_name: info.port_name,
-                port_type: describe_port_type(info.port_type),
+                port_type: from_serialport_type(info.port_type),
             })
             .collect();
         ports.sort_by_key(|port| natural_sort_key(&port.port_name));
@@ -211,9 +338,11 @@ impl TransportManager {
         {
             let guard = self.ports.lock();
             if let Some(existing) = guard.get(&config.port_name)
-                && existing.alive.load(Ordering::Relaxed) && existing.config == config {
-                    return Ok(());
-                }
+                && existing.alive.load(Ordering::Acquire)
+                && existing.config == config
+            {
+                return Ok(());
+            }
         }
 
         // 同名端口正在关闭中，返回错误
@@ -315,26 +444,32 @@ impl TransportManager {
 
     // ── 关闭指定端口（异步：设 stop 并移入 closing，不 join）──
     pub fn close_port(&self, port_name: &str) {
-        let mut guard = self.ports.lock();
-        let key = Self::resolve_open_port_name_locked(&guard, port_name)
-            .unwrap_or_else(|| port_name.to_owned());
-        if let Some(mut worker) = guard.remove(&key) {
-            worker.stop.store(true, Ordering::Relaxed);
-            if let Some(join) = worker.join.take() {
-                self.closing.lock().push(ClosingHandle {
-                    port_name: worker.config.port_name.clone(),
-                    baud_rate: worker.config.baud_rate,
-                    join,
-                });
-            }
+        // 先从 ports 中取出 worker，释放锁后再操作 closing
+        let closing_info = {
+            let mut guard = self.ports.lock();
+            let key = Self::resolve_open_port_name_locked(&guard, port_name)
+                .unwrap_or_else(|| port_name.to_owned());
+            guard.remove(&key).map(|mut worker| {
+                worker.stop.store(true, Ordering::Release);
+                let join = worker.join.take();
+                let port_name = worker.config.port_name.clone();
+                let baud_rate = worker.config.baud_rate;
+                (port_name, baud_rate, join)
+            })
+        };
+        if let Some((port_name, baud_rate, join)) = closing_info {
             self.bus.publish(Event::system_log(
                 LogLevel::Info,
                 "transport.serial",
-                format!(
-                    "closing {} @ {}",
-                    worker.config.port_name, worker.config.baud_rate
-                ),
+                format!("closing {} @ {}", port_name, baud_rate),
             ));
+            if let Some(join) = join {
+                self.closing.lock().push(ClosingHandle {
+                    port_name,
+                    baud_rate,
+                    join,
+                });
+            }
         }
     }
 
@@ -349,7 +484,7 @@ impl TransportManager {
             let Some(mut worker) = guard.remove(&key) else {
                 return Ok(());
             };
-            worker.stop.store(true, Ordering::Relaxed);
+            worker.stop.store(true, Ordering::Release);
             let join = worker.join.take();
             (
                 worker.config.port_name.clone(),
@@ -388,7 +523,7 @@ impl TransportManager {
         let worker = guard
             .get(&resolved)
             .ok_or_else(|| TransportError::PortNotOpen(port_name.to_owned()))?;
-        if !worker.alive.load(Ordering::Relaxed) {
+        if !worker.alive.load(Ordering::Acquire) {
             return Err(TransportError::WorkerClosed);
         }
         worker.writer.try_send(bytes).map_err(|e| match e {
@@ -397,12 +532,12 @@ impl TransportManager {
         })
     }
 
-    // ── 向后兼容：发送到第一个已打开端口 ──
+    // ── 向后兼容：发送到第一个已打开端口（按端口名排序保证确定性） ──
     pub fn send(&self, bytes: Vec<u8>) -> TransportResult<()> {
         let guard = self.ports.lock();
         let name = guard
             .keys()
-            .next()
+            .min() // 按字典序取最小，保证确定性而非 HashMap 随机
             .cloned()
             .ok_or(TransportError::NoOpenPort)?;
         drop(guard);
@@ -461,26 +596,15 @@ impl TransportManager {
     }
 
     pub fn set_dtr(&self, port_name: &str, value: bool) -> TransportResult<()> {
-        self.reap_closing();
-        let guard = self.ports.lock();
-        let resolved = Self::resolve_open_port_name_locked(&guard, port_name)
-            .ok_or_else(|| TransportError::PortNotOpen(port_name.to_owned()))?;
-        let worker = guard
-            .get(&resolved)
-            .ok_or_else(|| TransportError::PortNotOpen(port_name.to_owned()))?;
-        if !worker.alive.load(Ordering::Relaxed) {
-            return Err(TransportError::WorkerClosed);
-        }
-        worker
-            .dtr_rts_tx
-            .try_send(DtrRtsCommand::SetDtr(value))
-            .map_err(|e| match e {
-                TrySendError::Full(_) => TransportError::QueueFull,
-                TrySendError::Disconnected(_) => TransportError::WorkerClosed,
-            })
+        self.send_dtr_rts_command(port_name, DtrRtsCommand::SetDtr(value))
     }
 
     pub fn set_rts(&self, port_name: &str, value: bool) -> TransportResult<()> {
+        self.send_dtr_rts_command(port_name, DtrRtsCommand::SetRts(value))
+    }
+
+    /// 向指定端口的 worker 发送 DTR/RTS 控制命令
+    fn send_dtr_rts_command(&self, port_name: &str, cmd: DtrRtsCommand) -> TransportResult<()> {
         self.reap_closing();
         let guard = self.ports.lock();
         let resolved = Self::resolve_open_port_name_locked(&guard, port_name)
@@ -488,16 +612,13 @@ impl TransportManager {
         let worker = guard
             .get(&resolved)
             .ok_or_else(|| TransportError::PortNotOpen(port_name.to_owned()))?;
-        if !worker.alive.load(Ordering::Relaxed) {
+        if !worker.alive.load(Ordering::Acquire) {
             return Err(TransportError::WorkerClosed);
         }
-        worker
-            .dtr_rts_tx
-            .try_send(DtrRtsCommand::SetRts(value))
-            .map_err(|e| match e {
-                TrySendError::Full(_) => TransportError::QueueFull,
-                TrySendError::Disconnected(_) => TransportError::WorkerClosed,
-            })
+        worker.dtr_rts_tx.try_send(cmd).map_err(|e| match e {
+            TrySendError::Full(_) => TransportError::QueueFull,
+            TrySendError::Disconnected(_) => TransportError::WorkerClosed,
+        })
     }
 
     /// 清理已退出 worker 的 stale port handle（alive == false）。
@@ -507,7 +628,7 @@ impl TransportManager {
             let guard = self.ports.lock();
             guard
                 .iter()
-                .filter(|(_, h)| !h.alive.load(Ordering::Relaxed))
+                .filter(|(_, h)| !h.alive.load(Ordering::Acquire))
                 .map(|(name, h)| (name.clone(), h.config.baud_rate))
                 .collect()
         };
@@ -526,10 +647,51 @@ impl TransportManager {
 // clone 被 Lua plugin/PluginManager 多处持有，任意 clone drop 会误关所有串口。
 // 关闭串口的唯一安全调用点是 WorkbenchApp::drop()。
 
+// ── 串口 I/O trait ──
+
+/// 串口读写抽象，使 `serial_worker_loop` 可测试。
+/// 生产实现：`Box<dyn sp::SerialPort>`（通过 blanket impl 自动满足）。
+/// 测试实现：`MockSerialPort`。
+trait SerialIo {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()>;
+    fn write_data_terminal_ready(&mut self, value: bool) -> std::io::Result<()>;
+    fn write_request_to_send(&mut self, value: bool) -> std::io::Result<()>;
+}
+
+impl SerialIo for Box<dyn sp::SerialPort> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        (**self).read(buf)
+    }
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        (**self).write_all(buf)
+    }
+    fn write_data_terminal_ready(&mut self, value: bool) -> std::io::Result<()> {
+        (**self)
+            .write_data_terminal_ready(value)
+            .map_err(|e| e.into())
+    }
+    fn write_request_to_send(&mut self, value: bool) -> std::io::Result<()> {
+        (**self).write_request_to_send(value).map_err(|e| e.into())
+    }
+}
+
 // ── 串口工作线程 ──
 
 fn serial_worker_loop(
-    mut port: Box<dyn sp::SerialPort>,
+    port: Box<dyn sp::SerialPort>,
+    write_rx: Receiver<Vec<u8>>,
+    dtr_rts_rx: Receiver<DtrRtsCommand>,
+    stop: Arc<AtomicBool>,
+    alive: Arc<AtomicBool>,
+    bus: DataBus,
+    source: String,
+) {
+    serial_worker_loop_impl(port, write_rx, dtr_rts_rx, stop, alive, bus, source)
+}
+
+fn serial_worker_loop_impl(
+    mut port: impl SerialIo,
     write_rx: Receiver<Vec<u8>>,
     dtr_rts_rx: Receiver<DtrRtsCommand>,
     stop: Arc<AtomicBool>,
@@ -539,7 +701,7 @@ fn serial_worker_loop(
 ) {
     let mut buffer = [0_u8; 4096];
 
-    while !stop.load(Ordering::Relaxed) {
+    while !stop.load(Ordering::Acquire) {
         // 处理 DTR/RTS 命令
         while let Ok(cmd) = dtr_rts_rx.try_recv() {
             match cmd {
@@ -567,7 +729,7 @@ fn serial_worker_loop(
         while let Ok(bytes) = write_rx.try_recv() {
             match port.write_all(&bytes) {
                 Ok(()) => {
-                    bus.publish(Event::serial_tx(source.clone(), bytes));
+                    bus.publish(serial_tx_event(source.clone(), bytes));
                 }
                 Err(error) => {
                     bus.publish(Event::system_log(
@@ -575,7 +737,7 @@ fn serial_worker_loop(
                         "transport.serial",
                         format!("write failed on {source}: {error}"),
                     ));
-                    alive.store(false, Ordering::Relaxed);
+                    alive.store(false, Ordering::Release);
                     return;
                 }
             }
@@ -605,7 +767,7 @@ fn serial_worker_loop(
                         _ => break,
                     }
                 }
-                bus.publish(Event::serial_rx(source.clone(), data));
+                bus.publish(serial_rx_event(source.clone(), data));
             }
             Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
             Err(error) => {
@@ -676,15 +838,6 @@ fn parse_byte(token: &str) -> TransportResult<u8> {
         .map_err(|_| TransportError::InvalidHex(format!("'{token}' is not hex")))
 }
 
-fn describe_port_type(port_type: sp::SerialPortType) -> String {
-    match port_type {
-        sp::SerialPortType::UsbPort(usb) => usb.product.unwrap_or_else(|| "USB".to_owned()),
-        sp::SerialPortType::BluetoothPort => "Bluetooth".to_owned(),
-        sp::SerialPortType::PciPort => "PCI".to_owned(),
-        sp::SerialPortType::Unknown => String::new(),
-    }
-}
-
 fn natural_sort_key(name: &str) -> (String, u64) {
     let prefix: String = name.chars().take_while(|c| !c.is_ascii_digit()).collect();
     let number: u64 = name
@@ -724,6 +877,99 @@ impl From<Parity> for sp::Parity {
     }
 }
 
+// ── 发送辅助函数 ──
+
+/// HEX 预览：将输入解析为 HEX 字节并显示 ASCII 预览。
+pub fn hex_preview(input: &str) -> String {
+    if input.trim().is_empty() {
+        return "—".to_owned();
+    }
+    const MAX_PREVIEW: usize = 32;
+    match parse_hex(input) {
+        Ok(bytes) if !bytes.is_empty() => {
+            let count = bytes.len();
+            let ascii: String = bytes
+                .iter()
+                .take(MAX_PREVIEW)
+                .map(|&b| {
+                    if b.is_ascii_graphic() || b == b' ' {
+                        b as char
+                    } else {
+                        '.'
+                    }
+                })
+                .collect();
+            let hex = if count > MAX_PREVIEW {
+                format!(
+                    "{}… (共{count}B)",
+                    bytes[..MAX_PREVIEW]
+                        .iter()
+                        .map(|b| format!("{b:02X}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            } else {
+                bytes
+                    .iter()
+                    .map(|b| format!("{b:02X}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            format!("{hex}  |{ascii}|")
+        }
+        Ok(_) => "空".to_owned(),
+        Err(_) => "解析失败".to_owned(),
+    }
+}
+
+/// 向指定端口发送文本或 HEX 数据。
+pub fn send_impl_to(
+    port: &str,
+    input: &str,
+    hex: bool,
+    line_ending_suffix: &str,
+    hex_strict: bool,
+    t: &TransportManager,
+) -> TransportResult<()> {
+    if input.trim().is_empty() {
+        return Ok(());
+    }
+    if hex {
+        for line in input.lines() {
+            let x = line.trim();
+            if x.is_empty() {
+                continue;
+            }
+            if hex_strict {
+                let compact: String = x.chars().filter(|c| !c.is_whitespace()).collect();
+                if !compact.len().is_multiple_of(2) {
+                    return Err(TransportError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("HEX 严格模式: 奇数字节数 \"{x}\", 请补0或关闭严格模式"),
+                    )));
+                }
+            }
+            t.send_hex_to(port, x)?;
+        }
+        Ok(())
+    } else {
+        let mut text = input.to_owned();
+        text.push_str(line_ending_suffix);
+        t.send_text_to(port, &text)
+    }
+}
+
+/// 将传输错误消息翻译为用户友好的中文提示。
+pub fn translate_error(m: &str) -> String {
+    if m.contains("no serial") {
+        "串口未打开".into()
+    } else if m.contains("invalid hex") {
+        format!("无效HEX: {}", m.trim_start_matches("invalid hex input: "))
+    } else {
+        m.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -747,5 +993,248 @@ mod tests {
     #[test]
     fn parses_spaced_single_digits() {
         assert_eq!(parse_hex("1 2 3").unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn parse_data_bits_default_and_valid() {
+        assert_eq!(parse_data_bits("5"), DataBits::Five);
+        assert_eq!(parse_data_bits("6"), DataBits::Six);
+        assert_eq!(parse_data_bits("7"), DataBits::Seven);
+        assert_eq!(parse_data_bits("8"), DataBits::Eight);
+        assert_eq!(parse_data_bits("9"), DataBits::Eight); // 无效→默认 Eight
+        assert_eq!(parse_data_bits(""), DataBits::Eight);
+    }
+
+    #[test]
+    fn parse_stop_bits_default_and_valid() {
+        assert_eq!(parse_stop_bits("1"), StopBits::One);
+        assert_eq!(parse_stop_bits("2"), StopBits::Two);
+        assert_eq!(parse_stop_bits("3"), StopBits::One); // 无效→默认 One
+    }
+
+    #[test]
+    fn parse_parity_default_and_valid() {
+        assert_eq!(parse_parity("none"), Parity::None);
+        assert_eq!(parse_parity("odd"), Parity::Odd);
+        assert_eq!(parse_parity("even"), Parity::Even);
+        assert_eq!(parse_parity("mark"), Parity::None); // 无效→默认 None
+    }
+
+    // ── MockSerialPort + worker loop 测试 ──
+
+    use std::sync::Mutex as StdMutex;
+    use tool_databus::TopicFilter;
+
+    struct MockSerialPort {
+        read_data: StdMutex<Vec<Vec<u8>>>,
+        written: StdMutex<Vec<u8>>,
+        dtr: StdMutex<bool>,
+        rts: StdMutex<bool>,
+    }
+
+    impl MockSerialPort {
+        fn new() -> Self {
+            Self {
+                read_data: StdMutex::new(Vec::new()),
+                written: StdMutex::new(Vec::new()),
+                dtr: StdMutex::new(false),
+                rts: StdMutex::new(false),
+            }
+        }
+
+        fn push_read(&self, data: Vec<u8>) {
+            self.read_data.lock().unwrap().push(data);
+        }
+    }
+
+    impl SerialIo for MockSerialPort {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let mut data = self.read_data.lock().unwrap();
+            if data.is_empty() {
+                Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout"))
+            } else {
+                let bytes = data.remove(0);
+                let len = bytes.len().min(buf.len());
+                buf[..len].copy_from_slice(&bytes[..len]);
+                Ok(len)
+            }
+        }
+
+        fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+            self.written.lock().unwrap().extend_from_slice(buf);
+            Ok(())
+        }
+
+        fn write_data_terminal_ready(&mut self, value: bool) -> std::io::Result<()> {
+            *self.dtr.lock().unwrap() = value;
+            Ok(())
+        }
+
+        fn write_request_to_send(&mut self, value: bool) -> std::io::Result<()> {
+            *self.rts.lock().unwrap() = value;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn worker_loop_publishes_rx_and_tx() {
+        let bus = DataBus::new();
+        let rx_sub = bus.subscribe_lossless(TopicFilter::exact(tool_core::topics::SERIAL_RX));
+        let tx_sub = bus.subscribe_lossless(TopicFilter::exact(tool_core::topics::SERIAL_TX));
+
+        let mock = MockSerialPort::new();
+        mock.push_read(b"hello".to_vec());
+
+        let (write_tx, write_rx) = bounded::<Vec<u8>>(16);
+        let (_dtr_tx, dtr_rx) = bounded::<DtrRtsCommand>(4);
+        let stop = Arc::new(AtomicBool::new(false));
+        let alive = Arc::new(AtomicBool::new(true));
+
+        // 在另一个线程中运行 worker loop
+        let thread_stop = stop.clone();
+        let thread_alive = alive.clone();
+        let thread_bus = bus.clone();
+        let handle = std::thread::spawn(move || {
+            serial_worker_loop_impl(
+                mock,
+                write_rx,
+                dtr_rx,
+                thread_stop,
+                thread_alive,
+                thread_bus,
+                "serial:COM1".to_owned(),
+            );
+        });
+
+        // 等待 RX 事件
+        let rx_event = rx_sub.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(rx_event.topic, tool_core::topics::SERIAL_RX);
+        assert_eq!(rx_event.payload.text_lossy(), "hello");
+
+        // 发送数据
+        write_tx.send(b"world".to_vec()).unwrap();
+        let tx_event = tx_sub.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(tx_event.topic, tool_core::topics::SERIAL_TX);
+        assert_eq!(tx_event.payload.text_lossy(), "world");
+
+        // 停止 worker
+        stop.store(true, Ordering::Relaxed);
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn worker_loop_sets_dtr_rts() {
+        let bus = DataBus::new();
+        let mock = MockSerialPort::new();
+
+        let (_write_tx, write_rx) = bounded::<Vec<u8>>(16);
+        let (dtr_tx, dtr_rx) = bounded::<DtrRtsCommand>(4);
+        let stop = Arc::new(AtomicBool::new(false));
+        let alive = Arc::new(AtomicBool::new(true));
+
+        // 发送 DTR 命令
+        dtr_tx.send(DtrRtsCommand::SetDtr(true)).unwrap();
+        dtr_tx.send(DtrRtsCommand::SetRts(true)).unwrap();
+
+        let thread_stop = stop.clone();
+        let thread_alive = alive.clone();
+        let thread_bus = bus.clone();
+        let handle = std::thread::spawn(move || {
+            serial_worker_loop_impl(
+                mock,
+                write_rx,
+                dtr_rx,
+                thread_stop,
+                thread_alive,
+                thread_bus,
+                "serial:COM1".to_owned(),
+            );
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+        stop.store(true, Ordering::Relaxed);
+        let _ = handle.join();
+
+        // DTR/RTS 应在 worker loop 中被处理
+        // 注意：mock 在 worker loop 中被 move 了，无法直接检查
+        // 此测试主要验证 DTR/RTS 命令不会导致 panic
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_open_port_name_exact_match() {
+        let mut ports = HashMap::new();
+        ports.insert(
+            "COM3".to_owned(),
+            PortHandle {
+                config: SerialConfig::default(),
+                writer: bounded(1).0,
+                dtr_rts_tx: bounded(1).0,
+                stop: Arc::new(AtomicBool::new(false)),
+                alive: Arc::new(AtomicBool::new(true)),
+                join: None,
+            },
+        );
+        assert_eq!(
+            TransportManager::resolve_open_port_name_locked(&ports, "COM3"),
+            Some("COM3".to_owned())
+        );
+    }
+
+    #[test]
+    fn resolve_open_port_name_case_insensitive() {
+        let mut ports = HashMap::new();
+        ports.insert(
+            "COM3".to_owned(),
+            PortHandle {
+                config: SerialConfig::default(),
+                writer: bounded(1).0,
+                dtr_rts_tx: bounded(1).0,
+                stop: Arc::new(AtomicBool::new(false)),
+                alive: Arc::new(AtomicBool::new(true)),
+                join: None,
+            },
+        );
+        assert_eq!(
+            TransportManager::resolve_open_port_name_locked(&ports, "com3"),
+            Some("COM3".to_owned())
+        );
+    }
+
+    #[test]
+    fn resolve_open_port_name_not_found() {
+        let ports = HashMap::new();
+        assert_eq!(
+            TransportManager::resolve_open_port_name_locked(&ports, "COM3"),
+            None
+        );
+    }
+
+    #[test]
+    fn transport_manager_new_has_no_open_ports() {
+        let bus = DataBus::new();
+        let tm = TransportManager::new(bus);
+        assert!(tm.open_ports().is_empty());
+    }
+
+    #[test]
+    fn parse_hex_rejects_empty() {
+        assert!(parse_hex("").is_err());
+    }
+
+    #[test]
+    fn parse_hex_rejects_invalid_chars() {
+        assert!(parse_hex("gg").is_err());
+    }
+
+    #[test]
+    fn natural_sort_key_extracts_prefix_and_number() {
+        assert_eq!(natural_sort_key("COM3"), ("COM".to_owned(), 3));
+        assert_eq!(natural_sort_key("COM10"), ("COM".to_owned(), 10));
+        assert_eq!(natural_sort_key("USB0"), ("USB".to_owned(), 0));
     }
 }

@@ -1,3 +1,5 @@
+use tool_transport::{SerialConfig, SerialPortDescriptor};
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) enum StatusLevel {
     Info,
@@ -24,20 +26,6 @@ pub(crate) enum DetachedPanelAction {
     Close,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BottomTab {
-    Terminal,
-    Logs,
-}
-
-impl BottomTab {
-    pub(crate) const ALL: [Self; 2] = [Self::Terminal, Self::Logs];
-
-    pub(crate) fn is_available(self, terminal_popup_open: bool) -> bool {
-        !matches!(self, Self::Terminal) || !terminal_popup_open
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct StatusState {
     pub(crate) message: String,
@@ -51,6 +39,34 @@ impl Default for StatusState {
             message: "就绪".into(),
             level: StatusLevel::Info,
             deadline_ms: 0,
+        }
+    }
+}
+
+impl StatusState {
+    /// 统一状态入口。低级别不能覆盖未过期的高级消息。
+    pub(crate) fn set(&mut self, level: StatusLevel, text: impl Into<String>) {
+        let now = tool_core::now_timestamp_ms();
+        if level as u8 >= self.level as u8 || now > self.deadline_ms {
+            self.level = level;
+            self.message = text.into();
+            self.deadline_ms = now + level.ttl_ms();
+        }
+    }
+
+    /// 用户主动操作：总是更新状态（不被旧错误阻塞）。
+    pub(crate) fn set_force(&mut self, level: StatusLevel, text: impl Into<String>) {
+        let now = tool_core::now_timestamp_ms();
+        self.level = level;
+        self.message = text.into();
+        self.deadline_ms = now + level.ttl_ms();
+    }
+
+    /// 过期后重置为就绪。每帧调用。
+    pub(crate) fn clear_if_expired(&mut self) {
+        if tool_core::now_timestamp_ms() > self.deadline_ms {
+            self.level = StatusLevel::Info;
+            self.message = "就绪".into();
         }
     }
 }
@@ -121,6 +137,54 @@ impl Default for SendUiState {
             next_periodic_send_time: 0.0,
             periodic_send_count: 0,
             periodic_max_count: None,
+        }
+    }
+}
+
+/// 待重连的串口信息（拔出后自动重连用）。
+#[derive(Clone)]
+pub(crate) struct PendingReconnect {
+    pub(crate) port_name: String,
+    pub(crate) config: SerialConfig,
+    pub(crate) attempts: u32,
+    pub(crate) next_try_at: f64,
+}
+
+/// 串口相关的 UI 状态聚合：端口列表、选中端口、串口参数、自动重连、别名与配置档案。
+///
+/// 将原先散落在 `WorkbenchApp` 上的 13 个字段收拢于此，便于统一管理与持久化转换。
+pub(crate) struct SerialUiState {
+    pub(crate) ports: Vec<SerialPortDescriptor>,
+    pub(crate) selected_port: Option<String>,
+    pub(crate) baud_rate: String,
+    pub(crate) data_bits: String,
+    pub(crate) stop_bits: String,
+    pub(crate) parity: String,
+    pub(crate) timeout_ms: String,
+    pub(crate) last_port_refresh: f64,
+    pub(crate) auto_reconnect: bool,
+    pub(crate) pending_reconnect: Option<PendingReconnect>,
+    pub(crate) port_aliases: std::collections::HashMap<String, String>,
+    pub(crate) port_profiles: std::collections::HashMap<String, crate::config::PortProfile>,
+    pub(crate) top_bar_serial_collapsed: bool,
+}
+
+impl Default for SerialUiState {
+    fn default() -> Self {
+        Self {
+            ports: Vec::new(),
+            selected_port: None,
+            baud_rate: "115200".to_owned(),
+            data_bits: "8".to_owned(),
+            stop_bits: "1".to_owned(),
+            parity: "none".to_owned(),
+            timeout_ms: "50".to_owned(),
+            last_port_refresh: 0.0,
+            auto_reconnect: true,
+            pending_reconnect: None,
+            port_aliases: std::collections::HashMap::new(),
+            port_profiles: std::collections::HashMap::new(),
+            top_bar_serial_collapsed: false,
         }
     }
 }

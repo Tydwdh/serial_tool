@@ -1,4 +1,4 @@
-use crate::theme;
+use crate::{fmt_ts, theme};
 use egui::{Color32, RichText, ScrollArea};
 use std::collections::VecDeque;
 use tool_core::{Event, LogLevel};
@@ -47,11 +47,16 @@ impl LogPanel {
         }
     }
     pub fn ingest_all_pending(&mut self) -> usize {
+        // 每帧最多摄入 2000 条，防止大量日志突发时 UI 卡顿
+        const MAX_INGEST_ALL: usize = 2000;
         let mut count = 0;
 
         while let Some(event) = self.subscription.try_recv() {
             self.push_event(event);
             count += 1;
+            if count >= MAX_INGEST_ALL {
+                break;
+            }
         }
 
         count
@@ -59,6 +64,8 @@ impl LogPanel {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.last_scroll_offset_y = 0.0;
+        // 清空后重置为自动滚动，确保新日志可见
+        self.auto_scroll = true;
     }
 
     /// 让 main.rs 在日志面板不可见时也能消费日志事件。
@@ -85,14 +92,7 @@ impl LogPanel {
                 ui.selectable_value(&mut self.min_level, level, level.as_str());
             }
 
-            if self.auto_scroll {
-                if ui.button("⏸").on_hover_text("暂停自动滚动").clicked() {
-                    self.auto_scroll = false;
-                }
-            } else if ui.button("↓").on_hover_text("滚动到底部").clicked() {
-                self.auto_scroll = true;
-                force_scroll_to_bottom = true;
-            }
+            force_scroll_to_bottom |= crate::theme::auto_scroll_button(ui, &mut self.auto_scroll);
 
             let dropped = self.subscription.dropped_count();
             if dropped > 0 {
@@ -299,7 +299,7 @@ fn show_log_entry(ui: &mut egui::Ui, entry: &LogEntry, row_height: f32) -> egui:
         egui::Align2::LEFT_CENTER,
         entry.level.as_str(),
         font_id.clone(),
-        level_color(entry.level),
+        crate::level_color(entry.level),
     );
 
     x += LEVEL_COL_WIDTH + COL_GAP;
@@ -310,7 +310,7 @@ fn show_log_entry(ui: &mut egui::Ui, entry: &LogEntry, row_height: f32) -> egui:
     );
 
     let source_painter = ui.painter().with_clip_rect(source_clip);
-    let source_text = compact_middle(&entry.source, SOURCE_TEXT_MAX_CHARS);
+    let source_text = crate::compact_middle(&entry.source, SOURCE_TEXT_MAX_CHARS);
 
     source_painter.text(
         egui::pos2(x, text_y),
@@ -341,53 +341,8 @@ fn show_log_entry(ui: &mut egui::Ui, entry: &LogEntry, row_height: f32) -> egui:
 }
 
 fn log_row_height(ui: &egui::Ui) -> f32 {
-    (ui.text_style_height(&egui::TextStyle::Monospace).ceil() + 6.0).max(20.0)
+    crate::row_height(ui)
 }
 
-fn fmt_ts(ms: u64) -> String {
-    let Some(dt_utc) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms as i64) else {
-        return "--:--:--.---".to_owned();
-    };
-
-    dt_utc
-        .with_timezone(&chrono::Local)
-        .format("%H:%M:%S%.3f")
-        .to_string()
-}
-
-fn level_color(level: LogLevel) -> Color32 {
-    match level {
-        LogLevel::Trace => Color32::GRAY,
-        LogLevel::Debug => theme::BLUE,
-        LogLevel::Info => theme::GREEN,
-        LogLevel::Warn => theme::YELLOW,
-        LogLevel::Error => theme::RED,
-    }
-}
-
-fn compact_middle(text: &str, max_chars: usize) -> String {
-    let char_count = text.chars().count();
-
-    if char_count <= max_chars {
-        return text.to_owned();
-    }
-
-    if max_chars <= 3 {
-        return "...".to_owned();
-    }
-
-    let left_count = (max_chars - 3) / 2;
-    let right_count = max_chars - 3 - left_count;
-
-    let left = text.chars().take(left_count).collect::<String>();
-    let right = text
-        .chars()
-        .rev()
-        .take(right_count)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<String>();
-
-    format!("{left}...{right}")
-}
+// fmt_ts 已提取到 crate::fmt_ts
+// level_color 和 compact_middle 已提取到 crate 根模块

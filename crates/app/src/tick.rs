@@ -4,6 +4,7 @@ use crate::state::StatusLevel;
 use eframe::egui;
 use tool_core::{Direction, Event, Payload};
 use tool_panels::Activity;
+
 impl WorkbenchApp {
     pub(crate) fn handle_keys(&mut self, ctx: &egui::Context) {
         ctx.input(|i| {
@@ -35,6 +36,18 @@ impl WorkbenchApp {
 impl WorkbenchApp {
     pub(crate) fn tick_pre_ui(&mut self, ctx: &egui::Context) {
         self.clear_status_if_expired();
+        self.tick_recorder_status();
+        self.tick_terminal_maximize();
+        self.tick_replay(ctx);
+        self.tick_plugin_lifecycle();
+        self.handle_keys(ctx);
+        self.tick_port_refresh(ctx);
+        self.tick_periodic_send(ctx);
+        self.tick_auto_save(ctx);
+    }
+
+    /// 录制状态检测：收割已停止的录制、worker 线程错误反馈。
+    fn tick_recorder_status(&mut self) {
         match self.recorder.reap_stopping() {
             Some(Ok(path)) => {
                 self.set_status_force(StatusLevel::Info, format!("录制已保存: {}", path.display()))
@@ -42,7 +55,13 @@ impl WorkbenchApp {
             Some(Err(e)) => self.set_status_force(StatusLevel::Error, format!("录制失败: {e}")),
             None => {}
         }
-        // 终端放大按钮：打开悬浮窗并切走底部 Terminal
+        if let Some(error) = self.recorder.reap_error() {
+            self.set_status(StatusLevel::Error, format!("录制失败：{error}"));
+        }
+    }
+
+    /// 终端放大按钮：打开悬浮窗并切走底部 Terminal。
+    fn tick_terminal_maximize(&mut self) {
         if self.terminal_panel.maximize_clicked {
             self.terminal_panel.maximize_clicked = false;
             self.terminal_popup_open = true;
@@ -53,6 +72,10 @@ impl WorkbenchApp {
                 self.panels.dock.bottom.active = Some(tool_panels::PanelKind::Logs);
             }
         }
+    }
+
+    /// 回放相关：seek/step/pick_file/analyzer 调度。
+    fn tick_replay(&mut self, ctx: &egui::Context) {
         // 回放清理
         if self.replay_panel.want_clear_on_play {
             self.replay_panel.want_clear_on_play = false;
@@ -62,65 +85,13 @@ impl WorkbenchApp {
         }
 
         if let Some(steps) = self.replay_panel.want_step_backward.take() {
-            self.terminal_panel.clear();
-            self.bottom_log_panel.clear();
-            self.dynamic_panels.clear_charts();
-
-            self.bus.publish(Event::new(
-                "ui.replay.reset",
-                "ui.replay",
-                Direction::Internal,
-                Payload::Empty,
-            ));
-
-            let steps = steps.max(1);
-            let pos = self.replay_panel.manager().backward_position_by(steps);
-
-            if let Some(pos) = pos {
-                // 阶段 1：先发布 ui.panel.create 并创建图表面板
-                self.replay_panel.do_seek_panel_phase(pos);
-                self.dynamic_panels.ingest(&mut self.panels);
-                // 阶段 2：再发布数据事件
-                self.replay_panel.do_seek_data_phase(pos);
-            }
-
-            let terminal_count = self.terminal_panel.ingest_all_pending();
-            let log_count = self.bottom_log_panel.ingest_all_pending();
-            let chart_count = self.dynamic_panels.ingest_all_pending();
-
-            self.set_status(StatusLevel::Info, format!(
-                "回放重建完成：接收 {terminal_count} 条，日志 {log_count} 条，图表 {chart_count} 条"
-            ));
-            ctx.request_repaint();
+            self.do_replay_step_backward(steps, ctx);
         }
 
         if let Some(p) = self.replay_panel.want_seek_replay.take() {
-            self.terminal_panel.clear();
-            self.bottom_log_panel.clear();
-            self.dynamic_panels.clear_charts();
-
-            self.bus.publish(Event::new(
-                "ui.replay.reset",
-                "ui.replay",
-                Direction::Internal,
-                Payload::Empty,
-            ));
-
-            // 阶段 1：先发布 ui.panel.create 并创建图表面板
-            self.replay_panel.do_seek_panel_phase(p);
-            self.dynamic_panels.ingest(&mut self.panels);
-            // 阶段 2：再发布数据事件
-            self.replay_panel.do_seek_data_phase(p);
-
-            let terminal_count = self.terminal_panel.ingest_all_pending();
-            let log_count = self.bottom_log_panel.ingest_all_pending();
-            let chart_count = self.dynamic_panels.ingest_all_pending();
-
-            self.set_status(StatusLevel::Info, format!(
-                "回放重建完成：接收 {terminal_count} 条，日志 {log_count} 条，图表 {chart_count} 条"
-            ));
-            ctx.request_repaint();
+            self.do_replay_seek_rebuild(p, ctx);
         }
+
         if self.replay_panel.want_pick_file {
             self.replay_panel.want_pick_file = false;
             if let Some(p) = windows_open_dialog() {
@@ -148,12 +119,10 @@ impl WorkbenchApp {
 
         // 检查后台 analyzer 是否完成
         self.poll_replay_analyzer_result();
+    }
 
-        // 录制状态检测：worker 线程因错误退出时反馈给 UI
-        if let Some(error) = self.recorder.reap_error() {
-            self.set_status(StatusLevel::Error, format!("录制失败：{error}"));
-        }
-
+    /// 插件生命周期：禁用清理 + ingest + 事件处理。
+    fn tick_plugin_lifecycle(&mut self) {
         // 处理 dialog 请求（Lua ctx.dialog.open_file）
         self.poll_dialog_requests();
 
@@ -177,8 +146,10 @@ impl WorkbenchApp {
         if n > 0 {
             self.set_status_force(StatusLevel::Info, format!("{n} 个插件事件"));
         }
-        self.handle_keys(ctx);
+    }
 
+    /// 串口刷新 + 速率统计。
+    fn tick_port_refresh(&mut self, ctx: &egui::Context) {
         // 速率统计
         let now = ctx.input(|i| i.time);
         if self.last_rate_check_time > 0.0 {
@@ -198,19 +169,67 @@ impl WorkbenchApp {
         } else {
             2.0
         };
-        if now - self.last_port_refresh > refresh_interval {
-            self.last_port_refresh = now;
+        if now - self.serial.last_port_refresh > refresh_interval {
+            self.serial.last_port_refresh = now;
             self.refresh_ports_silent();
         }
+    }
 
-        // 周期发送
-        self.tick_periodic_send(ctx);
-
-        // 自动保存工作区（每60秒）
+    /// 自动保存工作区（每60秒）。
+    fn tick_auto_save(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
         if now - self.last_auto_save_time > 60.0 {
             self.last_auto_save_time = now;
             let _ = self.save_config();
         }
+    }
+
+    /// 回放 step backward：清空面板 → 两阶段重建 → ingest。
+    fn do_replay_step_backward(&mut self, steps: usize, ctx: &egui::Context) {
+        let pos = self
+            .replay_panel
+            .manager()
+            .backward_position_by(steps.max(1));
+        self.do_replay_rebuild(pos, ctx);
+    }
+
+    /// 回放 seek：清空面板 → 两阶段重建 → ingest。
+    fn do_replay_seek_rebuild(&mut self, position: u64, ctx: &egui::Context) {
+        self.do_replay_rebuild(Some(position), ctx);
+    }
+
+    /// 统一的回放重建：清空面板 → 发布 reset → 两阶段重建 → ingest。
+    fn do_replay_rebuild(&mut self, position: Option<u64>, ctx: &egui::Context) {
+        self.terminal_panel.clear();
+        self.bottom_log_panel.clear();
+        self.dynamic_panels.clear_charts();
+
+        self.bus.publish(Event::new(
+            "ui.replay.reset",
+            "ui.replay",
+            Direction::Internal,
+            Payload::Empty,
+        ));
+
+        if let Some(pos) = position {
+            // 阶段 1：先发布 ui.panel.create 并创建图表面板
+            self.replay_panel.do_seek_panel_phase(pos);
+            self.dynamic_panels.ingest(&mut self.panels);
+            // 阶段 2：再发布数据事件
+            self.replay_panel.do_seek_data_phase(pos);
+        }
+
+        let terminal_count = self.terminal_panel.ingest_all_pending();
+        let log_count = self.bottom_log_panel.ingest_all_pending();
+        let chart_count = self.dynamic_panels.ingest_all_pending();
+
+        self.set_status(
+            StatusLevel::Info,
+            format!(
+                "回放重建完成：接收 {terminal_count} 条，日志 {log_count} 条，图表 {chart_count} 条"
+            ),
+        );
+        ctx.request_repaint();
     }
 
     fn tick_periodic_send(&mut self, ctx: &egui::Context) {
@@ -237,15 +256,16 @@ impl WorkbenchApp {
             if self.send.error.is_none() {
                 self.send.periodic_send_count += 1;
                 if let Some(max) = self.send.periodic_max_count
-                    && self.send.periodic_send_count >= max {
-                        self.send.periodic_enabled = false;
-                        self.send.periodic_send_count = 0;
-                        self.set_status_force(
-                            crate::state::StatusLevel::Info,
-                            format!("周期发送已完成 ({max} 次)"),
-                        );
-                        return;
-                    }
+                    && self.send.periodic_send_count >= max
+                {
+                    self.send.periodic_enabled = false;
+                    self.send.periodic_send_count = 0;
+                    self.set_status_force(
+                        crate::state::StatusLevel::Info,
+                        format!("周期发送已完成 ({max} 次)"),
+                    );
+                    return;
+                }
             } else {
                 self.send.periodic_enabled = false;
                 self.set_status_force(crate::state::StatusLevel::Error, "周期发送已停止：发送失败");
@@ -255,6 +275,7 @@ impl WorkbenchApp {
 
         self.send.next_periodic_send_time = now + interval_ms as f64 / 1000.0;
     }
+
     pub(crate) fn tick_post_ui(&mut self, ctx: &egui::Context) {
         self.bottom_log_panel.ingest_pending();
         self.detached_dynamic_panel_viewports(ctx);

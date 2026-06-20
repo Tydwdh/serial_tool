@@ -6,9 +6,13 @@ use tool_core::{Event, Payload};
 use tool_databus::{DataBus, Subscription, TopicFilter};
 
 const MAX_CHART_EVENTS_PER_FRAME: usize = 1_000;
+
 pub struct ChartPanel {
     subscription: Subscription,
     series: BTreeMap<String, VecDeque<Sample>>,
+    /// 缓存窗口化后的数据，避免每帧重复分配 Vec。
+    /// Key 为 series 名称，Value 为窗口内样本（已按 x 排序）。
+    cached_window: BTreeMap<String, Vec<Sample>>,
     paused: bool,
     auto_scale: bool,
     y_min: f64,
@@ -37,6 +41,7 @@ impl ChartPanel {
         Self {
             subscription: bus.subscribe_lossy_bounded(filter, 4096),
             series: BTreeMap::new(),
+            cached_window: BTreeMap::new(),
             paused: false,
             auto_scale: true,
             y_min: 0.0,
@@ -49,6 +54,7 @@ impl ChartPanel {
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         self.ingest();
+        self.rebuild_cache();
 
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.paused, "暂停");
@@ -198,6 +204,20 @@ impl ChartPanel {
         }
     }
 
+    fn rebuild_cache(&mut self) {
+        self.cached_window.clear();
+        for (name, samples) in &self.series {
+            let window: Vec<Sample> = samples
+                .iter()
+                .rev()
+                .take(self.sample_window)
+                .rev()
+                .copied()
+                .collect();
+            self.cached_window.insert(name.clone(), window);
+        }
+    }
+
     fn paint_chart(&self, ui: &egui::Ui, rect: Rect) {
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 4.0, theme::CHART_BG);
@@ -208,24 +228,7 @@ impl ChartPanel {
             egui::StrokeKind::Inside,
         );
 
-        let samples: Vec<(&String, Vec<Sample>)> = self
-            .series
-            .iter()
-            .map(|(name, values)| {
-                let values = values
-                    .iter()
-                    .rev()
-                    .take(self.sample_window)
-                    .copied()
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect();
-                (name, values)
-            })
-            .collect();
-
-        if samples.iter().all(|(_, values)| values.len() < 2) {
+        if self.cached_window.values().all(|values| values.len() < 2) {
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -235,6 +238,9 @@ impl ChartPanel {
             );
             return;
         }
+
+        // 直接迭代缓存，避免每帧 collect 分配 Vec
+        let samples: Vec<(&String, &Vec<Sample>)> = self.cached_window.iter().collect();
 
         let bounds = chart_bounds(&samples, self.auto_scale, self.y_min, self.y_max);
         draw_grid(&painter, rect);
@@ -264,7 +270,7 @@ impl ChartPanel {
 }
 
 fn chart_bounds(
-    samples: &[(&String, Vec<Sample>)],
+    samples: &[(&String, &Vec<Sample>)],
     auto_scale: bool,
     y_min: f64,
     y_max: f64,
@@ -288,7 +294,7 @@ fn chart_bounds(
     };
 
     for (_, values) in samples {
-        for sample in values {
+        for sample in *values {
             min_x = min_x.min(sample.x);
             max_x = max_x.max(sample.x);
             if auto_scale {
@@ -390,10 +396,8 @@ mod tests {
     #[test]
     fn manual_y_axis_is_normalized() {
         let name = "actual".to_owned();
-        let samples = vec![(
-            &name,
-            vec![Sample { x: 0.0, y: 10.0 }, Sample { x: 1.0, y: 20.0 }],
-        )];
+        let data = vec![Sample { x: 0.0, y: 10.0 }, Sample { x: 1.0, y: 20.0 }];
+        let samples: Vec<(&String, &Vec<Sample>)> = vec![(&name, &data)];
 
         let (_, _, min_y, max_y) = chart_bounds(&samples, false, 100.0, 0.0);
 
@@ -403,10 +407,8 @@ mod tests {
     #[test]
     fn equal_y_axis_expands_to_visible_range() {
         let name = "actual".to_owned();
-        let samples = vec![(
-            &name,
-            vec![Sample { x: 0.0, y: 10.0 }, Sample { x: 1.0, y: 10.0 }],
-        )];
+        let data = vec![Sample { x: 0.0, y: 10.0 }, Sample { x: 1.0, y: 10.0 }];
+        let samples: Vec<(&String, &Vec<Sample>)> = vec![(&name, &data)];
 
         let (_, _, min_y, max_y) = chart_bounds(&samples, false, 10.0, 10.0);
 

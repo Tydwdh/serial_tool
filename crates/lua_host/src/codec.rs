@@ -14,11 +14,12 @@ fn create_codec_table(lua: &Lua, (): ()) -> mlua::Result<Value> {
     tbl.set(
         "to_hex",
         lua.create_function(|_, bytes: mlua::String| {
-            let hex: String = bytes
-                .as_bytes()
-                .iter()
-                .map(|b| format!("{:02X}", b))
-                .collect();
+            let data = bytes.as_bytes();
+            let mut hex = String::with_capacity(data.len() * 2);
+            for &b in &data {
+                use std::fmt::Write;
+                write!(hex, "{:02X}", b).unwrap();
+            }
             Ok(hex)
         })?,
     )?;
@@ -26,19 +27,18 @@ fn create_codec_table(lua: &Lua, (): ()) -> mlua::Result<Value> {
     tbl.set(
         "from_hex",
         lua.create_function(|lua, hex: mlua::String| {
-            let hex = hex.to_str()?.replace(' ', "");
-            if hex.len() % 2 != 0 {
+            let hex_str = hex.to_str()?;
+            let hex_clean: String = hex_str.chars().filter(|c| !c.is_whitespace()).collect();
+            if hex_clean.len() % 2 != 0 {
                 return Err(mlua::Error::RuntimeError(
                     "hex string must have even length".into(),
                 ));
             }
-            let bytes: Vec<u8> = (0..hex.len())
+            let bytes: Vec<u8> = (0..hex_clean.len())
                 .step_by(2)
-                .filter_map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
-                .collect();
-            if bytes.len() * 2 != hex.len() {
-                return Err(mlua::Error::RuntimeError("invalid hex string".into()));
-            }
+                .map(|i| u8::from_str_radix(&hex_clean[i..i + 2], 16))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| mlua::Error::RuntimeError("invalid hex string".into()))?;
             Ok(Value::String(lua.create_string(&bytes)?))
         })?,
     )?;

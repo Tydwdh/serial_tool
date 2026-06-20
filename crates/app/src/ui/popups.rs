@@ -1,6 +1,5 @@
 use crate::app::WorkbenchApp;
-use crate::state::{DetachedPanelAction, LineEnding};
-use crate::ui::bottom_panel::translate_error;
+use crate::state::DetachedPanelAction;
 use eframe::egui;
 use serde_json::Value;
 use tool_core::{Direction, Event, LogLevel, Payload};
@@ -103,96 +102,7 @@ impl WorkbenchApp {
             }
             egui::CentralPanel::default()
                 .show_inside(ui, |ui| {
-                    self.ensure_send_target_port();
-                    let send_port_open = self.send_target_port_open();
-                    ui.horizontal(|ui| {
-                        ui.heading("发送");
-
-                        ui.label("目标");
-                        self.send_target_port_combo(ui, "send-popup-target-port");
-
-                        let pin_label = if self.send_popup_always_on_top {
-                            "\u{1f4cc} 置顶"
-                        } else {
-                            "置顶"
-                        };
-
-                        if ui
-                            .selectable_label(self.send_popup_always_on_top, pin_label)
-                            .on_hover_text("让该窗口保持在其他窗口上方")
-                            .clicked()
-                        {
-                            self.send_popup_always_on_top = !self.send_popup_always_on_top;
-                            let _ = self.save_config();
-                        }
-
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.radio_value(&mut self.send.hex_mode, false, "文本");
-                            ui.radio_value(&mut self.send.hex_mode, true, "HEX");
-                            if self.send.hex_mode {
-                                ui.checkbox(&mut self.send.hex_strict, "严格")
-                                    .on_hover_text("严格模式：奇数 HEX 长度报错而非自动补0");
-                            }
-                            ui.add_enabled_ui(!self.send.hex_mode, |ui| {
-                                egui::ComboBox::from_id_salt("send-popup-line-ending")
-                                    .width(60.0)
-                                    .selected_text(self.send.line_ending.label())
-                                    .show_ui(ui, |ui| {
-                                        for &le in LineEnding::ALL.iter() {
-                                            ui.selectable_value(
-                                                &mut self.send.line_ending,
-                                                le,
-                                                le.label(),
-                                            );
-                                        }
-                                    });
-                            });
-                            if ui
-                                .add_enabled(
-                                    send_port_open && !self.send.input.is_empty(),
-                                    egui::Button::new("发送 (Ctrl+Enter)"),
-                                )
-                                .clicked()
-                            {
-                                self.do_send();
-                            }
-                            if ui.button("清空").clicked() {
-                                self.send.input.clear();
-                                self.send.error = None;
-                                self.send.periodic_send_count = 0;
-                            }
-                            self.send_history_combo(ui, "send-popup-history");
-                            self.ui_contribution_slot(ui, "send.toolbar");
-                        });
-                    });
-                    ui.separator();
-                    let text_edit_resp = ui.add(
-                        egui::TextEdit::multiline(&mut self.send.input)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(24)
-                            .hint_text("Ctrl+Enter 发送"),
-                    );
-                    // Ctrl+Enter 仅当发送输入框有焦点时触发
-                    if text_edit_resp.has_focus()
-                        && ui
-                            .ctx()
-                            .input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter))
-                        && send_port_open
-                        && !self.send.input.is_empty()
-                    {
-                        self.do_send();
-                    }
-                    if let Some(e) = &self.send.error {
-                        ui.colored_label(theme::RED, translate_error(e));
-                    }
-                    if self.send.hex_mode && !self.send.input.trim().is_empty() {
-                        let preview = crate::ui::bottom_panel::hex_preview(&self.send.input);
-                        ui.label(
-                            egui::RichText::new(format!("HEX 预览: {preview}"))
-                                .color(theme::TEXT_SECONDARY)
-                                .monospace(),
-                        );
-                    }
+                    self.send_panel_popup(ui);
                     false
                 })
                 .inner

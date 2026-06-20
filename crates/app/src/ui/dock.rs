@@ -93,6 +93,7 @@ impl WorkbenchApp {
                             if ui.button("移到右侧").clicked() {
                                 self.panels.dock.move_panel(kind.clone(), DockArea::Right);
                                 self.panels.dock.right_visible = true;
+                                self.panels.sync_tabs_from_dock();
                                 let _ = self.save_config();
                                 ui.close();
                             }
@@ -100,6 +101,7 @@ impl WorkbenchApp {
                         DockArea::Right => {
                             if ui.button("移到底部").clicked() {
                                 self.panels.dock.move_panel(kind.clone(), DockArea::Bottom);
+                                self.panels.sync_tabs_from_dock();
                                 self.set_bottom_visible(true);
                                 let _ = self.save_config();
                                 ui.close();
@@ -109,12 +111,7 @@ impl WorkbenchApp {
                     }
 
                     if ui.button("关闭").clicked() {
-                        let is_sender = matches!(kind, PanelKind::Sender);
                         self.panels.dock.stack_mut(area).close(kind);
-                        // Sender 从右侧关闭时恢复底部发送器
-                        if is_sender && area == DockArea::Right {
-                            self.panels.dock.bottom_sender_visible = true;
-                        }
                         let _ = self.save_config();
                         ui.close();
                     }
@@ -125,16 +122,6 @@ impl WorkbenchApp {
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| match area {
                     DockArea::Bottom => {
-                        let snd_visible = self.panels.dock.bottom_sender_visible;
-                        if ui
-                            .selectable_label(snd_visible, "📤")
-                            .on_hover_text("显示/隐藏底部发送器")
-                            .clicked()
-                        {
-                            self.panels.dock.bottom_sender_visible = !snd_visible;
-                            self.send.periodic_send_count = 0;
-                            let _ = self.save_config();
-                        }
                         if ui.small_button("×").on_hover_text("隐藏底部面板").clicked() {
                             self.panels.dock.bottom_visible = false;
                             self.bottom_panel_visible = false;
@@ -148,10 +135,6 @@ impl WorkbenchApp {
                             .clicked()
                         {
                             self.panels.dock.right_visible = false;
-                            // Sender 离开右侧时恢复底部发送器
-                            if self.panels.dock.right.contains(&PanelKind::Sender) {
-                                self.panels.dock.bottom_sender_visible = true;
-                            }
                             let _ = self.save_config();
                         }
                     }
@@ -170,7 +153,7 @@ impl WorkbenchApp {
             paint_dock_insert_line(ui, &tab_rects, index);
         }
 
-        // 只在“释放在当前 tab bar 上”时处理同区域重排。
+        // 只在"释放在当前 tab bar 上"时处理同区域重排。
         // 不要无条件 take()，否则跨区域 drop overlay 没机会处理。
         if ui.input(|i| i.pointer.any_released())
             && let Some(kind) = self.dock_dragging_panel.clone()
@@ -210,9 +193,7 @@ impl WorkbenchApp {
             }
             PanelKind::Sender => match area {
                 DockArea::Right => self.send_panel_vertical(ui),
-                DockArea::Bottom => {
-                    ui.colored_label(theme::YELLOW, "发送器已固定在底部下层");
-                }
+                DockArea::Bottom => self.send_panel_horizontal(ui),
                 DockArea::Center => {
                     ui.colored_label(theme::YELLOW, "发送器不支持放在主工作区");
                 }
@@ -241,6 +222,7 @@ impl WorkbenchApp {
                         self.panels
                             .dock
                             .move_panel(PanelKind::Replay, DockArea::Center);
+                        self.panels.sync_tabs_from_dock();
                     }
                 }
                 DockArea::Bottom => {
@@ -249,6 +231,7 @@ impl WorkbenchApp {
                         self.panels
                             .dock
                             .move_panel(PanelKind::Terminal, DockArea::Bottom);
+                        self.panels.sync_tabs_from_dock();
                     }
                 }
                 DockArea::Right => {
@@ -285,7 +268,6 @@ impl WorkbenchApp {
 
         let bottom_hit = self.bottom_dock_rect.is_some_and(|rect| rect.contains(pos));
 
-        // 可选：只在真实区域上画一个很轻的 hover 边框，不再画假的目标区
         if right_hit {
             if let Some(rect) = self.right_dock_rect {
                 paint_real_dock_hover(ctx, rect, "右侧");
@@ -298,9 +280,11 @@ impl WorkbenchApp {
             if right_hit {
                 self.panels.dock.move_panel(kind, DockArea::Right);
                 self.panels.dock.right_visible = true;
+                self.panels.sync_tabs_from_dock();
                 let _ = self.save_config();
             } else if bottom_hit {
                 self.panels.dock.move_panel(kind, DockArea::Bottom);
+                self.panels.sync_tabs_from_dock();
                 self.set_bottom_visible(true);
                 let _ = self.save_config();
             }
@@ -369,6 +353,7 @@ fn paint_dock_insert_line(ui: &egui::Ui, rects: &[(PanelKind, egui::Rect)], inde
         egui::Stroke::new(2.0, theme::BLUE),
     );
 }
+
 fn paint_real_dock_hover(ctx: &egui::Context, rect: egui::Rect, label: &str) {
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,

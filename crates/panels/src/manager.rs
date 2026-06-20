@@ -39,8 +39,8 @@ impl Activity {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PanelKind {
-    Devices,
     #[default]
+    Devices,
     Replay,
     Plugins,
     Settings,
@@ -93,13 +93,11 @@ pub enum DockArea {
     Right,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct DockStack {
     pub tabs: Vec<PanelKind>,
     pub active: Option<PanelKind>,
 }
-
 
 impl DockStack {
     pub fn open(&mut self, kind: PanelKind) {
@@ -120,9 +118,17 @@ impl DockStack {
     }
 
     pub fn close(&mut self, kind: &PanelKind) {
+        // 找到关闭位置，优先选择相邻的 tab 而非最后一个
+        let closed_pos = self.tabs.iter().position(|tab| tab == kind);
         self.tabs.retain(|tab| tab != kind);
         if self.active.as_ref() == Some(kind) {
-            self.active = self.tabs.last().cloned();
+            // 选择紧邻的右侧tab，如果不存在则选择左侧
+            let pos = closed_pos.unwrap_or(0);
+            self.active = self
+                .tabs
+                .get(pos)
+                .or_else(|| self.tabs.get(pos.saturating_sub(1)))
+                .cloned();
         }
     }
 
@@ -150,6 +156,7 @@ impl DockStack {
             self.active = self.tabs.last().cloned();
         }
     }
+
     pub fn reorder(&mut self, kind: &PanelKind, mut insert_index: usize) -> bool {
         let Some(source_index) = self.tabs.iter().position(|tab| tab == kind) else {
             return false;
@@ -167,8 +174,7 @@ impl DockStack {
 
         let item = self.tabs.remove(source_index);
         let insert_index = insert_index.min(self.tabs.len());
-        self.tabs.insert(insert_index, item.clone());
-        self.active = Some(item);
+        self.tabs.insert(insert_index, item);
 
         true
     }
@@ -185,9 +191,6 @@ fn default_bottom_size() -> f32 {
 fn default_right_size() -> f32 {
     320.0
 }
-fn default_bottom_sender_height() -> f32 {
-    190.0
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DockLayout {
@@ -201,10 +204,6 @@ pub struct DockLayout {
     pub bottom_size: f32,
     #[serde(default = "default_right_size")]
     pub right_size: f32,
-    #[serde(default = "default_true")]
-    pub bottom_sender_visible: bool,
-    #[serde(default = "default_bottom_sender_height")]
-    pub bottom_sender_height: f32,
     #[serde(default)]
     pub center: DockStack,
     #[serde(default)]
@@ -221,6 +220,7 @@ impl Default for DockLayout {
         let mut bottom = DockStack::default();
         bottom.open(PanelKind::Terminal);
         bottom.open(PanelKind::Logs);
+        bottom.open(PanelKind::Sender);
         bottom.active = Some(PanelKind::Terminal);
 
         Self {
@@ -229,8 +229,6 @@ impl Default for DockLayout {
             right_visible: false,
             bottom_size: default_bottom_size(),
             right_size: default_right_size(),
-            bottom_sender_visible: true,
-            bottom_sender_height: default_bottom_sender_height(),
             center,
             bottom,
             right: DockStack::default(),
@@ -256,7 +254,7 @@ impl DockLayout {
     }
 
     pub fn move_panel(&mut self, kind: PanelKind, to: DockArea) {
-        // Sender 特殊路径：不允许进入 Center/Bottom stack
+        // Sender 特殊路径：不允许进入 Center stack
         if kind == PanelKind::Sender {
             self.center.remove(&PanelKind::Sender);
             self.bottom.remove(&PanelKind::Sender);
@@ -265,11 +263,10 @@ impl DockLayout {
                 DockArea::Right => {
                     self.right.open(PanelKind::Sender);
                     self.right_visible = true;
-                    self.bottom_sender_visible = false;
                 }
                 _ => {
+                    self.bottom.open(PanelKind::Sender);
                     self.bottom_visible = true;
-                    self.bottom_sender_visible = true;
                 }
             }
             return;
@@ -314,17 +311,12 @@ impl DockLayout {
             }
         }
 
-        // Sender 不允许在 Center / Bottom stack 中存在
+        // Sender 不允许在 Center stack 中存在
         self.center.remove(&PanelKind::Sender);
-        self.bottom.remove(&PanelKind::Sender);
 
-        // Sender 只能二选一：右侧 tab 或底部固定区域
-        if self.right.contains(&PanelKind::Sender) {
-            self.right_visible = true;
-            self.bottom_sender_visible = false;
-        } else {
-            self.bottom_sender_visible = true;
-            self.bottom_visible = true;
+        // 确保 Sender 在 bottom dock 中（兼容旧工作空间文件）
+        if !self.bottom.contains(&PanelKind::Sender) {
+            self.bottom.open(PanelKind::Sender);
         }
 
         if self.bottom.active.is_none()
@@ -351,12 +343,9 @@ impl DockLayout {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PanelManager {
     pub activity: Activity,
-    pub tabs: Vec<PanelKind>,
     pub active_tab: PanelKind,
     #[serde(default)]
     pub inspector_visible: bool, // legacy: ignored, kept for old workspace compatibility
-    #[serde(default = "default_true")]
-    pub bottom_logs_visible: bool,
     #[serde(default)]
     pub dock: DockLayout,
 }
@@ -365,16 +354,19 @@ impl Default for PanelManager {
     fn default() -> Self {
         Self {
             activity: Activity::Devices,
-            tabs: Default::default(),
-            active_tab: PanelKind::Replay,
+            active_tab: PanelKind::Devices,
             inspector_visible: false,
-            bottom_logs_visible: true,
             dock: DockLayout::default(),
         }
     }
 }
 
 impl PanelManager {
+    /// 从 dock 的所有 stack 中派生 tabs 列表（唯一真相来源）
+    pub fn tabs(&self) -> Vec<PanelKind> {
+        self.dock.all_tabs()
+    }
+
     pub fn select_activity(&mut self, activity: Activity) {
         self.activity = activity;
         if let Some(kind) = activity.panel_kind() {
@@ -385,9 +377,6 @@ impl PanelManager {
     }
 
     pub fn open_tab(&mut self, kind: PanelKind) {
-        if !self.tabs.contains(&kind) {
-            self.tabs.push(kind.clone());
-        }
         if let Some(activity) = kind.activity() {
             self.activity = activity;
         }
@@ -397,16 +386,25 @@ impl PanelManager {
 
     /// 添加标签但不自动切换（插件后台创建面板时使用）
     pub fn add_tab(&mut self, kind: PanelKind) {
-        if !self.tabs.contains(&kind) {
-            self.tabs.push(kind.clone());
-        }
         self.dock.center.add_inactive(kind);
     }
 
     pub fn close_tab(&mut self, kind: PanelKind) {
+        // 确定关闭的 tab 在哪个 dock area，在该 stack 中查找回退
+        let area = if self.dock.center.contains(&kind) {
+            DockArea::Center
+        } else if self.dock.bottom.contains(&kind) {
+            DockArea::Bottom
+        } else if self.dock.right.contains(&kind) {
+            DockArea::Right
+        } else {
+            return; // tab 不在任何 dock 中
+        };
+
         if self.active_tab == kind {
-            self.active_tab = self
-                .tabs
+            // 在同一 dock stack 中查找最近的非关闭 tab
+            let stack_tabs = &self.dock.stack(area).tabs;
+            self.active_tab = stack_tabs
                 .iter()
                 .rev()
                 .find(|candidate| *candidate != &kind)
@@ -417,7 +415,6 @@ impl PanelManager {
                 self.activity = activity;
             }
         }
-        self.tabs.retain(|k| k != &kind);
         self.dock.center.remove(&kind);
         self.dock.bottom.remove(&kind);
         self.dock.right.remove(&kind);
@@ -428,11 +425,21 @@ impl PanelManager {
     }
 
     pub fn discard_dynamic_tabs(&mut self) {
-        self.tabs.retain(|kind| kind.dynamic_id().is_none());
         if self.active_tab.dynamic_id().is_some() {
             self.active_tab = self.activity.panel_kind().unwrap_or_default();
         }
         self.dock.discard_dynamic_tabs();
+    }
+
+    /// 在 dock.move_panel() 调用后同步 active_tab
+    pub fn sync_tabs_from_dock(&mut self) {
+        let all_tabs = self.dock.all_tabs();
+        if !all_tabs.contains(&self.active_tab) {
+            self.active_tab = all_tabs.first().cloned().unwrap_or_default();
+            if let Some(activity) = self.active_tab.activity() {
+                self.activity = activity;
+            }
+        }
     }
 }
 
@@ -471,7 +478,8 @@ mod tests {
 
         manager.discard_dynamic_tabs();
 
-        assert!(manager.tabs.is_empty());
+        // 动态 tab 应被清除，但 dock 中的固定 tab（Terminal/Logs）仍保留
+        assert!(!manager.tabs().iter().any(|k| k.dynamic_id().is_some()));
         assert!(manager.active_dynamic_id().is_none());
     }
 }

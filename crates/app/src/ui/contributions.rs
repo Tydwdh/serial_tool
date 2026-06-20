@@ -189,7 +189,7 @@ impl WorkbenchApp {
                     "periodic_interval_ms": self.send.periodic_interval_ms,
                 },
                 "serial": {
-                    "selected_port": self.selected_port.clone(),
+                    "selected_port": self.serial.selected_port.clone(),
                     "open_ports": self.transport.open_ports(),
                 }
             });

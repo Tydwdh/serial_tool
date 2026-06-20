@@ -44,7 +44,7 @@ pub(crate) fn serial_combo(
                     {
                         format!("{alias} ({})", port.port_name)
                     } else {
-                        format!("{}", port.port_name)
+                        port.port_name.to_string()
                     };
                     ui.selectable_value(sel, Some(port.port_name.clone()), label);
                 }
@@ -67,30 +67,6 @@ pub(crate) fn serial_action_button_enabled(
     )
 }
 
-use tool_transport::{DataBits, Parity, StopBits};
-
-pub(crate) fn pdb(v: &str) -> DataBits {
-    match v {
-        "5" => DataBits::Five,
-        "6" => DataBits::Six,
-        "7" => DataBits::Seven,
-        _ => DataBits::Eight,
-    }
-}
-pub(crate) fn psb(v: &str) -> StopBits {
-    match v {
-        "2" => StopBits::Two,
-        _ => StopBits::One,
-    }
-}
-pub(crate) fn ppar(v: &str) -> Parity {
-    match v {
-        "odd" => Parity::Odd,
-        "even" => Parity::Even,
-        _ => Parity::None,
-    }
-}
-
 use crate::app::WorkbenchApp;
 use crate::state::StatusLevel;
 use crate::ui::layout_buttons::{LayoutButtonKind, layout_icon_button};
@@ -100,13 +76,15 @@ impl WorkbenchApp {
     pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let so = self
+                .serial
                 .selected_port
                 .as_deref()
                 .is_some_and(|p| self.transport.status_port(p).open);
             let sl = if so {
                 format!(
                     "串口 ▸ {}",
-                    self.selected_port
+                    self.serial
+                        .selected_port
                         .as_deref()
                         .map(|p| self.port_label(p))
                         .unwrap_or_else(|| "?".to_owned())
@@ -116,31 +94,33 @@ impl WorkbenchApp {
             };
             if ui
                 .selectable_label(
-                    !self.top_bar_serial_collapsed,
+                    !self.serial.top_bar_serial_collapsed,
                     egui::RichText::new(format!("{} {sl}", if so { "●" } else { "○" }))
                         .color(if so { theme::GREEN } else { theme::RED }),
                 )
                 .clicked()
             {
-                self.top_bar_serial_collapsed = !self.top_bar_serial_collapsed;
+                self.serial.top_bar_serial_collapsed = !self.serial.top_bar_serial_collapsed;
             }
-            if !self.top_bar_serial_collapsed {
-                let before = self.selected_port.clone();
+            if !self.serial.top_bar_serial_collapsed {
+                let before = self.serial.selected_port.clone();
                 serial_combo(
                     ui,
                     "top-port",
                     120.0,
-                    &self.ports,
-                    &mut self.selected_port,
-                    &self.port_aliases,
+                    &self.serial.ports,
+                    &mut self.serial.selected_port,
+                    &self.serial.port_aliases,
                 );
                 // 端口切换时：保存旧配置、恢复新配置
-                if self.selected_port != before
-                    && let Some(ref new) = self.selected_port.clone()
-                {
-                    self.switch_port_selection(new);
+                if self.serial.selected_port != before {
+                    let new_port = self.serial.selected_port.clone();
+                    if let Some(ref new) = new_port {
+                        self.switch_port_selection(before.as_deref(), new);
+                    }
                 }
                 let selected_open = self
+                    .serial
                     .selected_port
                     .as_deref()
                     .is_some_and(|port| self.transport.status_port(port).open);
@@ -154,7 +134,7 @@ impl WorkbenchApp {
                 }
 
                 if serial_action_button_enabled(ui, selected_open, "关闭").clicked()
-                    && let Some(ref port) = self.selected_port
+                    && let Some(ref port) = self.serial.selected_port
                 {
                     self.transport.close_port(port);
                     self.set_status(StatusLevel::Info, format!("{port} 已关闭"));
@@ -164,7 +144,10 @@ impl WorkbenchApp {
                 ui.label(
                     egui::RichText::new(format!(
                         "· {} {}N{} · {}ms",
-                        self.baud_rate, self.data_bits, self.stop_bits, self.timeout_ms
+                        self.serial.baud_rate,
+                        self.serial.data_bits,
+                        self.serial.stop_bits,
+                        self.serial.timeout_ms
                     ))
                     .color(theme::TEXT_SECONDARY),
                 );
@@ -203,8 +186,7 @@ impl WorkbenchApp {
                 )
                 .clicked()
                 {
-                    self.panels.dock.bottom_visible = !self.panels.dock.bottom_visible;
-                    self.bottom_panel_visible = self.panels.dock.bottom_visible;
+                    self.toggle_bottom_panel();
                     let _ = self.save_config();
                 }
 
@@ -222,7 +204,7 @@ impl WorkbenchApp {
 
                 if layout_icon_button(ui, LayoutButtonKind::Menu, false, "重置布局").clicked() {
                     self.panels.dock = tool_panels::DockLayout::default();
-                    self.bottom_panel_visible = self.panels.dock.bottom_visible;
+                    self.set_bottom_visible(self.panels.dock.bottom_visible);
                     let _ = self.save_config();
                 }
             });

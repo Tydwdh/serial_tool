@@ -36,6 +36,7 @@ impl WorkbenchApp {
                         self.panels
                             .dock
                             .move_panel(kind, tool_panels::DockArea::Center);
+                        self.panels.sync_tabs_from_dock();
                     }
                 }
 
@@ -124,7 +125,7 @@ impl WorkbenchApp {
     pub(crate) fn dynamic_panel_shortcuts(&mut self, ui: &mut egui::Ui) {
         let items: Vec<(String, String)> = self
             .panels
-            .tabs
+            .tabs()
             .iter()
             .filter_map(|kind| kind.dynamic_id().map(|id| id.to_owned()))
             .filter(|id| self.dynamic_panels.contains(id))
@@ -157,7 +158,7 @@ impl WorkbenchApp {
             }
 
             if response.clicked() && self.dynamic_drag_source.is_none() {
-                self.panels.open_tab(PanelKind::Dynamic(id.clone()));
+                self.panels.open_tab(PanelKind::Dynamic(id.to_owned()));
             }
 
             let bg = if is_source {
@@ -220,6 +221,8 @@ impl WorkbenchApp {
     pub(crate) fn reorder_dynamic_tabs(&mut self, source_index: usize, mut insert_index: usize) {
         let mut dynamic_tabs: Vec<PanelKind> = self
             .panels
+            .dock
+            .center
             .tabs
             .iter()
             .filter(|kind| kind.dynamic_id().is_some())
@@ -244,15 +247,20 @@ impl WorkbenchApp {
         let insert_index = insert_index.min(dynamic_tabs.len());
         dynamic_tabs.insert(insert_index, item);
 
+        // 将重排后的动态面板顺序写回 dock.center.tabs
+        let all_tabs = self.panels.dock.all_tabs();
         let mut dynamic_iter = dynamic_tabs.into_iter();
-
-        for kind in &mut self.panels.tabs {
+        let mut new_center: Vec<PanelKind> = Vec::with_capacity(self.panels.dock.center.tabs.len());
+        for kind in &all_tabs {
             if kind.dynamic_id().is_some()
                 && let Some(next) = dynamic_iter.next()
             {
-                *kind = next;
+                new_center.push(next);
+            } else if !kind.dynamic_id().is_some() {
+                new_center.push(kind.clone());
             }
         }
+        self.panels.dock.center.tabs = new_center;
 
         let _ = self.save_config();
     }
@@ -279,143 +287,98 @@ pub(crate) fn ashortcut(a: Activity) -> &'static str {
     }
 }
 
+/// 通用：根据指针位置计算插入索引。
+fn insert_index_from_pointer(
+    rects: &[egui::Rect],
+    pointer: egui::Pos2,
+    margin: f32,
+) -> Option<usize> {
+    if rects.is_empty() {
+        return None;
+    }
+
+    let left = rects
+        .iter()
+        .map(|rect| rect.left())
+        .fold(f32::INFINITY, f32::min);
+
+    let right = rects
+        .iter()
+        .map(|rect| rect.right())
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    let top = rects.first()?.top() - margin;
+    let bottom = rects.last()?.bottom() + margin;
+
+    if pointer.x < left - 16.0 || pointer.x > right + 16.0 || pointer.y < top || pointer.y > bottom
+    {
+        return None;
+    }
+
+    for (index, rect) in rects.iter().enumerate() {
+        if pointer.y < rect.center().y {
+            return Some(index);
+        }
+    }
+
+    Some(rects.len())
+}
+
+/// 通用：绘制插入指示线。
+fn paint_insert_line(ui: &egui::Ui, rects: &[egui::Rect], insert_index: usize) {
+    if rects.is_empty() {
+        return;
+    }
+
+    let left = rects
+        .iter()
+        .map(|rect| rect.left())
+        .fold(f32::INFINITY, f32::min);
+
+    let right = rects
+        .iter()
+        .map(|rect| rect.right())
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    let y = if insert_index == 0 {
+        rects[0].top() - 3.0
+    } else if insert_index >= rects.len() {
+        rects[rects.len() - 1].bottom() + 3.0
+    } else {
+        let above = rects[insert_index - 1];
+        let below = rects[insert_index];
+        (above.bottom() + below.top()) * 0.5
+    };
+
+    let painter = ui.painter();
+
+    painter.line_segment(
+        [egui::pos2(left + 6.0, y), egui::pos2(right - 6.0, y)],
+        egui::Stroke::new(2.0, theme::BLUE),
+    );
+
+    painter.circle_filled(egui::pos2(left + 6.0, y), 3.0, theme::BLUE);
+    painter.circle_filled(egui::pos2(right - 6.0, y), 3.0, theme::BLUE);
+}
+
 pub(crate) fn activity_insert_index_from_pointer(
     rects: &[egui::Rect],
     pointer: egui::Pos2,
 ) -> Option<usize> {
-    if rects.is_empty() {
-        return None;
-    }
-
-    let left = rects
-        .iter()
-        .map(|rect| rect.left())
-        .fold(f32::INFINITY, f32::min);
-
-    let right = rects
-        .iter()
-        .map(|rect| rect.right())
-        .fold(f32::NEG_INFINITY, f32::max);
-
-    let top = rects.first()?.top() - 14.0;
-    let bottom = rects.last()?.bottom() + 14.0;
-
-    if pointer.x < left - 16.0 || pointer.x > right + 16.0 || pointer.y < top || pointer.y > bottom
-    {
-        return None;
-    }
-
-    for (index, rect) in rects.iter().enumerate() {
-        if pointer.y < rect.center().y {
-            return Some(index);
-        }
-    }
-
-    Some(rects.len())
+    insert_index_from_pointer(rects, pointer, 14.0)
 }
 
 pub(crate) fn paint_activity_insert_line(ui: &egui::Ui, rects: &[egui::Rect], insert_index: usize) {
-    if rects.is_empty() {
-        return;
-    }
-
-    let left = rects
-        .iter()
-        .map(|rect| rect.left())
-        .fold(f32::INFINITY, f32::min);
-
-    let right = rects
-        .iter()
-        .map(|rect| rect.right())
-        .fold(f32::NEG_INFINITY, f32::max);
-
-    let y = if insert_index == 0 {
-        rects[0].top() - 3.0
-    } else if insert_index >= rects.len() {
-        rects[rects.len() - 1].bottom() + 3.0
-    } else {
-        let above = rects[insert_index - 1];
-        let below = rects[insert_index];
-        (above.bottom() + below.top()) * 0.5
-    };
-
-    let painter = ui.painter();
-
-    painter.line_segment(
-        [egui::pos2(left + 6.0, y), egui::pos2(right - 6.0, y)],
-        egui::Stroke::new(2.0, theme::BLUE),
-    );
-
-    painter.circle_filled(egui::pos2(left + 6.0, y), 3.0, theme::BLUE);
-    painter.circle_filled(egui::pos2(right - 6.0, y), 3.0, theme::BLUE);
+    paint_insert_line(ui, rects, insert_index);
 }
+
 pub(crate) fn vertical_insert_index_from_pointer(
     rects: &[egui::Rect],
     pointer: egui::Pos2,
 ) -> Option<usize> {
-    if rects.is_empty() {
-        return None;
-    }
-
-    let left = rects
-        .iter()
-        .map(|rect| rect.left())
-        .fold(f32::INFINITY, f32::min);
-
-    let right = rects
-        .iter()
-        .map(|rect| rect.right())
-        .fold(f32::NEG_INFINITY, f32::max);
-
-    let top = rects.first()?.top() - 10.0;
-    let bottom = rects.last()?.bottom() + 10.0;
-
-    if pointer.x < left - 16.0 || pointer.x > right + 16.0 || pointer.y < top || pointer.y > bottom
-    {
-        return None;
-    }
-
-    for (index, rect) in rects.iter().enumerate() {
-        if pointer.y < rect.center().y {
-            return Some(index);
-        }
-    }
-
-    Some(rects.len())
+    insert_index_from_pointer(rects, pointer, 10.0)
 }
 
 pub(crate) fn paint_vertical_insert_line(ui: &egui::Ui, rects: &[egui::Rect], insert_index: usize) {
-    if rects.is_empty() {
-        return;
-    }
-
-    let left = rects
-        .iter()
-        .map(|rect| rect.left())
-        .fold(f32::INFINITY, f32::min);
-
-    let right = rects
-        .iter()
-        .map(|rect| rect.right())
-        .fold(f32::NEG_INFINITY, f32::max);
-
-    let y = if insert_index == 0 {
-        rects[0].top() - 3.0
-    } else if insert_index >= rects.len() {
-        rects[rects.len() - 1].bottom() + 3.0
-    } else {
-        let above = rects[insert_index - 1];
-        let below = rects[insert_index];
-        (above.bottom() + below.top()) * 0.5
-    };
-
-    let painter = ui.painter();
-
-    painter.line_segment(
-        [egui::pos2(left + 6.0, y), egui::pos2(right - 6.0, y)],
-        egui::Stroke::new(2.0, theme::BLUE),
-    );
-
-    painter.circle_filled(egui::pos2(left + 6.0, y), 3.0, theme::BLUE);
-    painter.circle_filled(egui::pos2(right - 6.0, y), 3.0, theme::BLUE);
+    paint_insert_line(ui, rects, insert_index);
 }

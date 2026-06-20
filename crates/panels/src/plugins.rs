@@ -35,7 +35,7 @@ impl PluginsPanel {
                 self.scaffold_plugin();
             }
             if ui.button("打开目录").clicked() {
-                self.last_error = Some(format!("插件目录: {}", self.root));
+                let _ = open::that(&self.root);
             }
         });
 
@@ -44,28 +44,32 @@ impl PluginsPanel {
         }
 
         // 权限确认对话框
-        if let Some(ref summary) = self.pending_enable.clone() {
+        if let Some(ref summary) = self.pending_enable {
+            let summary_id = summary.id.clone();
+            let summary_name = summary.name.clone();
+            let permissions = summary.permissions.clone();
+            let subscriptions = summary.contributes.subscriptions.clone();
+
             egui::Window::new("确认启用插件")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ui.ctx(), |ui| {
-                    ui.label(format!("「{}」({}) 请求以下权限：", summary.name, summary.id));
+                    ui.label(format!("「{summary_name}」({summary_id}) 请求以下权限："));
                     ui.separator();
-                    for perm in &summary.permissions {
+                    for perm in &permissions {
                         ui.label(format!("  • {perm}"));
                     }
-                    if !summary.contributes.subscriptions.is_empty() {
+                    if !subscriptions.is_empty() {
                         ui.label("订阅主题：");
-                        for sub in &summary.contributes.subscriptions {
+                        for sub in &subscriptions {
                             ui.label(format!("  • {}", sub.topic));
                         }
                     }
                     ui.separator();
                     ui.horizontal(|ui| {
                         if ui.button("确认启用").clicked() {
-                            let id = summary.id.clone();
-                            match manager.enable(&id) {
+                            match manager.enable(&summary_id) {
                                 Ok(()) => self.last_error = None,
                                 Err(error) => self.last_error = Some(error.to_string()),
                             }
@@ -119,10 +123,13 @@ impl PluginsPanel {
                     "main": "main.lua",
                     "permissions": ["bus", "log", "ui", "storage"],
                 });
-                let _ = std::fs::write(
+                if let Err(e) = std::fs::write(
                     dir.join("plugin.json"),
                     serde_json::to_string_pretty(&plugin_json).unwrap_or_default(),
-                );
+                ) {
+                    self.last_error = Some(format!("写入 plugin.json 失败：{e}"));
+                    return;
+                }
 
                 let main_lua = r#"local PANEL_ID = "my-panel"
 
@@ -149,7 +156,10 @@ function on_form_action(ctx, panel_id, field_id, action, values)
     end
 end
 "#;
-                let _ = std::fs::write(dir.join("main.lua"), main_lua);
+                if let Err(e) = std::fs::write(dir.join("main.lua"), main_lua) {
+                    self.last_error = Some(format!("写入 main.lua 失败：{e}"));
+                    return;
+                }
 
                 self.last_error = Some(format!("已创建插件 {name}，请点击刷新后启用"));
             }

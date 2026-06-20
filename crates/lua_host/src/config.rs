@@ -49,8 +49,11 @@ impl ConfigStore {
     }
 
     fn write(&self, plugin_id: &str) -> std::io::Result<()> {
-        let cache = self.cache.lock();
-        let Some(data) = cache.get(plugin_id) else {
+        let data = {
+            let cache = self.cache.lock();
+            cache.get(plugin_id).cloned()
+        };
+        let Some(data) = data else {
             return Ok(());
         };
         let path = self.config_path(plugin_id);
@@ -58,9 +61,12 @@ impl ConfigStore {
         fs::create_dir_all(parent)?;
 
         let tmp = path.with_extension("tmp");
-        let content = serde_json::to_string_pretty(data).unwrap_or_else(|_| "{}".to_owned());
+        let content = serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".to_owned());
         fs::write(&tmp, &content)?;
-        fs::rename(&tmp, &path)?;
+        if let Err(e) = fs::rename(&tmp, &path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
         Ok(())
     }
 

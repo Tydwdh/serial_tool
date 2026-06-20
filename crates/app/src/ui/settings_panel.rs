@@ -58,15 +58,15 @@ impl WorkbenchApp {
 
         ui.horizontal(|ui| {
             if ui.button("恢复默认").clicked() {
-                self.selected_port = None;
-                self.baud_rate = "115200".to_owned();
-                self.data_bits = "8".to_owned();
-                self.stop_bits = "1".to_owned();
-                self.parity = "none".to_owned();
-                self.timeout_ms = "50".to_owned();
+                self.serial.selected_port = None;
+                self.serial.baud_rate = "115200".to_owned();
+                self.serial.data_bits = "8".to_owned();
+                self.serial.stop_bits = "1".to_owned();
+                self.serial.parity = "none".to_owned();
+                self.serial.timeout_ms = "50".to_owned();
                 self.recorder_path = default_recorder_path();
                 self.activity_order = default_activity_order();
-                self.port_aliases.clear();
+                self.serial.port_aliases.clear();
                 self.set_status_force(StatusLevel::Warn, "已恢复默认设置，请保存后生效");
             }
 

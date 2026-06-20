@@ -18,3 +18,4 @@ tool-extension = { path = "../extension" }
 tool-recorder = { path = "../recorder" }
 tool-transport = { path = "../transport" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+open.workspace = true

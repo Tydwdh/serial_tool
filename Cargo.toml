@@ -28,6 +28,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serialport = "4.8"
 thiserror = "2"
+open = "5"
 # ── 发布优化：减小体积、提升性能 ──
 [profile.release]
 opt-level = "s"   # 优化体积

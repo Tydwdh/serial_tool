@@ -61,65 +61,12 @@ impl WorkbenchApp {
                 .default_size(self.panels.dock.bottom_size.max(BOTTOM_PANEL_MIN))
                 .min_size(BOTTOM_PANEL_MIN)
                 .show_inside(ui, |ui| {
-                    let width = ui.available_width();
-                    let total_h = ui.available_height();
-                    // 关键：让 resizable bottom panel 的内容吃掉拖拽后的可用高度。
-                    // 否则 egui 会按内容实际高度保存 PanelState，松手后自动收缩。
-                    ui.take_available_height();
-                    const OUTPUT_MIN_H: f32 = 120.0;
-                    const SENDER_MIN_H: f32 = 190.0;
-
-                    let sender_visible =
-                        self.panels.dock.bottom_sender_visible && !self.send.popup_open;
-
-                    let max_sender_h = if sender_visible {
-                        (total_h - OUTPUT_MIN_H).max(0.0)
-                    } else {
-                        0.0
-                    };
-
-                    let sender_h = if sender_visible && max_sender_h >= SENDER_MIN_H {
-                        self.panels
-                            .dock
-                            .bottom_sender_height
-                            .clamp(SENDER_MIN_H, max_sender_h)
-                    } else if sender_visible {
-                        max_sender_h
-                    } else {
-                        0.0
-                    };
-
-                    let output_h = if sender_h > 0.0 {
-                        (total_h - sender_h).max(0.0)
-                    } else {
-                        total_h
-                    };
-
-                    // 上层：接收 / 日志 / 图表输出 dock。
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(width, output_h),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            self.dock_stack_ui(ui, DockArea::Bottom);
-                        },
-                    );
-
-                    if sender_h > 0.0 {
-                        ui.separator();
-
-                        // 下层：发送器。
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(width, sender_h),
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| {
-                                self.send_panel_horizontal(ui);
-                            },
-                        );
-                    }
+                    self.dock_stack_ui(ui, DockArea::Bottom);
                 });
-
             self.bottom_dock_rect = Some(shown.response.rect);
         }
+
+        self.paint_dock_drop_overlay(ctx);
 
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(theme::BG_PRIMARY))
@@ -131,8 +78,6 @@ impl WorkbenchApp {
                         self.dock_stack_ui(ui, DockArea::Center);
                     });
             });
-
-        self.paint_dock_drop_overlay(ctx);
     }
 }
 

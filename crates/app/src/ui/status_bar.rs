@@ -6,17 +6,19 @@ use tool_transport::TransportStatus;
 impl WorkbenchApp {
     pub(crate) fn status_bar(&mut self, ui: &mut egui::Ui) {
         let st = self
+            .serial
             .selected_port
             .as_deref()
             .map(|p| self.transport.status_port(p))
             .unwrap_or_else(TransportStatus::closed);
         ui.horizontal(|ui| {
-            let (d, l) = if let (Some(p), Some(b)) = (self.selected_port.clone(), st.baud_rate) {
-                let label = self.port_label(&p);
-                (if st.open { "●" } else { "○" }, format!("{label} @ {b}"))
-            } else {
-                ("○", "串口已关闭".into())
-            };
+            let (d, l) =
+                if let (Some(p), Some(b)) = (self.serial.selected_port.clone(), st.baud_rate) {
+                    let label = self.port_label(&p);
+                    (if st.open { "●" } else { "○" }, format!("{label} @ {b}"))
+                } else {
+                    ("○", "串口已关闭".into())
+                };
             ui.label(egui::RichText::new(d).color(if st.open {
                 theme::GREEN
             } else {
@@ -33,9 +35,17 @@ impl WorkbenchApp {
             if rec {
                 let stats = self.recorder.stats();
                 if stats.paused {
-                    ui.label(format!("已暂停 {} 条 {:.1}MB", stats.events_written, stats.bytes_written as f64 / 1024.0 / 1024.0));
+                    ui.label(format!(
+                        "已暂停 {} 条 {:.1}MB",
+                        stats.events_written,
+                        stats.bytes_written as f64 / 1024.0 / 1024.0
+                    ));
                 } else {
-                    ui.label(format!("录制中 {} 条 {:.1}MB", stats.events_written, stats.bytes_written as f64 / 1024.0 / 1024.0));
+                    ui.label(format!(
+                        "录制中 {} 条 {:.1}MB",
+                        stats.events_written,
+                        stats.bytes_written as f64 / 1024.0 / 1024.0
+                    ));
                 }
             } else {
                 ui.label("未录制");
@@ -49,8 +59,16 @@ impl WorkbenchApp {
             // DTR/RTS 状态
             if st.open {
                 ui.separator();
-                let dtr = if self.send.dtr_high { "DTR⬆" } else { "DTR⬇" };
-                let rts = if self.send.rts_high { "RTS⬆" } else { "RTS⬇" };
+                let dtr = if self.send.dtr_high {
+                    "DTR⬆"
+                } else {
+                    "DTR⬇"
+                };
+                let rts = if self.send.rts_high {
+                    "RTS⬆"
+                } else {
+                    "RTS⬇"
+                };
                 ui.label(format!("{dtr} {rts}"));
             }
             ui.separator();

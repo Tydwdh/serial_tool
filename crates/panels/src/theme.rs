@@ -51,3 +51,21 @@ pub const ATTITUDE_BODY: Color32 = YELLOW;
 pub const ATTITUDE_AXIS_X: Color32 = RED;
 pub const ATTITUDE_AXIS_Y: Color32 = GREEN;
 pub const ATTITUDE_AXIS_Z: Color32 = BLUE;
+
+// ── 公共 UI 工具 ──
+
+/// 自动滚动按钮：暂停/恢复自动滚动。
+/// 返回 `true` 表示需要强制滚动到底部。
+pub fn auto_scroll_button(ui: &mut egui::Ui, auto_scroll: &mut bool) -> bool {
+    if *auto_scroll {
+        if ui.button("⏸").on_hover_text("暂停自动滚动").clicked() {
+            *auto_scroll = false;
+        }
+        false
+    } else if ui.button("↓").on_hover_text("滚动到底部").clicked() {
+        *auto_scroll = true;
+        true
+    } else {
+        false
+    }
+}

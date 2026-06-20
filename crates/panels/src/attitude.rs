@@ -20,7 +20,7 @@ impl AttitudePanel {
 
     pub fn new_for_topic(bus: &DataBus, topic: impl Into<String>) -> Self {
         Self {
-            subscription: bus.subscribe(TopicFilter::exact(topic.into())),
+            subscription: bus.subscribe_lossy_bounded(TopicFilter::exact(topic.into()), 1024),
             roll: 0.0,
             pitch: 0.0,
             yaw: 0.0,
