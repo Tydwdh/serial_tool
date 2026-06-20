@@ -217,6 +217,17 @@ impl TransportStatus {
 
 use std::sync::atomic::AtomicU64;
 
+/// 串口生命周期管理器。
+///
+/// # Safety / 所有权
+///
+/// `TransportManager` **不实现** `Drop`（有意为之）。因为 `Clone` 被
+/// `LuaPluginRuntime`、`PluginManager` 多处持有，任意一个 clone 被 drop
+/// 会误关所有串口。关闭串口的**唯一安全调用点**是 `WorkbenchApp::drop()`
+/// 中调用的 `close_serial()`。
+///
+/// 如果外部代码意外 drop 了一个 `TransportManager` clone，串口 worker 线程
+/// 将继续运行（`Arc` 中的 `PortHandle` 仍存活），线程不会泄漏。
 #[derive(Clone)]
 pub struct TransportManager {
     bus: DataBus,
@@ -642,10 +653,6 @@ impl TransportManager {
         }
     }
 }
-
-// TransportManager 不再实现 Drop：
-// clone 被 Lua plugin/PluginManager 多处持有，任意 clone drop 会误关所有串口。
-// 关闭串口的唯一安全调用点是 WorkbenchApp::drop()。
 
 // ── 串口 I/O trait ──
 

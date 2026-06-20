@@ -1,5 +1,5 @@
 use crate::{fmt_ts, theme, MAX_INGEST_PER_FRAME};
-use egui::{Color32, RichText, ScrollArea};
+use egui::{Color32, RichText, ScrollArea, UiBuilder};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use tool_core::{Direction, Event, Payload};
 use tool_databus::{DataBus, Subscription, TopicFilter};
@@ -373,8 +373,6 @@ impl TerminalPanel {
 
         ui.separator();
 
-        let total_all: usize = self.ports.values().map(|d| d.entries.len()).sum();
-
         let render_outcome = {
             // 预计算搜索查询的小写版本，避免在渲染循环中重复分配
             let search_lower = self.search_text.trim().to_ascii_lowercase();
@@ -399,14 +397,6 @@ impl TerminalPanel {
                         entry,
                     });
                 }
-            }
-
-            let visible_count = rows.len();
-            if visible_count != total_all {
-                ui.label(
-                    RichText::new(format!("{visible_count} / {total_all} 条"))
-                        .color(theme::TEXT_SECONDARY),
-                );
             }
 
             // 截断提示
@@ -787,10 +777,10 @@ fn render_rows_view(
             if entry_rect.bottom() >= clip_rect.top() - entry_height
                 && entry_rect.top() <= clip_rect.bottom() + entry_height
             {
-                let mut child_ui = ui.child_ui(
-                    entry_rect,
-                    egui::Layout::top_down(egui::Align::Min),
-                    None,
+                let mut child_ui = ui.new_child(
+                    UiBuilder::new()
+                        .max_rect(entry_rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
                 );
 
                 let selected = selected_entry_id == Some(row.entry.id);

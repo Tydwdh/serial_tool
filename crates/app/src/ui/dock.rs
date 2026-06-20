@@ -2,6 +2,7 @@ use eframe::egui;
 use tool_panels::{DockArea, PanelKind, theme};
 
 use crate::app::WorkbenchApp;
+use crate::state::StatusLevel;
 
 impl WorkbenchApp {
     pub(crate) fn dock_stack_ui(&mut self, ui: &mut egui::Ui, area: DockArea) {
@@ -176,7 +177,12 @@ impl WorkbenchApp {
         match kind {
             PanelKind::Devices => self.device_panel(ui),
             PanelKind::Replay => self.replay_panel.ui(ui),
-            PanelKind::Plugins => self.plugins_panel.ui(ui, &mut self.plugin_manager),
+            PanelKind::Plugins => {
+                if let Some((msg, is_error)) = self.plugins_panel.ui(ui, &mut self.plugin_manager) {
+                    let level = if is_error { StatusLevel::Error } else { StatusLevel::Info };
+                    self.set_status_force(level, msg);
+                }
+            }
             PanelKind::Settings => self.settings_panel(ui),
             PanelKind::Terminal => {
                 if self.terminal_popup_open {

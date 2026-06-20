@@ -142,28 +142,12 @@ impl WorkbenchApp {
 
         self.dynamic_panels.ingest(&mut self.panels);
         let _terminal_ingested = self.terminal_panel.ingest_pending();
-        let n = self.plugin_manager.process_pending();
-        if n > 0 {
-            self.set_status_force(StatusLevel::Info, format!("{n} 个插件事件"));
-        }
+        self.plugin_manager.process_pending();
     }
 
-    /// 串口刷新 + 速率统计。
+    /// 串口刷新。
     fn tick_port_refresh(&mut self, ctx: &egui::Context) {
-        // 速率统计
         let now = ctx.input(|i| i.time);
-        if self.last_rate_check_time > 0.0 {
-            let el = now - self.last_rate_check_time;
-            if el >= 1.0 {
-                let c = self.bus.published_count();
-                self.event_rate = c.saturating_sub(self.last_event_count) as f64 / el;
-                self.last_event_count = c;
-                self.last_rate_check_time = now;
-            }
-        } else {
-            self.last_rate_check_time = now;
-            self.last_event_count = self.bus.published_count();
-        }
         let refresh_interval = if ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
             0.5
         } else {

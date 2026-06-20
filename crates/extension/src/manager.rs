@@ -220,11 +220,11 @@ impl PluginManager {
             return Err(ExtensionError::AlreadyEnabled(plugin_id.to_owned()));
         }
 
-        // 检查是否正在关闭中，防止同一插件同时存在两个运行时
+        // 检查是否正在关闭中，防止同一插件同时存在两个运行时。
+        // 不在 UI 线程上忙等待：直接返回 Stopping 错误，调用方（如 plugins_panel）
+        // 可通过下次重试处理。忙等待会阻塞 UI 线程长达 timeout。
         if self.stopping_plugins.iter().any(|(id, _)| id == plugin_id) {
-            return Err(ExtensionError::AlreadyEnabled(format!(
-                "{plugin_id}（正在关闭中，请稍后重试）"
-            )));
+            return Err(ExtensionError::Stopping(plugin_id.to_owned()));
         }
 
         let runtime = self

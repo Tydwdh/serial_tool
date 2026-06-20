@@ -140,7 +140,9 @@ impl LuaPluginRuntime {
             return false;
         }
 
-        self.event_sender.send(event.clone()).is_ok()
+        // 使用 try_send 而非 send：回放期间若插件处理慢，丢弃事件比阻塞 UI 线程安全。
+        // 与 on_event 保持一致行为。
+        self.event_sender.try_send(event.clone()).is_ok()
     }
 
     pub fn stop(&self) {
@@ -159,8 +161,20 @@ impl Drop for LuaPluginRuntime {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
 
+        // 超时 join：防止 Lua 线程卡住时阻塞 UI 线程 Drop。
+        // Lua 线程有指令 hook，正常情况几 ms 内响应 stop flag；
+        // 超时后分离线程，让其自行结束。
         if let Some(join) = self.join.take() {
-            let _ = join.join();
+            const DROP_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
+            let deadline = std::time::Instant::now() + DROP_JOIN_TIMEOUT;
+            while std::time::Instant::now() < deadline {
+                if join.is_finished() {
+                    let _ = join.join();
+                    return;
+                }
+                std::thread::yield_now();
+            }
+            // 超时：分离线程，不再等待
         }
     }
 }
@@ -302,10 +316,20 @@ impl Drop for LuaHost {
             worker.stop.store(true, Ordering::Relaxed);
         }
 
+        // 超时 join（同 LuaPluginRuntime::drop 的策略）
         if let Some(mut worker) = self.worker.take()
             && let Some(join) = worker.join.take()
         {
-            let _ = join.join();
+            const DROP_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
+            let deadline = std::time::Instant::now() + DROP_JOIN_TIMEOUT;
+            while std::time::Instant::now() < deadline {
+                if join.is_finished() {
+                    let _ = join.join();
+                    return;
+                }
+                std::thread::yield_now();
+            }
+            // 超时：分离线程
         }
     }
 }

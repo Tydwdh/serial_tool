@@ -168,13 +168,11 @@ impl Event {
     }
 
     /// 从 source 字符串中提取端口名（去除 "serial:" 前缀）
-    #[deprecated(note = "Use tool_transport::serial_rx_event instead")]
     fn extract_port(source: &str) -> String {
         source.strip_prefix("serial:").unwrap_or(source).to_owned()
     }
 
     /// 构建串口事件的通用方法。
-    #[deprecated(note = "Use tool_transport::serial_rx_event / serial_tx_event instead")]
     fn serial_event(
         topic: &str,
         direction: Direction,
@@ -182,6 +180,7 @@ impl Event {
         bytes: Vec<u8>,
     ) -> Self {
         let source = source.into();
+        #[allow(deprecated)]
         let port = Self::extract_port(&source);
         Self::new(topic, source, direction, Payload::Bytes(bytes))
             .with_metadata(json!({ "port": port }))
@@ -189,11 +188,13 @@ impl Event {
 
     #[deprecated(note = "Use tool_transport::serial_rx_event instead")]
     pub fn serial_rx(source: impl Into<String>, bytes: Vec<u8>) -> Self {
+        #[allow(deprecated)]
         Self::serial_event(topics::SERIAL_RX, Direction::Rx, source, bytes)
     }
 
     #[deprecated(note = "Use tool_transport::serial_tx_event instead")]
     pub fn serial_tx(source: impl Into<String>, bytes: Vec<u8>) -> Self {
+        #[allow(deprecated)]
         Self::serial_event(topics::SERIAL_TX, Direction::Tx, source, bytes)
     }
 
@@ -444,6 +445,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn serial_rx_strips_serial_prefix_for_port_metadata() {
         let event = Event::serial_rx("serial:COM3", vec![1, 2, 3]);
         assert_eq!(event.topic, topics::SERIAL_RX);
@@ -454,6 +456,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn serial_rx_without_prefix_keeps_port() {
         let event = Event::serial_rx("COM3", vec![]);
         assert_eq!(event.meta_str("port"), Some("COM3"));

@@ -5,18 +5,14 @@ use tool_extension::{PluginManager, PluginState, PluginSummary};
 
 pub struct PluginsPanel {
     root: String,
-    last_error: Option<String>,
     recently_disabled: Vec<String>,
-    pending_enable: Option<PluginSummary>,
 }
 
 impl PluginsPanel {
     pub fn new() -> Self {
         Self {
             root: "plugins".to_owned(),
-            last_error: None,
             recently_disabled: Vec::new(),
-            pending_enable: None,
         }
     }
 
@@ -24,94 +20,57 @@ impl PluginsPanel {
         std::mem::take(&mut self.recently_disabled)
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, manager: &mut PluginManager) {
-        ui.horizontal(|ui| {
+    /// 渲染插件面板 UI，返回 (消息内容, 是否错误) 供调用方显示到状态栏。
+    pub fn ui(&mut self, ui: &mut egui::Ui, manager: &mut PluginManager) -> Option<(String, bool)> {
+        let toolbar_status = ui.horizontal(|ui| -> Option<(String, bool)> {
             ui.label("根目录");
             ui.add(TextEdit::singleline(&mut self.root).desired_width(240.0));
             if ui.button("刷新").clicked() {
-                self.refresh(manager);
+                match manager.discover_roots([PathBuf::from(self.root.trim())]) {
+                    Ok(count) => return Some((format!("发现了 {count} 个插件"), false)),
+                    Err(error) => return Some((error.to_string(), true)),
+                }
             }
             if ui.button("创建插件...").clicked() {
-                self.scaffold_plugin();
+                return self.scaffold_plugin();
             }
             if ui.button("打开目录").clicked() {
                 let _ = open::that(&self.root);
             }
-        });
+            None
+        }).inner;
 
-        if let Some(error) = &self.last_error {
-            ui.colored_label(theme::RED, error);
-        }
-
-        // 权限确认对话框
-        if let Some(ref summary) = self.pending_enable {
-            let summary_id = summary.id.clone();
-            let summary_name = summary.name.clone();
-            let permissions = summary.permissions.clone();
-            let subscriptions = summary.contributes.subscriptions.clone();
-
-            egui::Window::new("确认启用插件")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ui.ctx(), |ui| {
-                    ui.label(format!("「{summary_name}」({summary_id}) 请求以下权限："));
-                    ui.separator();
-                    for perm in &permissions {
-                        ui.label(format!("  • {perm}"));
-                    }
-                    if !subscriptions.is_empty() {
-                        ui.label("订阅主题：");
-                        for sub in &subscriptions {
-                            ui.label(format!("  • {}", sub.topic));
-                        }
-                    }
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        if ui.button("确认启用").clicked() {
-                            match manager.enable(&summary_id) {
-                                Ok(()) => self.last_error = None,
-                                Err(error) => self.last_error = Some(error.to_string()),
-                            }
-                            self.pending_enable = None;
-                        }
-                        if ui.button("取消").clicked() {
-                            self.pending_enable = None;
-                        }
-                    });
-                });
-        }
+        let status = toolbar_status;
 
         ui.separator();
         let summaries = manager.summaries();
         if summaries.is_empty() {
             ui.label("未找到插件");
-            return;
+            return status;
         }
 
-        ScrollArea::vertical()
+        let scroll_result = ScrollArea::vertical()
             .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .show(ui, |ui| -> Option<(String, bool)> {
+                let mut row_status: Option<(String, bool)> = None;
                 for summary in summaries {
-                    self.plugin_row(ui, manager, summary);
+                    let s = self.plugin_row(ui, manager, summary);
+                    if row_status.is_none() {
+                        row_status = s;
+                    }
                     ui.separator();
                 }
+                row_status
             });
+
+        status.or(scroll_result.inner)
     }
 
-    fn refresh(&mut self, manager: &mut PluginManager) {
-        match manager.discover_roots([PathBuf::from(self.root.trim())]) {
-            Ok(count) => self.last_error = Some(format!("发现了 {count} 个插件")),
-            Err(error) => self.last_error = Some(error.to_string()),
-        }
-    }
-
-    fn scaffold_plugin(&mut self) {
+    fn scaffold_plugin(&mut self) -> Option<(String, bool)> {
         let name = "my-plugin";
         let dir = PathBuf::from(self.root.trim()).join(name);
         if dir.exists() {
-            self.last_error = Some(format!("{name} 已存在"));
-            return;
+            return Some((format!("{name} 已存在"), true));
         }
         match std::fs::create_dir_all(&dir) {
             Ok(()) => {
@@ -127,8 +86,7 @@ impl PluginsPanel {
                     dir.join("plugin.json"),
                     serde_json::to_string_pretty(&plugin_json).unwrap_or_default(),
                 ) {
-                    self.last_error = Some(format!("写入 plugin.json 失败：{e}"));
-                    return;
+                    return Some((format!("写入 plugin.json 失败：{e}"), true));
                 }
 
                 let main_lua = r#"local PANEL_ID = "my-panel"
@@ -157,15 +115,12 @@ function on_form_action(ctx, panel_id, field_id, action, values)
 end
 "#;
                 if let Err(e) = std::fs::write(dir.join("main.lua"), main_lua) {
-                    self.last_error = Some(format!("写入 main.lua 失败：{e}"));
-                    return;
+                    return Some((format!("写入 main.lua 失败：{e}"), true));
                 }
 
-                self.last_error = Some(format!("已创建插件 {name}，请点击刷新后启用"));
+                Some((format!("已创建插件 {name}，请点击刷新后启用"), false))
             }
-            Err(e) => {
-                self.last_error = Some(format!("创建失败：{e}"));
-            }
+            Err(e) => Some((format!("创建失败：{e}"), true)),
         }
     }
 
@@ -174,7 +129,7 @@ end
         ui: &mut egui::Ui,
         manager: &mut PluginManager,
         summary: PluginSummary,
-    ) {
+    ) -> Option<(String, bool)> {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(&summary.name).strong());
             ui.monospace(&summary.id);
@@ -220,13 +175,17 @@ end
             ui.colored_label(theme::RED, error);
         }
 
-        ui.horizontal(|ui| {
+        // 按钮行：通过闭包返回值传递操作结果
+        let row_status = ui.horizontal(|ui| -> Option<(String, bool)> {
             let can_enable = !matches!(summary.state, PluginState::Running | PluginState::Enabled);
             if ui
                 .add_enabled(can_enable, egui::Button::new("启用"))
                 .clicked()
             {
-                self.pending_enable = Some(summary.clone());
+                match manager.enable(&summary.id) {
+                    Ok(()) => {}
+                    Err(error) => return Some((error.to_string(), true)),
+                }
             }
             let can_disable = matches!(
                 summary.state,
@@ -241,10 +200,9 @@ end
             {
                 match manager.disable(&summary.id) {
                     Ok(()) => {
-                        self.last_error = None;
                         self.recently_disabled.push(summary.id.clone());
                     }
-                    Err(error) => self.last_error = Some(error.to_string()),
+                    Err(error) => return Some((error.to_string(), true)),
                 }
             }
             let can_restart = can_disable;
@@ -254,14 +212,17 @@ end
                 .clicked()
             {
                 if let Err(e) = manager.disable(&summary.id) {
-                    self.last_error = Some(format!("禁用失败：{e}"));
+                    return Some((format!("禁用失败：{e}"), true));
                 } else if let Err(e) = manager.enable(&summary.id) {
-                    self.last_error = Some(format!("启用失败：{e}"));
+                    return Some((format!("启用失败：{e}"), true));
                 } else {
-                    self.last_error = Some(format!("{} 已重启", summary.id));
+                    return Some((format!("{} 已重启", summary.id), false));
                 }
             }
-        });
+            None
+        }).inner;
+
+        row_status
     }
 }
 

@@ -27,6 +27,9 @@ pub enum ExtensionError {
     #[error("plugin '{0}' is already enabled")]
     AlreadyEnabled(String),
 
+    #[error("plugin '{0}' is still shutting down")]
+    Stopping(String),
+
     #[error("unsupported runtime '{0}'")]
     UnsupportedRuntime(String),
 

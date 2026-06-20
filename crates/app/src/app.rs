@@ -16,7 +16,7 @@ use tool_panels::{
 use tool_recorder::JsonlRecorder;
 use tool_transport::TransportManager;
 
-use crate::bootstrap::{REPAINT_INTERVAL_MS, app_dir, apply_theme, setup_fonts};
+use crate::bootstrap::{app_dir, apply_theme, setup_fonts};
 
 // ── 数据结构 ──
 
@@ -48,9 +48,6 @@ pub(crate) struct WorkbenchApp {
     pub(crate) bottom_dock_rect: Option<egui::Rect>,
     pub(crate) right_dock_rect: Option<egui::Rect>,
     pub(crate) last_auto_save_time: f64,
-    pub(crate) last_rate_check_time: f64,
-    pub(crate) last_event_count: u64,
-    pub(crate) event_rate: f64,
     pub(crate) dynamic_drag_source: Option<usize>,
     pub(crate) file_broker: Arc<FileAccessBroker>,
     pub(crate) dialog_receiver: crossbeam_channel::Receiver<DialogRequest>,
@@ -93,6 +90,8 @@ impl WorkbenchApp {
     }
 
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // 主题必须尽早设置，否则 eframe 在 new() 返回前可能已用默认主题渲染了首帧。
+        apply_theme(&cc.egui_ctx);
         setup_fonts(cc);
         cc.egui_ctx.set_embed_viewports(false);
         let bus = DataBus::new();
@@ -121,7 +120,6 @@ impl WorkbenchApp {
                 "未找到或无法加载配置，使用默认设置",
             ));
         }
-        apply_theme(&cc.egui_ctx);
         let mut rp = config
             .as_ref()
             .map(|c| c.panels.clone())
@@ -210,9 +208,6 @@ impl WorkbenchApp {
             activity_drag_source: None,
             activity_rects_cache: Vec::new(),
             last_auto_save_time: 0.0,
-            last_rate_check_time: 0.0,
-            last_event_count: 0,
-            event_rate: 0.0,
             bus: bus.clone(),
             transport,
             plugin_manager: pm,
@@ -269,6 +264,9 @@ impl eframe::App for WorkbenchApp {
         self.tick_pre_ui(&ctx);
         self.draw_shell(ui, &ctx);
         self.tick_post_ui(&ctx);
-        ctx.request_repaint_after(std::time::Duration::from_millis(REPAINT_INTERVAL_MS));
+
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        let poll_interval_ms = if focused { 80 } else { 250 };
+        ctx.request_repaint_after(std::time::Duration::from_millis(poll_interval_ms));
     }
 }

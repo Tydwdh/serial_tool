@@ -1,5 +1,5 @@
 use crate::{fmt_ts, theme, MAX_INGEST_PER_FRAME};
-use egui::{Color32, RichText, ScrollArea};
+use egui::{Color32, RichText, ScrollArea, UiBuilder};
 use std::collections::VecDeque;
 use tool_core::{Event, LogLevel};
 use tool_databus::{DataBus, Subscription, TopicFilter};
@@ -79,7 +79,7 @@ impl LogPanel {
 
         let mut force_scroll_to_bottom = false;
 
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
             ui.label("级别");
 
             for level in [
@@ -89,7 +89,21 @@ impl LogPanel {
                 LogLevel::Warn,
                 LogLevel::Error,
             ] {
-                ui.selectable_value(&mut self.min_level, level, level.as_str());
+                let is_selected = self.min_level == level;
+                let text = level.as_str();
+                let color = if is_selected {
+                    theme::TEXT_PRIMARY
+                } else {
+                    theme::TEXT_SECONDARY
+                };
+                let response = ui.add_sized(
+                    [40.0, 0.0],
+                    egui::Button::new(egui::RichText::new(text).color(color))
+                        .frame(is_selected),
+                );
+                if response.clicked() {
+                    self.min_level = level;
+                }
             }
 
             force_scroll_to_bottom |= crate::theme::auto_scroll_button(ui, &mut self.auto_scroll);
@@ -102,10 +116,6 @@ impl LogPanel {
             if ui.button("清空").clicked() {
                 self.clear();
             }
-
-            ui.label(
-                RichText::new(format!("{} 条", self.entries.len())).color(theme::TEXT_SECONDARY),
-            );
         });
 
         ui.separator();
@@ -252,10 +262,10 @@ fn render_log_rows(
                 if entry_rect.bottom() >= clip_rect.top() - entry_height
                     && entry_rect.top() <= clip_rect.bottom() + entry_height
                 {
-                    let mut child_ui = ui.child_ui(
-                        entry_rect,
-                        egui::Layout::top_down(egui::Align::Min),
-                        None,
+                    let mut child_ui = ui.new_child(
+                        UiBuilder::new()
+                            .max_rect(entry_rect)
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
                     );
 
                     let response = show_log_entry(&mut child_ui, entry, base_row_height);
