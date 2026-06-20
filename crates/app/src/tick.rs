@@ -53,19 +53,11 @@ impl WorkbenchApp {
                 self.panels.dock.right_visible = !self.panels.dock.right_visible;
                 if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
             }
-            Action::CloseTab => {
-                let active = self.panels.active_tab.clone();
-                if active.activity().is_none() {
-                    self.panels.close_tab(active);
-                    if let Err(e) = self.save_config() { log::warn!("save_config failed: {e}") };
-                }
-            }
             Action::SelectActivity1 => self.panels.select_activity(Activity::Devices),
             Action::SelectActivity2 => self.panels.select_activity(Activity::Replay),
             Action::SelectActivity3 => self.panels.select_activity(Activity::Plugins),
             Action::SelectActivity4 => self.panels.select_activity(Activity::Settings),
             Action::Send => {
-                // Ctrl+Enter 发送：仅在底部面板可见且发送目标端口打开时触发
                 if self.send_target_port_open() && !self.send.input.trim().is_empty() {
                     self.do_send();
                 }

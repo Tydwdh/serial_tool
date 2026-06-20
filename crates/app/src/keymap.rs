@@ -19,8 +19,6 @@ pub(crate) enum Action {
     ToggleBottomPanel,
     /// 切换右侧边栏
     ToggleRightSidebar,
-    /// 关闭当前活动标签页
-    CloseTab,
     /// 切换到活动栏第 1 项（设备）
     SelectActivity1,
     /// 切换到活动栏第 2 项（回放）
@@ -45,7 +43,6 @@ impl Action {
         Action::ToggleActivityBar,
         Action::ToggleBottomPanel,
         Action::ToggleRightSidebar,
-        Action::CloseTab,
         Action::SelectActivity1,
         Action::SelectActivity2,
         Action::SelectActivity3,
@@ -63,7 +60,6 @@ impl Action {
             Action::ToggleActivityBar => "切换左侧活动栏",
             Action::ToggleBottomPanel => "切换底部面板",
             Action::ToggleRightSidebar => "切换右侧边栏",
-            Action::CloseTab => "关闭标签页",
             Action::SelectActivity1 => "切换到设备",
             Action::SelectActivity2 => "切换到回放",
             Action::SelectActivity3 => "切换到插件",
@@ -145,7 +141,6 @@ fn default_bindings() -> HashMap<Action, Vec<KeyBinding>> {
     m.insert(ToggleActivityBar,  vec![KeyBinding::new("B", true, false, false)]);
     m.insert(ToggleBottomPanel,  vec![KeyBinding::new("Backtick", true, false, false)]);
     m.insert(ToggleRightSidebar, vec![KeyBinding::new("B", true, false, true)]);
-    m.insert(CloseTab,           vec![KeyBinding::new("W", true, false, false)]);
     m.insert(SelectActivity1,    vec![KeyBinding::new("Num1", true, false, false)]);
     m.insert(SelectActivity2,    vec![KeyBinding::new("Num2", true, false, false)]);
     m.insert(SelectActivity3,    vec![KeyBinding::new("Num3", true, false, false)]);

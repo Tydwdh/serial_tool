@@ -173,15 +173,23 @@ impl WorkbenchApp {
     }
     fn dock_panel_body(&mut self, ui: &mut egui::Ui, area: DockArea, kind: PanelKind) {
         match kind {
-            PanelKind::Devices => self.device_panel(ui),
-            PanelKind::Replay => self.replay_panel.ui(ui),
-            PanelKind::Plugins => {
-                if let Some((msg, is_error)) = self.plugins_panel.ui(ui, &mut self.plugin_manager) {
-                    let level = if is_error { StatusLevel::Error } else { StatusLevel::Info };
-                    self.set_status_force(level, msg);
-                }
+            PanelKind::Devices => {
+                egui::ScrollArea::vertical().show(ui, |ui| self.device_panel(ui));
             }
-            PanelKind::Settings => self.settings_panel(ui),
+            PanelKind::Replay => {
+                egui::ScrollArea::vertical().show(ui, |ui| self.replay_panel.ui(ui));
+            }
+            PanelKind::Plugins => {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    if let Some((msg, is_error)) = self.plugins_panel.ui(ui, &mut self.plugin_manager) {
+                        let level = if is_error { StatusLevel::Error } else { StatusLevel::Info };
+                        self.set_status_force(level, msg);
+                    }
+                });
+            }
+            PanelKind::Settings => {
+                egui::ScrollArea::vertical().show(ui, |ui| self.settings_panel(ui));
+            }
             PanelKind::Terminal => {
                 if self.terminal_popup_open {
                     ui.vertical_centered(|ui| {
@@ -200,7 +208,6 @@ impl WorkbenchApp {
                 DockArea::Bottom => self.send_panel_horizontal(ui),
                 DockArea::Center => {
                     ui.colored_label(theme::YELLOW, "发送器不支持放在主工作区，已自动移到底部");
-                    // 自动移到底部
                     self.panels.dock.move_panel(PanelKind::Sender, DockArea::Bottom);
                     self.panels.dock.bottom_visible = true;
                     self.set_bottom_visible(true);
@@ -212,7 +219,7 @@ impl WorkbenchApp {
                 if self.detached_dynamic_panels.contains(&id) {
                     ui.label("已弹出到独立窗口");
                 } else if self.dynamic_panels.contains(&id) {
-                    self.dynamic_panels.ui_body(ui, &id);
+                    egui::ScrollArea::vertical().show(ui, |ui| self.dynamic_panels.ui_body(ui, &id));
                 } else {
                     ui.colored_label(theme::RED, format!("动态面板不存在：{id}"));
                 }
