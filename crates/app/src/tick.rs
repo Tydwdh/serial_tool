@@ -262,9 +262,7 @@ impl WorkbenchApp {
             let mut count: u64 = 0;
 
             loop {
-                // 基于 start_time + count * interval 计算 absolute deadline，而非累加。
-                // 累加方案：每次发送后 next += interval，但发送本身耗时会被包含进去，导致长期漂移。
-                // 本方案：deadline = start + (count + 1) * interval，完全消除累积误差。
+                // 基于 start_time + count * interval 计算 absolute deadline
                 let deadline = start + interval * (count as u32 + 1);
 
                 // 纯 spin-wait 到 deadline
