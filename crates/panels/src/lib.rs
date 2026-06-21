@@ -51,6 +51,55 @@ pub fn row_height(ui: &egui::Ui) -> f32 {
     (text_style_height.ceil() + 6.0).max(20.0)
 }
 
+const AUTO_SCROLL_OFFSET_EPSILON: f32 = 0.5;
+const AUTO_SCROLL_BOTTOM_EPSILON: f32 = 4.0;
+
+pub(crate) fn scroll_delta_moves_away_from_bottom(scroll_delta_y: f32) -> bool {
+    scroll_delta_y > AUTO_SCROLL_OFFSET_EPSILON
+}
+
+pub(crate) fn scroll_delta_moves_towards_bottom(scroll_delta_y: f32) -> bool {
+    scroll_delta_y < -AUTO_SCROLL_OFFSET_EPSILON
+}
+
+pub(crate) fn scroll_is_at_bottom(
+    offset_y: f32,
+    content_height: f32,
+    viewport_height: f32,
+) -> bool {
+    let bottom_offset = (content_height - viewport_height).max(0.0);
+    offset_y >= bottom_offset - AUTO_SCROLL_BOTTOM_EPSILON
+}
+
+pub(crate) fn next_auto_scroll_state(
+    auto_scroll: bool,
+    pointer_inside: bool,
+    scroll_delta_y: f32,
+    previous_offset_y: f32,
+    offset_y: f32,
+    content_height: f32,
+    viewport_height: f32,
+) -> bool {
+    if !pointer_inside {
+        return auto_scroll;
+    }
+
+    let at_bottom = scroll_is_at_bottom(offset_y, content_height, viewport_height);
+    let moved_away_from_bottom = offset_y < previous_offset_y - AUTO_SCROLL_OFFSET_EPSILON;
+    let moved_towards_bottom = offset_y > previous_offset_y + AUTO_SCROLL_OFFSET_EPSILON;
+    let scrolled_towards_bottom = scroll_delta_moves_towards_bottom(scroll_delta_y);
+
+    if auto_scroll && moved_away_from_bottom && !at_bottom {
+        return false;
+    }
+
+    if !auto_scroll && at_bottom && (moved_towards_bottom || scrolled_towards_bottom) {
+        return true;
+    }
+
+    auto_scroll
+}
+
 /// 截断字符串中间，用 "..." 连接
 pub fn compact_middle(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
@@ -162,6 +211,44 @@ mod tests {
             // We just check it's a real color value
             let _ = color; // at minimum, the function returned without panicking
         }
+    }
+
+    // ── auto scroll ──────────────────────────────────────────────────
+
+    #[test]
+    fn auto_scroll_stays_enabled_when_scroll_input_moves_towards_bottom() {
+        let next = next_auto_scroll_state(true, true, -24.0, 96.0, 100.0, 200.0, 100.0);
+
+        assert!(next);
+    }
+
+    #[test]
+    fn auto_scroll_disables_after_view_moves_away_from_bottom() {
+        let next = next_auto_scroll_state(true, true, 24.0, 100.0, 80.0, 200.0, 100.0);
+
+        assert!(!next);
+    }
+
+    #[test]
+    fn auto_scroll_reenables_when_manual_scroll_reaches_bottom() {
+        let next = next_auto_scroll_state(false, true, -24.0, 80.0, 100.0, 200.0, 100.0);
+
+        assert!(next);
+    }
+
+    #[test]
+    fn scroll_delta_direction_matches_egui_wheel_direction() {
+        assert!(scroll_delta_moves_towards_bottom(-24.0));
+        assert!(!scroll_delta_moves_towards_bottom(24.0));
+        assert!(scroll_delta_moves_away_from_bottom(24.0));
+        assert!(!scroll_delta_moves_away_from_bottom(-24.0));
+    }
+
+    #[test]
+    fn auto_scroll_pause_is_not_immediately_reenabled_without_bottomward_motion() {
+        let next = next_auto_scroll_state(false, true, 0.0, 100.0, 100.0, 200.0, 100.0);
+
+        assert!(!next);
     }
 
     // ── compact_middle ────────────────────────────────────────────────

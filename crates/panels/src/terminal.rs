@@ -1,5 +1,5 @@
 use crate::{MAX_INGEST_PER_FRAME, fmt_ts, theme};
-use egui::{Color32, RichText, ScrollArea, UiBuilder};
+use egui::{Color32, RichText, ScrollArea};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use tool_core::{Direction, Event, Payload};
 use tool_databus::{DataBus, Subscription, TopicFilter};
@@ -30,6 +30,7 @@ pub struct TerminalPanel {
     pub maximize_clicked: bool,
 
     last_scroll_offsets: BTreeMap<String, f32>,
+    pending_scroll_to_bottom_keys: BTreeSet<String>,
 
     next_entry_id: u64,
     selected_entry_id: Option<u64>,
@@ -113,6 +114,7 @@ impl TerminalPanel {
             maximize_clicked: false,
 
             last_scroll_offsets: BTreeMap::new(),
+            pending_scroll_to_bottom_keys: BTreeSet::new(),
 
             next_entry_id: 1,
             selected_entry_id: None,
@@ -148,6 +150,7 @@ impl TerminalPanel {
     pub fn clear(&mut self) {
         self.ports.clear();
         self.last_scroll_offsets.clear();
+        self.pending_scroll_to_bottom_keys.clear();
         self.selected_entry_id = None;
         self.detail_entry_id = None;
         self.search_text.clear();
@@ -265,12 +268,14 @@ impl TerminalPanel {
         let mut auto_scroll = self.auto_scroll;
         let mut maximize_clicked = false;
         let mut clear_selection = false;
+        let wheel_moves_towards_bottom =
+            crate::scroll_delta_moves_towards_bottom(ui.input(|input| input.smooth_scroll_delta.y));
 
         let scroll_key = format!("terminal-port-{port_name}");
+        let mut force_scroll_to_bottom = self.pending_scroll_to_bottom_keys.remove(&scroll_key);
 
         let render_outcome = {
             let data = self.ports.entry(port_name.to_owned()).or_default();
-            let mut force_scroll_to_bottom = false;
 
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(port_name).monospace().strong());
@@ -295,6 +300,8 @@ impl TerminalPanel {
                     ui.colored_label(theme::YELLOW, format!("已丢弃 {dropped} 条，数据不完整"));
                 }
             });
+
+            force_scroll_to_bottom |= auto_scroll && wheel_moves_towards_bottom;
 
             ui.separator();
 
@@ -333,7 +340,9 @@ impl TerminalPanel {
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let scroll_key = "terminal-all".to_owned();
-        let mut force_scroll_to_bottom = false;
+        let wheel_moves_towards_bottom =
+            crate::scroll_delta_moves_towards_bottom(ui.input(|input| input.smooth_scroll_delta.y));
+        let mut force_scroll_to_bottom = self.pending_scroll_to_bottom_keys.remove(&scroll_key);
 
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut self.show_rx, "RX");
@@ -366,6 +375,8 @@ impl TerminalPanel {
                 self.maximize_clicked = true;
             }
         });
+
+        force_scroll_to_bottom |= self.auto_scroll && wheel_moves_towards_bottom;
 
         ui.horizontal(|ui| {
             ui.label("搜索");
@@ -489,25 +500,39 @@ impl TerminalPanel {
             .is_some_and(|pos| inner_rect.contains(pos));
 
         let smooth_scroll_y = ui.input(|input| input.smooth_scroll_delta.y);
-        let scrolling_away_from_bottom = pointer_inside && smooth_scroll_y > 0.0;
 
         let previous_offset_y = self
             .last_scroll_offsets
             .get(scroll_key)
             .copied()
             .unwrap_or(offset_y);
+        let next_auto_scroll = crate::next_auto_scroll_state(
+            self.auto_scroll,
+            pointer_inside,
+            smooth_scroll_y,
+            previous_offset_y,
+            offset_y,
+            content_height,
+            inner_rect.height(),
+        );
+        let should_repair_stick_to_bottom = next_auto_scroll
+            && !crate::scroll_delta_moves_away_from_bottom(smooth_scroll_y)
+            && !crate::scroll_is_at_bottom(offset_y, content_height, inner_rect.height());
 
-        let moving_towards_bottom = offset_y > previous_offset_y + 0.5;
+        if self.auto_scroll != next_auto_scroll {
+            if !self.auto_scroll && next_auto_scroll {
+                self.pending_scroll_to_bottom_keys
+                    .insert(scroll_key.to_owned());
+            }
 
-        let bottom_offset = (content_height - inner_rect.height()).max(0.0);
-        let at_bottom = offset_y >= bottom_offset - 4.0;
-
-        if scrolling_away_from_bottom {
-            self.auto_scroll = false;
+            self.auto_scroll = next_auto_scroll;
+            ui.ctx().request_repaint();
         }
 
-        if !self.auto_scroll && at_bottom && pointer_inside && moving_towards_bottom {
-            self.auto_scroll = true;
+        if should_repair_stick_to_bottom {
+            self.pending_scroll_to_bottom_keys
+                .insert(scroll_key.to_owned());
+            ui.ctx().request_repaint();
         }
 
         self.last_scroll_offsets
@@ -749,7 +774,7 @@ fn render_rows_view(
         let scroll_output = ScrollArea::vertical()
             .max_height(height)
             .auto_shrink([false, false])
-            .id_salt(scroll_key)
+            .id_salt((scroll_key, "v2"))
             .show(ui, |ui| {
                 ui.label(RichText::new("暂无串口数据").color(theme::TEXT_SECONDARY));
             });
@@ -766,47 +791,16 @@ fn render_rows_view(
     let mut clicked_entry_id = None;
     let mut open_detail_entry_id = None;
 
-    // 计算总内容高度：每条 entry 根据行数分配高度
-    let total_content_height: f32 = rows
-        .iter()
-        .map(|row| base_row_height * row.entry.line_count.max(1) as f32)
-        .sum();
-
-    let mut scroll_area = ScrollArea::vertical()
+    let scroll_output = ScrollArea::vertical()
         .max_height(height)
         .auto_shrink([false, false])
         .stick_to_bottom(stick_to_bottom)
-        .id_salt(scroll_key);
-
-    if force_scroll_to_bottom {
-        scroll_area = scroll_area.vertical_scroll_offset(1e9);
-    }
-
-    let scroll_output = scroll_area.show(ui, |ui| {
-        // 手动 layout：为每条 entry 分配可变高度
-        let clip_rect = ui.clip_rect();
-
-        let mut y_cursor = 0.0_f32;
-        for row in rows {
-            let entry_height = base_row_height * row.entry.line_count.max(1) as f32;
-            let entry_rect = egui::Rect::from_min_size(
-                egui::pos2(ui.min_rect().left(), ui.min_rect().top() + y_cursor),
-                egui::vec2(ui.available_width(), entry_height),
-            );
-
-            // 视口裁剪：只渲染可见区域内的条目
-            if entry_rect.bottom() >= clip_rect.top() - entry_height
-                && entry_rect.top() <= clip_rect.bottom() + entry_height
-            {
-                let mut child_ui = ui.new_child(
-                    UiBuilder::new()
-                        .max_rect(entry_rect)
-                        .layout(egui::Layout::top_down(egui::Align::Min)),
-                );
-
+        .id_salt((scroll_key, "v2"))
+        .show(ui, |ui| {
+            for row in rows {
                 let selected = selected_entry_id == Some(row.entry.id);
                 let response = show_entry_multiline(
-                    &mut child_ui,
+                    ui,
                     row.port,
                     row.entry,
                     show_hex,
@@ -848,12 +842,13 @@ fn render_rows_view(
                 });
             }
 
-            y_cursor += entry_height;
-        }
-
-        // 为 ScrollArea 提供正确的 content size
-        ui.allocate_space(egui::vec2(ui.available_width(), total_content_height));
-    });
+            if force_scroll_to_bottom {
+                ui.scroll_to_cursor_animation(
+                    Some(egui::Align::BOTTOM),
+                    egui::style::ScrollAnimation::none(),
+                );
+            }
+        });
 
     RenderOutcome {
         inner_rect: scroll_output.inner_rect,
@@ -1030,4 +1025,38 @@ fn show_entry_multiline(
 fn detail_text_rows(text: &str, min_rows: usize, max_rows: usize) -> usize {
     let line_count = text.lines().count().max(1);
     line_count.clamp(min_rows, max_rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tool_databus::DataBus;
+
+    #[test]
+    fn ingest_serial_rx_keeps_received_entry() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+
+        bus.publish(
+            Event::new(
+                serial_topics::SERIAL_RX,
+                "serial:COM1",
+                Direction::Rx,
+                Payload::Bytes(b"hello".to_vec()),
+            )
+            .with_metadata(serde_json::json!({ "port": "COM1" })),
+        );
+
+        assert_eq!(panel.ingest_all_pending(), 1);
+
+        let port = panel.ports.get("COM1").expect("COM1 should have entries");
+        assert_eq!(port.entries.len(), 1);
+
+        let entry = port.entries.front().expect("rx entry should be ingested");
+        assert_eq!(entry.direction, Direction::Rx);
+        assert_eq!(entry.raw_text, "hello");
+        assert_eq!(entry.display_text, "hello");
+        assert_eq!(entry.hex_text, "68 65 6C 6C 6F");
+        assert_eq!(entry.line_count, 1);
+    }
 }

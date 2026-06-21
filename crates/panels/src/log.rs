@@ -1,5 +1,5 @@
 use crate::{MAX_INGEST_PER_FRAME, fmt_ts, theme};
-use egui::{Color32, RichText, ScrollArea, UiBuilder};
+use egui::{Color32, RichText, ScrollArea};
 use std::collections::VecDeque;
 use tool_core::{Event, LogLevel};
 use tool_databus::{DataBus, Subscription, TopicFilter};
@@ -10,6 +10,7 @@ const SOURCE_COL_WIDTH: f32 = 190.0;
 const SOURCE_TEXT_MAX_CHARS: usize = 26;
 const ROW_LEFT_PADDING: f32 = 4.0;
 const COL_GAP: f32 = 6.0;
+const LOG_SCROLL_ID: &str = "log-scroll-v2";
 
 pub struct LogPanel {
     subscription: Subscription,
@@ -18,6 +19,7 @@ pub struct LogPanel {
     auto_scroll: bool,
     max_entries: usize,
     last_scroll_offset_y: f32,
+    pending_scroll_to_bottom: bool,
 }
 
 struct LogEntry {
@@ -44,6 +46,7 @@ impl LogPanel {
             auto_scroll: true,
             max_entries: 5_000,
             last_scroll_offset_y: 0.0,
+            pending_scroll_to_bottom: false,
         }
     }
     pub fn ingest_all_pending(&mut self) -> usize {
@@ -66,6 +69,7 @@ impl LogPanel {
         self.last_scroll_offset_y = 0.0;
         // 清空后重置为自动滚动，确保新日志可见
         self.auto_scroll = true;
+        self.pending_scroll_to_bottom = false;
     }
 
     /// 让 main.rs 在日志面板不可见时也能消费日志事件。
@@ -77,7 +81,10 @@ impl LogPanel {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let _new_entries = self.ingest();
 
-        let mut force_scroll_to_bottom = false;
+        let wheel_moves_towards_bottom =
+            crate::scroll_delta_moves_towards_bottom(ui.input(|input| input.smooth_scroll_delta.y));
+        let mut force_scroll_to_bottom = self.pending_scroll_to_bottom;
+        self.pending_scroll_to_bottom = false;
 
         ui.horizontal(|ui| {
             // 预计算标签所需宽度：按钮 padding + 最宽文字，避免 hover 框撑大时抖动
@@ -119,6 +126,8 @@ impl LogPanel {
             }
         });
 
+        force_scroll_to_bottom |= self.auto_scroll && wheel_moves_towards_bottom;
+
         ui.separator();
 
         let rows: Vec<&LogEntry> = self
@@ -127,7 +136,7 @@ impl LogPanel {
             .filter(|entry| entry.level >= self.min_level)
             .collect();
 
-        let outcome = render_log_rows(ui, &rows, self.auto_scroll || force_scroll_to_bottom);
+        let outcome = render_log_rows(ui, &rows, self.auto_scroll, force_scroll_to_bottom);
 
         self.update_auto_scroll(
             ui,
@@ -196,20 +205,31 @@ impl LogPanel {
             .is_some_and(|pos| inner_rect.contains(pos));
 
         let smooth_scroll_y = ui.input(|input| input.smooth_scroll_delta.y);
+        let next_auto_scroll = crate::next_auto_scroll_state(
+            self.auto_scroll,
+            pointer_inside,
+            smooth_scroll_y,
+            self.last_scroll_offset_y,
+            offset_y,
+            content_height,
+            inner_rect.height(),
+        );
+        let should_repair_stick_to_bottom = next_auto_scroll
+            && !crate::scroll_delta_moves_away_from_bottom(smooth_scroll_y)
+            && !crate::scroll_is_at_bottom(offset_y, content_height, inner_rect.height());
 
-        let scrolling_away_from_bottom = pointer_inside && smooth_scroll_y > 0.0;
+        if self.auto_scroll != next_auto_scroll {
+            if !self.auto_scroll && next_auto_scroll {
+                self.pending_scroll_to_bottom = true;
+            }
 
-        let moving_towards_bottom = offset_y > self.last_scroll_offset_y + 0.5;
-
-        let bottom_offset = (content_height - inner_rect.height()).max(0.0);
-        let at_bottom = offset_y >= bottom_offset - 4.0;
-
-        if scrolling_away_from_bottom {
-            self.auto_scroll = false;
+            self.auto_scroll = next_auto_scroll;
+            ui.ctx().request_repaint();
         }
 
-        if !self.auto_scroll && at_bottom && pointer_inside && moving_towards_bottom {
-            self.auto_scroll = true;
+        if should_repair_stick_to_bottom {
+            self.pending_scroll_to_bottom = true;
+            ui.ctx().request_repaint();
         }
 
         self.last_scroll_offset_y = offset_y;
@@ -220,13 +240,14 @@ fn render_log_rows(
     ui: &mut egui::Ui,
     rows: &[&LogEntry],
     stick_to_bottom: bool,
+    force_scroll_to_bottom: bool,
 ) -> LogRenderOutcome {
     let base_row_height = log_row_height(ui);
 
     if rows.is_empty() {
         let scroll_output = ScrollArea::vertical()
             .auto_shrink([false, false])
-            .id_salt("log-scroll")
+            .id_salt(LOG_SCROLL_ID)
             .show(ui, |ui| {
                 ui.label(RichText::new("暂无日志").color(theme::TEXT_SECONDARY));
             });
@@ -238,62 +259,39 @@ fn render_log_rows(
         };
     }
 
-    // 计算总内容高度
-    let total_content_height: f32 = rows
-        .iter()
-        .map(|entry| base_row_height * entry.line_count.max(1) as f32)
-        .sum();
-
     let scroll_output = ScrollArea::vertical()
         .auto_shrink([false, false])
         .stick_to_bottom(stick_to_bottom)
-        .id_salt("log-scroll")
+        .id_salt(LOG_SCROLL_ID)
         .show(ui, |ui| {
-            let clip_rect = ui.clip_rect();
-            let mut y_cursor = 0.0_f32;
-
             for entry in rows {
-                let entry_height = base_row_height * entry.line_count.max(1) as f32;
-                let entry_rect = egui::Rect::from_min_size(
-                    egui::pos2(ui.min_rect().left(), ui.min_rect().top() + y_cursor),
-                    egui::vec2(ui.available_width(), entry_height),
-                );
+                let response = show_log_entry(ui, entry, base_row_height);
 
-                // 视口裁剪
-                if entry_rect.bottom() >= clip_rect.top() - entry_height
-                    && entry_rect.top() <= clip_rect.bottom() + entry_height
-                {
-                    let mut child_ui = ui.new_child(
-                        UiBuilder::new()
-                            .max_rect(entry_rect)
-                            .layout(egui::Layout::top_down(egui::Align::Min)),
-                    );
+                response.context_menu(|ctx_ui| {
+                    if ctx_ui.button("复制消息").clicked() {
+                        ctx_ui.ctx().copy_text(entry.message.clone());
+                        ctx_ui.close();
+                    }
 
-                    let response = show_log_entry(&mut child_ui, entry, base_row_height);
-
-                    response.context_menu(|ctx_ui| {
-                        if ctx_ui.button("复制消息").clicked() {
-                            ctx_ui.ctx().copy_text(entry.message.clone());
-                            ctx_ui.close();
-                        }
-
-                        if ctx_ui.button("复制整行").clicked() {
-                            ctx_ui.ctx().copy_text(format!(
-                                "{} {} {} {}",
-                                entry.timestamp_label,
-                                entry.level.as_str(),
-                                entry.source,
-                                entry.message
-                            ));
-                            ctx_ui.close();
-                        }
-                    });
-                }
-
-                y_cursor += entry_height;
+                    if ctx_ui.button("复制整行").clicked() {
+                        ctx_ui.ctx().copy_text(format!(
+                            "{} {} {} {}",
+                            entry.timestamp_label,
+                            entry.level.as_str(),
+                            entry.source,
+                            entry.message
+                        ));
+                        ctx_ui.close();
+                    }
+                });
             }
 
-            ui.allocate_space(egui::vec2(ui.available_width(), total_content_height));
+            if force_scroll_to_bottom {
+                ui.scroll_to_cursor_animation(
+                    Some(egui::Align::BOTTOM),
+                    egui::style::ScrollAnimation::none(),
+                );
+            }
         });
 
     LogRenderOutcome {
@@ -396,3 +394,26 @@ fn log_row_height(ui: &egui::Ui) -> f32 {
 
 // fmt_ts 已提取到 crate::fmt_ts
 // level_color 和 compact_middle 已提取到 crate 根模块
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tool_databus::DataBus;
+
+    #[test]
+    fn ingest_system_log_keeps_app_ready_entry() {
+        let bus = DataBus::new();
+        let mut panel = LogPanel::new(&bus);
+
+        bus.publish(Event::system_log(LogLevel::Info, "app", "就绪"));
+
+        assert_eq!(panel.ingest_all_pending(), 1);
+        assert_eq!(panel.entries.len(), 1);
+
+        let entry = panel.entries.front().expect("log entry should be ingested");
+        assert_eq!(entry.level, LogLevel::Info);
+        assert_eq!(entry.source, "app");
+        assert_eq!(entry.message, "就绪");
+        assert_eq!(entry.line_count, 1);
+    }
+}
