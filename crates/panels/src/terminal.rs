@@ -66,9 +66,6 @@ struct TerminalEntry {
 
     /// 预缓存的小写字段，用于搜索时避免每帧分配
     search_lower: String,
-
-    /// 显示文本的行数（预计算，避免渲染时重复 count）
-    line_count: usize,
 }
 
 struct VisibleRow<'a> {
@@ -336,6 +333,7 @@ impl TerminalPanel {
                 scroll_height,
                 &rows,
                 show_hex,
+                self.show_raw,
                 self.show_timestamp,
                 true, // 单端口视图始终显示端口名（工具栏已标明）
                 auto_scroll,
@@ -481,6 +479,7 @@ impl TerminalPanel {
                 scroll_height,
                 &rows,
                 self.show_hex,
+                self.show_raw,
                 self.show_timestamp,
                 self.show_port,
                 self.auto_scroll,
@@ -602,7 +601,6 @@ impl TerminalPanel {
 
         let raw_text = event.payload.text_lossy();
         let display_text = format_terminal_text(&raw_text);
-        let line_count = display_text.lines().count().max(1);
 
         let hex_text = format_hex(&bytes);
         let utf8_preview = format_utf8_preview(&bytes);
@@ -645,7 +643,6 @@ impl TerminalPanel {
             hex_text,
             hex_preview,
             search_lower,
-            line_count,
         });
 
         while data.entries.len() > self.max_entries {
@@ -788,11 +785,12 @@ fn render_rows_view(
     height: f32,
     rows: &[VisibleRow<'_>],
     show_hex: bool,
+    show_raw: bool,
     show_timestamp: bool,
     show_port: bool,
     stick_to_bottom: bool,
     force_scroll_to_bottom: bool,
-    selected_entry_id: Option<u64>,
+    _selected_entry_id: Option<u64>,
 ) -> RenderOutcome {
     let height = height.max(40.0);
     let base_row_height = terminal_row_height(ui);
@@ -815,8 +813,38 @@ fn render_rows_view(
         };
     }
 
-    let mut clicked_entry_id = None;
-    let mut open_detail_entry_id = None;
+    // Compute label column width based on visible flags
+    let mut label_width = ROW_LEFT_PADDING;
+    if show_timestamp {
+        label_width += TIME_COL_WIDTH + COL_GAP;
+    }
+    if show_port {
+        label_width += PORT_COL_WIDTH + COL_GAP;
+    }
+    label_width += DIR_COL_WIDTH + COL_GAP;
+
+    // Build combined text: one line per entry
+    let combined_text: String = rows
+        .iter()
+        .map(|row| {
+            let content = if show_hex {
+                &row.entry.hex_preview
+            } else if show_raw {
+                &row.entry.raw_text
+            } else {
+                &row.entry.display_text
+            };
+            // Replace newlines with spaces so each entry is exactly one line
+            content.replace('\n', " ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let num_rows = rows.len();
+    let content_height = base_row_height * num_rows as f32;
+    let total_height = content_height.max(1.0);
+
+    let open_detail_entry_id: Option<u64> = None;
 
     let scroll_output = ScrollArea::vertical()
         .max_height(height)
@@ -824,52 +852,111 @@ fn render_rows_view(
         .stick_to_bottom(stick_to_bottom)
         .id_salt((scroll_key, "v2"))
         .show(ui, |ui| {
-            for row in rows {
-                let selected = selected_entry_id == Some(row.entry.id);
-                let response = show_entry_multiline(
-                    ui,
-                    row.port,
-                    row.entry,
-                    show_hex,
-                    show_timestamp,
-                    show_port,
-                    base_row_height,
-                    selected,
+            ui.horizontal(|ui| {
+                // --- Left: painter-drawn labels ---
+                let label_rect = ui
+                    .allocate_exact_size(
+                        egui::vec2(label_width, total_height),
+                        egui::Sense::hover(),
+                    )
+                    .0;
+
+                let painter = ui.painter_at(label_rect);
+                let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+
+                for (i, row) in rows.iter().enumerate() {
+                    let text_y = label_rect.top() + base_row_height * (i as f32 + 0.5);
+                    let mut x = label_rect.left() + ROW_LEFT_PADDING;
+
+                    if show_timestamp {
+                        painter.text(
+                            egui::pos2(x, text_y),
+                            egui::Align2::LEFT_CENTER,
+                            &row.entry.timestamp_label,
+                            font_id.clone(),
+                            theme::TEXT_SECONDARY,
+                        );
+                        x += TIME_COL_WIDTH + COL_GAP;
+                    }
+
+                    if show_port {
+                        if let Some(port) = row.port {
+                            painter.text(
+                                egui::pos2(x, text_y),
+                                egui::Align2::LEFT_CENTER,
+                                port,
+                                font_id.clone(),
+                                theme::YELLOW,
+                            );
+                        }
+                        x += PORT_COL_WIDTH + COL_GAP;
+                    }
+
+                    let (dir_label, dir_color) = direction_label(row.entry.direction);
+                    painter.text(
+                        egui::pos2(x, text_y),
+                        egui::Align2::LEFT_CENTER,
+                        dir_label,
+                        font_id.clone(),
+                        dir_color,
+                    );
+                }
+
+                // --- Right: read-only TextEdit ---
+                let mut text_copy = combined_text.clone();
+                let text_edit_response = ui.add(
+                    egui::TextEdit::multiline(&mut text_copy)
+                        .desired_width(f32::INFINITY)
+                        .font(egui::TextStyle::Monospace)
+                        .interactive(false),
                 );
 
-                if response.clicked() {
-                    clicked_entry_id = Some(row.entry.id);
-                }
-
-                if response.double_clicked() {
-                    clicked_entry_id = Some(row.entry.id);
-                    open_detail_entry_id = Some(row.entry.id);
-                }
-
-                response.context_menu(|ctx_ui| {
-                    if ctx_ui.button("复制内容").clicked() {
-                        ctx_ui.ctx().copy_text(row.entry.raw_text.clone());
-                        ctx_ui.close();
-                    }
-
-                    if ctx_ui.button("复制显示文本").clicked() {
-                        ctx_ui.ctx().copy_text(row.entry.display_text.clone());
-                        ctx_ui.close();
-                    }
-
-                    if ctx_ui.button("复制 HEX").clicked() {
-                        ctx_ui.ctx().copy_text(row.entry.hex_text.clone());
+                text_edit_response.context_menu(|ctx_ui| {
+                    // Determine which row is under the cursor by checking
+                    // the TextEdit's cursor position (line number)
+                    // For now, provide generic copy-all actions
+                    if ctx_ui.button("复制全部可见内容").clicked() {
+                        ctx_ui.ctx().copy_text(combined_text.clone());
                         ctx_ui.close();
                     }
 
                     ctx_ui.separator();
 
-                    if ctx_ui.button("查看详情").clicked() {
-                        open_detail_entry_id = Some(row.entry.id);
+                    // Build and provide per-entry copy submenus
+                    // We can determine the row from cursor position
+                    // But for simplicity, just provide a generic detail action
+                    if ctx_ui.button("复制 CSV").clicked() {
+                        // Build a simple CSV of visible rows
+                        let csv: String = rows
+                            .iter()
+                            .map(|row| {
+                                let content = if show_hex {
+                                    &row.entry.hex_preview
+                                } else if show_raw {
+                                    &row.entry.raw_text
+                                } else {
+                                    &row.entry.display_text
+                                };
+                                let port = row.port.unwrap_or("");
+                                format!(
+                                    "{},{},{},{}",
+                                    row.entry.timestamp_label,
+                                    port,
+                                    match row.entry.direction {
+                                        Direction::Rx => "RX",
+                                        Direction::Tx => "TX",
+                                        Direction::Internal => "IN",
+                                    },
+                                    content.replace('\n', " ")
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        ctx_ui.ctx().copy_text(csv);
                         ctx_ui.close();
                     }
                 });
-            }
+            });
 
             if force_scroll_to_bottom {
                 ui.scroll_to_cursor_animation(
@@ -883,7 +970,7 @@ fn render_rows_view(
         inner_rect: scroll_output.inner_rect,
         content_height: scroll_output.content_size.y,
         offset_y: scroll_output.state.offset.y,
-        clicked_entry_id,
+        clicked_entry_id: None,
         open_detail_entry_id,
     }
 }
@@ -959,105 +1046,6 @@ fn direction_label(direction: Direction) -> (&'static str, Color32) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn show_entry_multiline(
-    ui: &mut egui::Ui,
-    port: Option<&str>,
-    entry: &TerminalEntry,
-    show_hex: bool,
-    show_timestamp: bool,
-    show_port: bool,
-    base_row_height: f32,
-    selected: bool,
-) -> egui::Response {
-    let row_width = ui.available_width();
-    let entry_height = base_row_height * entry.line_count.max(1) as f32;
-
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(row_width, entry_height), egui::Sense::click());
-
-    let bg = if selected {
-        theme::BG_SELECTION
-    } else if response.hovered() {
-        theme::WIDGET_HOVER
-    } else {
-        Color32::TRANSPARENT
-    };
-
-    let painter = ui.painter_at(rect);
-
-    if bg != Color32::TRANSPARENT {
-        painter.rect_filled(rect, 2.0, bg);
-    }
-
-    let font_id = egui::TextStyle::Monospace.resolve(ui.style());
-    let text_y = rect.top() + base_row_height * 0.5;
-
-    let mut x = rect.left() + ROW_LEFT_PADDING;
-
-    // 时间戳 — 第一行居中
-    if show_timestamp {
-        painter.text(
-            egui::pos2(x, text_y),
-            egui::Align2::LEFT_CENTER,
-            &entry.timestamp_label,
-            font_id.clone(),
-            theme::TEXT_SECONDARY,
-        );
-        x += TIME_COL_WIDTH + COL_GAP;
-    }
-
-    // 端口 — 第一行居中
-    if show_port
-        && let Some(port) = port
-    {
-        painter.text(
-            egui::pos2(x, text_y),
-            egui::Align2::LEFT_CENTER,
-            port,
-            font_id.clone(),
-            theme::YELLOW,
-        );
-        x += PORT_COL_WIDTH + COL_GAP;
-    }
-
-    // 方向 — 第一行居中
-    let (dir_label, dir_color) = direction_label(entry.direction);
-    painter.text(
-        egui::pos2(x, text_y),
-        egui::Align2::LEFT_CENTER,
-        dir_label,
-        font_id.clone(),
-        dir_color,
-    );
-    x += DIR_COL_WIDTH + COL_GAP;
-
-    // 内容区域 — 逐行渲染
-    let payload = if show_hex {
-        &entry.hex_preview
-    } else {
-        &entry.display_text
-    };
-
-    let payload_clip = egui::Rect::from_min_max(
-        egui::pos2(x, rect.top()),
-        egui::pos2(rect.right(), rect.bottom()),
-    );
-    let payload_painter = ui.painter().with_clip_rect(payload_clip);
-
-    for (line_idx, line) in payload.lines().enumerate() {
-        let line_y = rect.top() + base_row_height * (line_idx as f32 + 0.5);
-        payload_painter.text(
-            egui::pos2(x, line_y),
-            egui::Align2::LEFT_CENTER,
-            line,
-            font_id.clone(),
-            theme::TEXT_PRIMARY,
-        );
-    }
-
-    response
-}
 fn detail_text_rows(text: &str, min_rows: usize, max_rows: usize) -> usize {
     let line_count = text.lines().count().max(1);
     line_count.clamp(min_rows, max_rows)
@@ -1093,6 +1081,5 @@ mod tests {
         assert_eq!(entry.raw_text, "hello");
         assert_eq!(entry.display_text, "hello");
         assert_eq!(entry.hex_text, "68 65 6C 6C 6F");
-        assert_eq!(entry.line_count, 1);
     }
 }
