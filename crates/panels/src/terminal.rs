@@ -716,7 +716,7 @@ impl TerminalPanel {
                     .max_height(ui.available_height())
                     .show(ui, |ui| {
                         ui.label(RichText::new("原始内容").strong());
-                        let mut raw_text = detail.raw_text.clone();
+                        let mut raw_text = format_raw_visible(&detail.raw_text);
                         ui.add(
                             egui::TextEdit::multiline(&mut raw_text)
                                 .desired_width(f32::INFINITY)
@@ -1016,6 +1016,22 @@ fn format_terminal_text(text: &str) -> String {
         }
     }
 
+    output
+}
+
+fn format_raw_visible(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            '\\' => output.push_str("\\\\"),
+            '\0' => output.push_str("\\0"),
+            ch if ch.is_control() => output.push_str(&format!("\\x{:02x}", ch as u8)),
+            ch => output.push(ch),
+        }
+    }
     output
 }
 
