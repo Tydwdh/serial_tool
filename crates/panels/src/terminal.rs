@@ -161,6 +161,8 @@ impl TerminalPanel {
         self.port_filter = None;
         self.bookmarked_entry_ids.clear();
         // 清空后重置为自动滚动，与 LogPanel::clear() 保持一致
+        self.show_timestamp = true;
+        self.show_port = true;
         self.auto_scroll = true;
     }
 
@@ -201,28 +203,37 @@ impl TerminalPanel {
 
     pub fn export_visible_csv(&self) -> String {
         let show_hex = self.show_hex;
-        let header = if show_hex {
-            "time,port,direction,hex\n"
-        } else {
-            "time,port,direction,text\n"
-        };
-        let mut out = String::from(header);
+        let show_timestamp = self.show_timestamp;
+        let show_port = self.show_port;
+
+        let mut headers: Vec<&str> = Vec::new();
+        if show_timestamp { headers.push("time"); }
+        if show_port { headers.push("port"); }
+        headers.push("direction");
+        if show_hex { headers.push("hex"); } else { headers.push("text"); }
+
+        let mut out = headers.join(",");
+        out.push('\n');
+
         for (port, entry) in self.filtered_entries() {
-            out.push_str(&csv_cell(&entry.timestamp_label));
-            out.push(',');
-            out.push_str(&csv_cell(&port));
-            out.push(',');
-            out.push_str(&csv_cell(match entry.direction {
+            let mut cells: Vec<String> = Vec::new();
+            if show_timestamp {
+                cells.push(csv_cell(&entry.timestamp_label));
+            }
+            if show_port {
+                cells.push(csv_cell(&port));
+            }
+            cells.push(csv_cell(match entry.direction {
                 Direction::Rx => "RX",
                 Direction::Tx => "TX",
                 Direction::Internal => "INTERNAL",
             }));
-            out.push(',');
             if show_hex {
-                out.push_str(&csv_cell(&entry.hex_text));
+                cells.push(csv_cell(&entry.hex_text));
             } else {
-                out.push_str(&csv_cell(&entry.raw_text));
+                cells.push(csv_cell(&entry.raw_text));
             }
+            out.push_str(&cells.join(","));
             out.push('\n');
         }
         out
@@ -230,32 +241,29 @@ impl TerminalPanel {
 
     pub fn export_visible_jsonl(&self) -> String {
         let show_hex = self.show_hex;
+        let show_timestamp = self.show_timestamp;
+        let show_port = self.show_port;
+
         let mut out = String::new();
         for (port, entry) in self.filtered_entries() {
-            let line = if show_hex {
-                serde_json::json!({
-                    "time": entry.timestamp_label,
-                    "port": port,
-                    "direction": match entry.direction {
-                        Direction::Rx => "RX",
-                        Direction::Tx => "TX",
-                        Direction::Internal => "INTERNAL",
-                    },
-                    "hex": entry.hex_text,
-                })
+            let mut obj = serde_json::Map::new();
+            if show_timestamp {
+                obj.insert("time".into(), serde_json::Value::String(entry.timestamp_label.clone()));
+            }
+            if show_port {
+                obj.insert("port".into(), serde_json::Value::String(port.clone()));
+            }
+            obj.insert("direction".into(), serde_json::Value::String(match entry.direction {
+                Direction::Rx => "RX".into(),
+                Direction::Tx => "TX".into(),
+                Direction::Internal => "INTERNAL".into(),
+            }));
+            if show_hex {
+                obj.insert("hex".into(), serde_json::Value::String(entry.hex_text.clone()));
             } else {
-                serde_json::json!({
-                    "time": entry.timestamp_label,
-                    "port": port,
-                    "direction": match entry.direction {
-                        Direction::Rx => "RX",
-                        Direction::Tx => "TX",
-                        Direction::Internal => "INTERNAL",
-                    },
-                    "text": entry.raw_text,
-                })
-            };
-            out.push_str(&serde_json::to_string(&line).unwrap_or_else(|_| "{}".to_owned()));
+                obj.insert("text".into(), serde_json::Value::String(entry.raw_text.clone()));
+            }
+            out.push_str(&serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_else(|_| "{}".to_owned()));
             out.push('\n');
         }
         out
