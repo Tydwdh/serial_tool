@@ -6,10 +6,10 @@ use tool_databus::{DataBus, Subscription, TopicFilter};
 use tool_transport::serial_topics;
 
 const TIME_COL_WIDTH: f32 = 118.0;
-const PORT_COL_WIDTH: f32 = 64.0;
+const PORT_COL_WIDTH: f32 = 52.0;
 const DIR_COL_WIDTH: f32 = 28.0;
 const ROW_LEFT_PADDING: f32 = 4.0;
-const COL_GAP: f32 = 4.0;
+const COL_GAP: f32 = 3.0;
 
 pub struct TerminalPanel {
     subscription: Subscription,
@@ -18,6 +18,8 @@ pub struct TerminalPanel {
     show_rx: bool,
     show_tx: bool,
     show_hex: bool,
+    show_timestamp: bool,
+    show_port: bool,
     auto_scroll: bool,
 
     search_text: String,
@@ -102,6 +104,8 @@ impl TerminalPanel {
             show_rx: true,
             show_tx: true,
             show_hex: false,
+            show_timestamp: true,
+            show_port: true,
             auto_scroll: true,
 
             search_text: String::new(),
