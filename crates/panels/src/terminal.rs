@@ -88,8 +88,6 @@ struct RenderOutcome {
     inner_rect: egui::Rect,
     content_height: f32,
     offset_y: f32,
-    clicked_entry_id: Option<u64>,
-    open_detail_entry_id: Option<u64>,
 }
 
 impl TerminalPanel {
@@ -338,7 +336,6 @@ impl TerminalPanel {
                 true, // 单端口视图始终显示端口名（工具栏已标明）
                 auto_scroll,
                 force_scroll_to_bottom,
-                self.selected_entry_id,
             )
         };
 
@@ -484,7 +481,6 @@ impl TerminalPanel {
                 self.show_port,
                 self.auto_scroll,
                 force_scroll_to_bottom,
-                self.selected_entry_id,
             )
         };
 
@@ -493,15 +489,6 @@ impl TerminalPanel {
     }
 
     fn apply_render_outcome(&mut self, scroll_key: &str, outcome: RenderOutcome, ui: &egui::Ui) {
-        if let Some(entry_id) = outcome.clicked_entry_id {
-            self.selected_entry_id = Some(entry_id);
-        }
-
-        if let Some(entry_id) = outcome.open_detail_entry_id {
-            self.selected_entry_id = Some(entry_id);
-            self.detail_entry_id = Some(entry_id);
-        }
-
         self.update_auto_scroll(
             ui,
             scroll_key,
@@ -790,7 +777,6 @@ fn render_rows_view(
     show_port: bool,
     stick_to_bottom: bool,
     force_scroll_to_bottom: bool,
-    _selected_entry_id: Option<u64>,
 ) -> RenderOutcome {
     let height = height.max(40.0);
     let base_row_height = terminal_row_height(ui);
@@ -808,8 +794,6 @@ fn render_rows_view(
             inner_rect: scroll_output.inner_rect,
             content_height: scroll_output.content_size.y,
             offset_y: scroll_output.state.offset.y,
-            clicked_entry_id: None,
-            open_detail_entry_id: None,
         };
     }
 
@@ -827,13 +811,7 @@ fn render_rows_view(
     let combined_text: String = rows
         .iter()
         .map(|row| {
-            let content = if show_hex {
-                &row.entry.hex_preview
-            } else if show_raw {
-                &row.entry.raw_text
-            } else {
-                &row.entry.display_text
-            };
+            let content = entry_content_text(row.entry, show_hex, show_raw);
             // Replace newlines with spaces so each entry is exactly one line
             content.replace('\n', " ")
         })
@@ -843,8 +821,6 @@ fn render_rows_view(
     let num_rows = rows.len();
     let content_height = base_row_height * num_rows as f32;
     let total_height = content_height.max(1.0);
-
-    let open_detail_entry_id: Option<u64> = None;
 
     let scroll_output = ScrollArea::vertical()
         .max_height(height)
@@ -930,13 +906,7 @@ fn render_rows_view(
                         let csv: String = rows
                             .iter()
                             .map(|row| {
-                                let content = if show_hex {
-                                    &row.entry.hex_preview
-                                } else if show_raw {
-                                    &row.entry.raw_text
-                                } else {
-                                    &row.entry.display_text
-                                };
+                                let content = entry_content_text(row.entry, show_hex, show_raw);
                                 let port = row.port.unwrap_or("");
                                 format!(
                                     "{},{},{},{}",
@@ -959,10 +929,14 @@ fn render_rows_view(
             });
 
             if force_scroll_to_bottom {
-                ui.scroll_to_cursor_animation(
-                    Some(egui::Align::BOTTOM),
-                    egui::style::ScrollAnimation::none(),
+                // Add an invisible anchor at the bottom to scroll to.
+                // scroll_to_cursor_animation on a non-interactive TextEdit is a no-op,
+                // so we use a tiny spacer widget and scroll to it instead.
+                let (rect, _sense) = ui.allocate_exact_size(
+                    egui::vec2(0.0, 0.0),
+                    egui::Sense::hover(),
                 );
+                ui.scroll_to_rect(rect, Some(egui::Align::BOTTOM));
             }
         });
 
@@ -970,13 +944,22 @@ fn render_rows_view(
         inner_rect: scroll_output.inner_rect,
         content_height: scroll_output.content_size.y,
         offset_y: scroll_output.state.offset.y,
-        clicked_entry_id: None,
-        open_detail_entry_id,
     }
 }
 
 fn terminal_row_height(ui: &egui::Ui) -> f32 {
     crate::row_height(ui)
+}
+
+/// Returns the content text for an entry based on display priority: hex > raw > display.
+fn entry_content_text<'a>(entry: &'a TerminalEntry, show_hex: bool, show_raw: bool) -> &'a str {
+    if show_hex {
+        &entry.hex_preview
+    } else if show_raw {
+        &entry.raw_text
+    } else {
+        &entry.display_text
+    }
 }
 
 fn entry_visible(direction: Direction, show_rx: bool, show_tx: bool) -> bool {
