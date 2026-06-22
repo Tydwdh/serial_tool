@@ -401,6 +401,9 @@ impl TerminalPanel {
                     }
                 });
 
+            ui.checkbox(&mut self.show_timestamp, "时间");
+            ui.checkbox(&mut self.show_port, "端口");
+
             if ui.button("清除筛选").clicked() {
                 self.search_text.clear();
                 self.port_filter = None;
