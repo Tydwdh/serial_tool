@@ -18,6 +18,7 @@ pub struct TerminalPanel {
     show_rx: bool,
     show_tx: bool,
     show_hex: bool,
+    show_raw: bool,
     show_timestamp: bool,
     show_port: bool,
     auto_scroll: bool,
@@ -104,6 +105,7 @@ impl TerminalPanel {
             show_rx: true,
             show_tx: true,
             show_hex: false,
+            show_raw: false,
             show_timestamp: true,
             show_port: true,
             auto_scroll: true,
@@ -163,6 +165,7 @@ impl TerminalPanel {
         // 清空后重置为自动滚动，与 LogPanel::clear() 保持一致
         self.show_timestamp = true;
         self.show_port = true;
+        self.show_raw = false;
         self.auto_scroll = true;
     }
 
@@ -295,6 +298,7 @@ impl TerminalPanel {
                 ui.checkbox(&mut data.show_rx, "RX");
                 ui.checkbox(&mut data.show_tx, "TX");
                 ui.checkbox(&mut show_hex, "HEX");
+                ui.checkbox(&mut self.show_raw, "原始");
                 ui.checkbox(&mut self.show_timestamp, "时间");
 
                 force_scroll_to_bottom |= crate::theme::auto_scroll_button(ui, &mut auto_scroll);
@@ -363,6 +367,7 @@ impl TerminalPanel {
             ui.checkbox(&mut self.show_rx, "RX");
             ui.checkbox(&mut self.show_tx, "TX");
             ui.checkbox(&mut self.show_hex, "HEX");
+            ui.checkbox(&mut self.show_raw, "原始");
 
             force_scroll_to_bottom |= crate::theme::auto_scroll_button(ui, &mut self.auto_scroll);
 
