@@ -287,6 +287,7 @@ impl TerminalPanel {
                 ui.checkbox(&mut data.show_rx, "RX");
                 ui.checkbox(&mut data.show_tx, "TX");
                 ui.checkbox(&mut show_hex, "HEX");
+                ui.checkbox(&mut self.show_timestamp, "时间");
 
                 force_scroll_to_bottom |= crate::theme::auto_scroll_button(ui, &mut auto_scroll);
 
