@@ -324,6 +324,8 @@ impl TerminalPanel {
                 scroll_height,
                 &rows,
                 show_hex,
+                self.show_timestamp,
+                true, // 单端口视图始终显示端口名（工具栏已标明）
                 auto_scroll,
                 force_scroll_to_bottom,
                 self.selected_entry_id,
@@ -466,6 +468,8 @@ impl TerminalPanel {
                 scroll_height,
                 &rows,
                 self.show_hex,
+                self.show_timestamp,
+                self.show_port,
                 self.auto_scroll,
                 force_scroll_to_bottom,
                 self.selected_entry_id,
@@ -771,6 +775,8 @@ fn render_rows_view(
     height: f32,
     rows: &[VisibleRow<'_>],
     show_hex: bool,
+    show_timestamp: bool,
+    show_port: bool,
     stick_to_bottom: bool,
     force_scroll_to_bottom: bool,
     selected_entry_id: Option<u64>,
@@ -812,6 +818,8 @@ fn render_rows_view(
                     row.port,
                     row.entry,
                     show_hex,
+                    show_timestamp,
+                    show_port,
                     base_row_height,
                     selected,
                 );
@@ -943,6 +951,8 @@ fn show_entry_multiline(
     port: Option<&str>,
     entry: &TerminalEntry,
     show_hex: bool,
+    show_timestamp: bool,
+    show_port: bool,
     base_row_height: f32,
     selected: bool,
 ) -> egui::Response {
@@ -972,25 +982,29 @@ fn show_entry_multiline(
     let mut x = rect.left() + ROW_LEFT_PADDING;
 
     // 时间戳 — 第一行居中
-    painter.text(
-        egui::pos2(x, text_y),
-        egui::Align2::LEFT_CENTER,
-        &entry.timestamp_label,
-        font_id.clone(),
-        theme::TEXT_SECONDARY,
-    );
-    x += TIME_COL_WIDTH + COL_GAP;
-
-    // 端口 — 第一行居中
-    if let Some(port) = port {
+    if show_timestamp {
         painter.text(
             egui::pos2(x, text_y),
             egui::Align2::LEFT_CENTER,
-            port,
+            &entry.timestamp_label,
             font_id.clone(),
-            theme::YELLOW,
+            theme::TEXT_SECONDARY,
         );
-        x += PORT_COL_WIDTH + COL_GAP;
+        x += TIME_COL_WIDTH + COL_GAP;
+    }
+
+    // 端口 — 第一行居中
+    if show_port {
+        if let Some(port) = port {
+            painter.text(
+                egui::pos2(x, text_y),
+                egui::Align2::LEFT_CENTER,
+                port,
+                font_id.clone(),
+                theme::YELLOW,
+            );
+            x += PORT_COL_WIDTH + COL_GAP;
+        }
     }
 
     // 方向 — 第一行居中
