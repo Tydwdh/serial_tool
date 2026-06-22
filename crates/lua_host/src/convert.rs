@@ -569,7 +569,7 @@ mod tests {
         assert_eq!(config.port_name, "COM3");
         // Defaults should apply
         assert_eq!(config.baud_rate, 115_200);
-        assert_eq!(config.timeout_ms, 50);
+        assert_eq!(config.timeout_ms, 1);
     }
 
     #[test]
@@ -604,7 +604,7 @@ mod tests {
         assert_eq!(config.data_bits, DataBits::Eight);
         assert_eq!(config.stop_bits, StopBits::One);
         assert_eq!(config.parity, Parity::None);
-        assert_eq!(config.timeout_ms, 50);
+        assert_eq!(config.timeout_ms, 1);
     }
 
     #[test]

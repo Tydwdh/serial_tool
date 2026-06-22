@@ -141,7 +141,7 @@ impl Default for SerialConfig {
             data_bits: DataBits::Eight,
             stop_bits: StopBits::One,
             parity: Parity::None,
-            timeout_ms: 50,
+            timeout_ms: 1,
         }
     }
 }
