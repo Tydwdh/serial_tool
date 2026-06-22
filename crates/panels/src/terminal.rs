@@ -952,7 +952,7 @@ fn terminal_row_height(ui: &egui::Ui) -> f32 {
 }
 
 /// Returns the content text for an entry based on display priority: hex > raw > display.
-fn entry_content_text<'a>(entry: &'a TerminalEntry, show_hex: bool, show_raw: bool) -> &'a str {
+fn entry_content_text(entry: &TerminalEntry, show_hex: bool, show_raw: bool) -> &str {
     if show_hex {
         &entry.hex_preview
     } else if show_raw {
