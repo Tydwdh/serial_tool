@@ -954,6 +954,7 @@ fn direction_label(direction: Direction) -> (&'static str, Color32) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn show_entry_multiline(
     ui: &mut egui::Ui,
     port: Option<&str>,
@@ -1002,17 +1003,17 @@ fn show_entry_multiline(
     }
 
     // 端口 — 第一行居中
-    if show_port {
-        if let Some(port) = port {
-            painter.text(
-                egui::pos2(x, text_y),
-                egui::Align2::LEFT_CENTER,
-                port,
-                font_id.clone(),
-                theme::YELLOW,
-            );
-            x += PORT_COL_WIDTH + COL_GAP;
-        }
+    if show_port
+        && let Some(port) = port
+    {
+        painter.text(
+            egui::pos2(x, text_y),
+            egui::Align2::LEFT_CENTER,
+            port,
+            font_id.clone(),
+            theme::YELLOW,
+        );
+        x += PORT_COL_WIDTH + COL_GAP;
     }
 
     // 方向 — 第一行居中
