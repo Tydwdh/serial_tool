@@ -1,11 +1,10 @@
 use crate::{MAX_INGEST_PER_FRAME, fmt_ts, theme};
 use egui::{Color32, RichText, ScrollArea, Sense, Stroke};
+use egui::text_selection::LabelSelectionState;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use tool_core::{Direction, Event, Payload};
 use tool_databus::{DataBus, Subscription, TopicFilter};
 use tool_transport::serial_topics;
-
-use egui::text_selection::LabelSelectionState;
 
 const TIME_COL_WIDTH: f32 = 118.0;
 const PORT_COL_WIDTH: f32 = 52.0;
@@ -1008,20 +1007,11 @@ fn render_rows_view(
                 // --- Draw preview text (HEX mode only) ---
                 if let (Some(pr), Some(pg)) = (&preview_rect, &layout.preview_galley) {
                     let preview_pos = egui::pos2(pr.left() + text_padding, current_y);
-                    let preview_row_rect = egui::Rect::from_min_size(
-                        egui::pos2(pr.left(), current_y),
-                        egui::vec2(preview_width, entry_height),
-                    );
-                    let preview_id = ui.make_persistent_id(("preview", row.entry.id));
-                    let preview_response = ui.interact(preview_row_rect, preview_id, Sense::click_and_drag());
-
-                    LabelSelectionState::label_text_selection(
-                        ui,
-                        &preview_response,
-                        preview_pos,
-                        pg.clone(),
-                        theme::TEXT_DIMMED,
-                        Stroke::NONE,
+                    // Preview column: non-interactive painter text only, so it doesn't
+                    // interfere with HEX column's text selection.
+                    let preview_painter = ui.painter_at(*pr);
+                    preview_painter.add(
+                        egui::epaint::TextShape::new(preview_pos, pg.clone(), theme::TEXT_DIMMED),
                     );
                 }
 
