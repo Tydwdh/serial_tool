@@ -1,9 +1,11 @@
 use crate::{MAX_INGEST_PER_FRAME, fmt_ts, theme};
-use egui::{Color32, RichText, ScrollArea};
+use egui::{Color32, RichText, ScrollArea, Sense, Stroke};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use tool_core::{Direction, Event, Payload};
 use tool_databus::{DataBus, Subscription, TopicFilter};
 use tool_transport::serial_topics;
+
+use egui::text_selection::LabelSelectionState;
 
 const TIME_COL_WIDTH: f32 = 118.0;
 const PORT_COL_WIDTH: f32 = 52.0;
@@ -779,7 +781,8 @@ fn render_rows_view(
     force_scroll_to_bottom: bool,
 ) -> RenderOutcome {
     let height = height.max(40.0);
-    let base_row_height = terminal_row_height(ui);
+    let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+    let row_height = ui.fonts_mut(|f| f.row_height(&font_id));
 
     if rows.is_empty() {
         let scroll_output = ScrollArea::vertical()
@@ -807,20 +810,12 @@ fn render_rows_view(
     }
     label_width += DIR_COL_WIDTH + COL_GAP;
 
-    // Build combined text: one line per entry
-    let combined_text: String = rows
-        .iter()
-        .map(|row| {
-            let content = entry_content_text(row.entry, show_hex, show_raw);
-            // Replace newlines with spaces so each entry is exactly one line
-            content.replace('\n', " ")
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let num_rows = rows.len();
-    let content_height = base_row_height * num_rows as f32;
-    let total_height = content_height.max(1.0);
+    // Pre-layout all rows to determine their galley heights
+    struct RowLayout {
+        galley: std::sync::Arc<egui::Galley>,
+        /// Height needed for this entry's content (at least row_height)
+        height: f32,
+    }
 
     let scroll_output = ScrollArea::vertical()
         .max_height(height)
@@ -828,110 +823,171 @@ fn render_rows_view(
         .stick_to_bottom(stick_to_bottom)
         .id_salt((scroll_key, "v2"))
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                // --- Left: painter-drawn labels ---
-                let label_rect = ui
-                    .allocate_exact_size(
-                        egui::vec2(label_width, total_height),
-                        egui::Sense::hover(),
-                    )
-                    .0;
+            // Use a single allocate_exact_size to avoid layout conflicts.
+            // We manually split the rect into left (labels) and right (content).
+            let full_width = ui.available_width();
+            let text_width = (full_width - label_width).max(0.0);
+            let text_padding = 4.0;
+            let galley_width = (text_width - text_padding).max(0.0);
+            let text_color = ui.style().visuals.text_color();
 
-                let painter = ui.painter_at(label_rect);
-                let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+            // Layout all rows first to compute actual heights
+            let row_layouts: Vec<RowLayout> = rows
+                .iter()
+                .map(|row| {
+                    let content =
+                        entry_content_text(row.entry, show_hex, show_raw);
+                    let content = if content.is_empty() {
+                        " ".to_owned()
+                    } else {
+                        content.to_owned()
+                    };
 
-                for (i, row) in rows.iter().enumerate() {
-                    let text_y = label_rect.top() + base_row_height * (i as f32 + 0.5);
-                    let mut x = label_rect.left() + ROW_LEFT_PADDING;
-
-                    if show_timestamp {
-                        painter.text(
-                            egui::pos2(x, text_y),
-                            egui::Align2::LEFT_CENTER,
-                            &row.entry.timestamp_label,
-                            font_id.clone(),
-                            theme::TEXT_SECONDARY,
-                        );
-                        x += TIME_COL_WIDTH + COL_GAP;
-                    }
-
-                    if show_port {
-                        if let Some(port) = row.port {
-                            painter.text(
-                                egui::pos2(x, text_y),
-                                egui::Align2::LEFT_CENTER,
-                                port,
-                                font_id.clone(),
-                                theme::YELLOW,
-                            );
-                        }
-                        x += PORT_COL_WIDTH + COL_GAP;
-                    }
-
-                    let (dir_label, dir_color) = direction_label(row.entry.direction);
-                    painter.text(
-                        egui::pos2(x, text_y),
-                        egui::Align2::LEFT_CENTER,
-                        dir_label,
+                    let mut layout_job = egui::text::LayoutJob::simple(
+                        content,
                         font_id.clone(),
-                        dir_color,
+                        text_color,
+                        galley_width,
                     );
+                    layout_job.halign = egui::Align::LEFT;
+                    let galley = ui.fonts_mut(|f| f.layout_job(layout_job));
+                    let height = galley.size().y.max(row_height);
+                    RowLayout { galley, height }
+                })
+                .collect();
+
+            let total_height: f32 = row_layouts.iter().map(|r| r.height).sum();
+
+            let full_rect = ui
+                .allocate_exact_size(
+                    egui::vec2(full_width, total_height),
+                    Sense::click_and_drag(),
+                )
+                .0;
+
+            // Split into left (labels) and right (text)
+            let label_rect = egui::Rect::from_min_size(
+                full_rect.left_top(),
+                egui::vec2(label_width, total_height),
+            );
+            let text_rect = egui::Rect::from_min_size(
+                egui::pos2(full_rect.left() + label_width, full_rect.top()),
+                egui::vec2(text_width, total_height),
+            );
+
+            let label_painter = ui.painter_at(label_rect);
+
+            // Draw rows with accumulated Y
+            let mut current_y = label_rect.top();
+            for (row, layout) in rows.iter().zip(row_layouts.iter()) {
+                let entry_height = layout.height;
+                // Tag labels align with the top of the text content (first line baseline),
+                // using row_height as the effective single-line height for labels
+                let label_y = current_y + row_height * 0.5;
+
+                // --- Draw left labels (aligned with first line of text) ---
+                let mut x = label_rect.left() + ROW_LEFT_PADDING;
+
+                if show_timestamp {
+                    label_painter.text(
+                        egui::pos2(x, label_y),
+                        egui::Align2::LEFT_CENTER,
+                        &row.entry.timestamp_label,
+                        font_id.clone(),
+                        theme::TEXT_SECONDARY,
+                    );
+                    x += TIME_COL_WIDTH + COL_GAP;
                 }
 
-                // --- Right: read-only TextEdit ---
-                let mut text_copy = combined_text.clone();
-                let text_edit_response = ui.add(
-                    egui::TextEdit::multiline(&mut text_copy)
-                        .desired_width(f32::INFINITY)
-                        .font(egui::TextStyle::Monospace)
-                        .interactive(false),
+                if show_port {
+                    if let Some(port) = row.port {
+                        label_painter.text(
+                            egui::pos2(x, label_y),
+                            egui::Align2::LEFT_CENTER,
+                            port,
+                            font_id.clone(),
+                            theme::YELLOW,
+                        );
+                    }
+                    x += PORT_COL_WIDTH + COL_GAP;
+                }
+
+                let (dir_label, dir_color) = direction_label(row.entry.direction);
+                label_painter.text(
+                    egui::pos2(x, label_y),
+                    egui::Align2::LEFT_CENTER,
+                    dir_label,
+                    font_id.clone(),
+                    dir_color,
                 );
 
-                text_edit_response.context_menu(|ctx_ui| {
-                    // Determine which row is under the cursor by checking
-                    // the TextEdit's cursor position (line number)
-                    // For now, provide generic copy-all actions
-                    if ctx_ui.button("复制全部可见内容").clicked() {
-                        ctx_ui.ctx().copy_text(combined_text.clone());
-                        ctx_ui.close();
-                    }
+                // --- Draw selectable content text ---
+                let galley_pos = egui::pos2(text_rect.left() + text_padding, current_y);
+                let row_text_rect = egui::Rect::from_min_size(
+                    egui::pos2(text_rect.left(), current_y),
+                    egui::vec2(text_width, entry_height),
+                );
+                let row_id = ui.make_persistent_id(row.entry.id);
+                let response = ui.interact(row_text_rect, row_id, Sense::click_and_drag());
 
-                    ctx_ui.separator();
+                LabelSelectionState::label_text_selection(
+                    ui,
+                    &response,
+                    galley_pos,
+                    layout.galley.clone(),
+                    text_color,
+                    Stroke::NONE,
+                );
 
-                    // Build and provide per-entry copy submenus
-                    // We can determine the row from cursor position
-                    // But for simplicity, just provide a generic detail action
-                    if ctx_ui.button("复制 CSV").clicked() {
-                        // Build a simple CSV of visible rows
-                        let csv: String = rows
-                            .iter()
-                            .map(|row| {
-                                let content = entry_content_text(row.entry, show_hex, show_raw);
-                                let port = row.port.unwrap_or("");
-                                format!(
-                                    "{},{},{},{}",
-                                    row.entry.timestamp_label,
-                                    port,
-                                    match row.entry.direction {
-                                        Direction::Rx => "RX",
-                                        Direction::Tx => "TX",
-                                        Direction::Internal => "IN",
-                                    },
-                                    content.replace('\n', " ")
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        ctx_ui.ctx().copy_text(csv);
-                        ctx_ui.close();
-                    }
-                });
+                current_y += entry_height;
+            }
+
+            // Right-click context menu
+            let combined_text: String = rows
+                .iter()
+                .map(|row| {
+                    let content = entry_content_text(row.entry, show_hex, show_raw);
+                    content.replace('\n', " ")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            // Attach context menu to the full rect
+            let ctx_response = ui.interact(full_rect, ui.next_auto_id(), Sense::click());
+            ctx_response.context_menu(|ctx_ui| {
+                if ctx_ui.button("复制全部可见内容").clicked() {
+                    ctx_ui.ctx().copy_text(combined_text.clone());
+                    ctx_ui.close();
+                }
+
+                ctx_ui.separator();
+
+                if ctx_ui.button("复制 CSV").clicked() {
+                    let csv: String = rows
+                        .iter()
+                        .map(|row| {
+                            let content = entry_content_text(row.entry, show_hex, show_raw);
+                            let port = row.port.unwrap_or("");
+                            format!(
+                                "{},{},{},{}",
+                                row.entry.timestamp_label,
+                                port,
+                                match row.entry.direction {
+                                    Direction::Rx => "RX",
+                                    Direction::Tx => "TX",
+                                    Direction::Internal => "IN",
+                                },
+                                content.replace('\n', " ")
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    ctx_ui.ctx().copy_text(csv);
+                    ctx_ui.close();
+                }
             });
 
             if force_scroll_to_bottom {
-                // Add an invisible anchor at the bottom to scroll to.
-                // scroll_to_cursor_animation on a non-interactive TextEdit is a no-op,
-                // so we use a tiny spacer widget and scroll to it instead.
                 let (rect, _sense) = ui.allocate_exact_size(
                     egui::vec2(0.0, 0.0),
                     egui::Sense::hover(),
@@ -945,10 +1001,6 @@ fn render_rows_view(
         content_height: scroll_output.content_size.y,
         offset_y: scroll_output.state.offset.y,
     }
-}
-
-fn terminal_row_height(ui: &egui::Ui) -> f32 {
-    crate::row_height(ui)
 }
 
 /// Returns the content text for an entry based on display priority: hex > raw > display.
