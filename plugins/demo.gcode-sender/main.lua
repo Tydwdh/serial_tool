@@ -9,7 +9,6 @@ local TASK_ID = "demo.gcode-sender.print"
 local COMMAND = {
     SEND_FILE = "demo.gcode-sender.send_file",
     SEND_SINGLE = "demo.gcode-sender.send_single",
-    SEND_RAW = "demo.gcode-sender.send_raw",
     PAUSE = "demo.gcode-sender.pause",
     CANCEL = "demo.gcode-sender.cancel",
 }
@@ -165,14 +164,6 @@ local function numbered_entries(lines)
     local entries = {}
     for i, line in ipairs(lines) do
         entries[i] = { no = i, source = line, wire = checksum_line(line, i) }
-    end
-    return entries
-end
-
-local function raw_entries(lines)
-    local entries = {}
-    for i, line in ipairs(lines) do
-        entries[i] = { source = line, wire = line }
     end
     return entries
 end
@@ -569,21 +560,6 @@ local function handle_send_single(payload)
     start_task(port, numbered_entries(all), true)
 end
 
-local function handle_send_raw(payload)
-    local sc = send_context(payload)
-    local port = require_open_port(sc.target_port)
-    if not port then return end
-
-    local lines = split_nonempty_lines(sc.input)
-    if #lines == 0 then
-        log("warn", "请输入原始 G-code")
-        return
-    end
-
-    log("info", string.format("原始模式: %d 行", #lines))
-    start_task(port, raw_entries(lines), false)
-end
-
 local function handle_pause()
     local task = current_task()
     if not task or task.finished then
@@ -619,7 +595,6 @@ end
 local HANDLERS = {
     [COMMAND.SEND_FILE] = handle_send_file,
     [COMMAND.SEND_SINGLE] = handle_send_single,
-    [COMMAND.SEND_RAW] = handle_send_raw,
     [COMMAND.PAUSE] = handle_pause,
     [COMMAND.CANCEL] = handle_cancel,
 }
