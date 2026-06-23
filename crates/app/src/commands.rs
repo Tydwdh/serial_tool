@@ -33,7 +33,6 @@ impl WorkbenchApp {
                     data_bits: self.serial.data_bits.clone(),
                     stop_bits: self.serial.stop_bits.clone(),
                     parity: self.serial.parity.clone(),
-                    timeout_ms: self.serial.timeout_ms.clone(),
                 },
             );
         }
@@ -43,7 +42,6 @@ impl WorkbenchApp {
             self.serial.data_bits = profile.data_bits.clone();
             self.serial.stop_bits = profile.stop_bits.clone();
             self.serial.parity = profile.parity.clone();
-            self.serial.timeout_ms = profile.timeout_ms.clone();
         }
         self.serial.selected_port = Some(new_port.to_owned());
     }
@@ -98,7 +96,6 @@ impl WorkbenchApp {
                             data_bits: parse_data_bits(&self.serial.data_bits),
                             stop_bits: parse_stop_bits(&self.serial.stop_bits),
                             parity: parse_parity(&self.serial.parity),
-                            timeout_ms: self.serial.timeout_ms.parse().unwrap_or(50),
                         };
                         if self.transport.status_port(selected).open {
                             self.set_status_force(
@@ -236,22 +233,12 @@ impl WorkbenchApp {
         if baud_rate == 0 {
             return Err("波特率格式错误".to_owned());
         }
-        let timeout_ms = self
-            .serial
-            .timeout_ms
-            .trim()
-            .parse::<u64>()
-            .map_err(|_| "超时格式错误".to_owned())?;
-        if !(1..=1000).contains(&timeout_ms) {
-            return Err("超时 1..=1000 ms".to_owned());
-        }
         let cfg = SerialConfig {
             port_name: p,
             baud_rate,
             data_bits: parse_data_bits(&self.serial.data_bits),
             stop_bits: parse_stop_bits(&self.serial.stop_bits),
             parity: parse_parity(&self.serial.parity),
-            timeout_ms,
         };
         self.transport.open_serial(cfg).map_err(|e| e.to_string())
     }

@@ -54,10 +54,6 @@ pub(crate) fn lua_value_to_serial_config(value: Value) -> mlua::Result<SerialCon
                 config.baud_rate = value;
             }
 
-            if let Ok(value) = table.get::<u64>("timeout_ms") {
-                config.timeout_ms = value;
-            }
-
             if let Ok(value) = table.get::<String>("data_bits") {
                 config.data_bits = parse_data_bits(&value);
             }
@@ -569,7 +565,6 @@ mod tests {
         assert_eq!(config.port_name, "COM3");
         // Defaults should apply
         assert_eq!(config.baud_rate, 115_200);
-        assert_eq!(config.timeout_ms, 1);
     }
 
     #[test]
@@ -578,7 +573,6 @@ mod tests {
         let table = lua.create_table().unwrap();
         table.set("port_name", "COM5").unwrap();
         table.set("baud_rate", 9600_u32).unwrap();
-        table.set("timeout_ms", 100_u64).unwrap();
         table.set("data_bits", "7").unwrap();
         table.set("stop_bits", "2").unwrap();
         table.set("parity", "odd").unwrap();
@@ -586,7 +580,6 @@ mod tests {
         let config = lua_value_to_serial_config(Value::Table(table)).unwrap();
         assert_eq!(config.port_name, "COM5");
         assert_eq!(config.baud_rate, 9600);
-        assert_eq!(config.timeout_ms, 100);
         assert_eq!(config.data_bits, DataBits::Seven);
         assert_eq!(config.stop_bits, StopBits::Two);
         assert_eq!(config.parity, Parity::Odd);
@@ -604,7 +597,6 @@ mod tests {
         assert_eq!(config.data_bits, DataBits::Eight);
         assert_eq!(config.stop_bits, StopBits::One);
         assert_eq!(config.parity, Parity::None);
-        assert_eq!(config.timeout_ms, 1);
     }
 
     #[test]

@@ -36,7 +36,6 @@ pub(crate) struct PortProfile {
     pub(crate) data_bits: String,
     pub(crate) stop_bits: String,
     pub(crate) parity: String,
-    pub(crate) timeout_ms: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,7 +46,6 @@ pub(crate) struct PersistedConfig {
     pub(crate) data_bits: String,
     pub(crate) stop_bits: String,
     pub(crate) parity: String,
-    pub(crate) timeout_ms: String,
     pub(crate) recorder_path: String,
     #[serde(default = "default_activity_order")]
     pub(crate) activity_order: Vec<Activity>,
@@ -229,7 +227,6 @@ impl WorkbenchApp {
             data_bits: self.serial.data_bits.clone(),
             stop_bits: self.serial.stop_bits.clone(),
             parity: self.serial.parity.clone(),
-            timeout_ms: self.serial.timeout_ms.clone(),
             recorder_path: self.recorder_path.clone(),
             activity_order: self.activity_order.clone(),
             enabled_plugins: self
@@ -276,7 +273,6 @@ impl WorkbenchApp {
         self.serial.data_bits = cfg.data_bits.clone();
         self.serial.stop_bits = cfg.stop_bits.clone();
         self.serial.parity = cfg.parity.clone();
-        self.serial.timeout_ms = cfg.timeout_ms.clone();
         self.recorder_path = cfg.recorder_path.clone();
         self.activity_order = cfg.activity_order.clone();
         self.terminal_popup_always_on_top = cfg.terminal_popup_always_on_top;

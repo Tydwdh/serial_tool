@@ -1,4 +1,4 @@
-use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
+use crossbeam_channel::{Sender, TrySendError, bounded};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serialport as sp;
@@ -7,12 +7,17 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::thread::{self, JoinHandle};
+#[cfg(not(windows))]
+use std::thread;
+use std::thread::JoinHandle;
 use std::time::Duration;
 use thiserror::Error;
 use tool_core::{Direction, Event, LogLevel, Payload};
 
-enum DtrRtsCommand {
+#[cfg(windows)]
+mod windows_native;
+
+pub(crate) enum DtrRtsCommand {
     SetDtr(bool),
     SetRts(bool),
 }
@@ -130,7 +135,6 @@ pub struct SerialConfig {
     pub data_bits: DataBits,
     pub stop_bits: StopBits,
     pub parity: Parity,
-    pub timeout_ms: u64,
 }
 
 impl Default for SerialConfig {
@@ -141,7 +145,6 @@ impl Default for SerialConfig {
             data_bits: DataBits::Eight,
             stop_bits: StopBits::One,
             parity: Parity::None,
-            timeout_ms: 1,
         }
     }
 }
@@ -241,6 +244,8 @@ struct PortHandle {
     config: SerialConfig,
     writer: Sender<Vec<u8>>,
     dtr_rts_tx: Sender<DtrRtsCommand>,
+    #[cfg(windows)]
+    wake: Option<Arc<windows_native::WakeEvent>>,
     stop: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
@@ -370,23 +375,8 @@ impl TransportManager {
         // 配置变化时：同步等待旧 worker 退出再打开
         self.close_port_blocking(
             &config.port_name,
-            Duration::from_millis(config.timeout_ms + 100),
+            Duration::from_millis(100),
         )?;
-
-        let builder = sp::new(&config.port_name, config.baud_rate)
-            .data_bits(config.data_bits.into())
-            .stop_bits(config.stop_bits.into())
-            .parity(config.parity.into())
-            .timeout(Duration::from_millis(config.timeout_ms));
-
-        let port = builder.open().map_err(|error| {
-            self.bus.publish(Event::system_log(
-                LogLevel::Error,
-                "transport.serial",
-                format!("failed to open {}: {error}", config.port_name),
-            ));
-            TransportError::from(error)
-        })?;
 
         let (writer, write_rx) = bounded::<Vec<u8>>(1024);
         let (dtr_rts_tx, dtr_rts_rx) = bounded::<DtrRtsCommand>(16);
@@ -398,17 +388,59 @@ impl TransportManager {
         let source = format!("serial:{}", config.port_name);
         let thread_source = source.clone();
 
-        let join = thread::spawn(move || {
-            serial_worker_loop(
-                port,
+        #[cfg(windows)]
+        let (join, wake) = {
+            match windows_native::spawn_native_serial_worker(
+                &config,
                 write_rx,
                 dtr_rts_rx,
                 thread_stop,
                 thread_alive,
                 thread_bus,
                 thread_source,
-            );
-        });
+            ) {
+                Ok((join, wake)) => (join, Some(wake)),
+                Err(error) => {
+                    self.bus.publish(Event::system_log(
+                        LogLevel::Error,
+                        "transport.serial",
+                        format!("failed to open {}: {error}", config.port_name),
+                    ));
+                    return Err(error);
+                }
+            }
+        };
+
+        #[cfg(not(windows))]
+        let (join, wake) = {
+            let builder = sp::new(&config.port_name, config.baud_rate)
+                .data_bits(config.data_bits.into())
+                .stop_bits(config.stop_bits.into())
+                .parity(config.parity.into())
+                .timeout(Duration::from_millis(1));
+
+            let port = builder.open().map_err(|error| {
+                self.bus.publish(Event::system_log(
+                    LogLevel::Error,
+                    "transport.serial",
+                    format!("failed to open {}: {error}", config.port_name),
+                ));
+                TransportError::from(error)
+            })?;
+
+            let join = thread::spawn(move || {
+                serial_worker_loop(
+                    port,
+                    write_rx,
+                    dtr_rts_rx,
+                    thread_stop,
+                    thread_alive,
+                    thread_bus,
+                    thread_source,
+                );
+            });
+            (join, None::<()>)
+        };
 
         self.ports.lock().insert(
             config.port_name.clone(),
@@ -416,6 +448,8 @@ impl TransportManager {
                 config: config.clone(),
                 writer,
                 dtr_rts_tx,
+                #[cfg(windows)]
+                wake,
                 stop,
                 alive,
                 join: Some(join),
@@ -462,6 +496,10 @@ impl TransportManager {
                 .unwrap_or_else(|| port_name.to_owned());
             guard.remove(&key).map(|mut worker| {
                 worker.stop.store(true, Ordering::Release);
+                #[cfg(windows)]
+                if let Some(wake) = &worker.wake {
+                    wake.set();
+                }
                 let join = worker.join.take();
                 let port_name = worker.config.port_name.clone();
                 let baud_rate = worker.config.baud_rate;
@@ -496,6 +534,10 @@ impl TransportManager {
                 return Ok(());
             };
             worker.stop.store(true, Ordering::Release);
+            #[cfg(windows)]
+            if let Some(wake) = &worker.wake {
+                wake.set();
+            }
             let join = worker.join.take();
             (
                 worker.config.port_name.clone(),
@@ -540,7 +582,12 @@ impl TransportManager {
         worker.writer.try_send(bytes).map_err(|e| match e {
             crossbeam_channel::TrySendError::Full(_) => TransportError::QueueFull,
             crossbeam_channel::TrySendError::Disconnected(_) => TransportError::WorkerClosed,
-        })
+        })?;
+        #[cfg(windows)]
+        if let Some(wake) = &worker.wake {
+            wake.set();
+        }
+        Ok(())
     }
 
     // ── 向后兼容：发送到第一个已打开端口（按端口名排序保证确定性） ──
@@ -629,7 +676,12 @@ impl TransportManager {
         worker.dtr_rts_tx.try_send(cmd).map_err(|e| match e {
             TrySendError::Full(_) => TransportError::QueueFull,
             TrySendError::Disconnected(_) => TransportError::WorkerClosed,
-        })
+        })?;
+        #[cfg(windows)]
+        if let Some(wake) = &worker.wake {
+            wake.set();
+        }
+        Ok(())
     }
 
     /// 清理已退出 worker 的 stale port handle（alive == false）。
@@ -659,6 +711,7 @@ impl TransportManager {
 /// 串口读写抽象，使 `serial_worker_loop` 可测试。
 /// 生产实现：`Box<dyn sp::SerialPort>`（通过 blanket impl 自动满足）。
 /// 测试实现：`MockSerialPort`。
+#[cfg(any(not(windows), test))]
 trait SerialIo {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
     fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()>;
@@ -666,6 +719,7 @@ trait SerialIo {
     fn write_request_to_send(&mut self, value: bool) -> std::io::Result<()>;
 }
 
+#[cfg(any(not(windows), test))]
 impl SerialIo for Box<dyn sp::SerialPort> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         (**self).read(buf)
@@ -685,10 +739,11 @@ impl SerialIo for Box<dyn sp::SerialPort> {
 
 // ── 串口工作线程 ──
 
+#[cfg(not(windows))]
 fn serial_worker_loop(
     port: Box<dyn sp::SerialPort>,
-    write_rx: Receiver<Vec<u8>>,
-    dtr_rts_rx: Receiver<DtrRtsCommand>,
+    write_rx: crossbeam_channel::Receiver<Vec<u8>>,
+    dtr_rts_rx: crossbeam_channel::Receiver<DtrRtsCommand>,
     stop: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
     bus: DataBus,
@@ -697,10 +752,11 @@ fn serial_worker_loop(
     serial_worker_loop_impl(port, write_rx, dtr_rts_rx, stop, alive, bus, source)
 }
 
+#[cfg(any(not(windows), test))]
 fn serial_worker_loop_impl(
     mut port: impl SerialIo,
-    write_rx: Receiver<Vec<u8>>,
-    dtr_rts_rx: Receiver<DtrRtsCommand>,
+    write_rx: crossbeam_channel::Receiver<Vec<u8>>,
+    dtr_rts_rx: crossbeam_channel::Receiver<DtrRtsCommand>,
     stop: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
     bus: DataBus,
@@ -1181,6 +1237,8 @@ mod transport_tests {
                 config: SerialConfig::default(),
                 writer: bounded(1).0,
                 dtr_rts_tx: bounded(1).0,
+                #[cfg(windows)]
+                wake: None,
                 stop: Arc::new(AtomicBool::new(false)),
                 alive: Arc::new(AtomicBool::new(true)),
                 join: None,
@@ -1201,6 +1259,8 @@ mod transport_tests {
                 config: SerialConfig::default(),
                 writer: bounded(1).0,
                 dtr_rts_tx: bounded(1).0,
+                #[cfg(windows)]
+                wake: None,
                 stop: Arc::new(AtomicBool::new(false)),
                 alive: Arc::new(AtomicBool::new(true)),
                 join: None,

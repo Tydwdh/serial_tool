@@ -3562,6 +3562,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tool-core",
  "tool-databus",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

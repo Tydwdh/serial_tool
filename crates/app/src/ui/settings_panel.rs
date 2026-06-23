@@ -64,7 +64,6 @@ impl WorkbenchApp {
                 self.serial.data_bits = "8".to_owned();
                 self.serial.stop_bits = "1".to_owned();
                 self.serial.parity = "none".to_owned();
-                self.serial.timeout_ms = "50".to_owned();
                 self.recorder_path = default_recorder_path();
                 self.activity_order = default_activity_order();
                 self.serial.port_aliases.clear();

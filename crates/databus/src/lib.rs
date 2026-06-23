@@ -120,6 +120,12 @@ impl Subscription {
         self.receiver.try_recv().ok()
     }
 
+    /// 暴露底层接收端，用于 `crossbeam_channel::select!` 同时等待多个事件源。
+    /// 调用者应只在需要零延迟唤醒的内部调度路径使用。
+    pub fn receiver_arc(&self) -> &Receiver<Arc<Event>> {
+        &self.receiver
+    }
+
     /// 零 clone 批量消费：返回 `Arc<Event>` 引用列表。
     pub fn drain_arc(&self) -> Vec<Arc<Event>> {
         self.receiver.try_iter().collect()

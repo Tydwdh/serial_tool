@@ -143,11 +143,10 @@ impl WorkbenchApp {
                 // 折叠时显示当前配置摘要
                 ui.label(
                     egui::RichText::new(format!(
-                        "· {} {}N{} · {}ms",
+                        "· {} {}N{}",
                         self.serial.baud_rate,
                         self.serial.data_bits,
                         self.serial.stop_bits,
-                        self.serial.timeout_ms
                     ))
                     .color(theme::TEXT_SECONDARY),
                 );

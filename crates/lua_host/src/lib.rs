@@ -540,10 +540,37 @@ fn plugin_event_loop(
         process_timers(&lua, &bus, &config);
         process_tasks(&lua, &bus, &config, &host_services);
 
-        let wait_duration = next_timer_wait(&lua).unwrap_or_else(|| Duration::from_millis(50));
+        let wait_duration = next_timer_wait(&lua)
+            .unwrap_or_else(|| Duration::from_millis(50))
+            .min(Duration::from_millis(50));
 
-        match event_receiver.recv_timeout(wait_duration.min(Duration::from_millis(50))) {
-            Ok(event) => {
+        let event_result = if let Some(ref subscription) = serial_rx_subscription {
+            crossbeam_channel::select! {
+                recv(event_receiver) -> message => match message {
+                    Ok(event) => Some(Ok(event)),
+                    Err(_) => Some(Err(())),
+                },
+                recv(subscription.receiver_arc()) -> message => {
+                    if let Ok(event) = message {
+                        drain_serial_rx_to_buffers(&event, &host_services, &bus);
+                        for event in subscription.drain_limited(LUA_PLUGIN_INTERNAL_SERIAL_RX_DRAIN_LIMIT) {
+                            drain_serial_rx_to_buffers(&event, &host_services, &bus);
+                        }
+                    }
+                    None
+                },
+                default(wait_duration) => None,
+            }
+        } else {
+            match event_receiver.recv_timeout(wait_duration) {
+                Ok(event) => Some(Ok(event)),
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => None,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => Some(Err(())),
+            }
+        };
+
+        match event_result {
+            Some(Ok(event)) => {
                 // 没有内部 serial RX 订阅时，仍兼容旧的 manifest subscription 喂入方式。
                 if serial_rx_subscription.is_none() {
                     drain_serial_rx_to_buffers(&event, &host_services, &bus);
@@ -565,8 +592,8 @@ fn plugin_event_loop(
                     }
                 }
             }
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            None => {}
+            Some(Err(())) => break,
         }
 
         let timers_empty = lua

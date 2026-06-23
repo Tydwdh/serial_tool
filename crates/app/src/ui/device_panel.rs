@@ -44,9 +44,6 @@ impl WorkbenchApp {
                         ui.selectable_value(&mut self.serial.parity, v.to_owned(), l);
                     }
                 });
-
-            ui.label("超时(ms)");
-            ui.add(egui::TextEdit::singleline(&mut self.serial.timeout_ms).desired_width(50.0));
         });
 
         // 显示已打开但不在系统端口列表中的 stale 连接

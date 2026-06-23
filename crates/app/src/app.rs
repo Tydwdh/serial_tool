@@ -184,10 +184,6 @@ impl WorkbenchApp {
                     .as_ref()
                     .map(|c| c.parity.clone())
                     .unwrap_or_else(|| "none".into()),
-                timeout_ms: config
-                    .as_ref()
-                    .map(|c| c.timeout_ms.clone())
-                    .unwrap_or_else(|| "50".into()),
                 last_port_refresh: 0.0,
                 auto_reconnect: config.as_ref().map(|c| c.auto_reconnect).unwrap_or(true),
                 pending_reconnect: None,
