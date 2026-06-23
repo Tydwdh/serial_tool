@@ -1,6 +1,6 @@
 use crate::{MAX_INGEST_PER_FRAME, fmt_ts, theme};
-use egui::{Color32, RichText, ScrollArea, Sense, Stroke};
 use egui::text_selection::LabelSelectionState;
+use egui::{Color32, RichText, ScrollArea, Sense, Stroke};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use tool_core::{Direction, Event, Payload};
 use tool_databus::{DataBus, Subscription, TopicFilter};
@@ -209,10 +209,18 @@ impl TerminalPanel {
         let show_port = self.show_port;
 
         let mut headers: Vec<&str> = Vec::new();
-        if show_timestamp { headers.push("time"); }
-        if show_port { headers.push("port"); }
+        if show_timestamp {
+            headers.push("time");
+        }
+        if show_port {
+            headers.push("port");
+        }
         headers.push("direction");
-        if show_hex { headers.push("hex"); } else { headers.push("text"); }
+        if show_hex {
+            headers.push("hex");
+        } else {
+            headers.push("text");
+        }
 
         let mut out = headers.join(",");
         out.push('\n');
@@ -250,22 +258,37 @@ impl TerminalPanel {
         for (port, entry) in self.filtered_entries() {
             let mut obj = serde_json::Map::new();
             if show_timestamp {
-                obj.insert("time".into(), serde_json::Value::String(entry.timestamp_label.clone()));
+                obj.insert(
+                    "time".into(),
+                    serde_json::Value::String(entry.timestamp_label.clone()),
+                );
             }
             if show_port {
                 obj.insert("port".into(), serde_json::Value::String(port.clone()));
             }
-            obj.insert("direction".into(), serde_json::Value::String(match entry.direction {
-                Direction::Rx => "RX".into(),
-                Direction::Tx => "TX".into(),
-                Direction::Internal => "INTERNAL".into(),
-            }));
+            obj.insert(
+                "direction".into(),
+                serde_json::Value::String(match entry.direction {
+                    Direction::Rx => "RX".into(),
+                    Direction::Tx => "TX".into(),
+                    Direction::Internal => "INTERNAL".into(),
+                }),
+            );
             if show_hex {
-                obj.insert("hex".into(), serde_json::Value::String(entry.hex_text.clone()));
+                obj.insert(
+                    "hex".into(),
+                    serde_json::Value::String(entry.hex_text.clone()),
+                );
             } else {
-                obj.insert("text".into(), serde_json::Value::String(entry.raw_text.clone()));
+                obj.insert(
+                    "text".into(),
+                    serde_json::Value::String(entry.raw_text.clone()),
+                );
             }
-            out.push_str(&serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_else(|_| "{}".to_owned()));
+            out.push_str(
+                &serde_json::to_string(&serde_json::Value::Object(obj))
+                    .unwrap_or_else(|_| "{}".to_owned()),
+            );
             out.push('\n');
         }
         out
@@ -839,14 +862,17 @@ fn render_rows_view(
             }
 
             let galley_width = (hex_width - text_padding).max(0.0);
-            let preview_galley_width = if show_hex { (preview_width - text_padding).max(0.0) } else { 0.0 };
+            let preview_galley_width = if show_hex {
+                (preview_width - text_padding).max(0.0)
+            } else {
+                0.0
+            };
 
             // Layout all rows first to compute actual heights
             let row_layouts: Vec<RowLayout> = rows
                 .iter()
                 .map(|row| {
-                    let content =
-                        entry_content_text(row.entry, show_hex, show_raw);
+                    let content = entry_content_text(row.entry, show_hex, show_raw);
                     // Raw mode: escape newlines so content stays single-line
                     let content = if show_raw {
                         content.replace('\n', "\\n")
@@ -892,7 +918,11 @@ fn render_rows_view(
                     } else {
                         galley.size().y.max(row_height)
                     };
-                    RowLayout { galley, height, preview_galley }
+                    RowLayout {
+                        galley,
+                        height,
+                        preview_galley,
+                    }
                 })
                 .collect();
 
@@ -994,9 +1024,11 @@ fn render_rows_view(
                     // Preview column: non-interactive painter text only, so it doesn't
                     // interfere with HEX column's text selection.
                     let preview_painter = ui.painter_at(*pr);
-                    preview_painter.add(
-                        egui::epaint::TextShape::new(preview_pos, pg.clone(), theme::TEXT_DIMMED),
-                    );
+                    preview_painter.add(egui::epaint::TextShape::new(
+                        preview_pos,
+                        pg.clone(),
+                        theme::TEXT_DIMMED,
+                    ));
                 }
 
                 current_y += entry_height;
@@ -1038,10 +1070,8 @@ fn render_rows_view(
             });
 
             if force_scroll_to_bottom {
-                let (rect, _sense) = ui.allocate_exact_size(
-                    egui::vec2(0.0, 0.0),
-                    egui::Sense::hover(),
-                );
+                let (rect, _sense) =
+                    ui.allocate_exact_size(egui::vec2(0.0, 0.0), egui::Sense::hover());
                 ui.scroll_to_rect(rect, Some(egui::Align::BOTTOM));
             }
         });
@@ -1086,23 +1116,37 @@ fn build_jsonl(
     for row in rows {
         let mut obj = serde_json::Map::new();
         if show_timestamp {
-            obj.insert("time".into(), serde_json::Value::String(row.entry.timestamp_label.clone()));
+            obj.insert(
+                "time".into(),
+                serde_json::Value::String(row.entry.timestamp_label.clone()),
+            );
         }
-        if show_port
-            && let Some(port) = row.port {
-                obj.insert("port".into(), serde_json::Value::String(port.to_owned()));
-            }
-        obj.insert("direction".into(), serde_json::Value::String(match row.entry.direction {
-            Direction::Rx => "RX".into(),
-            Direction::Tx => "TX".into(),
-            Direction::Internal => "INTERNAL".into(),
-        }));
+        if show_port && let Some(port) = row.port {
+            obj.insert("port".into(), serde_json::Value::String(port.to_owned()));
+        }
+        obj.insert(
+            "direction".into(),
+            serde_json::Value::String(match row.entry.direction {
+                Direction::Rx => "RX".into(),
+                Direction::Tx => "TX".into(),
+                Direction::Internal => "INTERNAL".into(),
+            }),
+        );
         if show_hex {
-            obj.insert("hex".into(), serde_json::Value::String(row.entry.hex_text.clone()));
+            obj.insert(
+                "hex".into(),
+                serde_json::Value::String(row.entry.hex_text.clone()),
+            );
         } else {
-            obj.insert("text".into(), serde_json::Value::String(row.entry.raw_text.clone()));
+            obj.insert(
+                "text".into(),
+                serde_json::Value::String(row.entry.raw_text.clone()),
+            );
         }
-        out.push_str(&serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_else(|_| "{}".to_owned()));
+        out.push_str(
+            &serde_json::to_string(&serde_json::Value::Object(obj))
+                .unwrap_or_else(|_| "{}".to_owned()),
+        );
         out.push('\n');
     }
     out

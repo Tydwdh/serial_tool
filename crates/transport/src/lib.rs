@@ -373,10 +373,7 @@ impl TransportManager {
         }
 
         // 配置变化时：同步等待旧 worker 退出再打开
-        self.close_port_blocking(
-            &config.port_name,
-            Duration::from_millis(100),
-        )?;
+        self.close_port_blocking(&config.port_name, Duration::from_millis(100))?;
 
         let (writer, write_rx) = bounded::<Vec<u8>>(1024);
         let (dtr_rts_tx, dtr_rts_rx) = bounded::<DtrRtsCommand>(16);

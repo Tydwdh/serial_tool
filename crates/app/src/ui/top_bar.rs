@@ -144,9 +144,7 @@ impl WorkbenchApp {
                 ui.label(
                     egui::RichText::new(format!(
                         "· {} {}N{}",
-                        self.serial.baud_rate,
-                        self.serial.data_bits,
-                        self.serial.stop_bits,
+                        self.serial.baud_rate, self.serial.data_bits, self.serial.stop_bits,
                     ))
                     .color(theme::TEXT_SECONDARY),
                 );
