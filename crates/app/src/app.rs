@@ -156,6 +156,7 @@ impl WorkbenchApp {
                 .take(MAX_SEND_HISTORY)
                 .cloned()
                 .collect::<VecDeque<_>>();
+            send.line_ending = cfg.line_ending;
         }
 
         let mut app = Self {
