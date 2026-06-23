@@ -64,7 +64,10 @@ struct TerminalEntry {
     display_text: String,
 
     hex_text: String,
+    #[allow(dead_code)]
     hex_preview: String,
+    /// 纯 UTF8 预览文本（不含方括号），HEX 模式下独立显示
+    preview_text: String,
 
     /// 预缓存的小写字段，用于搜索时避免每帧分配
     search_lower: String,
@@ -602,6 +605,13 @@ impl TerminalPanel {
             format!("{hex_text} [{utf8_preview}]")
         };
 
+        // 独立预览文本（用于 HEX 模式下的独立列显示）
+        let preview_text = if hex_text.is_empty() {
+            String::new()
+        } else {
+            utf8_preview
+        };
+
         let entry_id = self.next_entry_id;
         self.next_entry_id = self.next_entry_id.wrapping_add(1).max(1);
 
@@ -631,6 +641,7 @@ impl TerminalPanel {
 
             hex_text,
             hex_preview,
+            preview_text,
             search_lower,
         });
 
@@ -815,21 +826,37 @@ fn render_rows_view(
         galley: std::sync::Arc<egui::Galley>,
         /// Height needed for this entry's content (at least row_height)
         height: f32,
+        /// Preview galley for HEX mode (UTF8 text)
+        preview_galley: Option<std::sync::Arc<egui::Galley>>,
     }
 
+    const PREVIEW_COL_MIN_WIDTH: f32 = 80.0;
+
     let scroll_output = ScrollArea::vertical()
-        .max_height(height)
         .auto_shrink([false, false])
         .stick_to_bottom(stick_to_bottom)
         .id_salt((scroll_key, "v2"))
         .show(ui, |ui| {
-            // Use a single allocate_exact_size to avoid layout conflicts.
-            // We manually split the rect into left (labels) and right (content).
             let full_width = ui.available_width();
-            let text_width = (full_width - label_width).max(0.0);
             let text_padding = 4.0;
-            let galley_width = (text_width - text_padding).max(0.0);
             let text_color = ui.style().visuals.text_color();
+
+            // In HEX mode, split the content area: hex text | preview text
+            let hex_width: f32;
+            let preview_width: f32;
+            if show_hex {
+                // Split remaining space between hex and preview
+                let content_width = (full_width - label_width).max(0.0);
+                // Preview gets roughly 30% or at least PREVIEW_COL_MIN_WIDTH
+                preview_width = (content_width * 0.3).max(PREVIEW_COL_MIN_WIDTH);
+                hex_width = (content_width - preview_width).max(0.0);
+            } else {
+                hex_width = (full_width - label_width).max(0.0);
+                preview_width = 0.0;
+            }
+
+            let galley_width = (hex_width - text_padding).max(0.0);
+            let preview_galley_width = if show_hex { (preview_width - text_padding).max(0.0) } else { 0.0 };
 
             // Layout all rows first to compute actual heights
             let row_layouts: Vec<RowLayout> = rows
@@ -857,8 +884,32 @@ fn render_rows_view(
                     );
                     layout_job.halign = egui::Align::LEFT;
                     let galley = ui.fonts_mut(|f| f.layout_job(layout_job));
-                    let height = galley.size().y.max(row_height);
-                    RowLayout { galley, height }
+
+                    // Layout preview text for HEX mode
+                    let preview_galley = if show_hex {
+                        let preview_text = if row.entry.preview_text.is_empty() {
+                            " ".to_owned()
+                        } else {
+                            row.entry.preview_text.clone()
+                        };
+                        let mut layout_job = egui::text::LayoutJob::simple(
+                            preview_text,
+                            font_id.clone(),
+                            theme::TEXT_DIMMED,
+                            preview_galley_width,
+                        );
+                        layout_job.halign = egui::Align::LEFT;
+                        Some(ui.fonts_mut(|f| f.layout_job(layout_job)))
+                    } else {
+                        None
+                    };
+
+                    let height = if let Some(ref pg) = preview_galley {
+                        galley.size().y.max(pg.size().y).max(row_height)
+                    } else {
+                        galley.size().y.max(row_height)
+                    };
+                    RowLayout { galley, height, preview_galley }
                 })
                 .collect();
 
@@ -871,15 +922,23 @@ fn render_rows_view(
                 )
                 .0;
 
-            // Split into left (labels) and right (text)
+            // Split into: labels | hex/raw/display | preview (HEX mode only)
             let label_rect = egui::Rect::from_min_size(
                 full_rect.left_top(),
                 egui::vec2(label_width, total_height),
             );
-            let text_rect = egui::Rect::from_min_size(
+            let hex_rect = egui::Rect::from_min_size(
                 egui::pos2(full_rect.left() + label_width, full_rect.top()),
-                egui::vec2(text_width, total_height),
+                egui::vec2(hex_width, total_height),
             );
+            let preview_rect = if show_hex {
+                Some(egui::Rect::from_min_size(
+                    egui::pos2(full_rect.left() + label_width + hex_width, full_rect.top()),
+                    egui::vec2(preview_width, total_height),
+                ))
+            } else {
+                None
+            };
 
             let label_painter = ui.painter_at(label_rect);
 
@@ -887,11 +946,9 @@ fn render_rows_view(
             let mut current_y = label_rect.top();
             for (row, layout) in rows.iter().zip(row_layouts.iter()) {
                 let entry_height = layout.height;
-                // Tag labels align with the top of the text content (first line baseline),
-                // using row_height as the effective single-line height for labels
                 let label_y = current_y + row_height * 0.5;
 
-                // --- Draw left labels (aligned with first line of text) ---
+                // --- Draw left labels ---
                 let mut x = label_rect.left() + ROW_LEFT_PADDING;
 
                 if show_timestamp {
@@ -927,23 +984,46 @@ fn render_rows_view(
                     dir_color,
                 );
 
-                // --- Draw selectable content text ---
-                let galley_pos = egui::pos2(text_rect.left() + text_padding, current_y);
-                let row_text_rect = egui::Rect::from_min_size(
-                    egui::pos2(text_rect.left(), current_y),
-                    egui::vec2(text_width, entry_height),
-                );
-                let row_id = ui.make_persistent_id(row.entry.id);
-                let response = ui.interact(row_text_rect, row_id, Sense::click_and_drag());
+                // --- Draw selectable content text (HEX / raw / display) ---
+                {
+                    let galley_pos = egui::pos2(hex_rect.left() + text_padding, current_y);
+                    let row_text_rect = egui::Rect::from_min_size(
+                        egui::pos2(hex_rect.left(), current_y),
+                        egui::vec2(hex_width, entry_height),
+                    );
+                    // Use a separate id salt for hex column to avoid id collision with preview
+                    let row_id = ui.make_persistent_id(("hex", row.entry.id));
+                    let response = ui.interact(row_text_rect, row_id, Sense::click_and_drag());
 
-                LabelSelectionState::label_text_selection(
-                    ui,
-                    &response,
-                    galley_pos,
-                    layout.galley.clone(),
-                    text_color,
-                    Stroke::NONE,
-                );
+                    LabelSelectionState::label_text_selection(
+                        ui,
+                        &response,
+                        galley_pos,
+                        layout.galley.clone(),
+                        text_color,
+                        Stroke::NONE,
+                    );
+                }
+
+                // --- Draw preview text (HEX mode only) ---
+                if let (Some(pr), Some(pg)) = (&preview_rect, &layout.preview_galley) {
+                    let preview_pos = egui::pos2(pr.left() + text_padding, current_y);
+                    let preview_row_rect = egui::Rect::from_min_size(
+                        egui::pos2(pr.left(), current_y),
+                        egui::vec2(preview_width, entry_height),
+                    );
+                    let preview_id = ui.make_persistent_id(("preview", row.entry.id));
+                    let preview_response = ui.interact(preview_row_rect, preview_id, Sense::click_and_drag());
+
+                    LabelSelectionState::label_text_selection(
+                        ui,
+                        &preview_response,
+                        preview_pos,
+                        pg.clone(),
+                        theme::TEXT_DIMMED,
+                        Stroke::NONE,
+                    );
+                }
 
                 current_y += entry_height;
             }
@@ -1016,7 +1096,7 @@ fn render_rows_view(
 /// Returns the content text for an entry based on display priority: hex > raw > display.
 fn entry_content_text(entry: &TerminalEntry, show_hex: bool, show_raw: bool) -> &str {
     if show_hex {
-        &entry.hex_preview
+        &entry.hex_text
     } else if show_raw {
         &entry.raw_text
     } else {
