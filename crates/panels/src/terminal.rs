@@ -837,10 +837,16 @@ fn render_rows_view(
                 .map(|row| {
                     let content =
                         entry_content_text(row.entry, show_hex, show_raw);
+                    // Raw mode: escape newlines so content stays single-line
+                    let content = if show_raw {
+                        content.replace('\n', "\\n")
+                    } else {
+                        content.to_owned()
+                    };
                     let content = if content.is_empty() {
                         " ".to_owned()
                     } else {
-                        content.to_owned()
+                        content
                     };
 
                     let mut layout_job = egui::text::LayoutJob::simple(
@@ -946,7 +952,12 @@ fn render_rows_view(
             let combined_text: String = rows
                 .iter()
                 .map(|row| {
-                    entry_content_text(row.entry, show_hex, show_raw)
+                    let content = entry_content_text(row.entry, show_hex, show_raw);
+                    if show_raw {
+                        content.replace('\n', "\\n")
+                    } else {
+                        content.to_owned()
+                    }
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
