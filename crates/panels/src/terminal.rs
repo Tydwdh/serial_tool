@@ -946,8 +946,7 @@ fn render_rows_view(
             let combined_text: String = rows
                 .iter()
                 .map(|row| {
-                    let content = entry_content_text(row.entry, show_hex, show_raw);
-                    content.replace('\n', " ")
+                    entry_content_text(row.entry, show_hex, show_raw)
                 })
                 .collect::<Vec<_>>()
                 .join("\n");

@@ -27,7 +27,7 @@ impl Default for SenderPanel {
             input: String::new(),
             hex_mode: false,
             hex_strict: true,
-            line_ending_suffix: "\n",
+            line_ending_suffix: "",
             error: None,
             target_port: None,
             send_history: VecDeque::new(),

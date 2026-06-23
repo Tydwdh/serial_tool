@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use tool_transport::{SerialConfig, SerialPortDescriptor};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -71,7 +72,7 @@ impl StatusState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum LineEnding {
     None,
     Lf,
@@ -123,7 +124,7 @@ impl Default for SendUiState {
         Self {
             input: String::new(),
             hex_mode: false,
-            line_ending: LineEnding::Lf,
+            line_ending: LineEnding::None,
             error: None,
             popup_open: false,
             target_port: None,

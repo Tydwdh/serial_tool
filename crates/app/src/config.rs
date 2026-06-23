@@ -1,3 +1,4 @@
+use crate::state::LineEnding;
 use std::path::PathBuf;
 use tool_core::now_timestamp_ms;
 use tool_recorder::RecordMode;
@@ -60,6 +61,8 @@ pub(crate) struct PersistedConfig {
     pub(crate) port_aliases: HashMap<String, String>,
     #[serde(default)]
     pub(crate) send_history: Vec<String>,
+    #[serde(default = "default_line_ending")]
+    pub(crate) line_ending: LineEnding,
     #[serde(default)]
     pub(crate) port_profiles: HashMap<String, PortProfile>,
     #[serde(default)]
@@ -73,6 +76,10 @@ pub(crate) struct PersistedConfig {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_line_ending() -> LineEnding {
+    LineEnding::None
 }
 
 pub(crate) fn default_activity_order() -> Vec<Activity> {
@@ -241,6 +248,7 @@ impl WorkbenchApp {
             send_popup_always_on_top: self.send_popup_always_on_top,
             port_aliases: self.serial.port_aliases.clone(),
             send_history: self.send.send_history.iter().cloned().collect(),
+            line_ending: self.send.line_ending,
             port_profiles: self.serial.port_profiles.clone(),
             recent_workspaces: self.recent_workspaces.clone(),
             auto_reconnect: self.serial.auto_reconnect,
@@ -284,6 +292,7 @@ impl WorkbenchApp {
             .take(MAX_SEND_HISTORY)
             .cloned()
             .collect();
+        self.send.line_ending = cfg.line_ending;
         self.panels = cfg.panels.clone();
         self.apply_loaded_workspace_postprocess();
         Ok(())
