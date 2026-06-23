@@ -374,22 +374,6 @@ impl TerminalPanel {
                 self.clear();
             }
 
-            if ui
-                .button("复制 CSV")
-                .on_hover_text("复制过滤后的视图为 CSV")
-                .clicked()
-            {
-                ui.ctx().copy_text(self.export_visible_csv());
-            }
-
-            if ui
-                .button("复制 JSONL")
-                .on_hover_text("复制过滤后的视图为 JSONL")
-                .clicked()
-            {
-                ui.ctx().copy_text(self.export_visible_jsonl());
-            }
-
             if ui.button("⛶").on_hover_text("放大查看").clicked() {
                 self.maximize_clicked = true;
             }
@@ -1040,29 +1024,15 @@ fn render_rows_view(
                     ctx_ui.close();
                 }
 
-                ctx_ui.separator();
-
                 if ctx_ui.button("复制 CSV").clicked() {
-                    let csv: String = rows
-                        .iter()
-                        .map(|row| {
-                            let content = entry_content_text(row.entry, show_hex, show_raw);
-                            let port = row.port.unwrap_or("");
-                            format!(
-                                "{},{},{},{}",
-                                row.entry.timestamp_label,
-                                port,
-                                match row.entry.direction {
-                                    Direction::Rx => "RX",
-                                    Direction::Tx => "TX",
-                                    Direction::Internal => "IN",
-                                },
-                                content.replace('\n', " ")
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
+                    let csv = build_csv(rows, show_hex, show_raw);
                     ctx_ui.ctx().copy_text(csv);
+                    ctx_ui.close();
+                }
+
+                if ctx_ui.button("复制 JSONL").clicked() {
+                    let jsonl = build_jsonl(rows, show_hex, show_raw, show_timestamp, show_port);
+                    ctx_ui.ctx().copy_text(jsonl);
                     ctx_ui.close();
                 }
             });
@@ -1081,6 +1051,61 @@ fn render_rows_view(
         content_height: scroll_output.content_size.y,
         offset_y: scroll_output.state.offset.y,
     }
+}
+
+/// Build CSV string from visible rows.
+fn build_csv(rows: &[VisibleRow<'_>], show_hex: bool, show_raw: bool) -> String {
+    let mut out = String::from("time,port,direction,content\n");
+    for row in rows {
+        let content = entry_content_text(row.entry, show_hex, show_raw);
+        let port = row.port.unwrap_or("");
+        out.push_str(&format!(
+            "{},{},{},{}\n",
+            csv_cell(&row.entry.timestamp_label),
+            csv_cell(port),
+            match row.entry.direction {
+                Direction::Rx => "RX",
+                Direction::Tx => "TX",
+                Direction::Internal => "IN",
+            },
+            csv_cell(&content.replace('\n', " ")),
+        ));
+    }
+    out
+}
+
+/// Build JSONL string from visible rows.
+fn build_jsonl(
+    rows: &[VisibleRow<'_>],
+    show_hex: bool,
+    _show_raw: bool,
+    show_timestamp: bool,
+    show_port: bool,
+) -> String {
+    let mut out = String::new();
+    for row in rows {
+        let mut obj = serde_json::Map::new();
+        if show_timestamp {
+            obj.insert("time".into(), serde_json::Value::String(row.entry.timestamp_label.clone()));
+        }
+        if show_port
+            && let Some(port) = row.port {
+                obj.insert("port".into(), serde_json::Value::String(port.to_owned()));
+            }
+        obj.insert("direction".into(), serde_json::Value::String(match row.entry.direction {
+            Direction::Rx => "RX".into(),
+            Direction::Tx => "TX".into(),
+            Direction::Internal => "INTERNAL".into(),
+        }));
+        if show_hex {
+            obj.insert("hex".into(), serde_json::Value::String(row.entry.hex_text.clone()));
+        } else {
+            obj.insert("text".into(), serde_json::Value::String(row.entry.raw_text.clone()));
+        }
+        out.push_str(&serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_else(|_| "{}".to_owned()));
+        out.push('\n');
+    }
+    out
 }
 
 /// Returns the content text for an entry based on display priority: hex > raw > display.
