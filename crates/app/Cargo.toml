@@ -10,6 +10,7 @@ dirs-next.workspace = true
 eframe.workspace = true
 egui.workspace = true
 log.workspace = true
+open.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tool-core = { path = "../core" }

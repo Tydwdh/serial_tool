@@ -1449,6 +1449,7 @@ dependencies = [
  "eframe",
  "egui",
  "log",
+ "open",
  "rfd",
  "serde",
  "serde_json",

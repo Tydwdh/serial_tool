@@ -25,6 +25,10 @@ impl ConfigStore {
         }
     }
 
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     fn config_path(&self, plugin_id: &str) -> PathBuf {
         let safe_id = sanitize_plugin_id(plugin_id);
         self.root.join(format!("{safe_id}.json"))

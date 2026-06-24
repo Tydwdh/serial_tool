@@ -1,8 +1,11 @@
 use crate::app::WorkbenchApp;
 use crate::config::default_activity_order;
-use crate::config::{default_recorder_path, pick_workspace_open_path, pick_workspace_save_path};
+use crate::config::{
+    config_path, default_recorder_path, pick_workspace_open_path, pick_workspace_save_path,
+};
 use crate::state::StatusLevel;
 use eframe::egui;
+use std::path::{Path, PathBuf};
 use tool_panels::theme;
 
 impl WorkbenchApp {
@@ -56,6 +59,8 @@ impl WorkbenchApp {
                 }
             }
         });
+
+        self.render_config_locations(ui);
 
         ui.horizontal(|ui| {
             if ui.button("恢复默认").clicked() {
@@ -137,6 +142,43 @@ impl WorkbenchApp {
         self.render_keymap_editor(ui);
         ui.separator();
         ui.label("硬件调试工作台 v0.1.0");
+    }
+
+    fn render_config_locations(&mut self, ui: &mut egui::Ui) {
+        let workspace_config = config_path();
+        let plugin_config_dir = self.plugin_manager.config_root().to_path_buf();
+
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("配置文件位置").strong());
+        self.render_config_location_row(ui, "工作区配置", &workspace_config, false);
+        self.render_config_location_row(ui, "插件配置目录", &plugin_config_dir, true);
+    }
+
+    fn render_config_location_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        label: &str,
+        path: &Path,
+        open_self: bool,
+    ) {
+        let path_text = path.display().to_string();
+        ui.horizontal(|ui| {
+            ui.add_sized([92.0, 0.0], egui::Label::new(label));
+            if ui.small_button("复制").clicked() {
+                ui.ctx().copy_text(path_text.clone());
+                self.set_status_force(StatusLevel::Info, format!("已复制: {path_text}"));
+            }
+            if ui.small_button("打开目录").clicked() {
+                match open_config_location(path, open_self) {
+                    Ok(target) => self.set_status_force(
+                        StatusLevel::Info,
+                        format!("已打开: {}", target.display()),
+                    ),
+                    Err(error) => self.set_status_force(StatusLevel::Error, error),
+                }
+            }
+            ui.monospace(&path_text).on_hover_text(path_text);
+        });
     }
 
     /// 快捷键编辑器：表格展示所有动作及其绑定，支持录制新快捷键。
@@ -250,4 +292,18 @@ impl WorkbenchApp {
             None
         })
     }
+}
+
+fn open_config_location(path: &Path, open_self: bool) -> Result<PathBuf, String> {
+    let target = if open_self {
+        path.to_path_buf()
+    } else {
+        path.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    };
+    std::fs::create_dir_all(&target).map_err(|e| format!("创建目录失败：{e}"))?;
+    open::that(&target)
+        .map_err(|e| format!("打开目录失败：{e}"))
+        .map(|()| target)
 }

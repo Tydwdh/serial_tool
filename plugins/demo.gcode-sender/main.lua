@@ -17,7 +17,6 @@ local DEFAULTS = {
     default_setup_gcode = "M92 X40 Y40 Z2.5 E7.53",
     ack_timeout_ms = 300000,
     start_timeout_ms = 3000,
-    send_delay_ms = 10,
     eof_delay_ms = 1000,
     error_followup_ms = 2000,
     max_marlin_line_bytes = 96,
@@ -47,7 +46,6 @@ local function settings()
         setup_gcode = trim(sget("default_setup_gcode")),
         ack_timeout_ms = snum("ack_timeout_ms"),
         start_timeout_ms = snum("start_timeout_ms"),
-        send_delay_ms = snum("send_delay_ms"),
         eof_delay_ms = snum("eof_delay_ms"),
         error_followup_ms = snum("error_followup_ms"),
         max_line_bytes = snum("max_marlin_line_bytes"),
@@ -382,9 +380,6 @@ local function run_entries(port, entries, use_checksum, task)
             pos = pos + 1
             max_done = pos - 1
             task:set_progress(max_done, total)
-            if s.send_delay_ms > 0 then
-                task:sleep_ms(s.send_delay_ms)
-            end
         elseif result.kind == "resend" then
             if not use_checksum then
                 log("warn", "raw 模式忽略 Resend: " .. (result.line or ""))

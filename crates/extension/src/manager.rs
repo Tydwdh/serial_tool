@@ -82,6 +82,10 @@ impl PluginManager {
         ));
     }
 
+    pub fn config_root(&self) -> &Path {
+        self.config_store.root()
+    }
+
     pub fn set_host_services(
         &mut self,
         dialog_sender: crossbeam_channel::Sender<DialogRequest>,

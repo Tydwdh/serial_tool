@@ -36,6 +36,10 @@ pub(crate) use crate::api::test::install_test_api;
 pub(crate) use crate::api::timer::create_timer_api;
 pub(crate) use crate::api::ui::create_ui_api;
 pub(crate) use crate::convert::{event_to_lua_table, json_to_lua_value};
+use crate::globals::{
+    TASK_CANCELLED, TASK_FINISHED, TASK_YIELD_OP, YIELD_DEADLINE_MS, YIELD_KIND, YIELD_READ_LINE,
+    YIELD_SLEEP, YIELD_WAIT_PAUSED, YIELD_WRITE_LINE_AND_EXPECT,
+};
 use crate::host_services::line_buffer_key;
 pub use config::ConfigStore;
 pub use replay::{run_replay_analyzer, run_replay_analyzer_with_cancel};
@@ -540,7 +544,7 @@ fn plugin_event_loop(
         process_timers(&lua, &bus, &config);
         process_tasks(&lua, &bus, &config, &host_services);
 
-        let wait_duration = next_timer_wait(&lua)
+        let wait_duration = min_wait(next_timer_wait(&lua), next_task_wait(&lua))
             .unwrap_or_else(|| Duration::from_millis(50))
             .min(Duration::from_millis(50));
 
@@ -662,6 +666,60 @@ fn next_timer_wait(lua: &Lua) -> Option<Duration> {
         Some(Duration::from_millis(next_trigger_at - now_ms))
     }
 }
+
+fn next_task_wait(lua: &Lua) -> Option<Duration> {
+    let tasks: Table = lua.globals().get(crate::globals::PLUGIN_TASKS).ok()?;
+    let now_ms = tool_core::now_timestamp_ms();
+    let mut next_wake_at = u64::MAX;
+
+    for (_, state) in tasks.pairs::<String, Table>().flatten() {
+        if state.get::<bool>(TASK_FINISHED).unwrap_or(true) {
+            continue;
+        }
+        if state.get::<bool>(TASK_CANCELLED).unwrap_or(false) {
+            return Some(Duration::ZERO);
+        }
+        if state.get::<bool>("paused").unwrap_or(false) {
+            continue;
+        }
+
+        let Some(op) = state.get::<Option<Table>>(TASK_YIELD_OP).ok().flatten() else {
+            return Some(Duration::ZERO);
+        };
+        let kind: String = op.get(YIELD_KIND).unwrap_or_default();
+        match kind.as_str() {
+            YIELD_SLEEP => {
+                let wake_at_ms: u64 = state.get("wake_at_ms").unwrap_or(0);
+                next_wake_at = next_wake_at.min(wake_at_ms);
+            }
+            YIELD_READ_LINE | YIELD_WRITE_LINE_AND_EXPECT => {
+                let deadline_ms: u64 = op.get(YIELD_DEADLINE_MS).unwrap_or(0);
+                if deadline_ms > 0 {
+                    next_wake_at = next_wake_at.min(deadline_ms);
+                }
+            }
+            YIELD_WAIT_PAUSED => {}
+            _ => {}
+        }
+    }
+
+    if next_wake_at == u64::MAX {
+        None
+    } else if next_wake_at <= now_ms {
+        Some(Duration::ZERO)
+    } else {
+        Some(Duration::from_millis(next_wake_at - now_ms))
+    }
+}
+
+fn min_wait(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(wait), None) | (None, Some(wait)) => Some(wait),
+        (None, None) => None,
+    }
+}
+
 fn process_timers(lua: &Lua, bus: &DataBus, config: &LuaRunConfig) {
     let timers: Table = match lua.globals().get(crate::globals::PLUGIN_TIMERS) {
         Ok(timers) => timers,
@@ -1293,6 +1351,34 @@ assert(task.finished == false)
             Arc::new(AtomicBool::new(false)),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn next_task_wait_tracks_sleep_wake_time() {
+        let lua = Lua::new();
+        let tasks = lua.create_table().unwrap();
+        lua.globals()
+            .set(crate::globals::PLUGIN_TASKS, tasks.clone())
+            .unwrap();
+
+        let state = lua.create_table().unwrap();
+        state.set(TASK_FINISHED, false).unwrap();
+        state.set(TASK_CANCELLED, false).unwrap();
+        state.set("paused", false).unwrap();
+        state
+            .set("wake_at_ms", tool_core::now_timestamp_ms() + 10)
+            .unwrap();
+
+        let op = lua.create_table().unwrap();
+        op.set(YIELD_KIND, YIELD_SLEEP).unwrap();
+        state.set(TASK_YIELD_OP, op).unwrap();
+        tasks.set("sleepy", state).unwrap();
+
+        let wait = next_task_wait(&lua).expect("sleeping task should set next wait");
+        assert!(
+            wait <= Duration::from_millis(10),
+            "sleeping task wait should be <= 10ms, got {wait:?}"
+        );
     }
 
     #[test]
