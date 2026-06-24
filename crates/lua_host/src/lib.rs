@@ -581,7 +581,6 @@ fn plugin_event_loop(
 
         match event_result {
             Some(Ok(event)) => {
-                // 没有内部 serial RX 订阅时，仍兼容旧的 manifest subscription 喂入方式。
                 if serial_rx_subscription.is_none() {
                     drain_serial_rx_to_buffers(&event, &host_services, &bus);
                 }
@@ -679,7 +678,6 @@ fn handle_plugin_command_event(
 
     let Some(command) = payload
         .get("command")
-        .or_else(|| payload.get("action"))
         .and_then(serde_json::Value::as_str)
         .filter(|command| !command.trim().is_empty())
     else {
@@ -1045,9 +1043,7 @@ fn install_ctx(
 
     if has_permission(config, "storage") {
         let storage_api = create_storage_api(lua)?;
-        ctx.set("session", storage_api.clone())?;
-        // 向后兼容旧名称
-        ctx.set("storage", storage_api)?;
+        ctx.set("session", storage_api)?;
     }
 
     if has_permission(config, "dialog")

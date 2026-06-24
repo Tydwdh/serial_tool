@@ -135,15 +135,6 @@ impl PluginsPanel {
             });
         }
 
-        if !summary.contributes.subscriptions.is_empty() {
-            ui.horizontal_wrapped(|ui| {
-                ui.label("订阅");
-                for subscription in &summary.contributes.subscriptions {
-                    ui.monospace(&subscription.topic);
-                }
-            });
-        }
-
         if let Some(error) = &summary.last_error {
             ui.colored_label(theme::RED, error);
         }

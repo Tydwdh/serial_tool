@@ -163,13 +163,6 @@
             "$ref": "#/$defs/setting"
           },
           "default": []
-        },
-        "subscriptions": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/subscription"
-          },
-          "default": []
         }
       }
     },
@@ -207,9 +200,6 @@
           "$ref": "#/$defs/nonEmptyString"
         },
         "command": {
-          "$ref": "#/$defs/nonEmptyString"
-        },
-        "action": {
           "$ref": "#/$defs/nonEmptyString"
         },
         "tooltip": {
@@ -263,16 +253,6 @@
           "$ref": "#/$defs/nonEmptyString"
         },
         "default": true
-      }
-    },
-    "subscription": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["topic"],
-      "properties": {
-        "topic": {
-          "$ref": "#/$defs/topic"
-        }
       }
     }
   }

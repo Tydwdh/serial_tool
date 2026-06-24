@@ -157,7 +157,7 @@ fn install_replay_ctx(
         }
     }
 
-    // ctx.storage.get (只读)
+    // ctx.session.get (只读)
     let storage = lua.create_table()?;
     storage.set(
         "get",

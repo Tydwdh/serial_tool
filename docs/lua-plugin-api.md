@@ -89,24 +89,6 @@ end)
 ctx.bus.off("transport.serial.default.rx")
 ```
 
-### ui.contribution.action（兼容）
-
-旧插件可以继续监听 `ui.contribution.action`。新插件优先使用 `ctx.commands.register`，避免每个插件自己判断 `plugin_id` 和分发 action。
-
-```lua
-ctx.bus.on("ui.contribution.action", function(event)
-  local p = event.payload or {}
-  if p.plugin_id ~= ctx.plugin.id then
-    return
-  end
-
-  if p.action == "my-plugin.send" then
-    local send = (p.context or {}).send or {}
-    ctx.log.info("send input: " .. tostring(send.input))
-  end
-end)
-```
-
 ## ctx.commands
 
 命令 API 总是可用，不需要额外权限。`plugin.json` 的 `contributes.commands` 负责声明命令标题和宿主入口；`main.lua` 用 `ctx.commands.register` 注册实际处理函数。
@@ -120,7 +102,7 @@ ctx.commands.register("my-plugin.send", function(payload)
 end)
 ```
 
-`payload` 和旧的 `ui.contribution.action` payload 基本一致，包含 `plugin_id`、`command`、`action`、`contribution_id`、`slot` 和 `context`。
+`payload` 包含 `plugin_id`、`command`、`contribution_id`、`slot` 和 `context`。
 
 ### unregister(command)
 
@@ -377,7 +359,7 @@ ctx.bus.on("ui.form.changed", function(event)
   end
 
   local values = event.payload.values
-  ctx.storage.set("port", tostring(values.port))
+  ctx.session.set("port", tostring(values.port))
 end)
 ```
 
@@ -544,17 +526,17 @@ local names = ctx.config.profile_list()
 ctx.config.profile_delete("old")
 ```
 
-## ctx.storage
+## ctx.session
 
 需要权限：`storage`
 
 ```lua
-local port = ctx.storage.get("port") or "COM3"
-ctx.storage.set("port", "COM3")
-local keys = ctx.storage.keys()
+local port = ctx.session.get("port") or "COM3"
+ctx.session.set("port", "COM3")
+local keys = ctx.session.keys()
 ```
 
-`ctx.storage` 是插件运行期存储，适合保存当前运行中的轻量状态。需要跨应用重启保留的数据，优先使用 `ctx.config`。
+`ctx.session` 是插件运行期存储，适合保存当前运行中的轻量状态。需要跨应用重启保留的数据，优先使用 `ctx.config`。
 
 ## on_disable(callback)
 

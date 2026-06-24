@@ -124,7 +124,7 @@
 | `serial` | 使用 `ctx.serial.*` 操作串口。 |
 | `ui` | 使用 `ctx.ui.*` 创建或移除动态面板。 |
 | `timer` | 使用 `ctx.timer.*` 创建定时任务。 |
-| `storage` | 使用 `ctx.storage.*` 运行期存储。 |
+| `storage` | 使用 `ctx.session.*` 运行期存储。 |
 | `dialog` | 使用 `ctx.dialog.open_file` 请求宿主文件选择对话框。 |
 | `fs.read.user_selected` | 读取用户通过宿主对话框或受控 UI 明确选择的文件。 |
 | `task` | 使用 `ctx.task.*` 运行可暂停、可取消的长任务。 |
@@ -198,7 +198,7 @@ status
 
 `send.*` 插槽中的控件可以设置 `record_send_input: true`。点击时宿主会把当前发送区内容写入发送历史；插件仍只处理 command，不需要直接操作宿主 UI 状态。
 
-点击 `button` / `small_button` 时，宿主会发布 `plugin.command.execute` 给 `ctx.commands.register` 注册的处理函数；同时保留发布 `ui.contribution.action`，兼容旧插件。payload 包含：
+点击 `button` / `small_button` 时，宿主会发布 `plugin.command.execute` 给 `ctx.commands.register` 注册的处理函数。payload 包含：
 
 ```json
 {
@@ -206,7 +206,6 @@ status
   "contribution_id": "my-plugin.send.button",
   "slot": "send.toolbar",
   "command": "my-plugin.send",
-  "action": "my-plugin.send",
   "context": {
     "send": {
       "input": "发送区文本",
@@ -219,7 +218,7 @@ status
 }
 ```
 
-新 Lua 插件应使用 `ctx.commands.register("my-plugin.send", handler)`。旧插件仍可监听 `ui.contribution.action`，并先检查 `payload.plugin_id` 是否等于自己的插件 ID。
+Lua 插件应使用 `ctx.commands.register("my-plugin.send", handler)` 来处理命令。
 
 ## 旧格式兼容
 

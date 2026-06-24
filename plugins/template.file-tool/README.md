@@ -7,7 +7,7 @@
 - `ctx.ui.create_form`
 - `ctx.ui.set_value`
 - `ctx.ui.set_enabled`
-- `ctx.storage.get/set`
+- `ctx.session.get/set`
 
 ## 使用方法
 

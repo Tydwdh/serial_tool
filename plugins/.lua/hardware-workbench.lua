@@ -162,7 +162,6 @@
 ---@class HwCommandPayload
 ---@field plugin_id string
 ---@field command string
----@field action string?
 ---@field contribution_id string?
 ---@field slot string?
 ---@field kind string?
@@ -226,7 +225,6 @@
 ---@field serial HwSerialApi
 ---@field ui HwUiApi
 ---@field timer HwTimerApi
----@field storage HwStorageApi
 ---@field session HwStorageApi
 ---@field dialog HwDialogApi
 ---@field fs HwFsApi

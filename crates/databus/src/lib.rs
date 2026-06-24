@@ -226,15 +226,6 @@ impl DataBus {
         Subscription { receiver, dropped }
     }
 
-    /// 有界订阅：超过容量时丢弃新事件并计入 dropped_count（DropIncoming 策略）。
-    /// 适用于 UI 面板等可容忍丢帧的场景。完整性需求请用 `subscribe_lossless()`。
-    #[deprecated(
-        note = "Use subscribe_lossy_bounded for UI lossy consumers, or subscribe_lossless for integrity-sensitive consumers. Never use for recorder."
-    )]
-    pub fn subscribe_bounded(&self, filter: TopicFilter, capacity: usize) -> Subscription {
-        self.subscribe_lossy_bounded(filter, capacity)
-    }
-
     pub fn history(&self) -> Vec<Event> {
         self.inner
             .history

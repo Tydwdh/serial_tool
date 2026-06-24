@@ -605,8 +605,6 @@ local function handle_cancel()
 end
 
 -- ── event dispatch ──
--- 新插件优先使用 ctx.commands.register。宿主仍会发布旧的
--- ui.contribution.action 事件，供未迁移插件兼容使用。
 
 local HANDLERS = {
     [COMMAND.SEND_FILE] = handle_send_file,
@@ -618,7 +616,7 @@ local HANDLERS = {
 for command, handler in pairs(HANDLERS) do
     ctx.commands.register(command, function(payload)
         handler(payload or {})
-    end
+    end)
 end
 
 on_disable(function()

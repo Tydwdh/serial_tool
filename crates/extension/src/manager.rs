@@ -531,20 +531,12 @@ impl PluginManager {
             if !runtime.is_alive() {
                 continue;
             }
-            // 检查订阅：live.subscriptions + 兼容旧 contributes.subscriptions
+            // 检查订阅：live.subscriptions
             let wants = self.records.get(plugin_id).is_some_and(|record| {
-                let live = record
+                record
                     .manifest
                     .live_subscriptions()
                     .iter()
-                    .map(String::as_str);
-                let legacy = record
-                    .manifest
-                    .contributes
-                    .subscriptions
-                    .iter()
-                    .map(|s| s.topic.as_str());
-                live.chain(legacy)
                     .any(|sub| tool_core::topic_matches(sub, &event.topic))
             });
             // ui.* / log.* 系统事件始终接收

@@ -79,7 +79,6 @@ impl WorkbenchApp {
             .and_then(|s| {
                 s.contributes.ui.iter().find(|ui| {
                     ui.command.as_deref() == Some(command_id)
-                        || ui.action.as_deref() == Some(command_id)
                 })
             })
             .map(|ui| ui.record_send_input)
@@ -132,12 +131,10 @@ impl WorkbenchApp {
             "slot": "send.toolbar",
             "kind": "button",
             "command": command_id,
-            "action": command_id,
             "context": context,
         });
 
         self.publish_plugin_command_execute(plugin_id, command_id, &payload);
-        self.publish_legacy_ui_contribution_action("ui.slot:send.toolbar", payload);
     }
 
     pub(crate) fn publish_plugin_command_execute(
@@ -150,28 +147,12 @@ impl WorkbenchApp {
         if let Some(object) = payload.as_object_mut() {
             object.insert("plugin_id".to_owned(), serde_json::json!(plugin_id));
             object.insert("command".to_owned(), serde_json::json!(command_id));
-            object
-                .entry("action".to_owned())
-                .or_insert_with(|| serde_json::json!(command_id));
             object.insert("origin".to_owned(), serde_json::json!("host.command"));
         }
 
         self.bus.publish(Event::new(
             topics::PLUGIN_COMMAND_EXECUTE,
             "plugin.command",
-            Direction::Internal,
-            Payload::Json(payload),
-        ));
-    }
-
-    pub(crate) fn publish_legacy_ui_contribution_action(
-        &mut self,
-        source: impl Into<String>,
-        payload: serde_json::Value,
-    ) {
-        self.bus.publish(Event::new(
-            topics::UI_CONTRIBUTION_ACTION,
-            source,
             Direction::Internal,
             Payload::Json(payload),
         ));

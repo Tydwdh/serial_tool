@@ -15,7 +15,6 @@ struct ResolvedUiContribution {
     kind: String,
     title: String,
     command: Option<String>,
-    action: Option<String>,
     tooltip: Option<String>,
     order: i32,
     enabled: bool,
@@ -68,10 +67,8 @@ impl WorkbenchApp {
                         .clone()
                         .or(command_title)
                         .or_else(|| contribution.command.clone())
-                        .or_else(|| contribution.action.clone())
                         .unwrap_or_else(|| contribution.id.clone()),
                     command: contribution.command.clone(),
-                    action: contribution.action.clone(),
                     tooltip: contribution.tooltip.clone(),
                     order: contribution.order,
                     enabled: contribution.enabled,
@@ -122,26 +119,18 @@ impl WorkbenchApp {
             self.record_send_history(self.send.input.clone());
         }
 
-        let action = item
-            .action
-            .clone()
-            .or_else(|| item.command.clone())
-            .unwrap_or_else(|| item.id.clone());
-
         let payload = json!({
             "plugin_id": item.plugin_id.clone(),
             "contribution_id": item.id.clone(),
             "slot": item.slot.clone(),
             "kind": item.kind.clone(),
             "command": item.command.clone(),
-            "action": action,
             "context": self.ui_contribution_context(&item.slot),
         });
 
         if let Some(command) = item.command.as_deref() {
             self.publish_plugin_command_execute(&item.plugin_id, command, &payload);
         }
-        self.publish_legacy_ui_contribution_action(format!("ui.slot:{}", item.slot), payload);
     }
 
     fn authorize_send_input_file_if_needed(&mut self, item: &ResolvedUiContribution) {

@@ -19,7 +19,7 @@ local CHART_ID = "template.serial-chart.chart"
 local FORM_ID = "template.serial-chart.form"
 local TOPIC_OUT = "protocol.template.sample"
 
-local selected_port = ctx.storage.get("rx_port") or "__any__"
+local selected_port = ctx.session.get("rx_port") or "__any__"
 local parse_errors = 0
 local received = 0
 
@@ -89,7 +89,7 @@ local function handle_text(port, text)
         parse_errors = parse_errors
     })
 
-    if ctx.storage.get("show_log") == "true" then
+    if ctx.session.get("show_log") == "true" then
         ctx.log.info(string.format(
             "parsed port=%s seq=%d value=%.3f",
             tostring(port),
@@ -118,11 +118,11 @@ ctx.bus.on("ui.form.changed", function(event)
 
     if values.rx_port ~= nil then
         selected_port = tostring(values.rx_port)
-        ctx.storage.set("rx_port", selected_port)
+        ctx.session.set("rx_port", selected_port)
     end
 
     if values.show_log ~= nil then
-        ctx.storage.set("show_log", tostring(values.show_log))
+        ctx.session.set("show_log", tostring(values.show_log))
     end
 
     ctx.log.info("串口图表参数已更新")

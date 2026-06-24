@@ -1,4 +1,4 @@
-//! `ctx.storage.*` / `ctx.session.*` — 键值存储 API。
+//! `ctx.session.*` — 键值存储 API。
 
 use mlua::{Lua, Table, Value};
 

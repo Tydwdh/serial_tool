@@ -77,7 +77,6 @@ pub(crate) fn create_commands_api(
                 Payload::Json(json!({
                     "plugin_id": plugin_id,
                     "command": command,
-                    "action": command,
                     "args": args,
                     "origin": "lua.commands.execute"
                 })),

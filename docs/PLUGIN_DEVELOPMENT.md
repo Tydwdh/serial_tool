@@ -174,7 +174,7 @@ ctx.ui.create_chart({
 
 ### UI 入口优先注册命令
 
-`contributes.ui[].command` 会触发 `ctx.commands.register` 注册的 handler。新插件优先这样写：
+`contributes.ui[].command` 会触发 `ctx.commands.register` 注册的 handler。插件应该这样写：
 
 ```lua
 ctx.commands.register("yourname.my-plugin.run", function(payload)
@@ -182,8 +182,6 @@ ctx.commands.register("yourname.my-plugin.run", function(payload)
   ctx.log.info("run: " .. tostring(send.input))
 end)
 ```
-
-旧的 `ctx.bus.on("ui.contribution.action", ...)` 仍然兼容，但不要和 `ctx.commands.register` 同时处理同一个命令，否则一次点击可能执行两次。
 
 ### 实时插件和回放解析器不要混用职责
 

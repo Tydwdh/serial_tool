@@ -29,13 +29,13 @@ ctx.ui.create_form({
             id = "message",
             label = "消息",
             kind = "text",
-            default = ctx.storage.get("message") or "hello hardware workbench"
+            default = ctx.session.get("message") or "hello hardware workbench"
         },
         {
             id = "level",
             label = "日志级别",
             kind = "select",
-            default = ctx.storage.get("level") or "info",
+            default = ctx.session.get("level") or "info",
             options = {
                 { label = "Info", value = "info" },
                 { label = "Warn", value = "warn" },
@@ -71,8 +71,8 @@ ctx.bus.on("ui.form.changed", function(event)
     local level = tostring(values.level or "info")
     local enabled = values.enabled
 
-    ctx.storage.set("message", message)
-    ctx.storage.set("level", level)
+    ctx.session.set("message", message)
+    ctx.session.set("level", level)
 
     if enabled then
         log_by_level(level, "Hello 表单变更: " .. message)

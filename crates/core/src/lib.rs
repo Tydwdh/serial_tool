@@ -17,7 +17,6 @@ pub mod topics {
     pub const UI_FORM_SET_VISIBLE: &str = "ui.form.set_visible";
     pub const UI_FORM_FILE_BROWSE: &str = "ui.form.file_browse";
     pub const UI_FORM_FILE_SELECTED: &str = "ui.form.file_selected";
-    pub const UI_CONTRIBUTION_ACTION: &str = "ui.contribution.action";
     pub const UI_LOG_APPEND: &str = "ui.log.append";
     pub const PLUGIN_COMMAND_EXECUTE: &str = "plugin.command.execute";
     pub const TEST_RESULT: &str = "test.result";
@@ -166,37 +165,6 @@ impl Event {
     pub fn with_metadata(mut self, metadata: Value) -> Self {
         self.metadata = metadata;
         self
-    }
-
-    /// 从 source 字符串中提取端口名（去除 "serial:" 前缀）
-    fn extract_port(source: &str) -> String {
-        source.strip_prefix("serial:").unwrap_or(source).to_owned()
-    }
-
-    /// 构建串口事件的通用方法。
-    fn serial_event(
-        topic: &str,
-        direction: Direction,
-        source: impl Into<String>,
-        bytes: Vec<u8>,
-    ) -> Self {
-        let source = source.into();
-        #[allow(deprecated)]
-        let port = Self::extract_port(&source);
-        Self::new(topic, source, direction, Payload::Bytes(bytes))
-            .with_metadata(json!({ "port": port }))
-    }
-
-    #[deprecated(note = "Use tool_transport::serial_rx_event instead")]
-    pub fn serial_rx(source: impl Into<String>, bytes: Vec<u8>) -> Self {
-        #[allow(deprecated)]
-        Self::serial_event(topics::SERIAL_RX, Direction::Rx, source, bytes)
-    }
-
-    #[deprecated(note = "Use tool_transport::serial_tx_event instead")]
-    pub fn serial_tx(source: impl Into<String>, bytes: Vec<u8>) -> Self {
-        #[allow(deprecated)]
-        Self::serial_event(topics::SERIAL_TX, Direction::Tx, source, bytes)
     }
 
     pub fn system_log(
@@ -443,24 +411,6 @@ mod tests {
         assert!(event.meta_bool("flag"));
         event.meta_set("name", json!("hello"));
         assert_eq!(event.meta_str("name"), Some("hello"));
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn serial_rx_strips_serial_prefix_for_port_metadata() {
-        let event = Event::serial_rx("serial:COM3", vec![1, 2, 3]);
-        assert_eq!(event.topic, topics::SERIAL_RX);
-        assert_eq!(event.direction, Direction::Rx);
-        assert_eq!(event.meta_str("port"), Some("COM3"));
-        // source 保留前缀，port metadata 去前缀
-        assert_eq!(event.source, "serial:COM3");
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn serial_rx_without_prefix_keeps_port() {
-        let event = Event::serial_rx("COM3", vec![]);
-        assert_eq!(event.meta_str("port"), Some("COM3"));
     }
 
     #[test]

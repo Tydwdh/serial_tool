@@ -249,9 +249,6 @@ pub struct PluginContributes {
 
     #[serde(default)]
     pub settings: Vec<PluginSetting>,
-
-    #[serde(default)]
-    pub subscriptions: Vec<PluginSubscription>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -277,9 +274,6 @@ pub struct PluginUiContribution {
 
     #[serde(default)]
     pub command: Option<String>,
-
-    #[serde(default)]
-    pub action: Option<String>,
 
     #[serde(default)]
     pub tooltip: Option<String>,
@@ -317,11 +311,6 @@ pub struct PluginSetting {
 
     #[serde(default)]
     pub default: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PluginSubscription {
-    pub topic: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

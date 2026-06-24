@@ -10,9 +10,6 @@ pub use manager::PluginManager;
 pub use manifest::{PluginDiagnostic, PluginDiagnosticSeverity, PluginState, PluginSummary};
 pub use permission::PermissionManager;
 
-// topic_matches 已移至 tool_core，此处保持向后兼容 re-export
-pub use tool_core::topic_matches;
-
 #[derive(Debug, Error)]
 pub enum ExtensionError {
     #[error("io error: {0}")]

@@ -6,7 +6,7 @@
 - `ctx.log`
 - `ctx.ui.create_form`
 - `ctx.bus.on("ui.form.changed", ...)`
-- `ctx.storage.get/set`
+- `ctx.session.get/set`
 - `on_disable`
 
 ## 使用方法
