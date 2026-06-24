@@ -12,6 +12,14 @@ use serde_json::Value;
 use std::collections::VecDeque;
 use tool_core::{Event, LogLevel, Payload, topics};
 
+fn event_source_for_owner(event: &Event) -> &str {
+    if event.source.starts_with("replay:") {
+        event.meta_str("original_source").unwrap_or(&event.source)
+    } else {
+        &event.source
+    }
+}
+
 impl super::DynamicPanels {
     pub fn ingest(&mut self, panel_manager: &mut PanelManager) {
         for event in self.subscription.drain_limited(500) {
@@ -55,16 +63,16 @@ impl super::DynamicPanels {
         }
         // log append 事件
         for event in self.log_append_subscription.drain_limited(500) {
+            let owner_source = event_source_for_owner(&event).to_owned();
             if let Payload::Json(val) = event.payload {
                 let panel_id = val.get("panel_id").and_then(Value::as_str).unwrap_or("");
                 let level_str = val.get("level").and_then(Value::as_str).unwrap_or("info");
                 let msg = val.get("message").and_then(Value::as_str).unwrap_or("");
                 let level = LogLevel::parse_name(level_str).unwrap_or(LogLevel::Info);
                 // 用事件真实来源校验 owner，不信任 payload 里的 plugin_id
-                let actual_plugin_id = event
-                    .source
+                let actual_plugin_id = owner_source
                     .strip_prefix("plugin:")
-                    .unwrap_or(event.source.as_str());
+                    .unwrap_or(owner_source.as_str());
                 if let Some(DynamicPanel::Log {
                     entries,
                     max_entries,
@@ -150,6 +158,7 @@ impl super::DynamicPanels {
     }
 
     fn handle_field_update(&mut self, event: Event, apply: impl Fn(&mut DynamicField, Value)) {
+        let source = event_source_for_owner(&event).to_owned();
         let Payload::Json(value) = event.payload else {
             return;
         };
@@ -158,13 +167,13 @@ impl super::DynamicPanels {
         let new_value = value.get("value").cloned().unwrap_or(Value::Null);
 
         // owner 校验
-        if !self.is_allowed(panel_id, &event.source) {
+        if !self.is_allowed(panel_id, &source) {
             self.bus.publish(Event::system_log(
                 LogLevel::Warn,
                 "ui.dynamic",
                 format!(
                     "set field '{panel_id}.{field_id}' rejected: source '{}' not allowed",
-                    event.source
+                    source
                 ),
             ));
             return;
@@ -195,6 +204,7 @@ impl super::DynamicPanels {
     }
 
     fn create_from_event(&mut self, event: Event) -> Result<Option<String>, String> {
+        let source = event_source_for_owner(&event).to_owned();
         let Payload::Json(value) = event.payload else {
             return Ok(None);
         };
@@ -221,8 +231,7 @@ impl super::DynamicPanels {
             .unwrap_or("chart");
 
         // owner 从 event.source 推导，不信任 payload 中的 plugin_id
-        let owner_plugin_id: Option<String> =
-            event.source.strip_prefix("plugin:").map(|s| s.to_owned());
+        let owner_plugin_id: Option<String> = source.strip_prefix("plugin:").map(|s| s.to_owned());
         let owner_for_check = owner_plugin_id.clone();
 
         let panel = match kind {
@@ -307,6 +316,7 @@ impl super::DynamicPanels {
     }
 
     fn remove_from_event(&mut self, event: Event) -> Result<Option<String>, String> {
+        let source = event_source_for_owner(&event).to_owned();
         let id = match event.payload {
             Payload::Json(value) => value
                 .get("id")
@@ -322,13 +332,13 @@ impl super::DynamicPanels {
         }
 
         // owner 校验：不允许跨插件删除面板
-        if !self.is_allowed(&id, &event.source) {
+        if !self.is_allowed(&id, &source) {
             self.bus.publish(Event::system_log(
                 LogLevel::Warn,
                 "ui.dynamic",
                 format!(
                     "remove panel '{id}' rejected: source '{}' not allowed",
-                    event.source
+                    source
                 ),
             ));
             return Ok(None);

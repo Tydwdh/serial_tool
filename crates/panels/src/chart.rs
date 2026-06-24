@@ -172,7 +172,10 @@ impl ChartPanel {
     }
 
     pub fn clear(&mut self) {
+        while self.subscription.try_recv().is_some() {}
         self.series.clear();
+        self.cached_window.clear();
+        self.dropped_while_paused = 0;
     }
 
     pub fn ingest_all_pending(&mut self) -> usize {
@@ -392,6 +395,8 @@ fn palette(index: usize) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tool_core::Event;
+    use tool_databus::DataBus;
 
     #[test]
     fn manual_y_axis_is_normalized() {
@@ -414,5 +419,21 @@ mod tests {
 
         assert!(min_y < 10.0);
         assert!(max_y > 10.0);
+    }
+
+    #[test]
+    fn clear_drains_pending_chart_events() {
+        let bus = DataBus::new();
+        let mut panel = ChartPanel::new(&bus);
+
+        bus.publish(Event::json(
+            tool_core::topics::PROTOCOL_PID_SAMPLE,
+            "test",
+            serde_json::json!({ "t": 1, "value": 2.0 }),
+        ));
+        panel.clear();
+
+        assert_eq!(panel.ingest_all_pending(), 0);
+        assert!(panel.series.is_empty());
     }
 }

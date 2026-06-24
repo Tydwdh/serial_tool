@@ -5,6 +5,7 @@ use crate::state::StatusLevel;
 use eframe::egui;
 use tool_core::{Direction, Event, Payload};
 use tool_panels::PanelKind;
+use tool_recorder::{ReplayBlockReason, ReplayState};
 use tool_transport::send_impl_to;
 
 impl WorkbenchApp {
@@ -367,6 +368,15 @@ impl WorkbenchApp {
             .is_some_and(|job| !job.handle.is_finished());
 
         self.poll_replay_analyzer_result();
+
+        let was_playing = matches!(
+            self.replay_panel.manager().status().state,
+            ReplayState::Playing
+        );
+        let replay_tick = self.replay_panel.tick_playback();
+        if was_playing || replay_tick.published > 0 || replay_tick.loop_restarted {
+            ctx.request_repaint();
+        }
     }
 
     /// 插件生命周期：禁用清理 + ingest + 事件处理。
@@ -415,11 +425,12 @@ impl WorkbenchApp {
     }
 
     fn do_replay_step_backward(&mut self, steps: usize, ctx: &egui::Context) {
-        let pos = self
-            .replay_panel
-            .manager()
-            .backward_position_by(steps.max(1));
-        self.do_replay_rebuild(pos, ctx);
+        if self.replay_panel.manager().status().cursor == 0 {
+            return;
+        }
+        if let Some(target_cursor) = self.replay_panel.manager().backward_cursor_by(steps.max(1)) {
+            self.do_replay_cursor_rebuild(target_cursor, ctx);
+        }
     }
 
     fn do_replay_seek_rebuild(&mut self, position: u64, ctx: &egui::Context) {
@@ -427,6 +438,10 @@ impl WorkbenchApp {
     }
 
     fn do_replay_rebuild(&mut self, position: Option<u64>, ctx: &egui::Context) {
+        if position.is_some() && self.warn_if_replay_blocked() {
+            return;
+        }
+
         self.terminal_panel.clear();
         self.bottom_log_panel.clear();
         self.dynamic_panels.clear_charts();
@@ -455,6 +470,54 @@ impl WorkbenchApp {
             ),
         );
         ctx.request_repaint();
+    }
+
+    fn do_replay_cursor_rebuild(&mut self, target_cursor: usize, ctx: &egui::Context) {
+        if self.warn_if_replay_blocked() {
+            return;
+        }
+
+        self.terminal_panel.clear();
+        self.bottom_log_panel.clear();
+        self.dynamic_panels.clear_charts();
+
+        self.bus.publish(Event::new(
+            "ui.replay.reset",
+            "ui.replay",
+            Direction::Internal,
+            Payload::Empty,
+        ));
+
+        self.replay_panel.do_seek_cursor_panel_phase(target_cursor);
+        self.dynamic_panels.ingest(&mut self.panels);
+        self.replay_panel.do_seek_cursor_data_phase(target_cursor);
+
+        let terminal_count = self.terminal_panel.ingest_all_pending();
+        let log_count = self.bottom_log_panel.ingest_all_pending();
+        let chart_count = self.dynamic_panels.ingest_all_pending();
+
+        self.set_status(
+            StatusLevel::Info,
+            format!(
+                "回放重建完成：接收 {terminal_count} 条，日志 {log_count} 条，图表 {chart_count} 条"
+            ),
+        );
+        ctx.request_repaint();
+    }
+
+    fn warn_if_replay_blocked(&mut self) -> bool {
+        let Some(reason) = self.replay_panel.manager().replay_block_reason() else {
+            return false;
+        };
+
+        let message = match reason {
+            ReplayBlockReason::NeedAnalyzer => "当前回放策略需要先完成 Replay Analyzer".to_owned(),
+            ReplayBlockReason::AnalyzerFailed(error) => {
+                format!("Replay Analyzer 失败，无法重建回放：{error}")
+            }
+        };
+        self.set_status(StatusLevel::Warn, message);
+        true
     }
 
     fn tick_periodic_send(&mut self, _ctx: &egui::Context) {

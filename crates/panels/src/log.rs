@@ -65,6 +65,7 @@ impl LogPanel {
         count
     }
     pub fn clear(&mut self) {
+        while self.subscription.try_recv().is_some() {}
         self.entries.clear();
         self.last_scroll_offset_y = 0.0;
         // 清空后重置为自动滚动，确保新日志可见
@@ -415,5 +416,17 @@ mod tests {
         assert_eq!(entry.source, "app");
         assert_eq!(entry.message, "就绪");
         assert_eq!(entry.line_count, 1);
+    }
+
+    #[test]
+    fn clear_drains_pending_log_events() {
+        let bus = DataBus::new();
+        let mut panel = LogPanel::new(&bus);
+
+        bus.publish(Event::system_log(LogLevel::Info, "app", "stale"));
+        panel.clear();
+
+        assert_eq!(panel.ingest_all_pending(), 0);
+        assert!(panel.entries.is_empty());
     }
 }

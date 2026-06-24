@@ -37,6 +37,11 @@ pub struct ReplayPanel {
     pub analyzer_logs: VecDeque<String>,
 }
 
+pub struct ReplayTickOutcome {
+    pub published: usize,
+    pub loop_restarted: bool,
+}
+
 impl ReplayPanel {
     pub fn new(bus: &DataBus) -> Self {
         Self {
@@ -102,9 +107,38 @@ impl ReplayPanel {
     pub fn do_step_backward(&mut self, steps: usize) {
         let steps = steps.max(1);
 
-        if let Some(position_ms) = self.manager.backward_position_by(steps) {
-            self.manager.seek_with_replay(position_ms);
+        if let Some(target_cursor) = self.manager.backward_cursor_by(steps) {
+            self.manager.seek_cursor_with_replay(target_cursor);
         }
+    }
+
+    pub fn tick_playback(&mut self) -> ReplayTickOutcome {
+        let published = self.manager.tick();
+        if published > 0 {
+            self.message = Some(format!("回放中 ({published} 事件)"));
+        }
+
+        let status = self.manager.status();
+        let mut loop_restarted = false;
+        if self.loop_playback && status.state == ReplayState::Finished {
+            self.want_clear_on_play = true;
+            self.manager.stop();
+            self.manager.play();
+            loop_restarted = true;
+        }
+
+        ReplayTickOutcome {
+            published,
+            loop_restarted,
+        }
+    }
+
+    pub fn do_seek_cursor_panel_phase(&mut self, target_cursor: usize) -> usize {
+        self.manager.seek_cursor_panel_phase(target_cursor)
+    }
+
+    pub fn do_seek_cursor_data_phase(&mut self, target_cursor: usize) -> usize {
+        self.manager.seek_cursor_data_phase(target_cursor)
     }
 
     // ── Coordinator accessors ──
@@ -118,8 +152,12 @@ impl ReplayPanel {
     }
 
     pub fn set_analyzer_cache(&mut self, events: Vec<tool_core::Event>) {
+        let status = self.manager.status();
         self.manager.set_analyzer_cache(events);
         self.want_run_analyzers = false;
+        if status.total_events > 0 && status.state != ReplayState::Playing {
+            self.want_seek_replay = Some(status.position_ms);
+        }
     }
 
     pub fn set_analyzer_error(&mut self, error: String) {
@@ -149,19 +187,7 @@ impl ReplayPanel {
             self.try_load();
         }
 
-        let published = self.manager.tick();
-        if published > 0 {
-            self.message = Some(format!("回放中 ({published} 事件)"));
-        }
-
         let mut status = self.manager.status();
-
-        if self.loop_playback && status.state == ReplayState::Finished {
-            self.want_clear_on_play = true;
-            self.manager.stop();
-            self.manager.play();
-            status = self.manager.status();
-        }
 
         ui.heading("会话回放");
 
@@ -273,8 +299,15 @@ impl ReplayPanel {
                 });
 
             if policy_changed.inner.unwrap_or(false) {
+                let status = self.manager.status();
                 self.manager.set_policy(policy);
                 self.want_run_analyzers = self.manager.needs_analyzer();
+                if self.manager.replay_ready()
+                    && status.total_events > 0
+                    && status.state != ReplayState::Playing
+                {
+                    self.want_seek_replay = Some(status.position_ms);
+                }
             }
         });
 
@@ -500,6 +533,7 @@ impl ReplayPanel {
         if bookmarks.is_empty() && status.total_events == 0 {
             return;
         }
+        let can_seek = self.manager.can_seek();
         ui.horizontal(|ui| {
             if ui
                 .small_button("+书签")
@@ -509,7 +543,11 @@ impl ReplayPanel {
                 self.manager.add_bookmark();
             }
             for &pos_ms in &bookmarks {
-                if ui.small_button(ms_to_hms(pos_ms).to_string()).clicked() {
+                if ui
+                    .add_enabled(can_seek, egui::Button::new(ms_to_hms(pos_ms).to_string()))
+                    .on_disabled_hover_text("当前回放策略需要先完成 Replay Analyzer")
+                    .clicked()
+                {
                     self.want_seek_replay = Some(pos_ms);
                 }
                 if ui.small_button("×").on_hover_text("删除此书签").clicked() {

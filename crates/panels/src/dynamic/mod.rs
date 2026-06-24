@@ -257,6 +257,36 @@ mod tests {
     }
 
     #[test]
+    fn replay_panel_create_preserves_plugin_owner() {
+        let bus = DataBus::new();
+        let mut panels = DynamicPanels::new(&bus);
+        let mut manager = PanelManager::default();
+
+        bus.publish(
+            Event::new(
+                topics::UI_PANEL_CREATE,
+                "replay:plugin:demo",
+                Direction::Internal,
+                Payload::Json(serde_json::json!({
+                    "id": "demo-chart",
+                    "title": "Demo Chart",
+                    "kind": "chart",
+                    "topic_prefix": "protocol.demo."
+                })),
+            )
+            .with_metadata(serde_json::json!({
+                "replay": true,
+                "origin": "replay",
+                "original_source": "plugin:demo"
+            })),
+        );
+
+        panels.ingest(&mut manager);
+
+        assert_eq!(panels.panel_owner("demo-chart"), Some("demo"));
+    }
+
+    #[test]
     fn creates_dynamic_form_from_bus_event() {
         let bus = DataBus::new();
         let mut panels = DynamicPanels::new(&bus);

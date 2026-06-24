@@ -153,6 +153,7 @@ impl TerminalPanel {
     }
 
     pub fn clear(&mut self) {
+        while self.subscription.try_recv().is_some() {}
         self.ports.clear();
         self.last_scroll_offsets.clear();
         self.pending_scroll_to_bottom_keys.clear();
@@ -1281,5 +1282,26 @@ mod tests {
         assert_eq!(entry.raw_text, "hello");
         assert_eq!(entry.display_text, "hello");
         assert_eq!(entry.hex_text, "68 65 6C 6C 6F");
+    }
+
+    #[test]
+    fn clear_drains_pending_serial_events() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+
+        bus.publish(
+            Event::new(
+                serial_topics::SERIAL_RX,
+                "serial:COM1",
+                Direction::Rx,
+                Payload::Bytes(b"stale".to_vec()),
+            )
+            .with_metadata(serde_json::json!({ "port": "COM1" })),
+        );
+
+        panel.clear();
+
+        assert_eq!(panel.ingest_all_pending(), 0);
+        assert!(panel.ports.is_empty());
     }
 }

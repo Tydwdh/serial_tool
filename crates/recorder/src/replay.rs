@@ -436,6 +436,22 @@ impl ReplayManager {
         panel_count + data_count
     }
 
+    /// 回退/步进专用：按事件 cursor 精确重建，而不是按毫秒重建。
+    pub fn seek_cursor_with_replay(&mut self, target_cursor: usize) -> usize {
+        if !self.replay_ready() {
+            self.bus.publish(Event::system_log(
+                LogLevel::Warn,
+                "replay",
+                "seek blocked: replay analyzer is required",
+            ));
+            return 0;
+        }
+
+        let panel_count = self.seek_cursor_panel_phase(target_cursor);
+        let data_count = self.seek_cursor_data_phase(target_cursor);
+        panel_count + data_count
+    }
+
     /// 第一阶段：重置位置，只发布 ui.panel.create 事件。
     /// 调用方应在该阶段后处理面板创建，再调用 seek_data_phase。
     pub fn seek_panel_phase(&mut self, position_ms: u64) -> usize {
@@ -477,6 +493,48 @@ impl ReplayManager {
         before_cursor + after_cursor + analyzer_count
     }
 
+    /// cursor 版本的第一阶段：只发布 target_cursor 之前的 ui.panel.create。
+    pub fn seek_cursor_panel_phase(&mut self, target_cursor: usize) -> usize {
+        let target_cursor = target_cursor.min(self.events.len());
+        self.cursor = 0;
+        self.analyzer_cursor = 0;
+        self.position_at_start_ms = self.position_for_cursor(target_cursor);
+        self.replay_start = None;
+        self.state = if self.events.is_empty() {
+            ReplayState::Empty
+        } else {
+            ReplayState::Paused
+        };
+
+        let count = self.publish_index_range_filtered(0, target_cursor, |event| {
+            event.topic == tool_core::topics::UI_PANEL_CREATE
+        });
+        self.cursor = target_cursor;
+        count
+    }
+
+    /// cursor 版本的第二阶段：发布 target_cursor 之前的非 ui.panel.create 事件。
+    pub fn seek_cursor_data_phase(&mut self, target_cursor: usize) -> usize {
+        let target_cursor = target_cursor.min(self.events.len());
+        let end = self.cursor.min(target_cursor);
+        let policy = self.effective_policy();
+
+        let event_count = self.publish_index_range_filtered(0, end, |event| {
+            event.topic != tool_core::topics::UI_PANEL_CREATE
+                && (policy != ReplayPolicy::ReparseRaw || !event.topic.starts_with("protocol."))
+        });
+
+        let analyzer_count =
+            if target_cursor > 0 && policy == ReplayPolicy::ReparseRaw && self.analyzer_cache_valid
+            {
+                self.publish_analyzer_cache_until(self.position_at_start_ms)
+            } else {
+                0
+            };
+
+        event_count + analyzer_count
+    }
+
     /// 按 predicate 过滤发布事件到指定位置。
     /// 会推进 cursor 到目标位置之后。
     fn publish_until_filtered(
@@ -501,6 +559,27 @@ impl ReplayManager {
             self.cursor += 1;
         }
 
+        count
+    }
+
+    /// 在指定索引范围 [start..end) 内，按 predicate 过滤发布事件。
+    /// 不推进 cursor，供 cursor-based seek 精确重建使用。
+    fn publish_index_range_filtered(
+        &mut self,
+        start: usize,
+        end: usize,
+        predicate: impl Fn(&Event) -> bool,
+    ) -> usize {
+        let mut count = 0;
+        for index in start..end.min(self.events.len()) {
+            let Some(event) = self.events.get(index) else {
+                break;
+            };
+            if predicate(event) {
+                self.bus.publish(mark_replay_event(event.clone()));
+                count += 1;
+            }
+        }
         count
     }
 
@@ -597,17 +676,8 @@ impl ReplayManager {
 
     /// 逐事件后退：回到上一个事件位置
     pub fn step_backward(&mut self) {
-        if self.cursor > 0 {
-            let prev = self.cursor - 1;
-            let base = self.base_timestamp_ms().unwrap_or(0);
-            let pos = if prev == 0 {
-                0
-            } else {
-                self.events[prev - 1].timestamp_ms.saturating_sub(base)
-            };
-            self.seek_ms(pos);
-            // 重放到新位置
-            self.publish_until(self.position_ms());
+        if let Some(target_cursor) = self.backward_cursor_by(1) {
+            self.seek_cursor_with_replay(target_cursor);
         }
     }
 
@@ -616,25 +686,40 @@ impl ReplayManager {
     }
 
     pub fn backward_position_by(&self, steps: usize) -> Option<u64> {
+        let target_cursor = self.backward_cursor_by(steps)?;
+        if target_cursor == 0 {
+            return None;
+        }
+        Some(self.position_for_cursor(target_cursor))
+    }
+
+    pub fn backward_cursor_by(&self, steps: usize) -> Option<usize> {
         if self.events.is_empty() || self.cursor == 0 {
             return None;
         }
 
-        let base = self.base_timestamp_ms()?;
         let steps = steps.max(1);
 
         // cursor 表示“下一个要发布的事件索引”。
         // 回退 N 步，就是希望最终重放到 cursor - N 之前的位置。
         let target_cursor = self.cursor.saturating_sub(steps);
+        Some(target_cursor)
+    }
 
+    fn position_for_cursor(&self, target_cursor: usize) -> u64 {
         if target_cursor == 0 {
-            return Some(0);
+            return 0;
         }
 
+        let Some(base) = self.base_timestamp_ms() else {
+            return 0;
+        };
         self.events
             .get(target_cursor - 1)
             .map(|event| event.timestamp_ms.saturating_sub(base))
+            .unwrap_or_else(|| self.duration_ms())
     }
+
     pub fn set_speed(&mut self, speed: f64) {
         self.position_at_start_ms = self.position_ms();
         self.replay_start = if self.state == ReplayState::Playing {
@@ -775,6 +860,7 @@ fn mark_replay_event(mut event: Event) -> Event {
 mod tests {
     use super::*;
     use tool_core::{Direction, Payload};
+    use tool_databus::TopicFilter;
 
     fn ev(topic: &str) -> Event {
         Event::new(topic, "test", Direction::Internal, Payload::Empty)
@@ -867,6 +953,54 @@ mod tests {
         let mgr = ReplayManager::new(bus);
         assert_eq!(mgr.backward_position(), None);
         assert_eq!(mgr.backward_position_by(5), None);
+    }
+
+    #[test]
+    fn step_backward_rebuilds_by_cursor_when_timestamps_match() {
+        let bus = DataBus::new();
+        let sub = bus.subscribe_lossless(TopicFilter::All);
+        let mut mgr = ReplayManager::new(bus);
+        mgr.set_policy(ReplayPolicy::ExactRecorded);
+
+        let mut first = Event::with_timestamp(
+            1000,
+            tool_core::topics::SERIAL_RX,
+            "serial:COM1",
+            Direction::Rx,
+            Payload::Text("first".to_owned()),
+        );
+        first.id = 1;
+        let mut second = Event::with_timestamp(
+            1000,
+            tool_core::topics::SERIAL_RX,
+            "serial:COM1",
+            Direction::Rx,
+            Payload::Text("second".to_owned()),
+        );
+        second.id = 2;
+        let mut third = Event::with_timestamp(
+            1010,
+            tool_core::topics::SERIAL_RX,
+            "serial:COM1",
+            Direction::Rx,
+            Payload::Text("third".to_owned()),
+        );
+        third.id = 3;
+
+        mgr.events = vec![first, second, third];
+        mgr.cursor = 2;
+        mgr.state = ReplayState::Paused;
+
+        mgr.step_backward();
+
+        assert_eq!(mgr.status().cursor, 1);
+        let replayed: Vec<_> = sub
+            .drain()
+            .into_iter()
+            .filter(|event| event.is_replay() && event.topic == tool_core::topics::SERIAL_RX)
+            .collect();
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].payload.text_lossy(), "first");
     }
 
     #[test]
