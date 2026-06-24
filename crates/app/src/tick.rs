@@ -77,9 +77,10 @@ impl WorkbenchApp {
             .iter()
             .find(|s| s.id == plugin_id)
             .and_then(|s| {
-                s.contributes.ui.iter().find(|ui| {
-                    ui.command.as_deref() == Some(command_id)
-                })
+                s.contributes
+                    .ui
+                    .iter()
+                    .find(|ui| ui.command.as_deref() == Some(command_id))
             })
             .map(|ui| ui.record_send_input)
             .unwrap_or(false);
