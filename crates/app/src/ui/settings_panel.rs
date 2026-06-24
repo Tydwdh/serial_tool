@@ -141,7 +141,7 @@ impl WorkbenchApp {
         ui.heading("快捷键");
         self.render_keymap_editor(ui);
         ui.separator();
-        ui.label("硬件调试工作台 v0.1.0");
+        ui.label(format!("硬件调试工作台 v{}", env!("CARGO_PKG_VERSION")));
     }
 
     fn render_config_locations(&mut self, ui: &mut egui::Ui) {

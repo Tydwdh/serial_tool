@@ -20,6 +20,8 @@ tool-lua-host = { path = "../lua_host" }
 tool-panels = { path = "../panels" }
 tool-recorder = { path = "../recorder" }
 tool-transport = { path = "../transport" }
+tool-updater = { path = "../updater" }
+tokio = { version = "1", features = ["rt"] }
 rfd = "0.17.2"
 
 [dev-dependencies]

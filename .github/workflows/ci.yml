@@ -59,9 +59,35 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           name: hardware-workbench-windows
+
+      - name: Generate update.json
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart('v')
+          $date = Get-Date -Format "yyyy-MM-dd"
+          $downloadUrl = "https://github.com/Tydwdh/serial_tool/releases/download/$tag/hardware-workbench-app.zip"
+          $json = @{
+            version = $version
+            date = $date
+            download_url = $downloadUrl
+            changelog = @()
+          } | ConvertTo-Json
+          $json | Out-File -FilePath "update.json" -Encoding utf8NoBOM
+          Write-Host "Generated update.json:"
+          Get-Content update.json
+
+      - name: Commit update.json to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add update.json
+          git diff --cached --quiet || git commit -m "Update update.json for ${{ github.ref_name }}"
+          git push
 
       - name: Create Release
         uses: softprops/action-gh-release@v2

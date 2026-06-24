@@ -27,6 +27,14 @@ fn app_icon() -> egui::IconData {
 }
 
 fn main() -> eframe::Result<()> {
+    // 启动时检查并应用待更新（在 eframe 启动前，exe 尚未被锁定）
+    let exe_path = std::env::current_exe().unwrap_or_default();
+    if let Ok(true) = tool_updater::apply_pending_update(&exe_path) {
+        // 更新已应用，启动新版本后退出
+        let _ = std::process::Command::new(&exe_path).spawn();
+        return Ok(());
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id("hardware-workbench")

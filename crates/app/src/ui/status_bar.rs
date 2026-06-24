@@ -77,6 +77,9 @@ impl WorkbenchApp {
                 ui.label(format!("{dtr} {rts}"));
             }
 
+            // ── 更新提示（靠右对齐） ──
+            self.draw_update_status(ui);
+
             // 状态消息：放在最右边，不挤占固定信息空间
             if !self.status.message.is_empty() {
                 ui.separator();
@@ -98,5 +101,75 @@ impl WorkbenchApp {
                     .on_hover_text(&self.status.message);
             }
         });
+    }
+
+    /// 状态栏中的更新提示 UI。
+    fn draw_update_status(&mut self, ui: &mut egui::Ui) {
+        let us = &self.update_state;
+
+        // 正在检查
+        if us.checking {
+            ui.separator();
+            ui.spinner();
+            ui.label("检查更新...");
+            return;
+        }
+
+        // 错误
+        if let Some(ref err) = us.error {
+            ui.separator();
+            ui.label(egui::RichText::new("⚠ 更新错误").color(theme::YELLOW))
+                .on_hover_text(err);
+            // 手动重试按钮
+            if ui.small_button("🔄").on_hover_text("重新检查").clicked() {
+                self.force_check_update();
+            }
+            return;
+        }
+
+        // 有新版本可用
+        if us.update_available {
+            ui.separator();
+            let version_str = us.latest_version.as_deref().unwrap_or("?");
+            let label =
+                ui.label(egui::RichText::new(format!("🔄 v{version_str} 可用")).color(theme::CYAN));
+
+            // hover 显示 changelog
+            if !us.changelog.is_empty() {
+                let changelog_text = us
+                    .changelog
+                    .iter()
+                    .map(|c| format!("• {c}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                label.on_hover_text(format!("v{version_str} 更新内容：\n{changelog_text}"));
+            }
+
+            // 正在下载
+            if us.downloading {
+                let pct = us.download_progress * 100.0;
+                ui.spinner();
+                ui.label(format!("下载中 {pct:.0}%"));
+            } else if us.downloaded {
+                // 下载完成，显示"更新并重启"按钮
+                if ui
+                    .button(egui::RichText::new("更新并重启").color(theme::GREEN))
+                    .clicked()
+                {
+                    self.update_state.want_restart = true;
+                }
+            } else {
+                // 未开始下载，显示下载按钮
+                if ui.button("下载更新").clicked() {
+                    self.start_update_download();
+                }
+            }
+        } else {
+            // 已是最新版本 — 显示手动检查按钮（小图标）
+            ui.separator();
+            if ui.small_button("🔄").on_hover_text("检查更新").clicked() {
+                self.force_check_update();
+            }
+        }
     }
 }
