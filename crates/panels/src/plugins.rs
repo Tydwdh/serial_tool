@@ -1,7 +1,9 @@
 use crate::theme;
 use egui::{Color32, RichText, ScrollArea, TextEdit};
 use std::path::PathBuf;
-use tool_extension::{PluginManager, PluginState, PluginSummary};
+use tool_extension::{
+    PluginDiagnostic, PluginDiagnosticSeverity, PluginManager, PluginState, PluginSummary,
+};
 
 pub struct PluginsPanel {
     root: String,
@@ -57,8 +59,23 @@ impl PluginsPanel {
 
         ui.separator();
         let summaries = manager.summaries();
-        if summaries.is_empty() {
+        let diagnostics = manager.diagnostics();
+
+        if summaries.is_empty() && diagnostics.is_empty() {
             ui.label("未找到插件");
+            return status;
+        }
+
+        if !diagnostics.is_empty() {
+            ui.label(RichText::new("诊断").strong());
+            for diagnostic in diagnostics {
+                diagnostic_row(ui, diagnostic);
+            }
+            ui.separator();
+        }
+
+        if summaries.is_empty() {
+            ui.label("没有可加载插件");
             return status;
         }
 
@@ -194,4 +211,24 @@ fn state_color(state: PluginState) -> Color32 {
         PluginState::Failed => theme::RED,
         PluginState::Disabled => theme::YELLOW,
     }
+}
+
+fn diagnostic_row(ui: &mut egui::Ui, diagnostic: &PluginDiagnostic) {
+    let color = match diagnostic.severity {
+        PluginDiagnosticSeverity::Warning => theme::YELLOW,
+        PluginDiagnosticSeverity::Error => theme::RED,
+    };
+
+    ui.horizontal_wrapped(|ui| {
+        ui.colored_label(color, format!("{:?}", diagnostic.severity));
+        ui.monospace(&diagnostic.code);
+        if let Some(plugin_id) = &diagnostic.plugin_id {
+            ui.monospace(plugin_id);
+        }
+        ui.label(&diagnostic.message);
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label("路径");
+        ui.monospace(diagnostic.path.display().to_string());
+    });
 }

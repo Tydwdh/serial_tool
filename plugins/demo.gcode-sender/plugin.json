@@ -2,6 +2,7 @@
   "id": "demo.gcode-sender",
   "name": "G-code Sender",
   "version": "0.1.0",
+  "api_version": "0.1",
   "runtime": "lua",
   "main": "main.lua",
   "permissions": ["bus", "log", "serial", "dialog", "fs.read.user_selected", "task", "config"],

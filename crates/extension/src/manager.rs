@@ -12,7 +12,10 @@ use tool_lua_host::{ConfigStore, LineBufferMap, LuaPluginRuntime, LuaRunConfig, 
 use tool_transport::TransportManager;
 
 use crate::host_services::{DialogRequest, FileAccessBroker};
-use crate::manifest::{PluginManifest, PluginState, PluginSummary, ReplayAnalyzerEntry};
+use crate::manifest::{
+    PluginDiagnostic, PluginDiagnosticSeverity, PluginManifest, PluginState, PluginSummary,
+    ReplayAnalyzerEntry, SUPPORTED_PLUGIN_API_VERSIONS,
+};
 use crate::permission::PermissionManager;
 use crate::{ExtensionError, ExtensionResult};
 
@@ -40,6 +43,7 @@ pub struct PluginManager {
     config_store: Arc<ConfigStore>,
     dropped_events: u64,
     last_seen_manager_dropped: u64,
+    diagnostics: Vec<PluginDiagnostic>,
 }
 
 impl PluginManager {
@@ -68,6 +72,7 @@ impl PluginManager {
             config_store: Arc::new(ConfigStore::new(config_root)),
             dropped_events: 0,
             last_seen_manager_dropped: 0,
+            diagnostics: Vec::new(),
         }
     }
 
@@ -104,6 +109,7 @@ impl PluginManager {
     }
 
     pub fn refresh(&mut self) -> ExtensionResult<usize> {
+        self.diagnostics.clear();
         // 清理：移除所有之前从某个 root 发现但现已不存在的插件
         self.records.retain(|_, record| record.root.exists());
 
@@ -147,6 +153,13 @@ impl PluginManager {
             let manifest = match load_manifest(&manifest_path) {
                 Ok(m) => m,
                 Err(e) => {
+                    self.push_diagnostic(
+                        PluginDiagnosticSeverity::Error,
+                        "manifest_parse_error",
+                        None,
+                        path.clone(),
+                        format!("manifest 解析失败: {e}"),
+                    );
                     self.bus.publish(Event::system_log(
                         LogLevel::Warn,
                         "extension",
@@ -156,7 +169,61 @@ impl PluginManager {
                 }
             };
 
+            if !manifest.api_version_supported() {
+                self.push_diagnostic(
+                    PluginDiagnosticSeverity::Warning,
+                    "unsupported_api_version",
+                    Some(manifest.id.clone()),
+                    path.clone(),
+                    format!(
+                        "api_version '{}' 不受支持，当前支持 {}",
+                        manifest.api_version,
+                        SUPPORTED_PLUGIN_API_VERSIONS.join(", ")
+                    ),
+                );
+                self.bus.publish(Event::system_log(
+                    LogLevel::Warn,
+                    "extension",
+                    format!(
+                        "跳过不兼容插件 {} ({}) : api_version '{}' 不受支持，当前支持 {}",
+                        manifest.id,
+                        path.display(),
+                        manifest.api_version,
+                        SUPPORTED_PLUGIN_API_VERSIONS.join(", ")
+                    ),
+                ));
+                continue;
+            }
+
+            if let Err(errors) = manifest.validate() {
+                self.push_diagnostic(
+                    PluginDiagnosticSeverity::Error,
+                    "manifest_validation_error",
+                    Some(manifest.id.clone()),
+                    path.clone(),
+                    errors.join("; "),
+                );
+                self.bus.publish(Event::system_log(
+                    LogLevel::Warn,
+                    "extension",
+                    format!(
+                        "跳过无效插件 {} ({}) : {}",
+                        manifest.id,
+                        path.display(),
+                        errors.join("; ")
+                    ),
+                ));
+                continue;
+            }
+
             if let Err(e) = self.permission_manager.check(&manifest) {
+                self.push_diagnostic(
+                    PluginDiagnosticSeverity::Error,
+                    "permission_denied",
+                    Some(manifest.id.clone()),
+                    path.clone(),
+                    e.to_string(),
+                );
                 self.bus.publish(Event::system_log(
                     LogLevel::Warn,
                     "extension",
@@ -183,6 +250,17 @@ impl PluginManager {
                     ),
                 ));
                 if is_running {
+                    self.push_diagnostic(
+                        PluginDiagnosticSeverity::Warning,
+                        "duplicate_plugin_id",
+                        Some(id.clone()),
+                        path.clone(),
+                        format!(
+                            "插件 ID 冲突，{} 已在运行，跳过 {}",
+                            existing.root.display(),
+                            path.display()
+                        ),
+                    );
                     self.bus.publish(Event::system_log(
                         LogLevel::Warn,
                         "extension",
@@ -374,6 +452,7 @@ impl PluginManager {
                 id: record.manifest.id.clone(),
                 name: record.manifest.name.clone(),
                 version: record.manifest.version.clone(),
+                api_version: record.manifest.api_version.clone(),
                 runtime: record.manifest.runtime.clone(),
                 state: record.state,
                 permissions: record.manifest.live_permissions().to_vec(),
@@ -385,6 +464,10 @@ impl PluginManager {
                 replay_outputs: record.manifest.replay_outputs().to_vec(),
             })
             .collect()
+    }
+
+    pub fn diagnostics(&self) -> &[PluginDiagnostic] {
+        &self.diagnostics
     }
 
     /// 列出所有已发现插件中有 replay analyzer 的配置。
@@ -525,6 +608,19 @@ impl PluginManager {
             }
         }
     }
+
+    fn push_diagnostic(
+        &mut self,
+        severity: PluginDiagnosticSeverity,
+        code: &'static str,
+        plugin_id: Option<String>,
+        path: PathBuf,
+        message: String,
+    ) {
+        self.diagnostics.push(PluginDiagnostic::new(
+            severity, code, plugin_id, path, message,
+        ));
+    }
 }
 
 fn load_manifest(path: &Path) -> ExtensionResult<PluginManifest> {
@@ -537,6 +633,7 @@ fn manifest_context(manifest: &PluginManifest, root: &Path) -> serde_json::Value
         "id": manifest.id,
         "name": manifest.name,
         "version": manifest.version,
+        "api_version": manifest.api_version,
         "runtime": manifest.runtime,
         "root": root.display().to_string(),
         "permissions": manifest.permissions,
@@ -587,6 +684,7 @@ ctx.bus.publish('protocol.pid.sample', { t = 1, target = 50, actual = 43, output
             id: "bad".to_owned(),
             name: "Bad".to_owned(),
             version: "0.1.0".to_owned(),
+            api_version: crate::manifest::CURRENT_PLUGIN_API_VERSION.to_owned(),
             runtime: "lua".to_owned(),
             main: "main.lua".to_owned(),
             permissions: vec!["filesystem".to_owned()],
@@ -598,9 +696,113 @@ ctx.bus.publish('protocol.pid.sample', { t = 1, target = 50, actual = 43, output
         assert!(PermissionManager::default().check(&manifest).is_err());
     }
 
+    #[test]
+    fn skips_unsupported_plugin_api_version() {
+        let root = create_test_plugin_with_api_version("future.plugin", "99.0");
+
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+        let mut manager = PluginManager::new(bus, transport);
+
+        assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 0);
+        assert_eq!(manager.count(), 0);
+        let diagnostics = manager.diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity, PluginDiagnosticSeverity::Warning);
+        assert_eq!(diagnostics[0].code, "unsupported_api_version");
+        assert_eq!(diagnostics[0].plugin_id.as_deref(), Some("future.plugin"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn records_manifest_parse_diagnostic() {
+        let root = create_broken_plugin("broken.plugin", "{ not json");
+
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+        let mut manager = PluginManager::new(bus, transport);
+
+        assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 0);
+        assert_eq!(manager.count(), 0);
+        let diagnostics = manager.diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity, PluginDiagnosticSeverity::Error);
+        assert_eq!(diagnostics[0].code, "manifest_parse_error");
+        assert_eq!(diagnostics[0].plugin_id, None);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn skips_invalid_manifest_with_diagnostic() {
+        let root = create_custom_plugin(
+            "bad.ui",
+            r#"{
+  "id": "bad.ui",
+  "name": "Bad UI",
+  "version": "0.1.0",
+  "runtime": "lua",
+  "main": "main.lua",
+  "permissions": ["bus"],
+  "contributes": {
+    "ui": [
+      { "id": "bad.ui.button", "slot": "send.toolbar", "command": "bad.ui.missing" }
+    ]
+  }
+}"#,
+            "ctx.log.info('bad ui')",
+        );
+
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+        let mut manager = PluginManager::new(bus, transport);
+
+        assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 0);
+        assert_eq!(manager.count(), 0);
+        let diagnostics = manager.diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity, PluginDiagnosticSeverity::Error);
+        assert_eq!(diagnostics[0].code, "manifest_validation_error");
+        assert_eq!(diagnostics[0].plugin_id.as_deref(), Some("bad.ui"));
+        assert!(diagnostics[0].message.contains("bad.ui.missing"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn create_test_plugin(id: &str, main_lua: &str) -> PathBuf {
+        create_test_plugin_inner(id, None, main_lua)
+    }
+
+    fn create_test_plugin_with_api_version(id: &str, api_version: &str) -> PathBuf {
+        create_test_plugin_inner(id, Some(api_version), "ctx.log.info('future')")
+    }
+
+    fn create_broken_plugin(id: &str, manifest_text: &str) -> PathBuf {
+        create_custom_plugin(id, manifest_text, "")
+    }
+
+    fn create_custom_plugin(id: &str, manifest_text: &str, main_lua: &str) -> PathBuf {
+        let safe_id = id.replace(['.', ':', '\\', '/'], "-");
         let root = std::env::temp_dir().join(format!(
-            "hardware-workbench-plugin-test-{}",
+            "hardware-workbench-plugin-test-custom-{}-{}",
+            safe_id,
+            tool_core::now_timestamp_ms()
+        ));
+        let plugin_root = root.join(id);
+
+        fs::create_dir_all(&plugin_root).unwrap();
+        fs::write(plugin_root.join("plugin.json"), manifest_text).unwrap();
+        fs::write(plugin_root.join("main.lua"), main_lua).unwrap();
+
+        root
+    }
+
+    fn create_test_plugin_inner(id: &str, api_version: Option<&str>, main_lua: &str) -> PathBuf {
+        let safe_id = id.replace(['.', ':', '\\', '/'], "-");
+        let root = std::env::temp_dir().join(format!(
+            "hardware-workbench-plugin-test-{}-{}",
+            safe_id,
             tool_core::now_timestamp_ms()
         ));
 
@@ -608,6 +810,9 @@ ctx.bus.publish('protocol.pid.sample', { t = 1, target = 50, actual = 43, output
 
         fs::create_dir_all(&plugin_root).unwrap();
 
+        let api_version_line = api_version
+            .map(|version| format!(r#"  "api_version": "{version}","#))
+            .unwrap_or_default();
         fs::write(
             plugin_root.join("plugin.json"),
             format!(
@@ -615,6 +820,7 @@ ctx.bus.publish('protocol.pid.sample', { t = 1, target = 50, actual = 43, output
   "id": "{id}",
   "name": "PID Tuner",
   "version": "0.1.0",
+{api_version_line}
   "runtime": "lua",
   "main": "main.lua",
   "permissions": ["bus", "log", "serial", "ui"],

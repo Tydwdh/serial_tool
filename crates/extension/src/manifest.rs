@@ -3,13 +3,23 @@
 //! 从 `lib.rs` 抽出的纯数据结构，供 `PluginManager` 与外部消费。
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
+
+pub const CURRENT_PLUGIN_API_VERSION: &str = "0.1";
+pub const SUPPORTED_PLUGIN_API_VERSIONS: &[&str] = &[CURRENT_PLUGIN_API_VERSION];
+
+fn default_api_version() -> String {
+    CURRENT_PLUGIN_API_VERSION.to_owned()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PluginManifest {
     pub id: String,
     pub name: String,
     pub version: String,
+    #[serde(default = "default_api_version")]
+    pub api_version: String,
     pub runtime: String,
     /// 默认入口（live.replay 不存在时使用）
     pub main: String,
@@ -30,6 +40,83 @@ pub struct PluginManifest {
 }
 
 impl PluginManifest {
+    pub fn validate(&self) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+
+        if self.id.trim().is_empty() {
+            errors.push("plugin id 不能为空".to_owned());
+        }
+        if self.name.trim().is_empty() {
+            errors.push("plugin name 不能为空".to_owned());
+        }
+        if self.version.trim().is_empty() {
+            errors.push("plugin version 不能为空".to_owned());
+        }
+        if self.runtime.trim().is_empty() {
+            errors.push("plugin runtime 不能为空".to_owned());
+        }
+        if self.live_main().trim().is_empty() {
+            errors.push("plugin live main 不能为空".to_owned());
+        }
+
+        let mut command_ids = BTreeSet::new();
+        for command in &self.contributes.commands {
+            if command.id.trim().is_empty() {
+                errors.push("contributes.commands 包含空 id".to_owned());
+                continue;
+            }
+            if !command_ids.insert(command.id.as_str()) {
+                errors.push(format!("重复 command id '{}'", command.id));
+            }
+        }
+
+        let mut ui_ids = BTreeSet::new();
+        for item in &self.contributes.ui {
+            if item.id.trim().is_empty() {
+                errors.push("contributes.ui 包含空 id".to_owned());
+                continue;
+            }
+            if !ui_ids.insert(item.id.as_str()) {
+                errors.push(format!("重复 ui id '{}'", item.id));
+            }
+
+            if let Some(command) = item
+                .command
+                .as_deref()
+                .filter(|command| !command.trim().is_empty())
+                && !command_ids.contains(command)
+            {
+                errors.push(format!(
+                    "ui '{}' 引用了未声明 command '{}'",
+                    item.id, command
+                ));
+            }
+        }
+
+        let mut panel_ids = BTreeSet::new();
+        for panel in &self.contributes.panels {
+            if panel.id.trim().is_empty() {
+                errors.push("contributes.panels 包含空 id".to_owned());
+                continue;
+            }
+            if !panel_ids.insert(panel.id.as_str()) {
+                errors.push(format!("重复 panel id '{}'", panel.id));
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    pub fn api_version_supported(&self) -> bool {
+        SUPPORTED_PLUGIN_API_VERSIONS
+            .iter()
+            .any(|supported| *supported == self.api_version)
+    }
+
     pub fn live_main(&self) -> &str {
         self.live
             .as_ref()
@@ -114,6 +201,39 @@ pub struct ReplayAnalyzerEntry {
     pub plugin_id: String,
     pub manifest: PluginManifest,
     pub root: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PluginDiagnosticSeverity {
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginDiagnostic {
+    pub severity: PluginDiagnosticSeverity,
+    pub code: String,
+    pub plugin_id: Option<String>,
+    pub path: PathBuf,
+    pub message: String,
+}
+
+impl PluginDiagnostic {
+    pub fn new(
+        severity: PluginDiagnosticSeverity,
+        code: impl Into<String>,
+        plugin_id: Option<String>,
+        path: PathBuf,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            severity,
+            code: code.into(),
+            plugin_id,
+            path,
+            message: message.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -219,6 +339,7 @@ pub struct PluginSummary {
     pub id: String,
     pub name: String,
     pub version: String,
+    pub api_version: String,
     pub runtime: String,
     pub state: PluginState,
     pub permissions: Vec<String>,

@@ -9,6 +9,7 @@
   "id": "demo.signal-generator",
   "name": "信号发生器 (Demo)",
   "version": "1.0.0",
+  "api_version": "0.1",
   "runtime": "lua",
 
   "main": "main.lua",
@@ -55,12 +56,29 @@
 | `id` | string | 是 | 插件唯一 ID。建议稳定，不要随意修改。 |
 | `name` | string | 是 | UI 中显示的插件名称。 |
 | `version` | string | 是 | 插件版本。 |
+| `api_version` | string | 否 | 插件 API 版本。当前支持 `"0.1"`；旧插件不填时按 `"0.1"` 处理。 |
 | `runtime` | string | 是 | 当前 Lua 插件使用 `"lua"`。 |
 | `main` | string | 是 | 旧格式入口；没有 `live.main` 时作为实时入口。 |
 | `permissions` | string[] | 否 | 旧格式实时权限；没有 `live.permissions` 时使用。 |
 | `live` | object | 否 | 实时插件配置。 |
 | `replay` | object | 否 | 回放解析器配置。 |
 | `contributes` | object | 否 | 插件贡献项，例如面板声明。 |
+
+## api_version
+
+`api_version` 表示插件使用的宿主 API 契约版本，不是插件自身版本。主程序会在发现插件时检查它：
+
+```json
+"api_version": "0.1"
+```
+
+当前支持：
+
+```text
+0.1
+```
+
+旧插件可以不写 `api_version`，主程序会按 `0.1` 兼容处理。新插件建议显式写上，方便未来宿主升级 API 时给出清楚的兼容提示。
 
 ## live 配置
 
@@ -132,6 +150,8 @@ attitude
 
 `contributes.ui` 用于把插件动作挂到宿主定义的 UI 插槽。插件只声明控件和命令，不直接绘制 egui。
 
+`contributes.commands`、`contributes.ui` 和 `contributes.panels` 内部的 `id` 必须各自唯一。`contributes.ui[].command` 如果填写，必须指向同一清单中已经声明的 `contributes.commands[].id`。
+
 ```json
 "contributes": {
   "commands": [
@@ -199,6 +219,7 @@ Lua 插件应监听 `ui.contribution.action`，并先检查 `payload.plugin_id` 
   "id": "my.old-plugin",
   "name": "旧格式插件",
   "version": "0.1.0",
+  "api_version": "0.1",
   "runtime": "lua",
   "main": "main.lua",
   "permissions": ["bus", "log", "ui"]

@@ -2,6 +2,7 @@
   "id": "template.hello",
   "name": "Hello 插件模板",
   "version": "0.1.0",
+  "api_version": "0.1",
   "runtime": "lua",
   "main": "main.lua",
   "permissions": ["bus", "log", "ui", "storage"],

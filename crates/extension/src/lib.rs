@@ -7,7 +7,7 @@ pub mod permission;
 
 // Re-export 核心类型，供外部 crate 直接通过 tool_extension:: 访问
 pub use manager::PluginManager;
-pub use manifest::{PluginState, PluginSummary};
+pub use manifest::{PluginDiagnostic, PluginDiagnosticSeverity, PluginState, PluginSummary};
 pub use permission::PermissionManager;
 
 // topic_matches 已移至 tool_core，此处保持向后兼容 re-export
@@ -32,6 +32,15 @@ pub enum ExtensionError {
 
     #[error("unsupported runtime '{0}'")]
     UnsupportedRuntime(String),
+
+    #[error(
+        "unsupported plugin api_version '{api_version}' for plugin '{plugin_id}' (supported: {supported})"
+    )]
+    UnsupportedApiVersion {
+        plugin_id: String,
+        api_version: String,
+        supported: String,
+    },
 
     #[error("permission '{permission}' is not allowed for plugin '{plugin_id}'")]
     PermissionDenied {
@@ -62,6 +71,11 @@ mod tests {
         }"#;
 
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            manifest.api_version,
+            crate::manifest::CURRENT_PLUGIN_API_VERSION
+        );
+        assert!(manifest.api_version_supported());
         assert_eq!(manifest.live_main(), "main.lua");
         assert_eq!(manifest.live_permissions().len(), 3);
         assert!(manifest.contributes.ui.is_empty());
@@ -107,11 +121,41 @@ mod tests {
     }
 
     #[test]
+    fn manifest_validate_rejects_missing_ui_command() {
+        let json = r#"{
+          "id": "demo.test",
+          "name": "Test",
+          "version": "1.0.0",
+          "runtime": "lua",
+          "main": "main.lua",
+          "permissions": ["bus"],
+          "contributes": {
+            "ui": [
+              {
+                "id": "demo.test.run.button",
+                "slot": "send.toolbar",
+                "command": "demo.test.missing"
+              }
+            ]
+          }
+        }"#;
+
+        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        let errors = manifest.validate().unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("demo.test.missing"))
+        );
+    }
+
+    #[test]
     fn new_manifest_with_live_and_replay() {
         let json = r#"{
           "id": "demo.test",
           "name": "Test",
           "version": "1.0.0",
+          "api_version": "0.1",
           "runtime": "lua",
           "main": "main.lua",
           "permissions": ["bus"],
@@ -128,6 +172,8 @@ mod tests {
         }"#;
 
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.api_version, "0.1");
+        assert!(manifest.api_version_supported());
         assert_eq!(manifest.live_main(), "live.lua");
         assert_eq!(manifest.live_permissions().len(), 4);
         assert!(manifest.has_replay_analyzer());
@@ -171,6 +217,7 @@ mod tests {
             id: "bad".to_owned(),
             name: "Bad".to_owned(),
             version: "0.1.0".to_owned(),
+            api_version: crate::manifest::CURRENT_PLUGIN_API_VERSION.to_owned(),
             runtime: "lua".to_owned(),
             main: "main.lua".to_owned(),
             permissions: vec!["filesystem".to_owned()],
