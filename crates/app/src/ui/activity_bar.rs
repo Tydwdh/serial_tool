@@ -281,14 +281,8 @@ pub(crate) fn aicon(a: Activity) -> &'static str {
         _ => "",
     }
 }
-pub(crate) fn ashortcut(a: Activity) -> &'static str {
-    match a {
-        Activity::Devices => "Ctrl+1",
-        Activity::Replay => "Ctrl+2",
-        Activity::Plugins => "Ctrl+3",
-        Activity::Settings => "Ctrl+4",
-        _ => "",
-    }
+pub(crate) fn ashortcut(_a: Activity) -> &'static str {
+    ""
 }
 
 /// 通用：根据指针位置计算插入索引。

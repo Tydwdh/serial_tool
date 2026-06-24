@@ -1,26 +1,30 @@
 use crate::app::WorkbenchApp;
 use crate::config::windows_open_dialog;
-use crate::keymap::Action;
+use crate::keymap::{Action, KeyBinding};
 use crate::state::StatusLevel;
 use eframe::egui;
 use tool_core::{Direction, Event, Payload};
-use tool_panels::Activity;
+use tool_panels::PanelKind;
 use tool_transport::send_impl_to;
 
 impl WorkbenchApp {
     pub(crate) fn handle_keys(&mut self, ctx: &egui::Context) {
+        // 快捷键录制期间跳过全局快捷键，避免误触发其他动作导致离开设置页
+        if self.key_recording.is_some() {
+            return;
+        }
         let keymap = self.keymap.clone();
         let mut triggered: Option<Action> = None;
 
         ctx.input(|i| {
-            for (action, bindings) in &keymap.bindings {
+            for (key, bindings) in &keymap.bindings {
                 for binding in bindings {
-                    if let Some(key) = parse_egui_key(&binding.key) {
+                    if let Some(egui_key) = parse_egui_key(&binding.key) {
                         let mods_match = i.modifiers.ctrl == binding.ctrl
                             && i.modifiers.shift == binding.shift
                             && i.modifiers.alt == binding.alt;
-                        if mods_match && i.key_pressed(key) {
-                            triggered = Some(*action);
+                        if mods_match && i.key_pressed(egui_key) {
+                            triggered = Action::from_key(key);
                         }
                     }
                 }
@@ -43,7 +47,7 @@ impl WorkbenchApp {
     fn execute_action(&mut self, action: Action) {
         match action {
             Action::RefreshPorts => self.refresh_ports(),
-            Action::OpenPort => self.open_selected_port(),
+            Action::OpenPort => self.toggle_selected_port(),
             Action::ToggleActivityBar => {
                 self.panels.dock.activity_bar_visible = !self.panels.dock.activity_bar_visible;
                 if let Err(e) = self.save_config() {
@@ -51,16 +55,6 @@ impl WorkbenchApp {
                 };
             }
             Action::ToggleBottomPanel => self.toggle_bottom_panel(),
-            Action::ToggleRightSidebar => {
-                self.panels.dock.right_visible = !self.panels.dock.right_visible;
-                if let Err(e) = self.save_config() {
-                    log::warn!("save_config failed: {e}")
-                };
-            }
-            Action::SelectActivity1 => self.panels.select_activity(Activity::Devices),
-            Action::SelectActivity2 => self.panels.select_activity(Activity::Replay),
-            Action::SelectActivity3 => self.panels.select_activity(Activity::Plugins),
-            Action::SelectActivity4 => self.panels.select_activity(Activity::Settings),
             Action::Send => {
                 if self.send_target_port_open() && !self.send.input.trim().is_empty() {
                     self.do_send();
@@ -68,7 +62,83 @@ impl WorkbenchApp {
             }
             Action::StartRecording => self.start_or_stop_recording(),
             Action::ReconnectPort => self.reconnect_selected_port(),
+            Action::PluginCommand(plugin_id, command_id) => {
+                self.publish_plugin_command_action(&plugin_id, &command_id);
+            }
         }
+    }
+
+    /// 发布插件命令动作（模拟 UI 按钮点击）。
+    fn publish_plugin_command_action(&mut self, plugin_id: &str, command_id: &str) {
+        // 查找该插件的 UI contribution 信息以确定是否 record_send_input
+        let summaries = self.plugin_manager.summaries();
+        let record_send_input = summaries
+            .iter()
+            .find(|s| s.id == plugin_id)
+            .and_then(|s| {
+                s.contributes.ui.iter().find(|ui| {
+                    ui.command.as_deref() == Some(command_id)
+                        || ui.action.as_deref() == Some(command_id)
+                })
+            })
+            .map(|ui| ui.record_send_input)
+            .unwrap_or(false);
+
+        if record_send_input {
+            self.record_send_history(self.send.input.clone());
+        }
+
+        // Authorize file access if plugin has fs.read.user_selected permission
+        let has_fs_permission = summaries
+            .iter()
+            .find(|s| s.id == plugin_id)
+            .map(|s| s.permissions.iter().any(|p| p == "fs.read.user_selected"))
+            .unwrap_or(false);
+
+        if has_fs_permission {
+            let input = self.send.input.trim();
+            if !input.is_empty() && input.lines().count() == 1 {
+                let path = std::path::PathBuf::from(input.trim_matches('"'));
+                if path.is_file() {
+                    self.file_broker.authorize(plugin_id, path);
+                }
+            }
+        }
+
+        let context = serde_json::json!({
+            "slot": "send.toolbar",
+            "send": {
+                "input": self.send.input.clone(),
+                "target_port": self.send.target_port.clone(),
+                "target_port_open": self.send_target_port_open(),
+                "hex_mode": self.send.hex_mode,
+                "line_ending": {
+                    "label": self.send.line_ending.label(),
+                    "suffix": self.send.line_ending.suffix(),
+                },
+                "periodic_enabled": self.send.periodic_enabled,
+                "periodic_interval_ms": self.send.periodic_interval_ms,
+            },
+            "serial": {
+                "selected_port": self.serial.selected_port.clone(),
+                "open_ports": self.transport.open_ports(),
+            }
+        });
+
+        self.bus.publish(Event::new(
+            tool_core::topics::UI_CONTRIBUTION_ACTION,
+            "ui.slot:send.toolbar".to_string(),
+            Direction::Internal,
+            Payload::Json(serde_json::json!({
+                "plugin_id": plugin_id,
+                "contribution_id": command_id,
+                "slot": "send.toolbar",
+                "kind": "button",
+                "command": command_id,
+                "action": command_id,
+                "context": context,
+            })),
+        ));
     }
 }
 
@@ -162,9 +232,71 @@ impl WorkbenchApp {
         self.tick_plugin_lifecycle();
         self.handle_keys(ctx);
         self.flush_pending_action();
+        self.tick_key_recording(ctx);
         self.tick_port_refresh(ctx);
         self.tick_periodic_send(ctx);
         self.tick_auto_save(ctx);
+    }
+
+    /// 快捷键录制：按 Escape 取消，离开设置页时取消。检测到按键则保存绑定。
+    fn tick_key_recording(&mut self, ctx: &egui::Context) {
+        if self.key_recording.is_none() {
+            return;
+        }
+        // 离开设置页时取消录制。这里看 dock 的实际可见面板，而不是可能滞后的 active_tab。
+        if !self.panels.is_panel_visible(&PanelKind::Settings) {
+            self.key_recording = None;
+            return;
+        }
+        // Escape 只取消录制，不能被保存成快捷键。
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.key_recording = None;
+            return;
+        }
+        // 检查是否有按键事件
+        if let Some((key_name, modifiers)) = Self::capture_key_for_recording(ctx) {
+            let action = self.key_recording.take().unwrap();
+            let new_binding =
+                KeyBinding::new(&key_name, modifiers.ctrl, modifiers.shift, modifiers.alt);
+
+            self.keymap.remove_binding_everywhere(&new_binding);
+            let mut bindings = self.keymap.get_bindings(&action);
+            bindings.retain(|b| {
+                !(b.ctrl == new_binding.ctrl
+                    && b.shift == new_binding.shift
+                    && b.alt == new_binding.alt)
+            });
+            bindings.push(new_binding);
+            self.keymap.set_bindings(&action, bindings);
+            if let Err(e) = self.save_config() {
+                log::warn!("save_config failed: {e}")
+            };
+            self.set_status_force(
+                StatusLevel::Info,
+                format!(
+                    "{} 快捷键已更新",
+                    action.label_with_plugins(&self.plugin_manager.summaries())
+                ),
+            );
+        }
+    }
+
+    /// 捕获按键事件用于快捷键录制。返回按下的键名。
+    fn capture_key_for_recording(ctx: &egui::Context) -> Option<(String, egui::Modifiers)> {
+        ctx.input(|i| {
+            for event in &i.events {
+                if let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } = event
+                {
+                    return Some((format!("{key:?}"), *modifiers));
+                }
+            }
+            None
+        })
     }
 
     /// 录制状态检测：收割已停止的录制、worker 线程错误反馈。

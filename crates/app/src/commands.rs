@@ -203,12 +203,32 @@ impl WorkbenchApp {
         }
     }
 
+    /// 切换选中串口的打开/关闭状态（快捷键用）。
+    pub(crate) fn toggle_selected_port(&mut self) {
+        let Some(port) = self.serial.selected_port.clone() else {
+            self.set_status_force(StatusLevel::Warn, "请选择串口");
+            return;
+        };
+        if self.transport.status_port(&port).open {
+            self.transport.close_port(&port);
+            self.set_status_force(StatusLevel::Info, format!("{port} 已断开"));
+        } else {
+            match self.open_selected_port_result() {
+                Ok(()) => {
+                    self.set_status_force(StatusLevel::Info, format!("{port} 已连接"));
+                }
+                Err(e) => {
+                    self.set_status_force(StatusLevel::Error, e);
+                }
+            }
+        }
+    }
+
     pub(crate) fn open_selected_port(&mut self) {
         match self.open_selected_port_result() {
             Ok(()) => {
                 let p = self.serial.selected_port.as_deref().unwrap_or("?");
                 self.set_status_force(StatusLevel::Info, format!("{p} 已连接"));
-                self.open_bottom_panel();
             }
             Err(e) => {
                 self.set_status_force(StatusLevel::Error, e);

@@ -22,6 +22,9 @@ impl WorkbenchApp {
         let active = self.panels.dock.stack(area).active_or_first();
 
         if let Some(kind) = active {
+            if area == DockArea::Center {
+                self.panels.sync_active_tab_from_center();
+            }
             self.dock_panel_body(ui, area, kind);
         }
     }

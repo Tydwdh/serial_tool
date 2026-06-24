@@ -23,10 +23,6 @@ impl WorkbenchApp {
         self.ensure_send_target_port();
     }
 
-    pub(crate) fn open_bottom_panel(&mut self) {
-        self.set_bottom_visible(true);
-    }
-
     pub(crate) fn set_bottom_visible(&mut self, visible: bool) {
         self.bottom_panel_visible = visible;
         self.panels.dock.bottom_visible = visible;

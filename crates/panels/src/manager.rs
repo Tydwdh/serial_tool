@@ -143,7 +143,10 @@ impl DockStack {
     }
 
     pub fn active_or_first(&self) -> Option<PanelKind> {
-        self.active.clone().or_else(|| self.tabs.first().cloned())
+        self.active
+            .clone()
+            .filter(|kind| self.tabs.contains(kind))
+            .or_else(|| self.tabs.first().cloned())
     }
 
     pub fn discard_dynamic_tabs(&mut self) {
@@ -384,6 +387,24 @@ impl PanelManager {
         self.dock.center.open(kind);
     }
 
+    pub fn sync_active_tab_from_center(&mut self) {
+        if let Some(kind) = self.dock.center.active_or_first() {
+            self.active_tab = kind.clone();
+            if let Some(activity) = kind.activity() {
+                self.activity = activity;
+            }
+        } else {
+            self.active_tab = self.activity.panel_kind().unwrap_or_default();
+        }
+    }
+
+    pub fn is_panel_visible(&self, kind: &PanelKind) -> bool {
+        self.dock.center.active_or_first().as_ref() == Some(kind)
+            || (self.dock.bottom_visible
+                && self.dock.bottom.active_or_first().as_ref() == Some(kind))
+            || (self.dock.right_visible && self.dock.right.active_or_first().as_ref() == Some(kind))
+    }
+
     /// 添加标签但不自动切换（插件后台创建面板时使用）
     pub fn add_tab(&mut self, kind: PanelKind) {
         self.dock.center.add_inactive(kind);
@@ -440,6 +461,7 @@ impl PanelManager {
                 self.activity = activity;
             }
         }
+        self.sync_active_tab_from_center();
     }
 }
 
@@ -481,5 +503,34 @@ mod tests {
         // 动态 tab 应被清除，但 dock 中的固定 tab（Terminal/Logs）仍保留
         assert!(!manager.tabs().iter().any(|k| k.dynamic_id().is_some()));
         assert!(manager.active_dynamic_id().is_none());
+    }
+
+    #[test]
+    fn sync_tabs_from_dock_uses_center_active_panel() {
+        let mut manager = PanelManager {
+            active_tab: PanelKind::Devices,
+            activity: Activity::Devices,
+            ..Default::default()
+        };
+        manager.dock.center.open(PanelKind::Settings);
+
+        manager.sync_tabs_from_dock();
+
+        assert_eq!(manager.active_tab, PanelKind::Settings);
+        assert_eq!(manager.activity, Activity::Settings);
+    }
+
+    #[test]
+    fn is_panel_visible_checks_active_dock_stacks() {
+        let mut manager = PanelManager::default();
+        manager.dock.center.open(PanelKind::Settings);
+        manager.dock.bottom_visible = true;
+        manager.dock.bottom.open(PanelKind::Logs);
+        manager.dock.right_visible = false;
+        manager.dock.right.open(PanelKind::Terminal);
+
+        assert!(manager.is_panel_visible(&PanelKind::Settings));
+        assert!(manager.is_panel_visible(&PanelKind::Logs));
+        assert!(!manager.is_panel_visible(&PanelKind::Terminal));
     }
 }

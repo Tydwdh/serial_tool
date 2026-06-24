@@ -60,6 +60,8 @@ pub(crate) struct WorkbenchApp {
     pub(crate) keymap: crate::keymap::Keymap,
     /// 当前帧触发的快捷键动作（handle_keys 设置，tick 执行）
     pub(crate) pending_action: Option<crate::keymap::Action>,
+    /// 快捷键录制状态：点击"录制"后等待用户按键
+    pub(crate) key_recording: Option<crate::keymap::Action>,
 }
 
 pub(crate) struct ReplayAnalyzerJob {
@@ -247,6 +249,7 @@ impl WorkbenchApp {
                 .map(|c| c.keymap.clone())
                 .unwrap_or_default(),
             pending_action: None,
+            key_recording: None,
         };
         app.refresh_ports();
         let enabled: Vec<String> = config
