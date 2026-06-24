@@ -89,9 +89,9 @@ end)
 ctx.bus.off("transport.serial.default.rx")
 ```
 
-### ui.contribution.action
+### ui.contribution.action（兼容）
 
-插件通过 `plugin.json` 的 `contributes.ui` 挂到宿主插槽后，点击动作会以普通事件送回 Lua。
+旧插件可以继续监听 `ui.contribution.action`。新插件优先使用 `ctx.commands.register`，避免每个插件自己判断 `plugin_id` 和分发 action。
 
 ```lua
 ctx.bus.on("ui.contribution.action", function(event)
@@ -105,6 +105,41 @@ ctx.bus.on("ui.contribution.action", function(event)
     ctx.log.info("send input: " .. tostring(send.input))
   end
 end)
+```
+
+## ctx.commands
+
+命令 API 总是可用，不需要额外权限。`plugin.json` 的 `contributes.commands` 负责声明命令标题和宿主入口；`main.lua` 用 `ctx.commands.register` 注册实际处理函数。
+
+### register(command, handler)
+
+```lua
+ctx.commands.register("my-plugin.send", function(payload)
+  local send = (payload.context or {}).send or {}
+  ctx.log.info("send input: " .. tostring(send.input))
+end)
+```
+
+`payload` 和旧的 `ui.contribution.action` payload 基本一致，包含 `plugin_id`、`command`、`action`、`contribution_id`、`slot` 和 `context`。
+
+### unregister(command)
+
+```lua
+ctx.commands.unregister("my-plugin.send")
+```
+
+### list()
+
+```lua
+local commands = ctx.commands.list()
+```
+
+### execute(command, args)
+
+发布一次命令执行请求。当前主要用于插件内部复用命令入口。
+
+```lua
+ctx.commands.execute("my-plugin.send", { source = "script" })
 ```
 
 ## ctx.serial

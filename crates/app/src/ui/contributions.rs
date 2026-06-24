@@ -2,7 +2,6 @@ use crate::app::WorkbenchApp;
 use eframe::egui;
 use serde_json::json;
 use std::path::PathBuf;
-use tool_core::{Direction, Event, Payload, topics};
 use tool_extension::PluginState;
 use tool_panels::theme;
 
@@ -129,20 +128,20 @@ impl WorkbenchApp {
             .or_else(|| item.command.clone())
             .unwrap_or_else(|| item.id.clone());
 
-        self.bus.publish(Event::new(
-            topics::UI_CONTRIBUTION_ACTION,
-            format!("ui.slot:{}", item.slot),
-            Direction::Internal,
-            Payload::Json(json!({
-                "plugin_id": item.plugin_id.clone(),
-                "contribution_id": item.id.clone(),
-                "slot": item.slot.clone(),
-                "kind": item.kind.clone(),
-                "command": item.command.clone(),
-                "action": action,
-                "context": self.ui_contribution_context(&item.slot),
-            })),
-        ));
+        let payload = json!({
+            "plugin_id": item.plugin_id.clone(),
+            "contribution_id": item.id.clone(),
+            "slot": item.slot.clone(),
+            "kind": item.kind.clone(),
+            "command": item.command.clone(),
+            "action": action,
+            "context": self.ui_contribution_context(&item.slot),
+        });
+
+        if let Some(command) = item.command.as_deref() {
+            self.publish_plugin_command_execute(&item.plugin_id, command, &payload);
+        }
+        self.publish_legacy_ui_contribution_action(format!("ui.slot:{}", item.slot), payload);
     }
 
     fn authorize_send_input_file_if_needed(&mut self, item: &ResolvedUiContribution) {

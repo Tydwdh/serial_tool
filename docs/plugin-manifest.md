@@ -196,9 +196,9 @@ label
 status
 ```
 
-`send.*` 插槽中的控件可以设置 `record_send_input: true`。点击时宿主会把当前发送区内容写入发送历史；插件仍只处理 action，不需要直接操作宿主 UI 状态。
+`send.*` 插槽中的控件可以设置 `record_send_input: true`。点击时宿主会把当前发送区内容写入发送历史；插件仍只处理 command，不需要直接操作宿主 UI 状态。
 
-点击 `button` / `small_button` 时，宿主发布 `ui.contribution.action`。payload 包含：
+点击 `button` / `small_button` 时，宿主会发布 `plugin.command.execute` 给 `ctx.commands.register` 注册的处理函数；同时保留发布 `ui.contribution.action`，兼容旧插件。payload 包含：
 
 ```json
 {
@@ -219,7 +219,7 @@ status
 }
 ```
 
-Lua 插件应监听 `ui.contribution.action`，并先检查 `payload.plugin_id` 是否等于自己的插件 ID。
+新 Lua 插件应使用 `ctx.commands.register("my-plugin.send", handler)`。旧插件仍可监听 `ui.contribution.action`，并先检查 `payload.plugin_id` 是否等于自己的插件 ID。
 
 ## 旧格式兼容
 

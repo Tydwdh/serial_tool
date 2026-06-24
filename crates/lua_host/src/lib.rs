@@ -10,7 +10,6 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use thiserror::Error;
-#[cfg(test)]
 use tool_core::topics;
 use tool_core::{Event, LogLevel, Payload, topic_matches};
 use tool_databus::{DataBus, TopicFilter};
@@ -23,6 +22,7 @@ pub mod globals;
 pub mod host_services;
 pub mod replay;
 pub(crate) use crate::api::bus::create_bus_api;
+pub(crate) use crate::api::commands::create_commands_api;
 pub(crate) use crate::api::config::create_config_api;
 pub(crate) use crate::api::dialog::create_dialog_api;
 pub(crate) use crate::api::fs::create_fs_api;
@@ -37,8 +37,8 @@ pub(crate) use crate::api::timer::create_timer_api;
 pub(crate) use crate::api::ui::create_ui_api;
 pub(crate) use crate::convert::{event_to_lua_table, json_to_lua_value};
 use crate::globals::{
-    TASK_CANCELLED, TASK_FINISHED, TASK_YIELD_OP, YIELD_DEADLINE_MS, YIELD_KIND, YIELD_READ_LINE,
-    YIELD_SLEEP, YIELD_WAIT_PAUSED, YIELD_WRITE_LINE_AND_EXPECT,
+    PLUGIN_COMMANDS, TASK_CANCELLED, TASK_FINISHED, TASK_YIELD_OP, YIELD_DEADLINE_MS, YIELD_KIND,
+    YIELD_READ_LINE, YIELD_SLEEP, YIELD_WAIT_PAUSED, YIELD_WRITE_LINE_AND_EXPECT,
 };
 use crate::host_services::line_buffer_key;
 pub use config::ConfigStore;
@@ -503,6 +503,12 @@ fn plugin_event_loop(
         .map(|table| !table.is_empty())
         .unwrap_or(false);
 
+    let has_commands = lua
+        .globals()
+        .get::<Table>(crate::globals::PLUGIN_COMMANDS)
+        .map(|table| !table.is_empty())
+        .unwrap_or(false);
+
     let has_timers = lua
         .globals()
         .get::<Table>(crate::globals::PLUGIN_TIMERS)
@@ -519,7 +525,7 @@ fn plugin_event_loop(
         })
         .unwrap_or(false);
 
-    if !has_callbacks && !has_timers && !has_tasks {
+    if !has_callbacks && !has_commands && !has_timers && !has_tasks {
         bus.publish(Event::system_log(
             LogLevel::Info,
             &config.source,
@@ -580,6 +586,10 @@ fn plugin_event_loop(
                     drain_serial_rx_to_buffers(&event, &host_services, &bus);
                 }
 
+                if handle_plugin_command_event(&lua, &bus, &config, &host_services, &event) {
+                    continue;
+                }
+
                 if let Some(callback) = get_callback(&lua, &event.topic) {
                     let event_table = lua.create_table().ok();
 
@@ -612,6 +622,12 @@ fn plugin_event_loop(
             .map(|table| table.is_empty())
             .unwrap_or(true);
 
+        let commands_empty = lua
+            .globals()
+            .get::<Table>(crate::globals::PLUGIN_COMMANDS)
+            .map(|table| table.is_empty())
+            .unwrap_or(true);
+
         let tasks_all_done = lua
             .globals()
             .get::<Table>(crate::globals::PLUGIN_TASKS)
@@ -622,12 +638,103 @@ fn plugin_event_loop(
             })
             .unwrap_or(true);
 
-        if timers_empty && callbacks_empty && tasks_all_done && event_receiver.is_empty() {
+        if timers_empty
+            && callbacks_empty
+            && commands_empty
+            && tasks_all_done
+            && event_receiver.is_empty()
+        {
             break;
         }
     }
 
     alive.store(false, Ordering::Relaxed);
+}
+
+fn handle_plugin_command_event(
+    lua: &Lua,
+    bus: &DataBus,
+    config: &LuaRunConfig,
+    host_services: &LuaHostServices,
+    event: &Event,
+) -> bool {
+    if event.topic != topics::PLUGIN_COMMAND_EXECUTE {
+        return false;
+    }
+
+    let Payload::Json(payload) = &event.payload else {
+        bus.publish(Event::system_log(
+            LogLevel::Warn,
+            &config.source,
+            "plugin command event ignored: payload is not JSON",
+        ));
+        return true;
+    };
+
+    if payload.get("plugin_id").and_then(serde_json::Value::as_str)
+        != Some(host_services.plugin_id.as_str())
+    {
+        return true;
+    }
+
+    let Some(command) = payload
+        .get("command")
+        .or_else(|| payload.get("action"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|command| !command.trim().is_empty())
+    else {
+        bus.publish(Event::system_log(
+            LogLevel::Warn,
+            &config.source,
+            "plugin command event ignored: missing command",
+        ));
+        return true;
+    };
+
+    let commands: Table = match lua.globals().get(PLUGIN_COMMANDS) {
+        Ok(commands) => commands,
+        Err(error) => {
+            bus.publish(Event::system_log(
+                LogLevel::Warn,
+                &config.source,
+                format!("plugin command table unavailable: {error}"),
+            ));
+            return true;
+        }
+    };
+
+    let handler: Function = match commands.get(command) {
+        Ok(handler) => handler,
+        Err(_) => {
+            bus.publish(Event::system_log(
+                LogLevel::Debug,
+                &config.source,
+                format!("plugin command '{command}' is not registered"),
+            ));
+            return true;
+        }
+    };
+
+    match json_to_lua_value(lua, payload) {
+        Ok(args) => {
+            if let Err(error) = handler.call::<Value>(args) {
+                bus.publish(Event::system_log(
+                    LogLevel::Warn,
+                    &config.source,
+                    format!("plugin command '{command}' failed: {error}"),
+                ));
+            }
+        }
+        Err(error) => {
+            bus.publish(Event::system_log(
+                LogLevel::Warn,
+                &config.source,
+                format!("plugin command '{command}' payload conversion failed: {error}"),
+            ));
+        }
+    }
+
+    true
 }
 fn get_callback(lua: &Lua, topic: &str) -> Option<Function> {
     let callbacks: Table = lua.globals().get(crate::globals::PLUGIN_CALLBACKS).ok()?;
@@ -876,6 +983,8 @@ fn install_ctx(
     lua.globals()
         .set(crate::globals::PLUGIN_CALLBACKS, lua.create_table()?)?;
     lua.globals()
+        .set(crate::globals::PLUGIN_COMMANDS, lua.create_table()?)?;
+    lua.globals()
         .set(crate::globals::PLUGIN_TIMERS, lua.create_table()?)?;
     lua.globals()
         .set(crate::globals::PLUGIN_STORAGE, lua.create_table()?)?;
@@ -900,6 +1009,16 @@ fn install_ctx(
             )?,
         )?;
     }
+
+    ctx.set(
+        "commands",
+        create_commands_api(
+            lua,
+            bus.clone(),
+            config.source.clone(),
+            host_services.plugin_id.clone(),
+        )?,
+    )?;
 
     if has_permission(config, "serial") {
         ctx.set(
@@ -1208,6 +1327,67 @@ mod tests {
             event.payload.text_lossy(),
             r#"{"actual":2.0,"t":1,"target":2.5}"#
         );
+    }
+
+    #[test]
+    fn plugin_command_event_invokes_registered_handler() {
+        let bus = DataBus::new();
+        let logs = bus.subscribe(TopicFilter::prefix("log."));
+        let transport = TransportManager::new(bus.clone());
+        let host_services = LuaHostServices {
+            plugin_root: None,
+            plugin_id: "cmd.plugin".to_owned(),
+            dialog_sender: None,
+            file_broker: None,
+            stop_flag: None,
+            line_buffers: None,
+            config_store: None,
+        };
+
+        let runtime = run_plugin(
+            r#"
+ctx.commands.register("cmd.plugin.run", function(payload)
+    local context = payload.context or {}
+    ctx.log.info("command:" .. tostring(context.value))
+end)
+"#
+            .to_owned(),
+            LuaRunConfig {
+                script_name: "commands.lua".to_owned(),
+                timeout_ms: 5_000,
+                source: "plugin:cmd.plugin".to_owned(),
+                context: json!({"id": "cmd.plugin"}),
+                permissions: vec!["log".to_owned()],
+            },
+            bus.clone(),
+            transport,
+            host_services,
+        )
+        .unwrap();
+
+        let event = Event::new(
+            topics::PLUGIN_COMMAND_EXECUTE,
+            "test",
+            tool_core::Direction::Internal,
+            Payload::Json(json!({
+                "plugin_id": "cmd.plugin",
+                "command": "cmd.plugin.run",
+                "context": { "value": "ok" }
+            })),
+        );
+        assert!(runtime.on_event(&event));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut saw_command = false;
+        while Instant::now() < deadline {
+            if let Ok(event) = logs.recv_timeout(Duration::from_millis(50))
+                && event.payload.text_lossy().contains("command:ok")
+            {
+                saw_command = true;
+                break;
+            }
+        }
+        assert!(saw_command, "registered command handler was not invoked");
     }
 
     #[test]

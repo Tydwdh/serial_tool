@@ -7,6 +7,7 @@
 
 // ── Lua 全局表键 ──
 pub const PLUGIN_CALLBACKS: &str = "__plugin_callbacks";
+pub const PLUGIN_COMMANDS: &str = "__plugin_commands";
 pub const PLUGIN_TIMERS: &str = "__plugin_timers";
 pub const PLUGIN_TASKS: &str = "__plugin_tasks";
 pub const PLUGIN_STORAGE: &str = "__plugin_storage";

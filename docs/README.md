@@ -11,6 +11,8 @@
 
 `plugin.json` 的 JSON Schema 位于 `plugins\plugin.schema.json`。模板插件已经内置 `$schema`，复制模板后编辑器通常会自动提供字段提示和基础校验。
 
+Lua 插件 API 的编辑器提示位于 `plugins\.lua\`，项目根目录的 `.luarc.json` 会让 LuaLS 自动加载这些 stub。它们只用于消除假报错和提供补全，不参与运行。
+
 ## 插件和脚本仓库策略
 
 主程序仓库只保留插件系统、开发文档和少量模板。正式发布包默认不预装测试脚本或个人脚本，避免用户安装后看到与自己设备无关的功能。
@@ -32,4 +34,4 @@
 
 ## 发布包内的示例
 
-`package.bat` 会把模板插件和 `plugin.schema.json` 复制到 `examples\plugins\`，并在运行目录的 `plugins\` 下放一份 schema。模板不会自动加载；需要试用时，可以手动复制到应用目录的 `plugins\` 下。
+`package.bat` 会把模板插件、`plugin.schema.json` 和 LuaLS stub 复制到 `examples\plugins\`，并在运行目录的 `plugins\` 下放一份 schema 与 stub。模板不会自动加载；需要试用时，可以手动复制到应用目录的 `plugins\` 下。

@@ -19,6 +19,7 @@ pub mod topics {
     pub const UI_FORM_FILE_SELECTED: &str = "ui.form.file_selected";
     pub const UI_CONTRIBUTION_ACTION: &str = "ui.contribution.action";
     pub const UI_LOG_APPEND: &str = "ui.log.append";
+    pub const PLUGIN_COMMAND_EXECUTE: &str = "plugin.command.execute";
     pub const TEST_RESULT: &str = "test.result";
 }
 

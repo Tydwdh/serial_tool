@@ -41,6 +41,8 @@ plugins/template.serial-chart -> plugins/yourname.serial-chart
 
 保留 `$schema` 字段，它会让支持 JSON Schema 的编辑器提示可用字段、权限和回放配置。
 
+项目根目录的 `.luarc.json` 会加载 `plugins\.lua\` 下的 Lua API stub，用于消除 `ctx`、`on_replay_*` 和 `require("hw.*")` 的假报错。
+
 3. 修改 `main.lua` 和 `replay.lua` 中的：
 
 ```lua

@@ -26,6 +26,8 @@ plugins/template.file-tool -> plugins/yourname.file-tool
 
 保留 `$schema` 字段，它会让支持 JSON Schema 的编辑器提示可用字段和权限。
 
+项目根目录的 `.luarc.json` 会加载 `plugins\.lua\` 下的 Lua API stub，用于消除 `ctx.dialog`、`ctx.fs`、`ctx.ui` 等宿主 API 的假报错。
+
 3. 修改 `main.lua` 里的面板 ID，避免和其他插件冲突。
 
 4. 在插件页刷新或重启应用后启用插件。

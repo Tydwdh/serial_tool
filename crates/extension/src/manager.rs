@@ -548,7 +548,9 @@ impl PluginManager {
                     .any(|sub| tool_core::topic_matches(sub, &event.topic))
             });
             // ui.* / log.* 系统事件始终接收
-            let is_sys = event.topic.starts_with("ui.") || event.topic.starts_with("log.");
+            let is_sys = event.topic.starts_with("ui.")
+                || event.topic.starts_with("log.")
+                || event.topic.starts_with("plugin.command.");
             if !is_sys && !wants {
                 continue;
             }

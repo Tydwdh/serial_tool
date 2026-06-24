@@ -26,6 +26,8 @@ plugins/template.hello -> plugins/yourname.hello
 
 保留 `$schema` 字段，它会让支持 JSON Schema 的编辑器提示可用字段和权限。
 
+项目根目录的 `.luarc.json` 会加载 `plugins\.lua\` 下的 Lua API stub，用于消除 `ctx` 和 `require("hw.*")` 的假报错。
+
 3. 修改 `main.lua` 里的 `PANEL_ID`，避免面板 ID 冲突。
 
 4. 在插件页刷新或重启应用后启用插件。

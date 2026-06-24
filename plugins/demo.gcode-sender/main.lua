@@ -96,6 +96,12 @@ end
 
 -- ── line parsing ──
 
+---@class GCodeResponse
+---@field kind "ok"|"resend"|"terminated"|"error"|"other"|"cancelled"|"timeout"
+---@field line string?
+---@field no integer?
+---@field err string?
+
 local function split_nonempty_lines(text)
     local result = {}
     for line in tostring(text or ""):gmatch("[^\r\n]+") do
@@ -108,6 +114,8 @@ local function split_nonempty_lines(text)
 end
 
 -- 一次性解析响应行
+---@param line string?
+---@return GCodeResponse
 local function parse_response(line)
     local text = tostring(line or "")
     if text == "" then
@@ -213,6 +221,10 @@ end
 
 -- ── follow-up reader（error 后的补充读取） ──
 
+---@param port string
+---@param s table
+---@param task HwTask
+---@return GCodeResponse
 local function read_followup(port, s, task)
     local deadline = ctx.now_ms() + s.error_followup_ms
     while ctx.now_ms() < deadline do
@@ -235,6 +247,12 @@ end
 
 -- ── single line send ──
 
+---@param port string
+---@param wire string
+---@param s table
+---@param task HwTask
+---@param use_checksum boolean
+---@return GCodeResponse
 local function send_and_wait(port, wire, s, task, use_checksum)
     log("debug", "→ " .. wire)
     local resp = ctx.serial.write_line_and_expect(port, wire, {
@@ -248,6 +266,7 @@ local function send_and_wait(port, wire, s, task, use_checksum)
         return { kind = "timeout", line = resp.err }
     end
 
+    ---@type HwSerialMatchedResult
     local result = resp.result or {}
     local line = tostring(result.line or "")
     local name = tostring(result.name or "")
@@ -586,6 +605,8 @@ local function handle_cancel()
 end
 
 -- ── event dispatch ──
+-- 新插件优先使用 ctx.commands.register。宿主仍会发布旧的
+-- ui.contribution.action 事件，供未迁移插件兼容使用。
 
 local HANDLERS = {
     [COMMAND.SEND_FILE] = handle_send_file,
@@ -594,16 +615,11 @@ local HANDLERS = {
     [COMMAND.CANCEL] = handle_cancel,
 }
 
-ctx.bus.on("ui.contribution.action", function(event)
-    local payload = event.payload or {}
-    if payload.plugin_id ~= PLUGIN_ID then
-        return
+for command, handler in pairs(HANDLERS) do
+    ctx.commands.register(command, function(payload)
+        handler(payload or {})
     end
-    local handler = HANDLERS[payload.action or payload.command]
-    if handler then
-        handler(payload)
-    end
-end)
+end
 
 on_disable(function()
     if task_running() then

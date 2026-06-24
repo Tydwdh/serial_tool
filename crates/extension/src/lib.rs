@@ -166,6 +166,31 @@ mod tests {
     }
 
     #[test]
+    fn lua_authoring_support_files_exist() {
+        let root = repo_root();
+        let luarc_path = root.join(".luarc.json");
+        let luarc_text = fs::read_to_string(&luarc_path)
+            .unwrap_or_else(|error| panic!("{}: {error}", luarc_path.display()));
+        let luarc: serde_json::Value = serde_json::from_str(&luarc_text)
+            .unwrap_or_else(|error| panic!("{}: {error}", luarc_path.display()));
+        assert_eq!(
+            luarc
+                .get("runtime.version")
+                .and_then(serde_json::Value::as_str),
+            Some("Lua 5.4")
+        );
+
+        for relative_path in [
+            "plugins/.lua/hardware-workbench.lua",
+            "plugins/.lua/hw/codec.lua",
+            "plugins/.lua/hw/utils.lua",
+        ] {
+            let path = root.join(relative_path);
+            assert!(path.exists(), "{} should exist", path.display());
+        }
+    }
+
+    #[test]
     fn bundled_plugin_manifests_are_valid() {
         let plugins_root = repo_root().join("plugins");
         let mut checked = 0;

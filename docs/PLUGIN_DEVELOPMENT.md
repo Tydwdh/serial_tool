@@ -132,6 +132,8 @@ end)
 
 模板里的 `plugin.json` 已经带有 `$schema`。只要 `plugins\plugin.schema.json` 和插件目录保持在同一个 `plugins\` 下，支持 JSON Schema 的编辑器会自动提示字段、权限、UI 插槽和常见枚举值。
 
+项目根目录的 `.luarc.json` 会让 LuaLS 读取 `plugins\.lua\` 下的宿主 API stub。这样编辑 `main.lua` / `replay.lua` 时，`ctx`、`on_disable`、`on_replay_event`、`require("hw.codec")` 和 `require("hw.utils")` 不会被误报为未定义。
+
 改完模板后，可以用仓库测试快速检查内置插件声明：
 
 ```powershell
@@ -170,6 +172,19 @@ ctx.ui.create_chart({
 })
 ```
 
+### UI 入口优先注册命令
+
+`contributes.ui[].command` 会触发 `ctx.commands.register` 注册的 handler。新插件优先这样写：
+
+```lua
+ctx.commands.register("yourname.my-plugin.run", function(payload)
+  local send = (payload.context or {}).send or {}
+  ctx.log.info("run: " .. tostring(send.input))
+end)
+```
+
+旧的 `ctx.bus.on("ui.contribution.action", ...)` 仍然兼容，但不要和 `ctx.commands.register` 同时处理同一个命令，否则一次点击可能执行两次。
+
 ### 实时插件和回放解析器不要混用职责
 
 不要在 `replay.lua` 里尝试做串口操作。回放解析器是无副作用的纯分析器。
@@ -182,3 +197,7 @@ on_disable(function()
   ctx.ui.remove_panel("my-panel")
 end)
 ```
+
+### 更新宿主 API 后同步 stub
+
+如果 Rust 侧新增或改名了 `ctx.*` API，同步更新 `plugins\.lua\hardware-workbench.lua`。如果新增了可 `require` 的内置模块，同步在 `plugins\.lua\` 下补模块 stub。

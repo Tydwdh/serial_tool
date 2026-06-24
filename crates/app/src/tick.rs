@@ -3,7 +3,7 @@ use crate::config::windows_open_dialog;
 use crate::keymap::{Action, KeyBinding};
 use crate::state::StatusLevel;
 use eframe::egui;
-use tool_core::{Direction, Event, Payload};
+use tool_core::{Direction, Event, Payload, topics};
 use tool_panels::PanelKind;
 use tool_recorder::{ReplayBlockReason, ReplayState};
 use tool_transport::send_impl_to;
@@ -126,19 +126,54 @@ impl WorkbenchApp {
             }
         });
 
+        let payload = serde_json::json!({
+            "plugin_id": plugin_id,
+            "contribution_id": command_id,
+            "slot": "send.toolbar",
+            "kind": "button",
+            "command": command_id,
+            "action": command_id,
+            "context": context,
+        });
+
+        self.publish_plugin_command_execute(plugin_id, command_id, &payload);
+        self.publish_legacy_ui_contribution_action("ui.slot:send.toolbar", payload);
+    }
+
+    pub(crate) fn publish_plugin_command_execute(
+        &mut self,
+        plugin_id: &str,
+        command_id: &str,
+        payload: &serde_json::Value,
+    ) {
+        let mut payload = payload.clone();
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("plugin_id".to_owned(), serde_json::json!(plugin_id));
+            object.insert("command".to_owned(), serde_json::json!(command_id));
+            object
+                .entry("action".to_owned())
+                .or_insert_with(|| serde_json::json!(command_id));
+            object.insert("origin".to_owned(), serde_json::json!("host.command"));
+        }
+
         self.bus.publish(Event::new(
-            tool_core::topics::UI_CONTRIBUTION_ACTION,
-            "ui.slot:send.toolbar".to_string(),
+            topics::PLUGIN_COMMAND_EXECUTE,
+            "plugin.command",
             Direction::Internal,
-            Payload::Json(serde_json::json!({
-                "plugin_id": plugin_id,
-                "contribution_id": command_id,
-                "slot": "send.toolbar",
-                "kind": "button",
-                "command": command_id,
-                "action": command_id,
-                "context": context,
-            })),
+            Payload::Json(payload),
+        ));
+    }
+
+    pub(crate) fn publish_legacy_ui_contribution_action(
+        &mut self,
+        source: impl Into<String>,
+        payload: serde_json::Value,
+    ) {
+        self.bus.publish(Event::new(
+            topics::UI_CONTRIBUTION_ACTION,
+            source,
+            Direction::Internal,
+            Payload::Json(payload),
         ));
     }
 }

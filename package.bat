@@ -78,6 +78,24 @@ if exist "plugins\plugin.schema.json" (
     echo   plugins\plugin.schema.json
 )
 
+if exist "plugins\.lua" (
+    xcopy "plugins\.lua" "%OUT_DIR%\plugins\.lua\" /E /I /Q /Y >nul
+    if %ERRORLEVEL% neq 0 (
+        echo Failed to copy Lua plugin stubs
+        exit /b %ERRORLEVEL%
+    )
+    echo   plugins\.lua\
+)
+
+if exist ".luarc.json" (
+    copy ".luarc.json" "%OUT_DIR%\.luarc.json" >nul
+    if %ERRORLEVEL% neq 0 (
+        echo Failed to copy LuaLS config
+        exit /b %ERRORLEVEL%
+    )
+    echo   .luarc.json
+)
+
 set "EXAMPLE_PLUGINS_DIR=%OUT_DIR%\examples\plugins"
 if exist "plugins\plugin.schema.json" (
     if not exist "%EXAMPLE_PLUGINS_DIR%" mkdir "%EXAMPLE_PLUGINS_DIR%"
@@ -87,6 +105,16 @@ if exist "plugins\plugin.schema.json" (
         exit /b %ERRORLEVEL%
     )
     echo   examples\plugins\plugin.schema.json
+)
+
+if exist "plugins\.lua" (
+    if not exist "%EXAMPLE_PLUGINS_DIR%" mkdir "%EXAMPLE_PLUGINS_DIR%"
+    xcopy "plugins\.lua" "%EXAMPLE_PLUGINS_DIR%\.lua\" /E /I /Q /Y >nul
+    if %ERRORLEVEL% neq 0 (
+        echo Failed to copy example Lua plugin stubs
+        exit /b %ERRORLEVEL%
+    )
+    echo   examples\plugins\.lua\
 )
 
 for %%P in (template.hello template.serial-chart template.file-tool) do (
