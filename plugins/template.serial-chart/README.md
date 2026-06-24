@@ -39,6 +39,8 @@ plugins/template.serial-chart -> plugins/yourname.serial-chart
 "name": "你的串口图表插件"
 ```
 
+保留 `$schema` 字段，它会让支持 JSON Schema 的编辑器提示可用字段、权限和回放配置。
+
 3. 修改 `main.lua` 和 `replay.lua` 中的：
 
 ```lua

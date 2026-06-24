@@ -58,6 +58,8 @@ pub type ExtensionResult<T> = Result<T, ExtensionError>;
 mod tests {
     use super::*;
     use crate::manifest::{PluginContributes, PluginManifest};
+    use std::fs;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn old_manifest_without_live_replay_is_compatible() {
@@ -150,6 +152,49 @@ mod tests {
     }
 
     #[test]
+    fn plugin_schema_is_valid_json() {
+        let schema_path = repo_root().join("plugins").join("plugin.schema.json");
+        let text = fs::read_to_string(&schema_path)
+            .unwrap_or_else(|error| panic!("{}: {error}", schema_path.display()));
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|error| panic!("{}: {error}", schema_path.display()));
+
+        assert_eq!(
+            value.get("title").and_then(serde_json::Value::as_str),
+            Some("Hardware Workbench plugin.json")
+        );
+    }
+
+    #[test]
+    fn bundled_plugin_manifests_are_valid() {
+        let plugins_root = repo_root().join("plugins");
+        let mut checked = 0;
+
+        for entry in fs::read_dir(&plugins_root)
+            .unwrap_or_else(|error| panic!("{}: {error}", plugins_root.display()))
+        {
+            let path = entry.unwrap().path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let manifest_path = path.join("plugin.json");
+            if !manifest_path.exists() {
+                continue;
+            }
+
+            assert_manifest_is_valid(&manifest_path);
+            checked += 1;
+        }
+
+        assert!(
+            checked >= 3,
+            "expected bundled plugin manifests under {}",
+            plugins_root.display()
+        );
+    }
+
+    #[test]
     fn new_manifest_with_live_and_replay() {
         let json = r#"{
           "id": "demo.test",
@@ -227,5 +272,39 @@ mod tests {
         };
 
         assert!(PermissionManager::default().check(&manifest).is_err());
+    }
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+    }
+
+    fn assert_manifest_is_valid(path: &Path) {
+        let text =
+            fs::read_to_string(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        assert_eq!(
+            value.get("$schema").and_then(serde_json::Value::as_str),
+            Some("../plugin.schema.json"),
+            "{} should point at the local plugin schema",
+            path.display()
+        );
+
+        let manifest: PluginManifest = serde_json::from_value(value)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        assert!(
+            manifest.api_version_supported(),
+            "{} uses unsupported api_version '{}'",
+            path.display(),
+            manifest.api_version
+        );
+        if let Err(errors) = manifest.validate() {
+            panic!("{}: {}", path.display(), errors.join("; "));
+        }
+        PermissionManager::default()
+            .check(&manifest)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
     }
 }

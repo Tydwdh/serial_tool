@@ -130,6 +130,14 @@ end)
 6. 启用插件。
 7. 查看日志面板和动态面板是否正常。
 
+模板里的 `plugin.json` 已经带有 `$schema`。只要 `plugins\plugin.schema.json` 和插件目录保持在同一个 `plugins\` 下，支持 JSON Schema 的编辑器会自动提示字段、权限、UI 插槽和常见枚举值。
+
+改完模板后，可以用仓库测试快速检查内置插件声明：
+
+```powershell
+cargo test -p tool-extension bundled_plugin_manifests_are_valid
+```
+
 `plugin.json` 里最重要的字段：
 
 - `id` 必须唯一，发布后尽量不要修改。

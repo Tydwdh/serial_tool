@@ -2,10 +2,19 @@
 
 `plugin.json` 是插件声明文件。主程序通过它识别插件 ID、入口脚本、权限、贡献的面板以及回放解析器。
 
+开发模板会在文件顶部包含：
+
+```json
+"$schema": "../plugin.schema.json"
+```
+
+这个字段只给编辑器使用，主程序会忽略它。保持 `plugins\plugin.schema.json` 位于插件目录的上一级，可以获得字段提示和基础校验。
+
 ## 推荐完整示例
 
 ```json
 {
+  "$schema": "../plugin.schema.json",
   "id": "demo.signal-generator",
   "name": "信号发生器 (Demo)",
   "version": "1.0.0",

@@ -67,10 +67,29 @@ if exist "assets" (
 )
 
 mkdir "%OUT_DIR%\plugins" >nul 2>nul
-echo   plugins\ empty runtime plugin directory
+echo   plugins\ runtime plugin directory
+
+if exist "plugins\plugin.schema.json" (
+    copy "plugins\plugin.schema.json" "%OUT_DIR%\plugins\plugin.schema.json" >nul
+    if %ERRORLEVEL% neq 0 (
+        echo Failed to copy plugin schema
+        exit /b %ERRORLEVEL%
+    )
+    echo   plugins\plugin.schema.json
+)
 
 set "EXAMPLE_PLUGINS_DIR=%OUT_DIR%\examples\plugins"
-for %%P in (template.hello template.serial-chart) do (
+if exist "plugins\plugin.schema.json" (
+    if not exist "%EXAMPLE_PLUGINS_DIR%" mkdir "%EXAMPLE_PLUGINS_DIR%"
+    copy "plugins\plugin.schema.json" "%EXAMPLE_PLUGINS_DIR%\plugin.schema.json" >nul
+    if %ERRORLEVEL% neq 0 (
+        echo Failed to copy example plugin schema
+        exit /b %ERRORLEVEL%
+    )
+    echo   examples\plugins\plugin.schema.json
+)
+
+for %%P in (template.hello template.serial-chart template.file-tool) do (
     if exist "plugins\%%P" (
         if not exist "%EXAMPLE_PLUGINS_DIR%" mkdir "%EXAMPLE_PLUGINS_DIR%"
         xcopy "plugins\%%P" "%EXAMPLE_PLUGINS_DIR%\%%P\" /E /I /Q /Y >nul

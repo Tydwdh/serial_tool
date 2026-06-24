@@ -1,0 +1,279 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hardware-workbench.local/schemas/plugin.schema.json",
+  "title": "Hardware Workbench plugin.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "name", "version", "runtime", "main"],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "id": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "name": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "version": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "api_version": {
+      "type": "string",
+      "enum": ["0.1"],
+      "default": "0.1"
+    },
+    "runtime": {
+      "type": "string",
+      "enum": ["lua"]
+    },
+    "main": {
+      "$ref": "#/$defs/luaFile"
+    },
+    "permissions": {
+      "$ref": "#/$defs/permissions"
+    },
+    "live": {
+      "$ref": "#/$defs/liveConfig"
+    },
+    "replay": {
+      "$ref": "#/$defs/replayConfig"
+    },
+    "contributes": {
+      "$ref": "#/$defs/contributes"
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "luaFile": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\.lua$"
+    },
+    "topic": {
+      "type": "string",
+      "minLength": 1
+    },
+    "permission": {
+      "type": "string",
+      "enum": [
+        "bus",
+        "log",
+        "serial",
+        "ui",
+        "storage",
+        "timer",
+        "testing",
+        "dialog",
+        "fs.read.user_selected",
+        "task",
+        "config"
+      ]
+    },
+    "replayPermission": {
+      "type": "string",
+      "enum": ["log", "storage"]
+    },
+    "permissions": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/permission"
+      },
+      "default": []
+    },
+    "liveConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "main": {
+          "$ref": "#/$defs/luaFile"
+        },
+        "permissions": {
+          "$ref": "#/$defs/permissions"
+        },
+        "subscriptions": {
+          "$ref": "#/$defs/topics"
+        }
+      }
+    },
+    "replayConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["main"],
+      "properties": {
+        "main": {
+          "$ref": "#/$defs/luaFile"
+        },
+        "subscriptions": {
+          "$ref": "#/$defs/topics"
+        },
+        "outputs": {
+          "$ref": "#/$defs/topics"
+        },
+        "permissions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/replayPermission"
+          },
+          "default": []
+        }
+      }
+    },
+    "topics": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/topic"
+      },
+      "default": []
+    },
+    "contributes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "commands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/command"
+          },
+          "default": []
+        },
+        "ui": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/uiContribution"
+          },
+          "default": []
+        },
+        "panels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/panelContribution"
+          },
+          "default": []
+        },
+        "settings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/setting"
+          },
+          "default": []
+        },
+        "subscriptions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/subscription"
+          },
+          "default": []
+        }
+      }
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "title": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "uiContribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "slot"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "slot": {
+          "type": "string",
+          "enum": ["send.toolbar"]
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["button", "small_button", "separator", "label", "status"],
+          "default": "button"
+        },
+        "title": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "command": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "action": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "tooltip": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "order": {
+          "type": "integer",
+          "default": 0
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "visible": {
+          "type": "boolean",
+          "default": true
+        },
+        "record_send_input": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "panelContribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "title": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["chart", "form", "attitude", "log"],
+          "default": ""
+        }
+      }
+    },
+    "setting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "title": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "default": true
+      }
+    },
+    "subscription": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["topic"],
+      "properties": {
+        "topic": {
+          "$ref": "#/$defs/topic"
+        }
+      }
+    }
+  }
+}

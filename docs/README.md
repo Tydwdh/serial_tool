@@ -9,6 +9,8 @@
 3. [Lua 实时插件 API](./lua-plugin-api.md)：`ctx.*` API、串口、事件总线、UI、文件选择和配置。
 4. [安装器与发布](./INSTALLER.md)：便携包、Windows 安装器和卸载清理范围。
 
+`plugin.json` 的 JSON Schema 位于 `plugins\plugin.schema.json`。模板插件已经内置 `$schema`，复制模板后编辑器通常会自动提供字段提示和基础校验。
+
 ## 插件和脚本仓库策略
 
 主程序仓库只保留插件系统、开发文档和少量模板。正式发布包默认不预装测试脚本或个人脚本，避免用户安装后看到与自己设备无关的功能。
@@ -30,4 +32,4 @@
 
 ## 发布包内的示例
 
-`package.bat` 会把模板插件复制到 `examples\plugins\`，它们不会自动加载。需要试用模板时，可以手动复制到应用目录的 `plugins\` 下。
+`package.bat` 会把模板插件和 `plugin.schema.json` 复制到 `examples\plugins\`，并在运行目录的 `plugins\` 下放一份 schema。模板不会自动加载；需要试用时，可以手动复制到应用目录的 `plugins\` 下。

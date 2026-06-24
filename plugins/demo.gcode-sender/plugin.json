@@ -1,17 +1,38 @@
 {
+  "$schema": "../plugin.schema.json",
   "id": "demo.gcode-sender",
   "name": "G-code Sender",
   "version": "0.1.0",
   "api_version": "0.1",
   "runtime": "lua",
   "main": "main.lua",
-  "permissions": ["bus", "log", "serial", "dialog", "fs.read.user_selected", "task", "config"],
+  "permissions": [
+    "bus",
+    "log",
+    "serial",
+    "dialog",
+    "fs.read.user_selected",
+    "task",
+    "config"
+  ],
   "contributes": {
     "commands": [
-      { "id": "demo.gcode-sender.send_file", "title": "G文件" },
-      { "id": "demo.gcode-sender.send_single", "title": "G单条" },
-      { "id": "demo.gcode-sender.pause", "title": "暂停/恢复" },
-      { "id": "demo.gcode-sender.cancel", "title": "取消" }
+      {
+        "id": "demo.gcode-sender.send_file",
+        "title": "G文件"
+      },
+      {
+        "id": "demo.gcode-sender.send_single",
+        "title": "G单条"
+      },
+      {
+        "id": "demo.gcode-sender.pause",
+        "title": "暂停/恢复"
+      },
+      {
+        "id": "demo.gcode-sender.cancel",
+        "title": "取消"
+      }
     ],
     "ui": [
       {
