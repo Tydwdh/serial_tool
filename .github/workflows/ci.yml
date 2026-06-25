@@ -60,6 +60,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
 
       - uses: actions/download-artifact@v4
         with:
@@ -69,10 +72,11 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout main
+          $branch = "${{ github.event.repository.default_branch }}"
           $tag = "${{ github.ref_name }}"
           $version = $tag.TrimStart('v')
-          $date = Get-Date -Format "yyyy-MM-dd"
+          $chinaTime = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId((Get-Date), "China Standard Time")
+          $date = $chinaTime.ToString("yyyy-MM-dd")
           $downloadUrl = "https://github.com/Tydwdh/serial_tool/releases/download/$tag/hardware-workbench-app.zip"
           $json = @{
             version = $version
@@ -84,8 +88,13 @@ jobs:
           Write-Host "Generated update.json:"
           Get-Content update.json
           git add update.json
-          git diff --cached --quiet || git commit -m "Update update.json for ${{ github.ref_name }}"
-          git push origin main
+          $changedFiles = git diff --cached --name-only
+          if (-not $changedFiles) {
+            Write-Host "update.json unchanged"
+          } else {
+            git commit -m "Update update.json for ${{ github.ref_name }}"
+            git push origin "HEAD:$branch"
+          }
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
