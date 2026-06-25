@@ -871,13 +871,13 @@ fn flush_line_accumulator<'a>(
     port: &Option<String>,
     line_seq: &mut u64,
 ) {
-    let Some(mut current) = acc.take() else {
+    let Some(current) = acc.take() else {
         return;
     };
     if current.raw_text.is_empty() {
         return;
     }
-    emit_line_row(rows, &mut current, port, line_seq);
+    emit_line_row(rows, &current, port, line_seq);
 }
 
 fn emit_line_row<'a>(

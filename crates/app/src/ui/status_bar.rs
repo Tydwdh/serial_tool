@@ -150,10 +150,8 @@ impl WorkbenchApp {
                 {
                     self.update_state.want_restart = true;
                 }
-            } else {
-                if ui.button("下载更新").clicked() {
-                    self.start_update_download();
-                }
+            } else if ui.button("下载更新").clicked() {
+                self.start_update_download();
             }
             return;
         }
