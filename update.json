@@ -1,10 +1,6 @@
 {
-  "version": "0.3.0",
   "date": "2026-06-25",
-  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v0.3.0/hardware-workbench-app.zip",
-  "changelog": [
-    "新增自动更新功能",
-    "设置页版本号改为动态读取",
-    "修复 GitHub API 限流问题"
-  ]
+  "changelog": [],
+  "version": "0.3.1",
+  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v0.3.1/hardware-workbench-app.zip"
 }
