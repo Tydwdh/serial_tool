@@ -11,13 +11,191 @@ pub mod update_info;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{self, Read as _, Write as _};
+use std::net::{SocketAddr, ToSocketAddrs as _};
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::process::Command;
+use std::time::Duration;
 
 /// 远端 update.json 的 URL。
 pub const UPDATE_JSON_URL: &str =
     "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/update.json";
 /// 应用 exe 文件名（zip 内顶层）。
 pub const APP_EXE_NAME: &str = "hardware-workbench-app.exe";
+const UPDATE_USER_AGENT: &str = "HardwareWorkbench-Updater";
+const UPDATE_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+const UPDATE_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+const GITHUB_UPDATE_HOSTS: &[&str] = &["raw.githubusercontent.com", "github.com"];
+
+fn update_http_client_with_proxy(proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .user_agent(UPDATE_USER_AGENT)
+        .connect_timeout(UPDATE_CONNECT_TIMEOUT)
+        .timeout(UPDATE_REQUEST_TIMEOUT);
+
+    if let Some(proxy_url) = proxy_url {
+        log::info!("updater: 使用代理 {}", redact_proxy_url(proxy_url));
+        let proxy = reqwest::Proxy::all(proxy_url)
+            .map_err(|e| format!("解析代理地址失败：{}", describe_reqwest_error(&e)))?;
+        builder = builder.proxy(proxy);
+    } else {
+        builder = apply_github_ipv4_dns_overrides(builder.no_proxy());
+    }
+
+    builder
+        .build()
+        .map_err(|e| format!("构建 HTTP 客户端失败：{}", describe_reqwest_error(&e)))
+}
+
+pub(crate) async fn send_update_get(url: &str) -> Result<reqwest::Response, String> {
+    let configured_proxy = explicit_proxy_url();
+    let client = update_http_client_with_proxy(configured_proxy.as_deref())?;
+
+    match client.get(url).send().await {
+        Ok(resp) => Ok(resp),
+        Err(primary_error) => {
+            let primary_message = describe_reqwest_error(&primary_error);
+            if configured_proxy.is_some() {
+                return Err(primary_message);
+            }
+
+            let Some(proxy_url) = fallback_proxy_url() else {
+                return Err(primary_message);
+            };
+
+            log::warn!(
+                "updater: 直连失败，改用备用代理 {} 重试：{}",
+                redact_proxy_url(proxy_url.as_str()),
+                primary_message
+            );
+            let fallback_client = update_http_client_with_proxy(Some(proxy_url.as_str()))?;
+            fallback_client.get(url).send().await.map_err(|fallback| {
+                format!(
+                    "{}；备用代理 {} 也失败：{}",
+                    primary_message,
+                    redact_proxy_url(proxy_url.as_str()),
+                    describe_reqwest_error(&fallback)
+                )
+            })
+        }
+    }
+}
+
+fn apply_github_ipv4_dns_overrides(mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    for host in GITHUB_UPDATE_HOSTS {
+        let addrs = resolve_ipv4_socket_addrs(host, 443);
+        if addrs.is_empty() {
+            continue;
+        }
+        log::debug!("updater: {host} IPv4 DNS override: {addrs:?}");
+        builder = builder.resolve_to_addrs(host, &addrs);
+    }
+    builder
+}
+
+fn resolve_ipv4_socket_addrs(host: &str, port: u16) -> Vec<SocketAddr> {
+    (host, port)
+        .to_socket_addrs()
+        .map(|addrs| addrs.filter(|addr| addr.is_ipv4()).collect())
+        .unwrap_or_default()
+}
+
+pub(crate) fn describe_reqwest_error(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(err) = source {
+        message.push_str("；原因：");
+        message.push_str(&err.to_string());
+        source = err.source();
+    }
+    message
+}
+
+fn explicit_proxy_url() -> Option<String> {
+    [
+        "HW_UPDATER_PROXY",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+    ]
+    .into_iter()
+    .filter_map(|name| std::env::var(name).ok())
+    .map(|value| value.trim().to_owned())
+    .find(|value| !value.is_empty())
+    .map(normalize_proxy_url)
+}
+
+fn fallback_proxy_url() -> Option<String> {
+    windows_internet_settings_proxy_url()
+}
+
+#[cfg(windows)]
+fn windows_internet_settings_proxy_url() -> Option<String> {
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$p=(Get-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings').ProxyServer; if ($p) { [Console]::Out.Write($p) }",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let proxy = String::from_utf8_lossy(&output.stdout);
+    proxy_server_value_to_url(proxy.trim())
+}
+
+#[cfg(not(windows))]
+fn windows_internet_settings_proxy_url() -> Option<String> {
+    None
+}
+
+fn proxy_server_value_to_url(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    for prefix in ["https=", "http="] {
+        if let Some(proxy) = value.split(';').find_map(|part| part.strip_prefix(prefix)) {
+            return Some(normalize_proxy_url(proxy.to_owned()));
+        }
+    }
+
+    if !value.contains('=') {
+        return Some(normalize_proxy_url(value.to_owned()));
+    }
+
+    value
+        .split(';')
+        .find_map(|part| part.split_once('=').map(|(_, proxy)| proxy))
+        .filter(|proxy| !proxy.trim().is_empty())
+        .map(|proxy| normalize_proxy_url(proxy.trim().to_owned()))
+}
+
+fn normalize_proxy_url(proxy: String) -> String {
+    if proxy.contains("://") {
+        proxy
+    } else {
+        format!("http://{proxy}")
+    }
+}
+
+fn redact_proxy_url(proxy: &str) -> String {
+    let Some((scheme, rest)) = proxy.split_once("://") else {
+        return proxy.to_owned();
+    };
+    let Some(at) = rest.rfind('@') else {
+        return proxy.to_owned();
+    };
+    format!("{scheme}://***@{}", &rest[at + 1..])
+}
 
 // ── update.json（待更新标记，本地） ──
 
@@ -337,14 +515,7 @@ pub async fn download_update(url: &str, on_progress: impl Fn(u64, u64)) -> Resul
         return Ok(hash);
     }
 
-    let client = reqwest::Client::builder()
-        .user_agent("HardwareWorkbench-Updater")
-        .build()
-        .map_err(|e| format!("构建 HTTP 客户端失败：{e}"))?;
-
-    let mut resp = client
-        .get(url)
-        .send()
+    let mut resp = send_update_get(url)
         .await
         .map_err(|e| format!("下载更新失败：{e}"))?;
 
@@ -365,7 +536,7 @@ pub async fn download_update(url: &str, on_progress: impl Fn(u64, u64)) -> Resul
     while let Some(chunk) = resp
         .chunk()
         .await
-        .map_err(|e| format!("下载读取数据失败：{e}"))?
+        .map_err(|e| format!("下载读取数据失败：{}", describe_reqwest_error(&e)))?
     {
         part_file
             .write_all(&chunk)
@@ -446,6 +617,46 @@ mod tests {
         assert_eq!(
             hash,
             "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+    }
+
+    #[test]
+    fn normalize_proxy_url_adds_http_scheme() {
+        assert_eq!(
+            normalize_proxy_url("127.0.0.1:7890".to_owned()),
+            "http://127.0.0.1:7890"
+        );
+        assert_eq!(
+            normalize_proxy_url("socks5://127.0.0.1:7890".to_owned()),
+            "socks5://127.0.0.1:7890"
+        );
+    }
+
+    #[test]
+    fn redact_proxy_url_hides_credentials() {
+        assert_eq!(
+            redact_proxy_url("http://user:pass@127.0.0.1:7890"),
+            "http://***@127.0.0.1:7890"
+        );
+        assert_eq!(
+            redact_proxy_url("http://127.0.0.1:7890"),
+            "http://127.0.0.1:7890"
+        );
+    }
+
+    #[test]
+    fn proxy_server_value_to_url_handles_plain_host_port() {
+        assert_eq!(
+            proxy_server_value_to_url("172.18.88.90:3128").as_deref(),
+            Some("http://172.18.88.90:3128")
+        );
+    }
+
+    #[test]
+    fn proxy_server_value_to_url_prefers_https_mapping() {
+        assert_eq!(
+            proxy_server_value_to_url("http=proxy-a:8080;https=proxy-b:8443").as_deref(),
+            Some("http://proxy-b:8443")
         );
     }
 

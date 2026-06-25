@@ -1,6 +1,7 @@
 use crate::{MAX_INGEST_PER_FRAME, fmt_ts, theme};
 use egui::text_selection::LabelSelectionState;
 use egui::{Color32, RichText, ScrollArea, Sense, Stroke};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use tool_core::{Direction, Event, Payload};
 use tool_databus::{DataBus, Subscription, TopicFilter};
@@ -20,8 +21,7 @@ pub struct TerminalPanel {
     show_tx: bool,
     show_hex: bool,
     show_raw: bool,
-    show_timestamp: bool,
-    show_port: bool,
+    show_lines: bool,
     auto_scroll: bool,
 
     search_text: String,
@@ -67,14 +67,34 @@ struct TerminalEntry {
     hex_preview: String,
     /// 纯 UTF8 预览文本（不含方括号），HEX 模式下独立显示
     preview_text: String,
-
-    /// 预缓存的小写字段，用于搜索时避免每帧分配
-    search_lower: String,
 }
 
 struct VisibleRow<'a> {
-    port: Option<&'a str>,
-    entry: &'a TerminalEntry,
+    id: u64,
+    event_id: u64,
+    port: Option<Cow<'a, str>>,
+    timestamp_label: Cow<'a, str>,
+    direction: Direction,
+    raw_text: Cow<'a, str>,
+    display_text: Cow<'a, str>,
+    hex_text: Cow<'a, str>,
+    preview_text: Cow<'a, str>,
+}
+
+impl<'a> VisibleRow<'a> {
+    fn from_entry(port: Option<&'a str>, entry: &'a TerminalEntry) -> Self {
+        Self {
+            id: entry.id,
+            event_id: entry.event_id,
+            port: port.map(Cow::Borrowed),
+            timestamp_label: Cow::Borrowed(&entry.timestamp_label),
+            direction: entry.direction,
+            raw_text: Cow::Borrowed(&entry.raw_text),
+            display_text: Cow::Borrowed(&entry.display_text),
+            hex_text: Cow::Borrowed(&entry.hex_text),
+            preview_text: Cow::Borrowed(&entry.preview_text),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -105,8 +125,7 @@ impl TerminalPanel {
             show_tx: true,
             show_hex: false,
             show_raw: false,
-            show_timestamp: true,
-            show_port: true,
+            show_lines: false,
             auto_scroll: true,
 
             search_text: String::new(),
@@ -163,8 +182,7 @@ impl TerminalPanel {
         self.port_filter = None;
         self.bookmarked_entry_ids.clear();
         // 清空后重置为自动滚动，与 LogPanel::clear() 保持一致
-        self.show_timestamp = true;
-        self.show_port = true;
+        self.show_lines = false;
         self.show_raw = false;
         self.auto_scroll = true;
     }
@@ -179,44 +197,46 @@ impl TerminalPanel {
         }
     }
 
-    /// 返回当前过滤条件下可见的条目迭代器 (port_name, &TerminalEntry)
-    fn filtered_entries(&self) -> Vec<(String, &TerminalEntry)> {
-        // 预计算搜索查询的小写版本，避免在循环中重复分配
+    fn collect_visible_rows(&self, line_mode: bool) -> Vec<VisibleRow<'_>> {
         let search_lower = self.search_text.trim().to_ascii_lowercase();
-        let mut result = Vec::new();
+        let mut rows = Vec::new();
+
         for (port, data) in &self.ports {
             if let Some(ref filter) = self.port_filter
                 && filter != port
             {
                 continue;
             }
+
             let port_lower = port.to_ascii_lowercase();
-            for entry in &data.entries {
-                if !entry_visible(entry.direction, self.show_rx, self.show_tx) {
-                    continue;
-                }
-                if !entry_matches_search(&port_lower, entry, &search_lower) {
-                    continue;
-                }
-                result.push((port.clone(), entry));
+            let mut port_rows = build_visible_rows_for_port(
+                Some(port.as_str()),
+                data.entries
+                    .iter()
+                    .filter(|entry| entry_visible(entry.direction, self.show_rx, self.show_tx)),
+                line_mode,
+            );
+            if !search_lower.is_empty() {
+                port_rows.retain(|row| row_matches_search(&port_lower, row, &search_lower));
             }
+            rows.extend(port_rows);
         }
-        result
+
+        rows.sort_by_key(|row| row.event_id);
+        rows
     }
 
     pub fn export_visible_csv(&self) -> String {
         let show_hex = self.show_hex;
-        let show_timestamp = self.show_timestamp;
-        let show_port = self.show_port;
+        let rows = self.collect_visible_rows(self.show_lines);
+        let show_metadata = !self.show_lines;
 
         let mut headers: Vec<&str> = Vec::new();
-        if show_timestamp {
+        if show_metadata {
             headers.push("time");
-        }
-        if show_port {
             headers.push("port");
+            headers.push("direction");
         }
-        headers.push("direction");
         if show_hex {
             headers.push("hex");
         } else {
@@ -226,23 +246,21 @@ impl TerminalPanel {
         let mut out = headers.join(",");
         out.push('\n');
 
-        for (port, entry) in self.filtered_entries() {
+        for row in rows {
             let mut cells: Vec<String> = Vec::new();
-            if show_timestamp {
-                cells.push(csv_cell(&entry.timestamp_label));
+            if show_metadata {
+                cells.push(csv_cell(&row.timestamp_label));
+                cells.push(csv_cell(row.port.as_deref().unwrap_or("")));
+                cells.push(csv_cell(match row.direction {
+                    Direction::Rx => "RX",
+                    Direction::Tx => "TX",
+                    Direction::Internal => "INTERNAL",
+                }));
             }
-            if show_port {
-                cells.push(csv_cell(&port));
-            }
-            cells.push(csv_cell(match entry.direction {
-                Direction::Rx => "RX",
-                Direction::Tx => "TX",
-                Direction::Internal => "INTERNAL",
-            }));
             if show_hex {
-                cells.push(csv_cell(&entry.hex_text));
+                cells.push(csv_cell(&row.hex_text));
             } else {
-                cells.push(csv_cell(&entry.raw_text));
+                cells.push(csv_cell(&row.raw_text));
             }
             out.push_str(&cells.join(","));
             out.push('\n');
@@ -252,38 +270,38 @@ impl TerminalPanel {
 
     pub fn export_visible_jsonl(&self) -> String {
         let show_hex = self.show_hex;
-        let show_timestamp = self.show_timestamp;
-        let show_port = self.show_port;
+        let rows = self.collect_visible_rows(self.show_lines);
+        let show_metadata = !self.show_lines;
 
         let mut out = String::new();
-        for (port, entry) in self.filtered_entries() {
+        for row in rows {
             let mut obj = serde_json::Map::new();
-            if show_timestamp {
+            if show_metadata {
                 obj.insert(
                     "time".into(),
-                    serde_json::Value::String(entry.timestamp_label.clone()),
+                    serde_json::Value::String(row.timestamp_label.to_string()),
+                );
+                if let Some(port) = row.port.as_deref() {
+                    obj.insert("port".into(), serde_json::Value::String(port.to_owned()));
+                }
+                obj.insert(
+                    "direction".into(),
+                    serde_json::Value::String(match row.direction {
+                        Direction::Rx => "RX".into(),
+                        Direction::Tx => "TX".into(),
+                        Direction::Internal => "INTERNAL".into(),
+                    }),
                 );
             }
-            if show_port {
-                obj.insert("port".into(), serde_json::Value::String(port.clone()));
-            }
-            obj.insert(
-                "direction".into(),
-                serde_json::Value::String(match entry.direction {
-                    Direction::Rx => "RX".into(),
-                    Direction::Tx => "TX".into(),
-                    Direction::Internal => "INTERNAL".into(),
-                }),
-            );
             if show_hex {
                 obj.insert(
                     "hex".into(),
-                    serde_json::Value::String(entry.hex_text.clone()),
+                    serde_json::Value::String(row.hex_text.to_string()),
                 );
             } else {
                 obj.insert(
                     "text".into(),
-                    serde_json::Value::String(entry.raw_text.clone()),
+                    serde_json::Value::String(row.raw_text.to_string()),
                 );
             }
             out.push_str(
@@ -322,7 +340,7 @@ impl TerminalPanel {
                 ui.checkbox(&mut data.show_tx, "TX");
                 ui.checkbox(&mut show_hex, "HEX");
                 ui.checkbox(&mut self.show_raw, "原始");
-                ui.checkbox(&mut self.show_timestamp, "时间");
+                ui.checkbox(&mut self.show_lines, "按行显示");
 
                 force_scroll_to_bottom |= crate::theme::auto_scroll_button(ui, &mut auto_scroll);
 
@@ -345,12 +363,14 @@ impl TerminalPanel {
 
             ui.separator();
 
-            let rows: Vec<VisibleRow<'_>> = data
-                .entries
-                .iter()
-                .filter(|entry| entry_visible(entry.direction, data.show_rx, data.show_tx))
-                .map(|entry| VisibleRow { port: None, entry })
-                .collect();
+            let rows = build_visible_rows_for_port(
+                None,
+                data.entries
+                    .iter()
+                    .filter(|entry| entry_visible(entry.direction, data.show_rx, data.show_tx)),
+                self.show_lines,
+            );
+            let show_metadata = !self.show_lines;
 
             let scroll_height = ui.available_height().max(40.0);
             render_rows_view(
@@ -360,8 +380,9 @@ impl TerminalPanel {
                 &rows,
                 show_hex,
                 self.show_raw,
-                self.show_timestamp,
-                true, // 单端口视图始终显示端口名（工具栏已标明）
+                show_metadata,
+                false,
+                show_metadata,
                 auto_scroll,
                 force_scroll_to_bottom,
             )
@@ -391,6 +412,7 @@ impl TerminalPanel {
             ui.checkbox(&mut self.show_tx, "TX");
             ui.checkbox(&mut self.show_hex, "HEX");
             ui.checkbox(&mut self.show_raw, "原始");
+            ui.checkbox(&mut self.show_lines, "按行显示");
 
             force_scroll_to_bottom |= crate::theme::auto_scroll_button(ui, &mut self.auto_scroll);
 
@@ -424,9 +446,6 @@ impl TerminalPanel {
                     }
                 });
 
-            ui.checkbox(&mut self.show_timestamp, "时间");
-            ui.checkbox(&mut self.show_port, "端口");
-
             if ui.button("清除筛选").clicked() {
                 self.search_text.clear();
                 self.port_filter = None;
@@ -448,17 +467,17 @@ impl TerminalPanel {
                 }
                 let port_lower = port.to_ascii_lowercase();
 
-                for entry in data
-                    .entries
-                    .iter()
-                    .filter(|entry| entry_visible(entry.direction, self.show_rx, self.show_tx))
-                    .filter(|entry| entry_matches_search(&port_lower, entry, &search_lower))
-                {
-                    rows.push(VisibleRow {
-                        port: Some(port.as_str()),
-                        entry,
-                    });
+                let mut port_rows = build_visible_rows_for_port(
+                    Some(port.as_str()),
+                    data.entries
+                        .iter()
+                        .filter(|entry| entry_visible(entry.direction, self.show_rx, self.show_tx)),
+                    self.show_lines,
+                );
+                if !search_lower.is_empty() {
+                    port_rows.retain(|row| row_matches_search(&port_lower, row, &search_lower));
                 }
+                rows.extend(port_rows);
             }
 
             // 截断提示
@@ -479,9 +498,10 @@ impl TerminalPanel {
             // timestamp_ms 在高频串口下会大量相同；
             // BTreeMap 遍历又会按 COM 名排序；
             // 所以只按 timestamp_ms 或 (timestamp_ms, local_id) 都可能看起来像 COM 分组。
-            rows.sort_by_key(|row| row.entry.event_id);
+            rows.sort_by_key(|row| row.event_id);
 
             let scroll_height = ui.available_height().max(40.0);
+            let show_metadata = !self.show_lines;
             render_rows_view(
                 ui,
                 &scroll_key,
@@ -489,8 +509,9 @@ impl TerminalPanel {
                 &rows,
                 self.show_hex,
                 self.show_raw,
-                self.show_timestamp,
-                self.show_port,
+                show_metadata,
+                show_metadata,
+                show_metadata,
                 self.auto_scroll,
                 force_scroll_to_bottom,
             )
@@ -624,18 +645,6 @@ impl TerminalPanel {
 
         let data = self.ports.entry(port).or_default();
 
-        // 预计算搜索用小写字符串，将所有可搜索字段合并
-        let search_lower = {
-            let mut s =
-                String::with_capacity(raw_text.len() + display_text.len() + hex_text.len() + 1);
-            s.push_str(&raw_text.to_ascii_lowercase());
-            s.push('\0'); // 分隔符，防止跨字段匹配
-            s.push_str(&display_text.to_ascii_lowercase());
-            s.push('\0');
-            s.push_str(&hex_text.to_ascii_lowercase());
-            s
-        };
-
         data.entries.push_back(TerminalEntry {
             id: entry_id,
             event_id: event.id,
@@ -649,7 +658,6 @@ impl TerminalPanel {
             hex_text,
             hex_preview,
             preview_text,
-            search_lower,
         });
 
         while data.entries.len() > self.max_entries {
@@ -785,6 +793,124 @@ impl Default for PortData {
     }
 }
 
+struct LineAccumulator {
+    id: u64,
+    event_id: u64,
+    timestamp_label: String,
+    direction: Direction,
+    raw_text: String,
+}
+
+fn build_visible_rows_for_port<'a>(
+    port: Option<&'a str>,
+    entries: impl IntoIterator<Item = &'a TerminalEntry>,
+    line_mode: bool,
+) -> Vec<VisibleRow<'a>> {
+    if !line_mode {
+        return entries
+            .into_iter()
+            .map(|entry| VisibleRow::from_entry(port, entry))
+            .collect();
+    }
+
+    let mut rows = Vec::new();
+    let mut acc: Option<LineAccumulator> = None;
+    let mut line_seq = 0_u64;
+    let owned_port = port.map(str::to_owned);
+
+    for entry in entries {
+        if acc
+            .as_ref()
+            .is_some_and(|current| current.direction != entry.direction)
+        {
+            flush_line_accumulator(&mut rows, &mut acc, &owned_port, &mut line_seq);
+        }
+
+        if acc.is_none() {
+            acc = Some(LineAccumulator {
+                id: entry.id,
+                event_id: entry.event_id,
+                timestamp_label: entry.timestamp_label.clone(),
+                direction: entry.direction,
+                raw_text: String::new(),
+            });
+        }
+
+        append_entry_to_line_rows(
+            &mut rows,
+            acc.as_mut().expect("line accumulator exists"),
+            &entry.raw_text,
+            &owned_port,
+            &mut line_seq,
+        );
+    }
+
+    flush_line_accumulator(&mut rows, &mut acc, &owned_port, &mut line_seq);
+    rows
+}
+
+fn append_entry_to_line_rows<'a>(
+    rows: &mut Vec<VisibleRow<'a>>,
+    acc: &mut LineAccumulator,
+    mut text: &str,
+    port: &Option<String>,
+    line_seq: &mut u64,
+) {
+    while let Some(pos) = text.find('\n') {
+        acc.raw_text.push_str(&text[..pos]);
+        emit_line_row(rows, acc, port, line_seq);
+        acc.raw_text.clear();
+        text = &text[pos + 1..];
+    }
+    acc.raw_text.push_str(text);
+}
+
+fn flush_line_accumulator<'a>(
+    rows: &mut Vec<VisibleRow<'a>>,
+    acc: &mut Option<LineAccumulator>,
+    port: &Option<String>,
+    line_seq: &mut u64,
+) {
+    let Some(mut current) = acc.take() else {
+        return;
+    };
+    if current.raw_text.is_empty() {
+        return;
+    }
+    emit_line_row(rows, &mut current, port, line_seq);
+}
+
+fn emit_line_row<'a>(
+    rows: &mut Vec<VisibleRow<'a>>,
+    acc: &LineAccumulator,
+    port: &Option<String>,
+    line_seq: &mut u64,
+) {
+    let raw_text = acc.raw_text.trim_end_matches('\r').to_owned();
+    let bytes = raw_text.as_bytes();
+    let display_text = format_terminal_text(&raw_text);
+    let hex_text = format_hex(bytes);
+    let preview_text = format_utf8_preview(bytes);
+    let id = acc
+        .id
+        .wrapping_mul(1_000_003)
+        .wrapping_add(*line_seq)
+        .max(1);
+    *line_seq = line_seq.wrapping_add(1);
+
+    rows.push(VisibleRow {
+        id,
+        event_id: acc.event_id,
+        port: port.clone().map(Cow::Owned),
+        timestamp_label: Cow::Owned(acc.timestamp_label.clone()),
+        direction: acc.direction,
+        raw_text: Cow::Owned(raw_text),
+        display_text: Cow::Owned(display_text),
+        hex_text: Cow::Owned(hex_text),
+        preview_text: Cow::Owned(preview_text),
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_rows_view(
     ui: &mut egui::Ui,
@@ -795,6 +921,7 @@ fn render_rows_view(
     show_raw: bool,
     show_timestamp: bool,
     show_port: bool,
+    show_direction: bool,
     stick_to_bottom: bool,
     force_scroll_to_bottom: bool,
 ) -> RenderOutcome {
@@ -826,7 +953,9 @@ fn render_rows_view(
     if show_port {
         label_width += PORT_COL_WIDTH + COL_GAP;
     }
-    label_width += DIR_COL_WIDTH + COL_GAP;
+    if show_direction {
+        label_width += DIR_COL_WIDTH + COL_GAP;
+    }
 
     // Pre-layout all rows to determine their galley heights
     struct RowLayout {
@@ -873,7 +1002,7 @@ fn render_rows_view(
             let row_layouts: Vec<RowLayout> = rows
                 .iter()
                 .map(|row| {
-                    let content = entry_content_text(row.entry, show_hex, show_raw);
+                    let content = row_content_text(row, show_hex, show_raw);
                     // Raw mode: escape newlines so content stays single-line
                     let content = if show_raw {
                         content.replace('\n', "\\n")
@@ -897,10 +1026,10 @@ fn render_rows_view(
 
                     // Layout preview text for HEX mode
                     let preview_galley = if show_hex {
-                        let preview_text = if row.entry.preview_text.is_empty() {
+                        let preview_text = if row.preview_text.is_empty() {
                             " ".to_owned()
                         } else {
-                            row.entry.preview_text.clone()
+                            row.preview_text.to_string()
                         };
                         let mut layout_job = egui::text::LayoutJob::simple(
                             preview_text,
@@ -969,7 +1098,7 @@ fn render_rows_view(
                     label_painter.text(
                         egui::pos2(x, label_y),
                         egui::Align2::LEFT_CENTER,
-                        &row.entry.timestamp_label,
+                        row.timestamp_label.as_ref(),
                         font_id.clone(),
                         theme::TEXT_SECONDARY,
                     );
@@ -977,7 +1106,7 @@ fn render_rows_view(
                 }
 
                 if show_port {
-                    if let Some(port) = row.port {
+                    if let Some(port) = row.port.as_deref() {
                         label_painter.text(
                             egui::pos2(x, label_y),
                             egui::Align2::LEFT_CENTER,
@@ -989,14 +1118,16 @@ fn render_rows_view(
                     x += PORT_COL_WIDTH + COL_GAP;
                 }
 
-                let (dir_label, dir_color) = direction_label(row.entry.direction);
-                label_painter.text(
-                    egui::pos2(x, label_y),
-                    egui::Align2::LEFT_CENTER,
-                    dir_label,
-                    font_id.clone(),
-                    dir_color,
-                );
+                if show_direction {
+                    let (dir_label, dir_color) = direction_label(row.direction);
+                    label_painter.text(
+                        egui::pos2(x, label_y),
+                        egui::Align2::LEFT_CENTER,
+                        dir_label,
+                        font_id.clone(),
+                        dir_color,
+                    );
+                }
 
                 // --- Draw selectable content text (HEX / raw / display) ---
                 {
@@ -1006,7 +1137,7 @@ fn render_rows_view(
                         egui::vec2(hex_width, entry_height),
                     );
                     // Use a separate id salt for hex column to avoid id collision with preview
-                    let row_id = ui.make_persistent_id(("hex", row.entry.id));
+                    let row_id = ui.make_persistent_id(("hex", row.id));
                     let response = ui.interact(row_text_rect, row_id, Sense::click_and_drag());
 
                     LabelSelectionState::label_text_selection(
@@ -1039,7 +1170,7 @@ fn render_rows_view(
             let combined_text: String = rows
                 .iter()
                 .map(|row| {
-                    let content = entry_content_text(row.entry, show_hex, show_raw);
+                    let content = row_content_text(row, show_hex, show_raw);
                     if show_raw {
                         content.replace('\n', "\\n")
                     } else {
@@ -1058,13 +1189,25 @@ fn render_rows_view(
                 }
 
                 if ctx_ui.button("复制 CSV").clicked() {
-                    let csv = build_csv(rows, show_hex, show_raw);
+                    let csv = build_csv(
+                        rows,
+                        show_hex,
+                        show_raw,
+                        show_timestamp || show_port || show_direction,
+                    );
                     ctx_ui.ctx().copy_text(csv);
                     ctx_ui.close();
                 }
 
                 if ctx_ui.button("复制 JSONL").clicked() {
-                    let jsonl = build_jsonl(rows, show_hex, show_raw, show_timestamp, show_port);
+                    let jsonl = build_jsonl(
+                        rows,
+                        show_hex,
+                        show_raw,
+                        show_timestamp,
+                        show_port,
+                        show_direction,
+                    );
                     ctx_ui.ctx().copy_text(jsonl);
                     ctx_ui.close();
                 }
@@ -1085,22 +1228,36 @@ fn render_rows_view(
 }
 
 /// Build CSV string from visible rows.
-fn build_csv(rows: &[VisibleRow<'_>], show_hex: bool, show_raw: bool) -> String {
-    let mut out = String::from("time,port,direction,content\n");
+fn build_csv(
+    rows: &[VisibleRow<'_>],
+    show_hex: bool,
+    show_raw: bool,
+    show_metadata: bool,
+) -> String {
+    let mut out = if show_metadata {
+        "time,port,direction,content\n".to_owned()
+    } else {
+        "content\n".to_owned()
+    };
     for row in rows {
-        let content = entry_content_text(row.entry, show_hex, show_raw);
-        let port = row.port.unwrap_or("");
-        out.push_str(&format!(
-            "{},{},{},{}\n",
-            csv_cell(&row.entry.timestamp_label),
-            csv_cell(port),
-            match row.entry.direction {
-                Direction::Rx => "RX",
-                Direction::Tx => "TX",
-                Direction::Internal => "IN",
-            },
-            csv_cell(&content.replace('\n', " ")),
-        ));
+        let content = row_content_text(row, show_hex, show_raw);
+        let port = row.port.as_deref().unwrap_or("");
+        if show_metadata {
+            out.push_str(&format!(
+                "{},{},{},{}\n",
+                csv_cell(&row.timestamp_label),
+                csv_cell(port),
+                match row.direction {
+                    Direction::Rx => "RX",
+                    Direction::Tx => "TX",
+                    Direction::Internal => "IN",
+                },
+                csv_cell(&content.replace('\n', " ")),
+            ));
+        } else {
+            out.push_str(&csv_cell(&content.replace('\n', " ")));
+            out.push('\n');
+        }
     }
     out
 }
@@ -1112,6 +1269,7 @@ fn build_jsonl(
     _show_raw: bool,
     show_timestamp: bool,
     show_port: bool,
+    show_direction: bool,
 ) -> String {
     let mut out = String::new();
     for row in rows {
@@ -1119,29 +1277,31 @@ fn build_jsonl(
         if show_timestamp {
             obj.insert(
                 "time".into(),
-                serde_json::Value::String(row.entry.timestamp_label.clone()),
+                serde_json::Value::String(row.timestamp_label.to_string()),
             );
         }
-        if show_port && let Some(port) = row.port {
+        if show_port && let Some(port) = row.port.as_deref() {
             obj.insert("port".into(), serde_json::Value::String(port.to_owned()));
         }
-        obj.insert(
-            "direction".into(),
-            serde_json::Value::String(match row.entry.direction {
-                Direction::Rx => "RX".into(),
-                Direction::Tx => "TX".into(),
-                Direction::Internal => "INTERNAL".into(),
-            }),
-        );
+        if show_direction {
+            obj.insert(
+                "direction".into(),
+                serde_json::Value::String(match row.direction {
+                    Direction::Rx => "RX".into(),
+                    Direction::Tx => "TX".into(),
+                    Direction::Internal => "INTERNAL".into(),
+                }),
+            );
+        }
         if show_hex {
             obj.insert(
                 "hex".into(),
-                serde_json::Value::String(row.entry.hex_text.clone()),
+                serde_json::Value::String(row.hex_text.to_string()),
             );
         } else {
             obj.insert(
                 "text".into(),
-                serde_json::Value::String(row.entry.raw_text.clone()),
+                serde_json::Value::String(row.raw_text.to_string()),
             );
         }
         out.push_str(
@@ -1153,14 +1313,14 @@ fn build_jsonl(
     out
 }
 
-/// Returns the content text for an entry based on display priority: hex > raw > display.
-fn entry_content_text(entry: &TerminalEntry, show_hex: bool, show_raw: bool) -> &str {
+/// Returns the content text for a row based on display priority: hex > raw > display.
+fn row_content_text<'a>(row: &'a VisibleRow<'a>, show_hex: bool, show_raw: bool) -> &'a str {
     if show_hex {
-        &entry.hex_text
+        row.hex_text.as_ref()
     } else if show_raw {
-        &entry.raw_text
+        row.raw_text.as_ref()
     } else {
-        &entry.display_text
+        row.display_text.as_ref()
     }
 }
 
@@ -1172,13 +1332,14 @@ fn entry_visible(direction: Direction, show_rx: bool, show_tx: bool) -> bool {
     }
 }
 
-fn entry_matches_search(port_lower: &str, entry: &TerminalEntry, search_lower: &str) -> bool {
+fn row_matches_search(port_lower: &str, row: &VisibleRow<'_>, search_lower: &str) -> bool {
     if search_lower.is_empty() {
         return true;
     }
-
-    // port_lower 和 search_lower 都由调用端预计算，零额外分配
-    port_lower.contains(search_lower) || entry.search_lower.contains(search_lower)
+    port_lower.contains(search_lower)
+        || row.raw_text.to_ascii_lowercase().contains(search_lower)
+        || row.display_text.to_ascii_lowercase().contains(search_lower)
+        || row.hex_text.to_ascii_lowercase().contains(search_lower)
 }
 
 fn csv_cell(s: &str) -> String {
@@ -1303,5 +1464,38 @@ mod tests {
 
         assert_eq!(panel.ingest_all_pending(), 0);
         assert!(panel.ports.is_empty());
+    }
+
+    #[test]
+    fn line_mode_merges_rx_chunks_until_newline() {
+        let first = TerminalEntry {
+            id: 1,
+            event_id: 1,
+            timestamp_label: "[12:00:00.000]".to_owned(),
+            direction: Direction::Rx,
+            raw_text: "(42".to_owned(),
+            display_text: "(42".to_owned(),
+            hex_text: format_hex(b"(42"),
+            hex_preview: String::new(),
+            preview_text: "(42".to_owned(),
+        };
+        let second = TerminalEntry {
+            id: 2,
+            event_id: 2,
+            timestamp_label: "[12:00:00.001]".to_owned(),
+            direction: Direction::Rx,
+            raw_text: ".0000)ok*29\n".to_owned(),
+            display_text: ".0000)ok*29\n".to_owned(),
+            hex_text: format_hex(b".0000)ok*29\n"),
+            hex_preview: String::new(),
+            preview_text: ".0000)ok*29\n".to_owned(),
+        };
+
+        let rows = build_visible_rows_for_port(Some("COM6"), [&first, &second], true);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].port.as_deref(), Some("COM6"));
+        assert_eq!(rows[0].raw_text, "(42.0000)ok*29");
+        assert_eq!(rows[0].display_text, "(42.0000)ok*29");
     }
 }

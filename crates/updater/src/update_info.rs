@@ -20,14 +20,7 @@ pub struct UpdateInfo {
 
 /// 从远端获取 update.json。
 pub async fn fetch_update_info(url: &str) -> Result<UpdateInfo, String> {
-    let client = reqwest::Client::builder()
-        .user_agent("HardwareWorkbench-Updater")
-        .build()
-        .map_err(|e| format!("构建 HTTP 客户端失败：{e}"))?;
-
-    let resp = client
-        .get(url)
-        .send()
+    let resp = crate::send_update_get(url)
         .await
         .map_err(|e| format!("请求更新信息失败：{e}"))?;
 
@@ -39,7 +32,7 @@ pub async fn fetch_update_info(url: &str) -> Result<UpdateInfo, String> {
 
     resp.json::<UpdateInfo>()
         .await
-        .map_err(|e| format!("解析更新信息失败：{e}"))
+        .map_err(|e| format!("解析更新信息失败：{}", crate::describe_reqwest_error(&e)))
 }
 
 /// 比较两个语义版本号。返回 `true` 表示 `remote` 比 `local` 新。

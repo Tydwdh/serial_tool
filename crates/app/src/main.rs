@@ -27,6 +27,30 @@ fn app_icon() -> egui::IconData {
 }
 
 fn main() -> eframe::Result<()> {
+    if std::env::args().any(|arg| arg == "--check-update-once") {
+        print_update_network_diagnostics();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create tokio runtime");
+        match rt.block_on(tool_updater::update_info::fetch_update_info(
+            tool_updater::UPDATE_JSON_URL,
+        )) {
+            Ok(info) => {
+                println!(
+                    "update check ok: version={} date={} download_url={}",
+                    info.version, info.date, info.download_url
+                );
+                return Ok(());
+            }
+            Err(err) => {
+                eprintln!("update check failed: {err}");
+                std::process::exit(2);
+            }
+        }
+    }
+
     // 启动时检查并应用待更新（在 eframe 启动前，exe 尚未被锁定）
     let exe_path = std::env::current_exe().unwrap_or_default();
     if let Ok(true) = tool_updater::apply_pending_update(&exe_path) {
@@ -53,4 +77,36 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| Ok(Box::new(WorkbenchApp::new(cc)))),
     )
+}
+
+fn print_update_network_diagnostics() {
+    use std::net::{SocketAddr, TcpStream, ToSocketAddrs as _};
+    use std::time::{Duration, Instant};
+
+    println!("update diagnostic: {}", tool_updater::UPDATE_JSON_URL);
+    for name in [
+        "HW_UPDATER_PROXY",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+    ] {
+        if let Ok(value) = std::env::var(name) {
+            println!("env {name}={value}");
+        }
+    }
+
+    let addrs: Vec<SocketAddr> = ("raw.githubusercontent.com", 443)
+        .to_socket_addrs()
+        .map(|iter| iter.filter(|addr| addr.is_ipv4()).collect())
+        .unwrap_or_default();
+    println!("raw.githubusercontent.com IPv4 addrs: {addrs:?}");
+
+    for addr in addrs {
+        let start = Instant::now();
+        match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
+            Ok(_) => println!("tcp {addr} ok in {:?}", start.elapsed()),
+            Err(err) => println!("tcp {addr} failed in {:?}: {err}", start.elapsed()),
+        }
+    }
 }
