@@ -1,10 +1,10 @@
 //! 自动更新核心逻辑：检查、下载、校验、替换。
 //!
 //! 工作流程：
-//! 1. 启动时调用 `apply_pending_update`：检查待更新包，替换 exe 后重启
+//! 1. 启动时调用 `apply_pending_update`：兼容旧版待更新包
 //! 2. 运行时后台请求远端 update.json，发现新版本后下载到 update 目录
-//! 3. 下载完成后用户点击"更新并重启"，写入标记，退出进程
-//! 4. 下次启动时 `apply_pending_update` 完成替换
+//! 3. 下载完成后用户点击"更新并重启"，写入标记并启动临时 helper
+//! 4. helper 等主程序退出后替换 exe/resources 并重启主程序
 
 pub mod update_info;
 
@@ -13,9 +13,8 @@ use sha2::{Digest, Sha256};
 use std::io::{self, Read as _, Write as _};
 use std::net::{SocketAddr, ToSocketAddrs as _};
 use std::path::{Path, PathBuf};
-#[cfg(windows)]
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// 远端 update.json 的 URL。
 pub const UPDATE_JSON_URL: &str =
@@ -25,6 +24,8 @@ pub const APP_EXE_NAME: &str = "hardware-workbench-app.exe";
 const UPDATE_USER_AGENT: &str = "HardwareWorkbench-Updater";
 const UPDATE_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 const UPDATE_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+const UPDATE_HELPER_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+const UPDATE_HELPER_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const GITHUB_UPDATE_HOSTS: &[&str] = &["raw.githubusercontent.com", "github.com"];
 
 fn update_http_client_with_proxy(proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
@@ -285,6 +286,128 @@ pub fn downloaded_zip_path() -> PathBuf {
     update_dir().join("hardware-workbench-app.zip")
 }
 
+fn cleanup_partial_download(part_path: &Path) {
+    let _ = std::fs::remove_file(part_path);
+}
+
+/// 返回临时 helper 目录。helper 不放在 update 目录里，避免更新清理时删到自身。
+pub fn update_helper_dir() -> PathBuf {
+    dirs_next::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("HardwareWorkbench")
+        .join("updater")
+}
+
+/// 返回 helper 日志路径。
+pub fn update_helper_log_path() -> PathBuf {
+    update_helper_dir().join("updater.log")
+}
+
+fn append_update_helper_log(message: impl AsRef<str>) {
+    let dir = update_helper_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let line = format!(
+        "[{}] {}\n",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        message.as_ref()
+    );
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(update_helper_log_path())
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+fn cleanup_old_update_helpers(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with("hardware-workbench-updater-") && name.ends_with(".exe") {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// 复制当前 exe 为临时 helper，并启动 helper 负责替换目标 exe。
+pub fn launch_update_helper(target_exe: &Path) -> Result<(), String> {
+    let helper_dir = update_helper_dir();
+    std::fs::create_dir_all(&helper_dir).map_err(|e| format!("创建 updater 目录失败：{e}"))?;
+    cleanup_old_update_helpers(&helper_dir);
+
+    let helper_path = helper_dir.join(format!(
+        "hardware-workbench-updater-{}.exe",
+        std::process::id()
+    ));
+    std::fs::copy(target_exe, &helper_path).map_err(|e| {
+        format!(
+            "复制 updater helper 失败（{} → {}）：{e}",
+            target_exe.display(),
+            helper_path.display()
+        )
+    })?;
+
+    append_update_helper_log(format!(
+        "launch helper {} for target {}",
+        helper_path.display(),
+        target_exe.display()
+    ));
+
+    Command::new(&helper_path)
+        .arg("--apply-pending-update")
+        .arg(target_exe)
+        .spawn()
+        .map_err(|e| format!("启动 updater helper 失败：{e}"))?;
+
+    Ok(())
+}
+
+/// 临时 helper 入口：等待主程序退出后替换目标 exe，并重启目标程序。
+pub fn run_update_helper(target_exe: &Path) -> Result<bool, String> {
+    append_update_helper_log(format!("helper started for {}", target_exe.display()));
+    std::thread::sleep(Duration::from_millis(800));
+
+    let deadline = Instant::now() + UPDATE_HELPER_WAIT_TIMEOUT;
+
+    let error = loop {
+        match apply_pending_update_impl(target_exe, None) {
+            Ok(true) => {
+                append_update_helper_log("update applied");
+                Command::new(target_exe)
+                    .spawn()
+                    .map_err(|e| format!("重启应用失败：{e}"))?;
+                append_update_helper_log("target restarted");
+                return Ok(true);
+            }
+            Ok(false) => {
+                append_update_helper_log("no pending update");
+                return Ok(false);
+            }
+            Err(error) => {
+                if Instant::now() >= deadline {
+                    break error;
+                }
+                std::thread::sleep(UPDATE_HELPER_RETRY_INTERVAL);
+            }
+        }
+    };
+
+    append_update_helper_log(format!("update failed: {error}"));
+    Err(format!(
+        "等待主程序退出并替换更新失败：{error}。日志：{}",
+        update_helper_log_path().display()
+    ))
+}
+
 // ── 启动时替换 ──
 
 /// 启动时检查并应用待更新。
@@ -293,6 +416,13 @@ pub fn downloaded_zip_path() -> PathBuf {
 /// 返回 `Ok(false)` 表示无待更新。
 /// 返回 `Err` 表示替换过程出错（不应阻止正常启动）。
 pub fn apply_pending_update(exe_path: &Path) -> Result<bool, String> {
+    apply_pending_update_impl(exe_path, Some(env!("CARGO_PKG_VERSION")))
+}
+
+fn apply_pending_update_impl(
+    exe_path: &Path,
+    current_version: Option<&str>,
+) -> Result<bool, String> {
     let manifest_path = update_manifest_path();
     if !manifest_path.exists() {
         return Ok(false);
@@ -304,9 +434,11 @@ pub fn apply_pending_update(exe_path: &Path) -> Result<bool, String> {
     let manifest: UpdateManifest =
         serde_json::from_str(&manifest_data).map_err(|e| format!("解析 update.json 失败：{e}"))?;
 
-    // 比较版本：仅当远程版本比当前新时才替换
-    let current_version = env!("CARGO_PKG_VERSION");
-    if !update_info::is_newer_version(&manifest.version, current_version) {
+    // 兼容旧版启动时更新：仅当远程版本比当前新时才替换。
+    // 临时 helper 已由主程序确认是新版本更新，因此可跳过此检查。
+    if let Some(current_version) = current_version
+        && !update_info::is_newer_version(&manifest.version, current_version)
+    {
         log::info!(
             "updater: 待更新版本 {} 不比当前 {} 新，跳过",
             manifest.version,
@@ -508,12 +640,12 @@ pub async fn download_update(url: &str, on_progress: impl Fn(u64, u64)) -> Resul
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建更新目录失败：{e}"))?;
 
     let zip_path = downloaded_zip_path();
-    // 如果已下载，跳过
-    if zip_path.exists() {
-        let hash =
-            sha256_file(&zip_path).map_err(|e| format!("计算已下载文件 SHA256 失败：{e}"))?;
-        return Ok(hash);
-    }
+    let part_path = zip_path.with_extension("zip.part");
+
+    // 旧版本可能留下已下载 zip 或半截 .part。下载新版本前先清掉，
+    // 避免把旧 zip 的 hash 写进新版本 manifest。
+    let _ = std::fs::remove_file(&zip_path);
+    let _ = std::fs::remove_file(&part_path);
 
     let mut resp = send_update_get(url)
         .await
@@ -528,19 +660,25 @@ pub async fn download_update(url: &str, on_progress: impl Fn(u64, u64)) -> Resul
     let mut hasher = Sha256::new();
 
     // 临时文件：先下载到 .part，完成后 rename
-    let part_path = zip_path.with_extension("zip.part");
     let mut part_file =
         std::fs::File::create(&part_path).map_err(|e| format!("创建临时下载文件失败：{e}"))?;
 
     let mut last_reported: u64 = 0;
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| format!("下载读取数据失败：{}", describe_reqwest_error(&e)))?
-    {
-        part_file
-            .write_all(&chunk)
-            .map_err(|e| format!("写入下载数据失败：{e}"))?;
+    loop {
+        let chunk = match resp.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(e) => {
+                drop(part_file);
+                cleanup_partial_download(&part_path);
+                return Err(format!("下载读取数据失败：{}", describe_reqwest_error(&e)));
+            }
+        };
+        if let Err(e) = part_file.write_all(&chunk) {
+            drop(part_file);
+            cleanup_partial_download(&part_path);
+            return Err(format!("写入下载数据失败：{e}"));
+        }
         hasher.update(&chunk);
         downloaded += chunk.len() as u64;
 
@@ -556,7 +694,10 @@ pub async fn download_update(url: &str, on_progress: impl Fn(u64, u64)) -> Resul
     drop(part_file);
 
     // 重命名 .part → 最终文件名
-    std::fs::rename(&part_path, &zip_path).map_err(|e| format!("重命名下载文件失败：{e}"))?;
+    if let Err(e) = std::fs::rename(&part_path, &zip_path) {
+        cleanup_partial_download(&part_path);
+        return Err(format!("重命名下载文件失败：{e}"));
+    }
 
     let hash = format!("{:x}", hasher.finalize());
     Ok(hash)

@@ -707,25 +707,45 @@ impl WorkbenchApp {
 
         // 1. 用户点击"更新并重启"
         if self.update_state.want_restart {
-            let manifest_info = self
+            let Some((version, sha256)) = self
                 .update_state
                 .latest_version
                 .as_ref()
                 .zip(self.update_state.downloaded_sha256.as_ref())
-                .map(|(v, s)| (v.clone(), s.clone()));
+                .map(|(v, s)| (v.clone(), s.clone()))
+            else {
+                self.update_state.want_restart = false;
+                self.update_state.error = Some("更新信息不完整，请重新下载更新".into());
+                return;
+            };
 
             if let Err(e) = self.save_config() {
                 log::warn!("save_config failed: {e}")
             };
 
-            if let Some((version, sha256)) = manifest_info
-                && let Err(e) = tool_updater::write_update_manifest(&version, &sha256)
-            {
+            if let Err(e) = tool_updater::write_update_manifest(&version, &sha256) {
                 log::error!("write_update_manifest failed: {e}");
                 self.update_state.want_restart = false;
                 self.update_state.error = Some(format!("写入更新标记失败：{e}"));
                 return;
             }
+
+            let exe_path = match std::env::current_exe() {
+                Ok(path) => path,
+                Err(e) => {
+                    self.update_state.want_restart = false;
+                    self.update_state.error = Some(format!("定位当前程序失败：{e}"));
+                    return;
+                }
+            };
+
+            if let Err(e) = tool_updater::launch_update_helper(&exe_path) {
+                log::error!("launch_update_helper failed: {e}");
+                self.update_state.want_restart = false;
+                self.update_state.error = Some(format!("启动更新助手失败：{e}"));
+                return;
+            }
+
             std::process::exit(0);
         }
 

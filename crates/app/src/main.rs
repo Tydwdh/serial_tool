@@ -27,6 +27,20 @@ fn app_icon() -> egui::IconData {
 }
 
 fn main() -> eframe::Result<()> {
+    let mut args = std::env::args_os();
+    let _program = args.next();
+    if args.next().as_deref() == Some(std::ffi::OsStr::new("--apply-pending-update")) {
+        let Some(target_exe) = args.next() else {
+            eprintln!("missing target exe for --apply-pending-update");
+            std::process::exit(2);
+        };
+        if let Err(error) = tool_updater::run_update_helper(std::path::Path::new(&target_exe)) {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
+
     if std::env::args().any(|arg| arg == "--check-update-once") {
         print_update_network_diagnostics();
 
@@ -53,10 +67,14 @@ fn main() -> eframe::Result<()> {
 
     // 启动时检查并应用待更新（在 eframe 启动前，exe 尚未被锁定）
     let exe_path = std::env::current_exe().unwrap_or_default();
-    if let Ok(true) = tool_updater::apply_pending_update(&exe_path) {
-        // 更新已应用，启动新版本后退出
-        let _ = std::process::Command::new(&exe_path).spawn();
-        return Ok(());
+    match tool_updater::apply_pending_update(&exe_path) {
+        Ok(true) => {
+            // 兼容旧版遗留标记：更新已应用，启动新版本后退出
+            let _ = std::process::Command::new(&exe_path).spawn();
+            return Ok(());
+        }
+        Ok(false) => {}
+        Err(error) => eprintln!("apply pending update failed: {error}"),
     }
 
     let options = eframe::NativeOptions {
