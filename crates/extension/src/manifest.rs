@@ -13,7 +13,7 @@ fn default_api_version() -> String {
     CURRENT_PLUGIN_API_VERSION.to_owned()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PluginManifest {
     pub id: String,
     pub name: String,
@@ -236,7 +236,7 @@ impl PluginDiagnostic {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct PluginContributes {
     #[serde(default)]
     pub commands: Vec<PluginCommand>,
@@ -261,7 +261,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PluginUiContribution {
     pub id: String,
     pub slot: String,
@@ -289,6 +289,10 @@ pub struct PluginUiContribution {
 
     #[serde(default)]
     pub record_send_input: bool,
+
+    /// toggle 初始状态 / progress 初始值
+    #[serde(default)]
+    pub default: serde_json::Value,
 }
 
 fn default_ui_contribution_kind() -> String {
@@ -304,13 +308,38 @@ pub struct PluginPanelContribution {
     pub kind: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+fn default_setting_kind() -> String {
+    "text".to_owned()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PluginSetting {
     pub id: String,
     pub title: String,
 
+    #[serde(default = "default_setting_kind")]
+    pub kind: String,
+
     #[serde(default)]
     pub default: serde_json::Value,
+
+    #[serde(default)]
+    pub options: Vec<serde_json::Value>,
+
+    #[serde(default)]
+    pub min: Option<f64>,
+
+    #[serde(default)]
+    pub max: Option<f64>,
+
+    #[serde(default)]
+    pub step: Option<f64>,
+
+    #[serde(default)]
+    pub rows: Option<usize>,
+
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -340,4 +369,17 @@ pub struct PluginSummary {
     pub has_replay_analyzer: bool,
     pub replay_subscriptions: Vec<String>,
     pub replay_outputs: Vec<String>,
+
+    // ── 命令状态 ──
+    /// 运行时已注册的命令 ID 列表（仅 Running 状态有意义）
+    #[serde(default)]
+    pub registered_commands: Vec<String>,
+
+    /// 声明但未注册的命令 ID 列表
+    #[serde(default)]
+    pub missing_commands: Vec<String>,
+
+    /// 动态注册但未在 manifest 声明的命令 ID 列表
+    #[serde(default)]
+    pub undeclared_commands: Vec<String>,
 }

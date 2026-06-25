@@ -585,6 +585,14 @@ fn plugin_event_loop(
                     drain_serial_rx_to_buffers(&event, &host_services, &bus);
                 }
 
+                // 管理面事件不进插件事件循环
+                if event.topic == topics::PLUGIN_COMMAND_REGISTERED
+                    || event.topic == topics::PLUGIN_COMMAND_UNREGISTERED
+                    || event.topic == topics::UI_CONTRIBUTION_SET_VALUE
+                {
+                    continue;
+                }
+
                 if handle_plugin_command_event(&lua, &bus, &config, &host_services, &event) {
                     continue;
                 }

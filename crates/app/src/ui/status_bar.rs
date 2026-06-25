@@ -77,6 +77,9 @@ impl WorkbenchApp {
                 ui.label(format!("{dtr} {rts}"));
             }
 
+            // ── 插件贡献：status_bar.left ──
+            self.ui_contribution_slot(ui, "status_bar.left");
+
             // ── 状态消息（左对齐） ──
             if !self.status.message.is_empty() {
                 ui.separator();
@@ -97,6 +100,9 @@ impl WorkbenchApp {
                 ui.label(egui::RichText::new(&shown).color(status_color))
                     .on_hover_text(&self.status.message);
             }
+
+            // ── 插件贡献：status_bar.right ──
+            self.ui_contribution_slot(ui, "status_bar.right");
 
             // ── 更新图标（最右边） ──
             self.draw_update_status(ui);

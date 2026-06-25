@@ -150,6 +150,8 @@ impl WorkbenchApp {
                 );
             }
             ui.separator();
+            // ── 插件贡献：top_bar.left ──
+            self.ui_contribution_slot(ui, "top_bar.left");
             let rec = self.recorder.is_running();
             if ui
                 .button(if rec {
@@ -163,6 +165,9 @@ impl WorkbenchApp {
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // ── 插件贡献：top_bar.right ──
+                self.ui_contribution_slot(ui, "top_bar.right");
+
                 if layout_icon_button(
                     ui,
                     LayoutButtonKind::RightDock,

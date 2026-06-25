@@ -417,6 +417,36 @@ impl WorkbenchApp {
         self.dynamic_panels.ingest(&mut self.panels);
         let _terminal_ingested = self.terminal_panel.ingest_pending();
         self.plugin_manager.process_pending();
+        self.process_contribution_set_value();
+    }
+
+    /// 处理插件通过 ctx.ui.set_contribution_value 对 UI contribution 的状态更新。
+    /// 使用专用 topic `ui.contribution.set_value`，与动态面板的 `ui.form.set_value` 隔离。
+    fn process_contribution_set_value(&mut self) {
+        for event in self.contribution_set_value_subscription.drain_limited(64) {
+            let tool_core::Payload::Json(payload) = event.payload else {
+                continue;
+            };
+            // 要求 panel_id == "__contribution__" 作为哨兵，防止误消费面板事件
+            if payload.get("panel_id").and_then(serde_json::Value::as_str)
+                != Some("__contribution__")
+            {
+                continue;
+            }
+            let Some(contribution_id) = payload.get("field_id").and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let Some(value) = payload.get("value") else {
+                continue;
+            };
+            // 从事件 source 提取 plugin_id（格式 "plugin:{plugin_id}"）
+            let plugin_id = event
+                .source
+                .strip_prefix("plugin:")
+                .unwrap_or(&event.source);
+            self.set_contribution_value(plugin_id, contribution_id, value.clone());
+        }
     }
 
     /// 串口刷新。

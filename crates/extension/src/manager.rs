@@ -35,6 +35,8 @@ pub struct PluginManager {
     records: BTreeMap<String, PluginRecord>,
     lua_runtimes: HashMap<String, LuaPluginRuntime>,
     stopping_plugins: Vec<(String, LuaPluginRuntime)>,
+    /// 运行时注册的命令：plugin_id → 命令 ID 列表
+    registered_commands: HashMap<String, Vec<String>>,
     roots: Vec<PathBuf>,
     subscription: Subscription,
     dialog_request_sender: Option<crossbeam_channel::Sender<DialogRequest>>,
@@ -64,6 +66,7 @@ impl PluginManager {
             records: BTreeMap::new(),
             lua_runtimes: HashMap::new(),
             stopping_plugins: Vec::new(),
+            registered_commands: HashMap::new(),
             roots: Vec::new(),
             subscription,
             dialog_request_sender: None,
@@ -363,6 +366,19 @@ impl PluginManager {
 
         self.lua_runtimes.insert(plugin_id.to_owned(), runtime);
 
+        // 自动创建设置面板（如果 manifest 声明了 contributes.settings）
+        let settings_manifest = {
+            let rec = self.records.get(plugin_id).unwrap();
+            if rec.manifest.contributes.settings.is_empty() {
+                None
+            } else {
+                Some(rec.manifest.clone())
+            }
+        };
+        if let Some(manifest) = settings_manifest {
+            self.create_settings_panel(plugin_id, &manifest);
+        }
+
         self.bus.publish(Event::system_log(
             LogLevel::Info,
             format!("plugin:{plugin_id}"),
@@ -390,6 +406,9 @@ impl PluginManager {
             self.stopping_plugins.push((plugin_id.to_owned(), runtime));
         }
 
+        // 清除该插件的运行时注册命令
+        self.registered_commands.remove(plugin_id);
+
         let panel_ids: Vec<String> = self
             .records
             .get(plugin_id)
@@ -412,6 +431,20 @@ impl PluginManager {
                 source.clone(),
                 Direction::Internal,
                 Payload::Json(serde_json::json!({ "id": panel_id })),
+            ));
+        }
+
+        // 移除自动生成的设置面板
+        let has_settings = self
+            .records
+            .get(plugin_id)
+            .is_some_and(|r| !r.manifest.contributes.settings.is_empty());
+        if has_settings {
+            self.bus.publish(Event::new(
+                topics::UI_PANEL_REMOVE,
+                source.clone(),
+                Direction::Internal,
+                Payload::Json(serde_json::json!({ "id": format!("{plugin_id}.settings") })),
             ));
         }
 
@@ -448,20 +481,65 @@ impl PluginManager {
     pub fn summaries(&self) -> Vec<PluginSummary> {
         self.records
             .values()
-            .map(|record| PluginSummary {
-                id: record.manifest.id.clone(),
-                name: record.manifest.name.clone(),
-                version: record.manifest.version.clone(),
-                api_version: record.manifest.api_version.clone(),
-                runtime: record.manifest.runtime.clone(),
-                state: record.state,
-                permissions: record.manifest.live_permissions().to_vec(),
-                contributes: record.manifest.contributes.clone(),
-                path: record.root.clone(),
-                last_error: record.last_error.clone(),
-                has_replay_analyzer: record.manifest.has_replay_analyzer(),
-                replay_subscriptions: record.manifest.replay_subscriptions().to_vec(),
-                replay_outputs: record.manifest.replay_outputs().to_vec(),
+            .map(|record| {
+                // 只在 Running 状态时做命令对账；未启用时 registered 一定为空，
+                // 不应把所有声明命令都标为 missing。
+                let (registered, missing, undeclared) =
+                    if matches!(record.state, PluginState::Running) {
+                        let reg = self
+                            .registered_commands
+                            .get(&record.manifest.id)
+                            .cloned()
+                            .unwrap_or_default();
+
+                        let declared: Vec<String> = record
+                            .manifest
+                            .contributes
+                            .commands
+                            .iter()
+                            .map(|c| c.id.clone())
+                            .collect();
+
+                        let declared_set: std::collections::HashSet<&str> =
+                            declared.iter().map(String::as_str).collect();
+                        let registered_set: std::collections::HashSet<&str> =
+                            reg.iter().map(String::as_str).collect();
+
+                        let miss: Vec<String> = declared
+                            .iter()
+                            .filter(|id| !registered_set.contains(id.as_str()))
+                            .cloned()
+                            .collect();
+
+                        let undec: Vec<String> = reg
+                            .iter()
+                            .filter(|id| !declared_set.contains(id.as_str()))
+                            .cloned()
+                            .collect();
+
+                        (reg, miss, undec)
+                    } else {
+                        (Vec::new(), Vec::new(), Vec::new())
+                    };
+
+                PluginSummary {
+                    id: record.manifest.id.clone(),
+                    name: record.manifest.name.clone(),
+                    version: record.manifest.version.clone(),
+                    api_version: record.manifest.api_version.clone(),
+                    runtime: record.manifest.runtime.clone(),
+                    state: record.state,
+                    permissions: record.manifest.live_permissions().to_vec(),
+                    contributes: record.manifest.contributes.clone(),
+                    path: record.root.clone(),
+                    last_error: record.last_error.clone(),
+                    has_replay_analyzer: record.manifest.has_replay_analyzer(),
+                    replay_subscriptions: record.manifest.replay_subscriptions().to_vec(),
+                    replay_outputs: record.manifest.replay_outputs().to_vec(),
+                    registered_commands: registered,
+                    missing_commands: missing,
+                    undeclared_commands: undeclared,
+                }
             })
             .collect()
     }
@@ -523,6 +601,31 @@ impl PluginManager {
             return 0;
         }
 
+        // ── 管理面事件：命令注册/注销 ──
+        if event.topic == topics::PLUGIN_COMMAND_REGISTERED {
+            self.handle_command_registered(event);
+            return 0;
+        }
+        if event.topic == topics::PLUGIN_COMMAND_UNREGISTERED {
+            self.handle_command_unregistered(event);
+            return 0;
+        }
+
+        // ui.contribution.set_value 是宿主侧事件，不进 Lua
+        if event.topic == topics::UI_CONTRIBUTION_SET_VALUE {
+            return 0;
+        }
+
+        // 命令执行前置检测：命令是否已注册
+        if event.topic == topics::PLUGIN_COMMAND_EXECUTE {
+            self.check_command_registered(event);
+        }
+
+        // 设置面板变更自动持久化
+        if event.topic == topics::UI_FORM_CHANGED {
+            self.persist_settings_change(event);
+        }
+
         let mut count = 0;
 
         // 按插件 manifest 声明的 subscription 做 Rust 层过滤，
@@ -539,10 +642,10 @@ impl PluginManager {
                     .iter()
                     .any(|sub| tool_core::topic_matches(sub, &event.topic))
             });
-            // ui.* / log.* 系统事件始终接收
+            // ui.* / log.* / plugin.command.execute 系统事件始终接收
             let is_sys = event.topic.starts_with("ui.")
                 || event.topic.starts_with("log.")
-                || event.topic.starts_with("plugin.command.");
+                || event.topic == topics::PLUGIN_COMMAND_EXECUTE;
             if !is_sys && !wants {
                 continue;
             }
@@ -600,6 +703,216 @@ impl PluginManager {
                     }
                 }
             }
+
+            // 运行时结束后清除注册命令
+            self.registered_commands.remove(id.as_str());
+        }
+    }
+
+    fn handle_command_registered(&mut self, event: &Event) {
+        let Payload::Json(payload) = &event.payload else {
+            return;
+        };
+        let Some(plugin_id) = payload.get("plugin_id").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        let Some(command) = payload.get("command").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+
+        let commands = self
+            .registered_commands
+            .entry(plugin_id.to_owned())
+            .or_default();
+
+        // 去重：同一命令重复 register 不重复记录
+        if !commands.iter().any(|c| c == command) {
+            commands.push(command.to_owned());
+        }
+
+        // 命令注册成功后清除对应的 command_not_found 诊断
+        self.diagnostics.retain(|d| {
+            !(d.code == "command_not_found"
+                && d.plugin_id.as_deref() == Some(plugin_id)
+                && d.message.contains(command))
+        });
+    }
+
+    fn handle_command_unregistered(&mut self, event: &Event) {
+        let Payload::Json(payload) = &event.payload else {
+            return;
+        };
+        let Some(plugin_id) = payload.get("plugin_id").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        let Some(command) = payload.get("command").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+
+        if let Some(commands) = self.registered_commands.get_mut(plugin_id) {
+            commands.retain(|c| c != command);
+        }
+    }
+
+    fn check_command_registered(&mut self, event: &Event) {
+        let Payload::Json(payload) = &event.payload else {
+            return;
+        };
+        let Some(plugin_id) = payload.get("plugin_id").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        let Some(command) = payload.get("command").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+
+        // 只对 Running 状态的插件做诊断；未启用的插件没有 registered_commands 是正常的
+        let is_running = self
+            .records
+            .get(plugin_id)
+            .is_some_and(|r| matches!(r.state, PluginState::Running));
+        if !is_running {
+            return;
+        }
+
+        // 检查命令是否在 registered_commands 中
+        let is_registered = self
+            .registered_commands
+            .get(plugin_id)
+            .is_some_and(|cmds| cmds.iter().any(|c| c == command));
+
+        if !is_registered {
+            // 去重：如果已存在相同 plugin_id + command 的诊断，不重复添加
+            let already_diagnosed = self.diagnostics.iter().any(|d| {
+                d.code == "command_not_found"
+                    && d.plugin_id.as_deref() == Some(plugin_id)
+                    && d.message.contains(command)
+            });
+            if !already_diagnosed {
+                let path = self
+                    .records
+                    .get(plugin_id)
+                    .map(|r| r.root.clone())
+                    .unwrap_or_default();
+                self.push_diagnostic(
+                    PluginDiagnosticSeverity::Warning,
+                    "command_not_found",
+                    Some(plugin_id.to_owned()),
+                    path,
+                    format!("命令 '{command}' 未注册，点击或快捷键触发无效"),
+                );
+            }
+        }
+    }
+
+    /// 为插件自动创建设置面板（从 contributes.settings 生成 form）。
+    fn create_settings_panel(&mut self, plugin_id: &str, manifest: &PluginManifest) {
+        let settings = &manifest.contributes.settings;
+        let panel_id = format!("{plugin_id}.settings");
+
+        // 构造 fields 数组，每个 setting 对应一个表单字段
+        let mut fields = Vec::with_capacity(settings.len());
+        for setting in settings {
+            // 从 ConfigStore 读当前值，首次则写入默认值
+            let current_value =
+                self.config_store
+                    .get(plugin_id, &setting.id, setting.default.clone());
+            // 如果 key 不存在，ConfigStore::get 返回 default 但不写入；
+            // 我们主动写入以确保首次启用就有持久化默认值
+            if current_value == setting.default {
+                // 检查 key 是否真的不存在（get 对缺失 key 也返回 default）
+                let keys = self.config_store.keys(plugin_id);
+                if !keys.contains(&setting.id) {
+                    let _ = self
+                        .config_store
+                        .set(plugin_id, &setting.id, setting.default.clone());
+                }
+            }
+
+            let mut field = serde_json::json!({
+                "id": setting.id,
+                "label": setting.title,
+                "kind": setting.kind,
+                "value": current_value,
+            });
+            // 可选字段
+            if !setting.options.is_empty() {
+                field.as_object_mut().unwrap().insert(
+                    "options".to_owned(),
+                    serde_json::Value::Array(setting.options.clone()),
+                );
+            }
+            if let Some(min) = setting.min {
+                field
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("min".to_owned(), json!(min));
+            }
+            if let Some(max) = setting.max {
+                field
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("max".to_owned(), json!(max));
+            }
+            if let Some(step) = setting.step {
+                field
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("step".to_owned(), json!(step));
+            }
+            if let Some(rows) = setting.rows {
+                field
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("rows".to_owned(), json!(rows));
+            }
+            if let Some(ref desc) = setting.description {
+                field
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("description".to_owned(), json!(desc));
+            }
+            fields.push(field);
+        }
+
+        let payload = json!({
+            "id": panel_id,
+            "title": format!("{} 设置", manifest.name),
+            "kind": "form",
+            "plugin_id": plugin_id,
+            "auto_apply": true,
+            "is_settings_panel": true,
+            "fields": fields,
+        });
+
+        self.bus.publish(Event::new(
+            topics::UI_PANEL_CREATE,
+            format!("plugin:{plugin_id}"),
+            Direction::Internal,
+            Payload::Json(payload),
+        ));
+    }
+
+    /// 设置面板变更时自动持久化到 ConfigStore。
+    fn persist_settings_change(&mut self, event: &Event) {
+        let Payload::Json(payload) = &event.payload else {
+            return;
+        };
+
+        let Some(panel_id) = payload.get("panel_id").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+
+        // 只处理设置面板（panel_id 以 .settings 结尾）
+        let Some(plugin_id) = panel_id.strip_suffix(".settings") else {
+            return;
+        };
+
+        let Some(values) = payload.get("values").and_then(serde_json::Value::as_object) else {
+            return;
+        };
+
+        for (key, value) in values {
+            let _ = self.config_store.set(plugin_id, key, value.clone());
         }
     }
 
@@ -760,6 +1073,392 @@ ctx.bus.publish('protocol.pid.sample', { t = 1, target = 50, actual = 43, output
         assert_eq!(diagnostics[0].code, "manifest_validation_error");
         assert_eq!(diagnostics[0].plugin_id.as_deref(), Some("bad.ui"));
         assert!(diagnostics[0].message.contains("bad.ui.missing"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    // ── 命令追踪测试 ──
+
+    #[test]
+    fn tracks_registered_commands_after_enable() {
+        let root = create_custom_plugin(
+            "cmd.tracker",
+            r#"{
+  "id": "cmd.tracker",
+  "name": "Command Tracker",
+  "version": "0.1.0",
+  "runtime": "lua",
+  "main": "main.lua",
+  "permissions": ["log"],
+  "contributes": {
+    "commands": [
+      { "id": "cmd.tracker.run", "title": "Run" },
+      { "id": "cmd.tracker.stop", "title": "Stop" }
+    ]
+  }
+}"#,
+            r#"
+ctx.commands.register("cmd.tracker.run", function() end)
+ctx.commands.register("cmd.tracker.stop", function() end)
+ctx.log.info("registered")
+"#,
+        );
+
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+        let mut manager = PluginManager::new(bus, transport);
+
+        assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
+        manager.enable("cmd.tracker").unwrap();
+
+        // 等待 Lua 线程执行 + registered 事件到达 + process_pending 处理
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            manager.process_pending();
+        }
+
+        let summaries = manager.summaries();
+        let s = summaries.iter().find(|s| s.id == "cmd.tracker").unwrap();
+        assert!(
+            s.registered_commands
+                .contains(&"cmd.tracker.run".to_owned()),
+            "registered_commands should contain cmd.tracker.run, got {:?}",
+            s.registered_commands
+        );
+        assert!(
+            s.registered_commands
+                .contains(&"cmd.tracker.stop".to_owned()),
+            "registered_commands should contain cmd.tracker.stop, got {:?}",
+            s.registered_commands
+        );
+        // 声明且已注册 → missing 为空
+        assert!(
+            s.missing_commands.is_empty(),
+            "missing_commands should be empty, got {:?}",
+            s.missing_commands
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn detects_missing_declared_commands() {
+        // manifest 声明了命令，但 Lua 代码不注册
+        let root = create_custom_plugin(
+            "cmd.missing",
+            r#"{
+  "id": "cmd.missing",
+  "name": "Missing Commands",
+  "version": "0.1.0",
+  "runtime": "lua",
+  "main": "main.lua",
+  "permissions": ["log"],
+  "contributes": {
+    "commands": [
+      { "id": "cmd.missing.apply", "title": "Apply" }
+    ]
+  }
+}"#,
+            r#"ctx.log.info("no command registered")"#,
+        );
+
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+        let mut manager = PluginManager::new(bus, transport);
+
+        assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
+        manager.enable("cmd.missing").unwrap();
+
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            manager.process_pending();
+        }
+
+        let summaries = manager.summaries();
+        let s = summaries.iter().find(|s| s.id == "cmd.missing").unwrap();
+        assert!(
+            s.missing_commands.contains(&"cmd.missing.apply".to_owned()),
+            "missing_commands should contain cmd.missing.apply, got {:?}",
+            s.missing_commands
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn detects_undeclared_dynamic_commands() {
+        // Lua 代码注册了 manifest 未声明的命令
+        let root = create_custom_plugin(
+            "cmd.dynamic",
+            r#"{
+  "id": "cmd.dynamic",
+  "name": "Dynamic Commands",
+  "version": "0.1.0",
+  "runtime": "lua",
+  "main": "main.lua",
+  "permissions": ["log"],
+  "contributes": {}
+}"#,
+            r#"
+ctx.commands.register("cmd.dynamic.secret", function() end)
+ctx.log.info("registered dynamic")
+"#,
+        );
+
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+        let mut manager = PluginManager::new(bus, transport);
+
+        assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
+        manager.enable("cmd.dynamic").unwrap();
+
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            manager.process_pending();
+        }
+
+        let summaries = manager.summaries();
+        let s = summaries.iter().find(|s| s.id == "cmd.dynamic").unwrap();
+        assert!(
+            s.undeclared_commands
+                .contains(&"cmd.dynamic.secret".to_owned()),
+            "undeclared_commands should contain cmd.dynamic.secret, got {:?}",
+            s.undeclared_commands
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clears_registered_commands_on_disable() {
+        let root = create_custom_plugin(
+            "cmd.cleanup",
+            r#"{
+  "id": "cmd.cleanup",
+  "name": "Cleanup Test",
+  "version": "0.1.0",
+  "runtime": "lua",
+  "main": "main.lua",
+  "permissions": ["log"],
+  "contributes": {
+    "commands": [
+      { "id": "cmd.cleanup.run", "title": "Run" }
+    ]
+  }
+}"#,
+            r#"
+ctx.commands.register("cmd.cleanup.run", function() end)
+ctx.log.info("registered")
+"#,
+        );
+
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+        let mut manager = PluginManager::new(bus, transport);
+
+        assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
+        manager.enable("cmd.cleanup").unwrap();
+
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            manager.process_pending();
+        }
+
+        // 确认注册了
+        assert!(manager.registered_commands.contains_key("cmd.cleanup"));
+
+        manager.disable("cmd.cleanup").unwrap();
+
+        // disable 后应清除
+        assert!(
+            !manager.registered_commands.contains_key("cmd.cleanup"),
+            "registered_commands should be cleared after disable"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn diagnoses_command_not_found_on_execute() {
+        let root = create_custom_plugin(
+            "cmd.notfound",
+            r#"{
+  "id": "cmd.notfound",
+  "name": "Not Found Test",
+  "version": "0.1.0",
+  "runtime": "lua",
+  "main": "main.lua",
+  "permissions": ["log"],
+  "contributes": {
+    "commands": [
+      { "id": "cmd.notfound.run", "title": "Run" }
+    ]
+  }
+}"#,
+            r#"ctx.log.info("no command registered")"#,
+        );
+
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+        let mut manager = PluginManager::new(bus, transport);
+
+        assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
+        manager.enable("cmd.notfound").unwrap();
+
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            manager.process_pending();
+        }
+
+        // 模拟触发一个未注册的命令
+        let event = Event::new(
+            topics::PLUGIN_COMMAND_EXECUTE,
+            "test",
+            Direction::Internal,
+            Payload::Json(json!({
+                "plugin_id": "cmd.notfound",
+                "command": "cmd.notfound.run",
+                "origin": "test"
+            })),
+        );
+        manager.process_event(&event);
+
+        let diagnostics = manager.diagnostics();
+        let not_found = diagnostics.iter().find(|d| {
+            d.code == "command_not_found" && d.plugin_id.as_deref() == Some("cmd.notfound")
+        });
+        assert!(
+            not_found.is_some(),
+            "should have command_not_found diagnostic, got {:?}",
+            diagnostics
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn command_dedup_on_repeated_register() {
+        let root = create_custom_plugin(
+            "cmd.dedup",
+            r#"{
+  "id": "cmd.dedup",
+  "name": "Dedup Test",
+  "version": "0.1.0",
+  "runtime": "lua",
+  "main": "main.lua",
+  "permissions": ["log"],
+  "contributes": {
+    "commands": [
+      { "id": "cmd.dedup.run", "title": "Run" }
+    ]
+  }
+}"#,
+            r#"
+ctx.commands.register("cmd.dedup.run", function() end)
+-- 重复注册同一命令
+ctx.commands.register("cmd.dedup.run", function() end)
+ctx.log.info("registered twice")
+"#,
+        );
+
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+        let mut manager = PluginManager::new(bus, transport);
+
+        assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
+        manager.enable("cmd.dedup").unwrap();
+
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            manager.process_pending();
+        }
+
+        let summaries = manager.summaries();
+        let s = summaries.iter().find(|s| s.id == "cmd.dedup").unwrap();
+        // 重复注册不应重复计数
+        let count = s
+            .registered_commands
+            .iter()
+            .filter(|c| c.as_str() == "cmd.dedup.run")
+            .count();
+        assert_eq!(count, 1, "duplicate register should not duplicate entries");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn command_not_found_cleared_on_register() {
+        let root = create_custom_plugin(
+            "cmd.late",
+            r#"{
+  "id": "cmd.late",
+  "name": "Late Register",
+  "version": "0.1.0",
+  "runtime": "lua",
+  "main": "main.lua",
+  "permissions": ["log"],
+  "contributes": {
+    "commands": [
+      { "id": "cmd.late.run", "title": "Run" }
+    ]
+  }
+}"#,
+            r#"
+-- 先不注册，等宿主发一个 execute 后再注册
+ctx.log.info("started")
+"#,
+        );
+
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+        let mut manager = PluginManager::new(bus, transport);
+
+        assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
+        manager.enable("cmd.late").unwrap();
+
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            manager.process_pending();
+        }
+
+        // 模拟触发未注册命令 → 产生诊断
+        let exec_event = Event::new(
+            topics::PLUGIN_COMMAND_EXECUTE,
+            "test",
+            Direction::Internal,
+            Payload::Json(json!({
+                "plugin_id": "cmd.late",
+                "command": "cmd.late.run",
+                "origin": "test"
+            })),
+        );
+        manager.process_event(&exec_event);
+        assert!(
+            manager
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == "command_not_found"),
+            "should have command_not_found before register"
+        );
+
+        // 模拟注册事件 → 应清除诊断
+        let reg_event = Event::new(
+            topics::PLUGIN_COMMAND_REGISTERED,
+            "plugin:cmd.late",
+            Direction::Internal,
+            Payload::Json(json!({
+                "plugin_id": "cmd.late",
+                "command": "cmd.late.run"
+            })),
+        );
+        manager.process_event(&reg_event);
+        assert!(
+            !manager
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == "command_not_found"),
+            "command_not_found should be cleared after register"
+        );
 
         let _ = fs::remove_dir_all(root);
     }

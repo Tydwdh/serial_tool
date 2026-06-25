@@ -114,6 +114,7 @@ pub(crate) struct WorkbenchApp {
     pub(crate) file_broker: Arc<FileAccessBroker>,
     pub(crate) dialog_receiver: crossbeam_channel::Receiver<DialogRequest>,
     pub(crate) file_browse_subscription: tool_databus::Subscription,
+    pub(crate) contribution_set_value_subscription: tool_databus::Subscription,
     pub(crate) replay_analyzer_job: Option<ReplayAnalyzerJob>,
     pub(crate) replay_analyzer_generation: u64,
     /// 周期发送后台线程的取消信号
@@ -128,6 +129,8 @@ pub(crate) struct WorkbenchApp {
     pub(crate) update_state: UpdateState,
     /// 下载进度共享变量（0-1000 表示 0.0%-100.0%）
     pub(crate) update_state_download_progress: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    /// UI contribution 运行时状态（toggle 值、progress 值等）
+    pub(crate) contribution_states: std::collections::HashMap<String, serde_json::Value>,
 }
 
 pub(crate) struct ReplayAnalyzerJob {
@@ -304,6 +307,9 @@ impl WorkbenchApp {
             file_browse_subscription: bus.subscribe(tool_databus::TopicFilter::exact(
                 tool_core::topics::UI_FORM_FILE_BROWSE,
             )),
+            contribution_set_value_subscription: bus.subscribe(tool_databus::TopicFilter::exact(
+                tool_core::topics::UI_CONTRIBUTION_SET_VALUE,
+            )),
             replay_analyzer_job: None,
             replay_analyzer_generation: 0,
             periodic_send_cancel: None,
@@ -318,6 +324,7 @@ impl WorkbenchApp {
             key_recording: None,
             update_state: UpdateState::default(),
             update_state_download_progress: None,
+            contribution_states: std::collections::HashMap::new(),
         };
         app.refresh_ports();
         let enabled: Vec<String> = config

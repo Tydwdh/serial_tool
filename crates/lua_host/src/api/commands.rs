@@ -16,20 +16,52 @@ pub(crate) fn create_commands_api(
 ) -> mlua::Result<Table> {
     let table = lua.create_table()?;
 
+    let reg_bus = bus.clone();
+    let reg_source = source.clone();
+    let reg_pid = plugin_id.clone();
+
     table.set(
         "register",
-        lua.create_function(|lua, (command, handler): (String, Function)| {
+        lua.create_function(move |lua, (command, handler): (String, Function)| {
             let commands: Table = lua.globals().get(PLUGIN_COMMANDS)?;
-            commands.set(command, handler)?;
+            commands.set(command.clone(), handler)?;
+
+            // 通知管理面：命令已注册
+            reg_bus.publish(Event::new(
+                topics::PLUGIN_COMMAND_REGISTERED,
+                reg_source.clone(),
+                Direction::Internal,
+                Payload::Json(json!({
+                    "plugin_id": reg_pid,
+                    "command": command,
+                })),
+            ));
+
             Ok(())
         })?,
     )?;
 
+    let unreg_bus = bus.clone();
+    let unreg_source = source.clone();
+    let unreg_pid = plugin_id.clone();
+
     table.set(
         "unregister",
-        lua.create_function(|lua, command: String| {
+        lua.create_function(move |lua, command: String| {
             let commands: Table = lua.globals().get(PLUGIN_COMMANDS)?;
-            commands.set(command, Value::Nil)?;
+            commands.set(command.clone(), Value::Nil)?;
+
+            // 通知管理面：命令已注销
+            unreg_bus.publish(Event::new(
+                topics::PLUGIN_COMMAND_UNREGISTERED,
+                unreg_source.clone(),
+                Direction::Internal,
+                Payload::Json(json!({
+                    "plugin_id": unreg_pid,
+                    "command": command,
+                })),
+            ));
+
             Ok(())
         })?,
     )?;

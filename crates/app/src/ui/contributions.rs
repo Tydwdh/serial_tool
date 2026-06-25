@@ -19,6 +19,7 @@ struct ResolvedUiContribution {
     order: i32,
     enabled: bool,
     record_send_input: bool,
+    default: serde_json::Value,
 }
 
 impl WorkbenchApp {
@@ -31,6 +32,18 @@ impl WorkbenchApp {
         for item in items {
             self.ui_contribution_item(ui, item);
         }
+    }
+
+    /// 由插件通过 ctx.ui.set_contribution_value 设置 contribution 的运行时状态。
+    /// key 格式：`{plugin_id}:{contribution_id}`，防止跨插件 ID 冲突。
+    pub(crate) fn set_contribution_value(
+        &mut self,
+        plugin_id: &str,
+        contribution_id: &str,
+        value: serde_json::Value,
+    ) {
+        self.contribution_states
+            .insert(format!("{plugin_id}:{contribution_id}"), value);
     }
 
     fn resolved_ui_contributions(&mut self, slot: &str) -> Vec<ResolvedUiContribution> {
@@ -73,6 +86,7 @@ impl WorkbenchApp {
                     order: contribution.order,
                     enabled: contribution.enabled,
                     record_send_input: contribution.record_send_input,
+                    default: contribution.default.clone(),
                 });
             }
         }
@@ -88,12 +102,88 @@ impl WorkbenchApp {
     }
 
     fn ui_contribution_item(&mut self, ui: &mut egui::Ui, item: ResolvedUiContribution) {
+        let state_key = format!("{}:{}", item.plugin_id, item.id);
+
         match item.kind.to_ascii_lowercase().as_str() {
             "separator" => {
                 ui.separator();
             }
             "label" | "status" => {
-                ui.label(egui::RichText::new(item.title).color(theme::TEXT_SECONDARY));
+                // 先从 contribution_states 读运行时 text，否则用静态 title
+                let display_text = self
+                    .contribution_states
+                    .get(&state_key)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&item.title)
+                    .to_owned();
+                ui.label(egui::RichText::new(display_text).color(theme::TEXT_SECONDARY));
+            }
+            "progress" => {
+                let state = self
+                    .contribution_states
+                    .get(&state_key)
+                    .or_else(|| (!item.default.is_null()).then_some(&item.default));
+                let Some(state) = state else {
+                    return;
+                };
+                let value = state
+                    .get("value")
+                    .and_then(|v| v.as_f64())
+                    .or_else(|| state.as_f64())
+                    .unwrap_or(0.0)
+                    .clamp(0.0, 1.0);
+                let text = state.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                if state.get("visible").and_then(|v| v.as_bool()) == Some(false)
+                    || (value <= 0.0 && text.is_empty())
+                {
+                    return;
+                }
+                let response = ui
+                    .horizontal(|ui| {
+                        let response =
+                            ui.add_sized([46.0, 8.0], egui::ProgressBar::new(value as f32));
+                        if !text.is_empty() {
+                            ui.label(egui::RichText::new(text).color(theme::TEXT_SECONDARY));
+                        }
+                        response
+                    })
+                    .inner;
+                if let Some(tooltip) = item.tooltip.as_deref().filter(|t| !t.trim().is_empty()) {
+                    response.on_hover_text(tooltip);
+                }
+            }
+            "toggle" => {
+                let current = self
+                    .contribution_states
+                    .get(&state_key)
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or_else(|| item.default.as_bool().unwrap_or(false));
+
+                let response = ui.selectable_label(current, &item.title);
+                let response = match item.tooltip.as_deref() {
+                    Some(tooltip) if !tooltip.trim().is_empty() => response.on_hover_text(tooltip),
+                    _ => response,
+                };
+
+                if response.clicked() {
+                    // 切换本地状态
+                    self.contribution_states
+                        .insert(state_key.clone(), json!(!current));
+
+                    let payload = json!({
+                        "plugin_id": item.plugin_id,
+                        "contribution_id": item.id,
+                        "slot": item.slot,
+                        "kind": "toggle",
+                        "command": item.command,
+                        "state": !current,
+                        "context": self.ui_contribution_context(&item.slot),
+                    });
+
+                    if let Some(command) = item.command.as_deref() {
+                        self.publish_plugin_command_execute(&item.plugin_id, command, &payload);
+                    }
+                }
             }
             "button" | "small_button" | "" => {
                 let response = ui.add_enabled(item.enabled, egui::Button::new(&item.title));

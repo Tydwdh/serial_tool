@@ -135,6 +135,43 @@ impl PluginsPanel {
             });
         }
 
+        // ── 命令状态（仅 Running 时展示对账结果） ──
+        let declared = &summary.contributes.commands;
+        let registered = &summary.registered_commands;
+        let missing = &summary.missing_commands;
+        let undeclared = &summary.undeclared_commands;
+        let is_running = matches!(summary.state, PluginState::Running);
+
+        if !declared.is_empty() || !registered.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("命令");
+                if is_running {
+                    for cmd in declared {
+                        if registered.iter().any(|r| r == &cmd.id) {
+                            // 声明 + 已注册 → ✓ 绿色
+                            ui.colored_label(theme::GREEN, format!("✓ {}", cmd.id));
+                        } else if missing.iter().any(|m| m == &cmd.id) {
+                            // 声明 + 未注册 → ⚠ 黄色
+                            ui.colored_label(theme::YELLOW, format!("⚠ {}", cmd.id))
+                                .on_hover_text("此命令已在 manifest 声明但尚未注册 handler");
+                        } else {
+                            ui.label(cmd.id.as_str());
+                        }
+                    }
+                    for cmd in undeclared {
+                        // 动态注册但未声明 → ℹ 灰色
+                        ui.colored_label(theme::TEXT_SECONDARY, format!("ℹ {}", cmd))
+                            .on_hover_text("此命令在运行时动态注册，未在 manifest 声明");
+                    }
+                } else {
+                    // 非 Running 状态：只列出声明，不加状态标记
+                    for cmd in declared {
+                        ui.monospace(&cmd.id);
+                    }
+                }
+            });
+        }
+
         if let Some(error) = &summary.last_error {
             ui.colored_label(theme::RED, error);
         }

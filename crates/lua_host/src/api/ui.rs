@@ -167,8 +167,8 @@ pub(crate) fn create_ui_api(
         })?,
     )?;
 
-    let bus_visible = bus;
-    let src_visible = source;
+    let bus_visible = bus.clone();
+    let src_visible = source.clone();
     table.set(
         "set_visible",
         lua.create_function(
@@ -186,6 +186,27 @@ pub(crate) fn create_ui_api(
                 Ok(())
             },
         )?,
+    )?;
+
+    // ctx.ui.set_contribution_value(contribution_id, value)
+    // 用于更新 toggle / progress / label 等 UI contribution 的运行时状态。
+    let bus_scv = bus;
+    let src_scv = source;
+    table.set(
+        "set_contribution_value",
+        lua.create_function(move |_lua, (contribution_id, value): (String, Value)| {
+            bus_scv.publish(Event::new(
+                topics::UI_CONTRIBUTION_SET_VALUE,
+                src_scv.clone(),
+                Direction::Internal,
+                Payload::Json(serde_json::json!({
+                    "panel_id": "__contribution__",
+                    "field_id": contribution_id,
+                    "value": lua_value_to_json(value).unwrap_or(serde_json::Value::Null),
+                })),
+            ));
+            Ok(())
+        })?,
     )?;
 
     Ok(table)

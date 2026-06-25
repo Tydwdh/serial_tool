@@ -381,10 +381,13 @@ local function run_entries(port, entries, use_checksum, task)
     local pos = 1
     local max_done = 0
     task:set_progress(0, total)
+    -- 初始化 contribution 进度
+    ctx.ui.set_contribution_value("demo.gcode-sender.progress", { value = 0, text = "0/" .. total })
 
     while pos <= total do
         if task:is_cancelled() then
             task:set_status("已取消")
+            ctx.ui.set_contribution_value("demo.gcode-sender.progress", { value = 0, text = "" })
             return
         end
         task:wait_if_paused()
@@ -399,6 +402,10 @@ local function run_entries(port, entries, use_checksum, task)
             pos = pos + 1
             max_done = pos - 1
             task:set_progress(max_done, total)
+            ctx.ui.set_contribution_value("demo.gcode-sender.progress", {
+                value = max_done / total,
+                text = string.format("%d/%d", max_done, total)
+            })
         elseif result.kind == "resend" then
             if not use_checksum then
                 log("warn", "raw 模式忽略 Resend: " .. (result.line or ""))
@@ -431,6 +438,10 @@ local function run_entries(port, entries, use_checksum, task)
 
     task:set_progress(total, total)
     task:set_status("发送完成")
+    ctx.ui.set_contribution_value("demo.gcode-sender.progress", {
+        value = 1,
+        text = string.format("%d/%d", total, total)
+    })
     log("info", string.format("发送完成: %d 行", total))
 
     if s.eof_delay_ms > 0 then
@@ -465,6 +476,7 @@ local function start_task(port, entries, use_checksum)
         local ok, err = pcall(run_entries, port, entries, use_checksum, task)
         state.active = false
         state.paused = false
+        ctx.ui.set_contribution_value("demo.gcode-sender.progress", { value = 0, text = "" })
         if not ok then
             task:set_status("插件错误")
             log("error", err)

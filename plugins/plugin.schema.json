@@ -189,11 +189,11 @@
         },
         "slot": {
           "type": "string",
-          "enum": ["send.toolbar"]
+          "enum": ["send.toolbar", "top_bar.left", "top_bar.right", "status_bar.left", "status_bar.right"]
         },
         "kind": {
           "type": "string",
-          "enum": ["button", "small_button", "separator", "label", "status"],
+          "enum": ["button", "small_button", "separator", "label", "status", "toggle", "progress"],
           "default": "button"
         },
         "title": {
@@ -220,7 +220,8 @@
         "record_send_input": {
           "type": "boolean",
           "default": false
-        }
+        },
+        "default": true
       }
     },
     "panelContribution": {
@@ -252,7 +253,34 @@
         "title": {
           "$ref": "#/$defs/nonEmptyString"
         },
-        "default": true
+        "kind": {
+          "type": "string",
+          "enum": ["text", "number", "boolean", "checkbox", "select", "slider", "textarea", "serial"],
+          "default": "text"
+        },
+        "default": true,
+        "options": {
+          "type": "array",
+          "items": {},
+          "default": []
+        },
+        "min": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number"
+        },
+        "step": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "description": {
+          "type": "string"
+        }
       }
     }
   }
