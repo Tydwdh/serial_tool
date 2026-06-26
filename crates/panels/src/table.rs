@@ -29,8 +29,7 @@ impl RowHighlight {
         if !any_popup {
             ui.data_mut(|d| d.remove::<Option<(f32, f32)>>(frozen_y_id));
         }
-        let frozen_y: Option<(f32, f32)> =
-            ui.data_mut(|d| d.get_persisted(frozen_y_id)).flatten();
+        let frozen_y: Option<(f32, f32)> = ui.data_mut(|d| d.get_persisted(frozen_y_id)).flatten();
 
         Self {
             frozen_y,
@@ -72,13 +71,10 @@ impl RowHighlight {
 
     /// 在每行循环内调用：记录该行的 Y 范围，返回行索引。
     /// 参数 `current_y` 是该行顶部 Y，`entry_height` 是该行高度。
-    pub(crate) fn record_row(
-        &mut self,
-        _current_y: f32,
-        _entry_height: f32,
-    ) -> usize {
+    pub(crate) fn record_row(&mut self, _current_y: f32, _entry_height: f32) -> usize {
         let index = self.row_y_ranges.len();
-        self.row_y_ranges.push((_current_y, _current_y + _entry_height));
+        self.row_y_ranges
+            .push((_current_y, _current_y + _entry_height));
         index
     }
 
@@ -95,9 +91,7 @@ impl RowHighlight {
 
         if clicked {
             // 冻结高亮位置
-            let frozen_y = ui
-                .input(|i| i.pointer.hover_pos())
-                .map(|p| (p.y, p.y));
+            let frozen_y = ui.input(|i| i.pointer.hover_pos()).map(|p| (p.y, p.y));
             ui.data_mut(|d| d.insert_persisted(self.frozen_y_id, frozen_y));
 
             // 冻结行索引

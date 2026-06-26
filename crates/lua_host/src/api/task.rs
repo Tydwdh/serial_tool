@@ -370,15 +370,13 @@ fn create_task_methods_table(lua: &Lua) -> mlua::Result<Table> {
         "log",
         lua.create_function(|lua, (task, level, message): (Table, String, String)| {
             let state = get_state_for_task(lua, &task)?;
-            let logs: Table = state
-                .get("logs")
-                .unwrap_or_else(|_| {
-                    lua.create_table().unwrap_or_else(|e| {
-                        log::error!("task:log create_table failed: {e}; log entries will be lost");
-                        // 降级：复用 globals 表作为临时容器（日志会丢失，但任务不会崩溃）
-                        lua.globals()
-                    })
-                });
+            let logs: Table = state.get("logs").unwrap_or_else(|_| {
+                lua.create_table().unwrap_or_else(|e| {
+                    log::error!("task:log create_table failed: {e}; log entries will be lost");
+                    // 降级：复用 globals 表作为临时容器（日志会丢失，但任务不会崩溃）
+                    lua.globals()
+                })
+            });
             let idx = logs.raw_len() + 1;
             let entry = lua.create_table()?;
             entry.set("level", level)?;

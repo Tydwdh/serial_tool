@@ -348,7 +348,11 @@ impl WorkbenchApp {
         }
 
         // SAFETY: we returned early above if target_port is None
-        let port = self.send.target_port.clone().expect("target_port was checked non-None above");
+        let port = self
+            .send
+            .target_port
+            .clone()
+            .expect("target_port was checked non-None above");
         let open = self.transport.status_port(&port).open;
 
         ui.add_enabled_ui(open, |ui| {

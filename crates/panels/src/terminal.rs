@@ -1182,11 +1182,14 @@ fn render_rows_view(
                 &ctx_response,
                 ui.make_persistent_id(("term-frozen-row", scroll_key)),
             );
-            let hovered_row: Option<(String, String)> = if ctx_response.context_menu_opened() || ctx_response.clicked_by(egui::PointerButton::Secondary) {
+            let hovered_row: Option<(String, String)> = if ctx_response.context_menu_opened()
+                || ctx_response.clicked_by(egui::PointerButton::Secondary)
+            {
                 frozen_row_idx
             } else {
                 hl.hover_index(ui)
-            }.and_then(|idx| {
+            }
+            .and_then(|idx| {
                 rows.get(idx).map(|row| {
                     let content = row_content_text(row, show_hex, show_raw);
                     let content_only = if show_raw {
@@ -1196,7 +1199,10 @@ fn render_rows_view(
                     };
                     let port = row.port.as_deref().unwrap_or("");
                     let (dir_label, _) = direction_label(row.direction);
-                    let full_line = format!("{} {} {} {}", row.timestamp_label, port, dir_label, content_only);
+                    let full_line = format!(
+                        "{} {} {} {}",
+                        row.timestamp_label, port, dir_label, content_only
+                    );
                     (full_line, content_only)
                 })
             });

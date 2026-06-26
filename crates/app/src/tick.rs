@@ -278,7 +278,10 @@ impl WorkbenchApp {
         if let Some((key_name, modifiers)) = Self::capture_key_for_recording(ctx) {
             // SAFETY: tick_key_recording starts by checking key_recording.is_none() and returns
             // early, and there's no async yield point between that guard and here.
-            let action = self.key_recording.take().expect("key_recording was checked non-None above");
+            let action = self
+                .key_recording
+                .take()
+                .expect("key_recording was checked non-None above");
             let new_binding =
                 KeyBinding::new(&key_name, modifiers.ctrl, modifiers.shift, modifiers.alt);
 

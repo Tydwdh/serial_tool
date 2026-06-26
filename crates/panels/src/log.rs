@@ -342,9 +342,13 @@ fn render_log_rows(
             let text_color = ui.style().visuals.text_color();
 
             // 标签列总宽度
-            let label_width = ROW_LEFT_PADDING + TIME_COL_WIDTH + COL_GAP
-                + LEVEL_COL_WIDTH + COL_GAP
-                + SOURCE_COL_WIDTH + LABEL_TO_MSG_GAP;
+            let label_width = ROW_LEFT_PADDING
+                + TIME_COL_WIDTH
+                + COL_GAP
+                + LEVEL_COL_WIDTH
+                + COL_GAP
+                + SOURCE_COL_WIDTH
+                + LABEL_TO_MSG_GAP;
             let message_width = (full_width - label_width).max(40.0);
             let text_padding = 4.0;
             let galley_width = (message_width - text_padding).max(0.0);
@@ -430,7 +434,10 @@ fn render_log_rows(
                 // 来源（裁剪）
                 let source_clip = egui::Rect::from_min_max(
                     egui::pos2(x, current_y),
-                    egui::pos2((x + SOURCE_COL_WIDTH).min(label_rect.right()), current_y + entry_height),
+                    egui::pos2(
+                        (x + SOURCE_COL_WIDTH).min(label_rect.right()),
+                        current_y + entry_height,
+                    ),
                 );
                 let source_painter = label_painter.with_clip_rect(source_clip);
                 let source_text = crate::compact_middle(&entry.source, SOURCE_TEXT_MAX_CHARS);
@@ -450,7 +457,12 @@ fn render_log_rows(
                         egui::pos2(message_rect.left(), current_y),
                         egui::vec2(message_width, entry_height),
                     );
-                    let row_id = ui.make_persistent_id(("log-msg", entry.timestamp_label.as_str(), entry.source.as_str(), entry.message.as_str()));
+                    let row_id = ui.make_persistent_id((
+                        "log-msg",
+                        entry.timestamp_label.as_str(),
+                        entry.source.as_str(),
+                        entry.message.as_str(),
+                    ));
                     let response = ui.interact(row_text_rect, row_id, Sense::click_and_drag());
 
                     LabelSelectionState::label_text_selection(
@@ -473,11 +485,14 @@ fn render_log_rows(
                 &ctx_response,
                 ui.make_persistent_id(("log-frozen-row", LOG_SCROLL_ID)),
             );
-            let hovered_row = if ctx_response.context_menu_opened() || ctx_response.clicked_by(egui::PointerButton::Secondary) {
+            let hovered_row = if ctx_response.context_menu_opened()
+                || ctx_response.clicked_by(egui::PointerButton::Secondary)
+            {
                 frozen_row_idx
             } else {
                 hl.hover_index(ui)
-            }.and_then(|idx| {
+            }
+            .and_then(|idx| {
                 rows.get(idx).map(|entry| {
                     let line = format!(
                         "{} {} {} {}",
@@ -666,11 +681,7 @@ mod tests {
         assert_eq!(rows[0].message, "就绪");
 
         panel.search_text.clear();
-        let rows: Vec<&LogEntry> = panel
-            .entries
-            .iter()
-            .filter(|_| true)
-            .collect();
+        let rows: Vec<&LogEntry> = panel.entries.iter().filter(|_| true).collect();
         assert_eq!(rows.len(), 2);
     }
 
@@ -693,11 +704,7 @@ mod tests {
         });
 
         panel.source_filter = Some("app".into());
-        let rows: Vec<&LogEntry> = panel
-            .entries
-            .iter()
-            .filter(|e| e.source == "app")
-            .collect();
+        let rows: Vec<&LogEntry> = panel.entries.iter().filter(|e| e.source == "app").collect();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].source, "app");
 
