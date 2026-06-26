@@ -8,7 +8,7 @@ use tool_transport::{TransportManager, hex_preview, send_impl_to};
 
 use crate::theme;
 
-const MAX_SEND_HISTORY: usize = 50;
+const MAX_SEND_HISTORY: usize = 200;
 
 /// 发送面板状态。
 pub struct SenderPanel {
@@ -124,7 +124,12 @@ impl SenderPanel {
         if self.send_history.is_empty() {
             return;
         }
-        let entries: Vec<String> = self.send_history.iter().take(20).cloned().collect();
+        let entries: Vec<String> = self
+            .send_history
+            .iter()
+            .take(MAX_SEND_HISTORY)
+            .cloned()
+            .collect();
         ui.separator();
         egui::ComboBox::from_id_salt(id_salt)
             .width(140.0)

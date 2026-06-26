@@ -422,7 +422,13 @@ impl WorkbenchApp {
             return;
         }
 
-        let entries: Vec<String> = self.send.send_history.iter().take(20).cloned().collect();
+        let entries: Vec<String> = self
+            .send
+            .send_history
+            .iter()
+            .take(MAX_SEND_HISTORY)
+            .cloned()
+            .collect();
         ui.separator();
         egui::ComboBox::from_id_salt(id_salt)
             .width(140.0)
