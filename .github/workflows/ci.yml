@@ -5,6 +5,7 @@ on:
     branches: [main]
     tags:
       - 'v*'
+      - 'V*'
   pull_request:
     branches: [main]
 
@@ -68,13 +69,22 @@ jobs:
         with:
           name: hardware-workbench-windows
 
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Hardware Workbench ${{ github.ref_name }}
+          files: |
+            hardware-workbench-app.zip
+            HardwareWorkbenchSetup.exe
+          generate_release_notes: true
+
       - name: Generate and commit update.json
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           $branch = "${{ github.event.repository.default_branch }}"
           $tag = "${{ github.ref_name }}"
-          $version = $tag.TrimStart('v')
+          $version = $tag -replace '^[vV]', ''
           $chinaTime = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId((Get-Date), "China Standard Time")
           $date = $chinaTime.ToString("yyyy-MM-dd")
           $downloadUrl = "https://github.com/Tydwdh/serial_tool/releases/download/$tag/hardware-workbench-app.zip"
@@ -95,12 +105,3 @@ jobs:
             git commit -m "Update update.json for ${{ github.ref_name }}"
             git push origin "HEAD:$branch"
           }
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: Hardware Workbench ${{ github.ref_name }}
-          files: |
-            hardware-workbench-app.zip
-            HardwareWorkbenchSetup.exe
-          generate_release_notes: true
