@@ -315,11 +315,28 @@ impl WorkbenchApp {
                     ..
                 } = event
                 {
+                    // 过滤修饰键本身：Ctrl/Shift/Alt/Meta 键不应被录制为主体按键
+                    if Self::is_modifier_key(*key) {
+                        continue;
+                    }
                     return Some((format!("{key:?}"), *modifiers));
                 }
             }
             None
         })
+    }
+
+    /// 判断按键是否为修饰键（Ctrl/Shift/Alt 本身），这些键不应被录制为快捷键的主体。
+    fn is_modifier_key(key: egui::Key) -> bool {
+        matches!(
+            key,
+            egui::Key::ControlLeft
+                | egui::Key::ControlRight
+                | egui::Key::ShiftLeft
+                | egui::Key::ShiftRight
+                | egui::Key::AltLeft
+                | egui::Key::AltRight
+        )
     }
 
     /// 录制状态检测：收割已停止的录制、worker 线程错误反馈。

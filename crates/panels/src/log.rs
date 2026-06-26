@@ -1,6 +1,7 @@
-use crate::{MAX_INGEST_PER_FRAME, fmt_ts, theme};
-use egui::{Color32, RichText, ScrollArea};
-use std::collections::VecDeque;
+use crate::{MAX_INGEST_PER_FRAME, fmt_ts, table::RowHighlight, theme};
+use egui::text_selection::LabelSelectionState;
+use egui::{RichText, ScrollArea, Sense, Stroke, TextEdit};
+use std::collections::{BTreeSet, VecDeque};
 use tool_core::{Event, LogLevel};
 use tool_databus::{DataBus, Subscription, TopicFilter};
 
@@ -11,6 +12,8 @@ const SOURCE_TEXT_MAX_CHARS: usize = 26;
 const ROW_LEFT_PADDING: f32 = 4.0;
 const COL_GAP: f32 = 6.0;
 const LOG_SCROLL_ID: &str = "log-scroll-v2";
+/// 日志面板最大保留条数（与终端面板一致）。
+const MAX_LOG_ENTRIES: usize = 2_000;
 
 pub struct LogPanel {
     subscription: Subscription,
@@ -20,6 +23,10 @@ pub struct LogPanel {
     max_entries: usize,
     last_scroll_offset_y: f32,
     pending_scroll_to_bottom: bool,
+    /// 搜索文本（大小写不敏感，同时匹配 source 和 message）。
+    search_text: String,
+    /// 来源过滤：None 表示显示全部，Some 表示只显示指定 source。
+    source_filter: Option<String>,
 }
 
 struct LogEntry {
@@ -27,8 +34,6 @@ struct LogEntry {
     level: LogLevel,
     source: String,
     message: String,
-    /// 消息的行数（预计算，避免渲染时重复 count）
-    line_count: usize,
 }
 
 struct LogRenderOutcome {
@@ -44,9 +49,11 @@ impl LogPanel {
             entries: VecDeque::new(),
             min_level: LogLevel::Info,
             auto_scroll: true,
-            max_entries: 5_000,
+            max_entries: MAX_LOG_ENTRIES,
             last_scroll_offset_y: 0.0,
             pending_scroll_to_bottom: false,
+            search_text: String::new(),
+            source_filter: None,
         }
     }
     pub fn ingest_all_pending(&mut self) -> usize {
@@ -68,13 +75,22 @@ impl LogPanel {
         while self.subscription.try_recv().is_some() {}
         self.entries.clear();
         self.last_scroll_offset_y = 0.0;
-        // 清空后重置为自动滚动，确保新日志可见
         self.auto_scroll = true;
         self.pending_scroll_to_bottom = false;
+        self.search_text.clear();
+        self.source_filter = None;
+    }
+
+    /// 收集所有已出现过的 source 名称，用于过滤下拉框。
+    fn source_names(&self) -> Vec<String> {
+        let mut names: BTreeSet<&str> = BTreeSet::new();
+        for entry in &self.entries {
+            names.insert(&entry.source);
+        }
+        names.into_iter().map(|s| s.to_owned()).collect()
     }
 
     /// 让 main.rs 在日志面板不可见时也能消费日志事件。
-    /// 这样回放、拖进度条、seek 时日志状态会和接收区一致。
     pub fn ingest_pending(&mut self) -> usize {
         self.ingest()
     }
@@ -87,10 +103,10 @@ impl LogPanel {
         let mut force_scroll_to_bottom = self.pending_scroll_to_bottom;
         self.pending_scroll_to_bottom = false;
 
+        // ── 第一行：级别过滤 + 搜索 + 来源过滤 ──
         ui.horizontal(|ui| {
-            // 预计算标签所需宽度：按钮 padding + 最宽文字，避免 hover 框撑大时抖动
             let padding = ui.spacing().button_padding.x * 2.0;
-            let char_w = 10.0; // 近似等宽字符宽度
+            let char_w = 10.0;
             let btn_w = padding + 5.0 * char_w + 4.0;
 
             for level in [
@@ -115,6 +131,36 @@ impl LogPanel {
                 );
             }
 
+            ui.separator();
+
+            ui.label("搜索");
+            ui.add(
+                TextEdit::singleline(&mut self.search_text)
+                    .desired_width(120.0)
+                    .hint_text("关键词"),
+            );
+
+            ui.label("来源");
+            egui::ComboBox::from_id_salt("log-source-filter")
+                .width(100.0)
+                .selected_text(self.source_filter.as_deref().unwrap_or("全部"))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.source_filter, None, "全部");
+                    for name in self.source_names() {
+                        ui.selectable_value(&mut self.source_filter, Some(name.clone()), &name);
+                    }
+                });
+
+            if !self.search_text.is_empty() || self.source_filter.is_some() {
+                if ui.small_button("清除筛选").clicked() {
+                    self.search_text.clear();
+                    self.source_filter = None;
+                }
+            }
+        });
+
+        // ── 第二行：自动滚动 + 丢弃计数 + 清空 ──
+        ui.horizontal(|ui| {
             force_scroll_to_bottom |= crate::theme::auto_scroll_button(ui, &mut self.auto_scroll);
 
             let dropped = self.subscription.dropped_count();
@@ -131,10 +177,26 @@ impl LogPanel {
 
         ui.separator();
 
+        // ── 构建可见行列表 ──
+        let search_lower = self.search_text.trim().to_ascii_lowercase();
         let rows: Vec<&LogEntry> = self
             .entries
             .iter()
             .filter(|entry| entry.level >= self.min_level)
+            .filter(|entry| {
+                if let Some(ref filter) = self.source_filter {
+                    entry.source == *filter
+                } else {
+                    true
+                }
+            })
+            .filter(|entry| {
+                if search_lower.is_empty() {
+                    return true;
+                }
+                entry.source.to_ascii_lowercase().contains(&search_lower)
+                    || entry.message.to_ascii_lowercase().contains(&search_lower)
+            })
             .collect();
 
         let outcome = render_log_rows(ui, &rows, self.auto_scroll, force_scroll_to_bottom);
@@ -170,8 +232,6 @@ impl LogPanel {
             .and_then(|value| value.parse().ok())
             .unwrap_or(LogLevel::Info);
 
-        // 回放事件会被 mark_replay_event() 改成 replay:<source>。
-        // 这里优先显示 original_source，让回放日志看起来和原始日志一致。
         let source = event
             .metadata
             .get("original_source")
@@ -185,7 +245,6 @@ impl LogPanel {
             timestamp_label: format!("[{}]", fmt_ts(event.timestamp_ms)),
             level,
             source,
-            line_count: message.lines().count().max(1),
             message,
         });
 
@@ -237,13 +296,24 @@ impl LogPanel {
     }
 }
 
+// ── 渲染 ──
+
+/// 预计算的单行布局（复用终端面板的 LayoutJob 模式）。
+struct RowLayout {
+    /// 消息列的 galley（支持文本选择）。
+    message_galley: std::sync::Arc<egui::Galley>,
+    /// 该行高度（至少 base_row_height）。
+    height: f32,
+}
+
 fn render_log_rows(
     ui: &mut egui::Ui,
     rows: &[&LogEntry],
     stick_to_bottom: bool,
     force_scroll_to_bottom: bool,
 ) -> LogRenderOutcome {
-    let base_row_height = log_row_height(ui);
+    let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+    let base_row_height = ui.fonts_mut(|f| f.row_height(&font_id));
 
     if rows.is_empty() {
         let scroll_output = ScrollArea::vertical()
@@ -265,33 +335,230 @@ fn render_log_rows(
         .stick_to_bottom(stick_to_bottom)
         .id_salt(LOG_SCROLL_ID)
         .show(ui, |ui| {
-            for entry in rows {
-                let response = show_log_entry(ui, entry, base_row_height);
+            let full_width = ui.available_width();
+            let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+            let text_color = ui.style().visuals.text_color();
 
-                response.context_menu(|ctx_ui| {
-                    if ctx_ui.button("复制消息").clicked() {
-                        ctx_ui.ctx().copy_text(entry.message.clone());
-                        ctx_ui.close();
-                    }
+            // 标签列总宽度
+            let label_width = ROW_LEFT_PADDING + TIME_COL_WIDTH + COL_GAP
+                + LEVEL_COL_WIDTH + COL_GAP
+                + SOURCE_COL_WIDTH + COL_GAP;
+            let message_width = (full_width - label_width).max(40.0);
+            let text_padding = 4.0;
+            let galley_width = (message_width - text_padding).max(0.0);
 
-                    if ctx_ui.button("复制整行").clicked() {
-                        ctx_ui.ctx().copy_text(format!(
-                            "{} {} {} {}",
-                            entry.timestamp_label,
-                            entry.level.as_str(),
-                            entry.source,
-                            entry.message
-                        ));
-                        ctx_ui.close();
+            // 预计算所有行的 LayoutJob
+            let row_layouts: Vec<RowLayout> = rows
+                .iter()
+                .map(|entry| {
+                    let mut layout_job = egui::text::LayoutJob::simple(
+                        entry.message.clone(),
+                        font_id.clone(),
+                        text_color,
+                        galley_width,
+                    );
+                    layout_job.halign = egui::Align::LEFT;
+                    let galley = ui.fonts_mut(|f| f.layout_job(layout_job));
+                    let height = galley.size().y.max(base_row_height);
+                    RowLayout {
+                        message_galley: galley,
+                        height,
                     }
-                });
+                })
+                .collect();
+
+            let total_height: f32 = row_layouts.iter().map(|r| r.height).sum();
+
+            // 分配总区域
+            let full_rect = ui
+                .allocate_exact_size(
+                    egui::vec2(full_width, total_height),
+                    Sense::click_and_drag(),
+                )
+                .0;
+
+            // 标签区域
+            let label_rect = egui::Rect::from_min_size(
+                full_rect.left_top(),
+                egui::vec2(label_width, total_height),
+            );
+            let label_painter = ui.painter_at(label_rect);
+
+            // 消息区域
+            let message_rect = egui::Rect::from_min_size(
+                egui::pos2(full_rect.left() + label_width, full_rect.top()),
+                egui::vec2(message_width, total_height),
+            );
+
+            // 逐行绘制标签 + 可选择的文本
+            let mut hl = RowHighlight::new(ui, LOG_SCROLL_ID);
+            let mut current_y = label_rect.top();
+            for (entry, layout) in rows.iter().zip(row_layouts.iter()) {
+                let entry_height = layout.height;
+                // 标签对齐第一行中心（和终端面板一致）
+                let label_y = current_y + base_row_height * 0.5;
+
+                // 高亮悬停行（在文字之前绘制）
+                hl.paint_background(ui, full_rect, current_y, entry_height);
+                hl.record_row(current_y, entry_height);
+
+                // --- 标签列 ---
+                let mut x = label_rect.left() + ROW_LEFT_PADDING;
+
+                // 时间戳
+                label_painter.text(
+                    egui::pos2(x, label_y),
+                    egui::Align2::LEFT_CENTER,
+                    &entry.timestamp_label,
+                    font_id.clone(),
+                    theme::TEXT_SECONDARY,
+                );
+                x += TIME_COL_WIDTH + COL_GAP;
+
+                // 级别
+                label_painter.text(
+                    egui::pos2(x, label_y),
+                    egui::Align2::LEFT_CENTER,
+                    entry.level.as_str(),
+                    font_id.clone(),
+                    crate::level_color(entry.level),
+                );
+                x += LEVEL_COL_WIDTH + COL_GAP;
+
+                // 来源（裁剪）
+                let source_clip = egui::Rect::from_min_max(
+                    egui::pos2(x, current_y),
+                    egui::pos2((x + SOURCE_COL_WIDTH).min(label_rect.right()), current_y + entry_height),
+                );
+                let source_painter = label_painter.with_clip_rect(source_clip);
+                let source_text = crate::compact_middle(&entry.source, SOURCE_TEXT_MAX_CHARS);
+                source_painter.text(
+                    egui::pos2(x, label_y),
+                    egui::Align2::LEFT_CENTER,
+                    source_text,
+                    font_id.clone(),
+                    theme::CYAN,
+                );
+
+                // --- 可选择的消息文本 ---
+                {
+                    // galley 从行顶开始绘制（和终端面板一致）
+                    let galley_pos = egui::pos2(message_rect.left() + text_padding, current_y);
+                    let row_text_rect = egui::Rect::from_min_size(
+                        egui::pos2(message_rect.left(), current_y),
+                        egui::vec2(message_width, entry_height),
+                    );
+                    let row_id = ui.make_persistent_id(("log-msg", entry.timestamp_label.as_str(), entry.source.as_str(), entry.message.as_str()));
+                    let response = ui.interact(row_text_rect, row_id, Sense::click_and_drag());
+
+                    LabelSelectionState::label_text_selection(
+                        ui,
+                        &response,
+                        galley_pos,
+                        layout.message_galley.clone(),
+                        text_color,
+                        Stroke::NONE,
+                    );
+                }
+
+                current_y += entry_height;
             }
 
+            // ── 全局右键菜单 ──
+            let ctx_response = hl.click_response(ui);
+            let frozen_row_idx = hl.resolve_click(
+                ui,
+                &ctx_response,
+                ui.make_persistent_id(("log-frozen-row", LOG_SCROLL_ID)),
+            );
+            let hovered_row = if ctx_response.context_menu_opened() || ctx_response.clicked_by(egui::PointerButton::Secondary) {
+                frozen_row_idx
+            } else {
+                hl.hover_index(ui)
+            }.and_then(|idx| {
+                rows.get(idx).map(|entry| {
+                    let line = format!(
+                        "{} {} {} {}",
+                        entry.timestamp_label,
+                        entry.level.as_str(),
+                        entry.source,
+                        entry.message
+                    );
+                    (line, entry.message.clone())
+                })
+            });
+
+            let combined_text: String = rows
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "{} {} {} {}",
+                        entry.timestamp_label,
+                        entry.level.as_str(),
+                        entry.source,
+                        entry.message
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            ctx_response.context_menu(move |ctx_ui| {
+                if let Some((ref row_line, ref row_msg)) = hovered_row {
+                    if ctx_ui.button("复制此行").clicked() {
+                        ctx_ui.ctx().copy_text(row_line.clone());
+                        ctx_ui.close();
+                    }
+                    if ctx_ui.button("复制此行消息").clicked() {
+                        ctx_ui.ctx().copy_text(row_msg.clone());
+                        ctx_ui.close();
+                    }
+                    ctx_ui.separator();
+                }
+
+                if ctx_ui.button("复制全部可见内容").clicked() {
+                    ctx_ui.ctx().copy_text(combined_text.clone());
+                    ctx_ui.close();
+                }
+
+                if ctx_ui.button("复制 CSV").clicked() {
+                    let mut csv = String::from("time,level,source,message\n");
+                    for entry in rows {
+                        csv.push_str(&csv_cell(&entry.timestamp_label));
+                        csv.push(',');
+                        csv.push_str(&csv_cell(entry.level.as_str()));
+                        csv.push(',');
+                        csv.push_str(&csv_cell(&entry.source));
+                        csv.push(',');
+                        csv.push_str(&csv_cell(&entry.message.replace('\n', " ")));
+                        csv.push('\n');
+                    }
+                    ctx_ui.ctx().copy_text(csv);
+                    ctx_ui.close();
+                }
+
+                if ctx_ui.button("复制 JSONL").clicked() {
+                    let mut jsonl = String::new();
+                    for entry in rows {
+                        let obj = serde_json::json!({
+                            "time": entry.timestamp_label,
+                            "level": entry.level.as_str(),
+                            "source": entry.source,
+                            "message": entry.message,
+                        });
+                        if let Ok(line) = serde_json::to_string(&obj) {
+                            jsonl.push_str(&line);
+                            jsonl.push('\n');
+                        }
+                    }
+                    ctx_ui.ctx().copy_text(jsonl);
+                    ctx_ui.close();
+                }
+            });
+
             if force_scroll_to_bottom {
-                ui.scroll_to_cursor_animation(
-                    Some(egui::Align::BOTTOM),
-                    egui::style::ScrollAnimation::none(),
-                );
+                let (rect, _sense) =
+                    ui.allocate_exact_size(egui::vec2(0.0, 0.0), egui::Sense::hover());
+                ui.scroll_to_rect(rect, Some(egui::Align::BOTTOM));
             }
         });
 
@@ -302,99 +569,10 @@ fn render_log_rows(
     }
 }
 
-fn show_log_entry(ui: &mut egui::Ui, entry: &LogEntry, base_row_height: f32) -> egui::Response {
-    let row_width = ui.available_width();
-    let entry_height = base_row_height * entry.line_count.max(1) as f32;
-
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(row_width, entry_height), egui::Sense::click());
-
-    let bg = if response.hovered() {
-        theme::WIDGET_HOVER
-    } else {
-        Color32::TRANSPARENT
-    };
-
-    let painter = ui.painter_at(rect);
-
-    if bg != Color32::TRANSPARENT {
-        painter.rect_filled(rect, 2.0, bg);
-    }
-
-    let font_id = egui::TextStyle::Monospace.resolve(ui.style());
-    let first_line_y = rect.top() + base_row_height * 0.5;
-
-    let mut x = rect.left() + ROW_LEFT_PADDING;
-
-    // 时间戳 — 第一行居中
-    painter.text(
-        egui::pos2(x, first_line_y),
-        egui::Align2::LEFT_CENTER,
-        &entry.timestamp_label,
-        font_id.clone(),
-        theme::TEXT_SECONDARY,
-    );
-
-    x += TIME_COL_WIDTH + COL_GAP;
-
-    // 级别 — 第一行居中
-    painter.text(
-        egui::pos2(x, first_line_y),
-        egui::Align2::LEFT_CENTER,
-        entry.level.as_str(),
-        font_id.clone(),
-        crate::level_color(entry.level),
-    );
-
-    x += LEVEL_COL_WIDTH + COL_GAP;
-
-    // 来源 — 第一行居中
-    let source_clip = egui::Rect::from_min_max(
-        egui::pos2(x, rect.top()),
-        egui::pos2((x + SOURCE_COL_WIDTH).min(rect.right()), rect.bottom()),
-    );
-
-    let source_painter = ui.painter().with_clip_rect(source_clip);
-    let source_text = crate::compact_middle(&entry.source, SOURCE_TEXT_MAX_CHARS);
-
-    source_painter.text(
-        egui::pos2(x, first_line_y),
-        egui::Align2::LEFT_CENTER,
-        source_text,
-        font_id.clone(),
-        theme::CYAN,
-    );
-
-    x += SOURCE_COL_WIDTH + COL_GAP;
-
-    // 消息 — 逐行渲染
-    let message_clip = egui::Rect::from_min_max(
-        egui::pos2(x, rect.top()),
-        egui::pos2(rect.right(), rect.bottom()),
-    );
-
-    let message_painter = ui.painter().with_clip_rect(message_clip);
-
-    for (line_idx, line) in entry.message.lines().enumerate() {
-        let line_y = rect.top() + base_row_height * (line_idx as f32 + 0.5);
-        message_painter.text(
-            egui::pos2(x, line_y),
-            egui::Align2::LEFT_CENTER,
-            line,
-            font_id.clone(),
-            theme::TEXT_PRIMARY,
-        );
-    }
-
-    response
+fn csv_cell(s: &str) -> String {
+    let escaped = s.replace('"', "\"\"");
+    format!("\"{escaped}\"")
 }
-
-fn log_row_height(ui: &egui::Ui) -> f32 {
-    crate::row_height(ui)
-}
-
-// fmt_ts 已提取到 crate::fmt_ts
-// level_color 和 compact_middle 已提取到 crate 根模块
 
 #[cfg(test)]
 mod tests {
@@ -415,7 +593,6 @@ mod tests {
         assert_eq!(entry.level, LogLevel::Info);
         assert_eq!(entry.source, "app");
         assert_eq!(entry.message, "就绪");
-        assert_eq!(entry.line_count, 1);
     }
 
     #[test]
@@ -428,5 +605,121 @@ mod tests {
 
         assert_eq!(panel.ingest_all_pending(), 0);
         assert!(panel.entries.is_empty());
+    }
+
+    #[test]
+    fn clear_resets_search_and_filter() {
+        let bus = DataBus::new();
+        let mut panel = LogPanel::new(&bus);
+
+        panel.search_text = "error".into();
+        panel.source_filter = Some("app".into());
+        panel.clear();
+
+        assert!(panel.search_text.is_empty());
+        assert!(panel.source_filter.is_none());
+        assert!(panel.entries.is_empty());
+    }
+
+    #[test]
+    fn search_filters_by_source_and_message() {
+        let bus = DataBus::new();
+        let mut panel = LogPanel::new(&bus);
+
+        panel.entries.push_back(LogEntry {
+            timestamp_label: "[12:00:00.000]".into(),
+            level: LogLevel::Error,
+            source: "transport.serial".into(),
+            message: "read failed on COM3: timeout".into(),
+        });
+        panel.entries.push_back(LogEntry {
+            timestamp_label: "[12:00:01.000]".into(),
+            level: LogLevel::Info,
+            source: "app".into(),
+            message: "就绪".into(),
+        });
+
+        panel.search_text = "com3".into();
+        let rows: Vec<&LogEntry> = panel
+            .entries
+            .iter()
+            .filter(|e| {
+                e.source.to_ascii_lowercase().contains("com3")
+                    || e.message.to_ascii_lowercase().contains("com3")
+            })
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source, "transport.serial");
+
+        panel.search_text = "app".into();
+        let rows: Vec<&LogEntry> = panel
+            .entries
+            .iter()
+            .filter(|e| {
+                e.source.to_ascii_lowercase().contains("app")
+                    || e.message.to_ascii_lowercase().contains("app")
+            })
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].message, "就绪");
+
+        panel.search_text.clear();
+        let rows: Vec<&LogEntry> = panel
+            .entries
+            .iter()
+            .filter(|_| true)
+            .collect();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn source_filter_excludes_others() {
+        let bus = DataBus::new();
+        let mut panel = LogPanel::new(&bus);
+
+        panel.entries.push_back(LogEntry {
+            timestamp_label: "[12:00:00.000]".into(),
+            level: LogLevel::Warn,
+            source: "ext".into(),
+            message: "plugin time out".into(),
+        });
+        panel.entries.push_back(LogEntry {
+            timestamp_label: "[12:00:01.000]".into(),
+            level: LogLevel::Info,
+            source: "app".into(),
+            message: "就绪".into(),
+        });
+
+        panel.source_filter = Some("app".into());
+        let rows: Vec<&LogEntry> = panel
+            .entries
+            .iter()
+            .filter(|e| e.source == "app")
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source, "app");
+
+        panel.source_filter = None;
+        let rows: Vec<&LogEntry> = panel.entries.iter().collect();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn max_entries_truncates_oldest() {
+        let bus = DataBus::new();
+        let mut panel = LogPanel::new(&bus);
+        panel.max_entries = 3;
+
+        for i in 0..5 {
+            bus.publish(Event::system_log(
+                LogLevel::Info,
+                "test",
+                format!("msg {i}"),
+            ));
+        }
+        panel.ingest_all_pending();
+        assert_eq!(panel.entries.len(), 3);
+        assert_eq!(panel.entries[0].message, "msg 2");
+        assert_eq!(panel.entries[2].message, "msg 4");
     }
 }

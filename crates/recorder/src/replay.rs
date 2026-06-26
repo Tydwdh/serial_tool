@@ -67,6 +67,9 @@ pub struct ReplayStatus {
 pub struct ReplayManager {
     bus: DataBus,
     events: Vec<Event>,
+    /// 按时间戳的稀疏索引：每 INDEX_STRIDE 个事件记录一个 (timestamp_ms, index) 条目。
+    /// 用于 seek_ms 时二分查找，将 O(n) 降为 O(log n)。
+    timestamp_index: Vec<(u64, usize)>,
     path: Option<PathBuf>,
     cursor: usize,
     state: ReplayState,
@@ -86,11 +89,16 @@ pub struct ReplayManager {
     bookmarks: Vec<u64>,
 }
 
+/// 稀疏索引入口间隔：每 INDEX_STRIDE 个事件记录一条索引。
+/// 200 是平衡内存开销和查找精度的选择（50 万事件 ≈ 2500 条索引 ≈ 40KB）。
+const INDEX_STRIDE: usize = 200;
+
 impl ReplayManager {
     pub fn new(bus: DataBus) -> Self {
         Self {
             bus,
             events: Vec::new(),
+            timestamp_index: Vec::new(),
             path: None,
             cursor: 0,
             state: ReplayState::Empty,
@@ -184,12 +192,16 @@ impl ReplayManager {
         });
         events.sort_by_key(|event| (event.timestamp_ms, event.id));
 
+        // 构建稀疏时间戳索引：每 INDEX_STRIDE 事件记录一条
+        let timestamp_index = build_timestamp_index(&events);
+
         // 扫描是否存在录制的 protocol.*（非 replay 事件）
         self.has_recorded_protocol = events
             .iter()
             .any(|e| e.topic.starts_with("protocol.") && !e.is_replay());
 
         self.events = events;
+        self.timestamp_index = timestamp_index;
         self.path = Some(path.clone());
         self.cursor = 0;
         self.position_at_start_ms = 0;
@@ -406,10 +418,24 @@ impl ReplayManager {
 
     pub fn seek_ms(&mut self, position_ms: u64) {
         let base = self.base_timestamp_ms().unwrap_or_default();
-        self.cursor = self
-            .events
+        // 二分查找跳表，找到 >= target 的最小索引位置
+        let start_idx = self
+            .timestamp_index
+            .binary_search_by_key(&(base.saturating_add(position_ms)), |(ts, _)| *ts)
+            .map(|exact| self.timestamp_index[exact].1)
+            .unwrap_or_else(|insert| {
+                // insert 是 >= target 的第一个位置，它的前一个 < target
+                if insert > 0 {
+                    self.timestamp_index[insert - 1].1
+                } else {
+                    0
+                }
+            });
+        // 从索引位置线性扫描剩余的 < INDEX_STRIDE 个事件
+        self.cursor = self.events[start_idx..]
             .iter()
             .position(|event| event.timestamp_ms.saturating_sub(base) >= position_ms)
+            .map(|offset| start_idx + offset)
             .unwrap_or(self.events.len());
         self.position_at_start_ms = position_ms.min(self.duration_ms());
         self.replay_start = if self.state == ReplayState::Playing {
@@ -842,6 +868,17 @@ impl ReplayManager {
     fn base_timestamp_ms(&self) -> Option<u64> {
         self.events.first().map(|event| event.timestamp_ms)
     }
+}
+
+/// 构建稀疏时间戳索引：每 INDEX_STRIDE 个事件记录一条 (timestamp_ms, index)。
+/// 索引保证按时间戳单调递增（events 已排序），可用于二分查找。
+fn build_timestamp_index(events: &[Event]) -> Vec<(u64, usize)> {
+    events
+        .iter()
+        .enumerate()
+        .step_by(INDEX_STRIDE)
+        .map(|(i, e)| (e.timestamp_ms, i))
+        .collect()
 }
 
 fn mark_replay_event(mut event: Event) -> Event {

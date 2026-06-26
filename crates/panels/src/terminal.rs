@@ -1,4 +1,4 @@
-use crate::{MAX_INGEST_PER_FRAME, fmt_ts, theme};
+use crate::{MAX_INGEST_PER_FRAME, fmt_ts, table::RowHighlight, theme};
 use egui::text_selection::LabelSelectionState;
 use egui::{Color32, RichText, ScrollArea, Sense, Stroke};
 use std::borrow::Cow;
@@ -1092,10 +1092,15 @@ fn render_rows_view(
             let label_painter = ui.painter_at(label_rect);
 
             // Draw rows with accumulated Y
+            let mut hl = RowHighlight::new(ui, scroll_key);
             let mut current_y = label_rect.top();
             for (row, layout) in rows.iter().zip(row_layouts.iter()) {
                 let entry_height = layout.height;
                 let label_y = current_y + row_height * 0.5;
+
+                // 高亮悬停行（在文字之前绘制）
+                hl.paint_background(ui, full_rect, current_y, entry_height);
+                hl.record_row(current_y, entry_height);
 
                 // --- Draw left labels ---
                 let mut x = label_rect.left() + ROW_LEFT_PADDING;
@@ -1159,8 +1164,6 @@ fn render_rows_view(
                 // --- Draw preview text (HEX mode only) ---
                 if let (Some(pr), Some(pg)) = (&preview_rect, &layout.preview_galley) {
                     let preview_pos = egui::pos2(pr.left() + text_padding, current_y);
-                    // Preview column: non-interactive painter text only, so it doesn't
-                    // interfere with HEX column's text selection.
                     let preview_painter = ui.painter_at(*pr);
                     preview_painter.add(egui::epaint::TextShape::new(
                         preview_pos,
@@ -1172,7 +1175,32 @@ fn render_rows_view(
                 current_y += entry_height;
             }
 
-            // Right-click context menu
+            // Right-click context menu — global area
+            let ctx_response = hl.click_response(ui);
+            let frozen_row_idx = hl.resolve_click(
+                ui,
+                &ctx_response,
+                ui.make_persistent_id(("term-frozen-row", scroll_key)),
+            );
+            let hovered_row: Option<(String, String)> = if ctx_response.context_menu_opened() || ctx_response.clicked_by(egui::PointerButton::Secondary) {
+                frozen_row_idx
+            } else {
+                hl.hover_index(ui)
+            }.and_then(|idx| {
+                rows.get(idx).map(|row| {
+                    let content = row_content_text(row, show_hex, show_raw);
+                    let content_only = if show_raw {
+                        content.replace('\n', "\\n")
+                    } else {
+                        content.to_owned()
+                    };
+                    let port = row.port.as_deref().unwrap_or("");
+                    let (dir_label, _) = direction_label(row.direction);
+                    let full_line = format!("{} {} {} {}", row.timestamp_label, port, dir_label, content_only);
+                    (full_line, content_only)
+                })
+            });
+
             let combined_text: String = rows
                 .iter()
                 .map(|row| {
@@ -1186,9 +1214,19 @@ fn render_rows_view(
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            // Attach context menu to the full rect
-            let ctx_response = ui.interact(full_rect, ui.next_auto_id(), Sense::click());
-            ctx_response.context_menu(|ctx_ui| {
+            ctx_response.context_menu(move |ctx_ui| {
+                if let Some((ref row_full, ref row_content)) = hovered_row {
+                    if ctx_ui.button("复制此行").clicked() {
+                        ctx_ui.ctx().copy_text(row_full.clone());
+                        ctx_ui.close();
+                    }
+                    if ctx_ui.button("复制此行数据").clicked() {
+                        ctx_ui.ctx().copy_text(row_content.clone());
+                        ctx_ui.close();
+                    }
+                    ctx_ui.separator();
+                }
+
                 if ctx_ui.button("复制全部可见内容").clicked() {
                     ctx_ui.ctx().copy_text(combined_text.clone());
                     ctx_ui.close();

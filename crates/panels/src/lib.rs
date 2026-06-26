@@ -6,6 +6,7 @@ mod manager;
 mod plugins;
 mod replay;
 mod sender;
+mod table;
 mod terminal;
 pub mod theme;
 
