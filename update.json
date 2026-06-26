@@ -1,14 +1,6 @@
 {
   "date": "2026-06-27",
-  "changelog": [
-    "日志面板：新增搜索框（匹配来源和消息）、来源过滤下拉框",
-    "日志面板：支持文本选择和右键复制单行/CSV/JSONL",
-    "接收区：右键菜单新增\"复制此行\"和\"复制此行数据\"",
-    "接收区和日志面板：悬停行高亮，右键菜单冻结行选择",
-    "回放seek：跳表索引优化，大文件拖进度条响应更快",
-    "修复快捷键录制显示ControlLeft的bug",
-    "日志面板UI调整：搜索筛选独立一行，来源列更紧凑"
-  ],
+  "changelog": [],
   "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v0.3.4/hardware-workbench-app.zip",
   "version": "0.3.4"
 }
