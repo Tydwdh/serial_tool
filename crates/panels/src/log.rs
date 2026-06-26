@@ -7,10 +7,12 @@ use tool_databus::{DataBus, Subscription, TopicFilter};
 
 const TIME_COL_WIDTH: f32 = 118.0;
 const LEVEL_COL_WIDTH: f32 = 52.0;
-const SOURCE_COL_WIDTH: f32 = 190.0;
-const SOURCE_TEXT_MAX_CHARS: usize = 26;
+const SOURCE_COL_WIDTH: f32 = 140.0;
+const SOURCE_TEXT_MAX_CHARS: usize = 18;
 const ROW_LEFT_PADDING: f32 = 4.0;
 const COL_GAP: f32 = 6.0;
+/// 标签列到消息列之间的间距
+const LABEL_TO_MSG_GAP: f32 = 3.0;
 const LOG_SCROLL_ID: &str = "log-scroll-v2";
 /// 日志面板最大保留条数（与终端面板一致）。
 const MAX_LOG_ENTRIES: usize = 2_000;
@@ -103,7 +105,7 @@ impl LogPanel {
         let mut force_scroll_to_bottom = self.pending_scroll_to_bottom;
         self.pending_scroll_to_bottom = false;
 
-        // ── 第一行：级别过滤 + 搜索 + 来源过滤 ──
+        // ── 第一行：级别过滤 + 自动滚动 + 清空 ──
         ui.horizontal(|ui| {
             let padding = ui.spacing().button_padding.x * 2.0;
             let char_w = 10.0;
@@ -133,6 +135,20 @@ impl LogPanel {
 
             ui.separator();
 
+            force_scroll_to_bottom |= crate::theme::auto_scroll_button(ui, &mut self.auto_scroll);
+
+            let dropped = self.subscription.dropped_count();
+            if dropped > 0 {
+                ui.colored_label(theme::YELLOW, format!("已丢弃 {dropped} 条"));
+            }
+
+            if ui.button("清空").clicked() {
+                self.clear();
+            }
+        });
+
+        // ── 第二行：搜索 + 来源过滤 ──
+        ui.horizontal(|ui| {
             ui.label("搜索");
             ui.add(
                 TextEdit::singleline(&mut self.search_text)
@@ -156,20 +172,6 @@ impl LogPanel {
                     self.search_text.clear();
                     self.source_filter = None;
                 }
-            }
-        });
-
-        // ── 第二行：自动滚动 + 丢弃计数 + 清空 ──
-        ui.horizontal(|ui| {
-            force_scroll_to_bottom |= crate::theme::auto_scroll_button(ui, &mut self.auto_scroll);
-
-            let dropped = self.subscription.dropped_count();
-            if dropped > 0 {
-                ui.colored_label(theme::YELLOW, format!("已丢弃 {dropped} 条"));
-            }
-
-            if ui.button("清空").clicked() {
-                self.clear();
             }
         });
 
@@ -342,7 +344,7 @@ fn render_log_rows(
             // 标签列总宽度
             let label_width = ROW_LEFT_PADDING + TIME_COL_WIDTH + COL_GAP
                 + LEVEL_COL_WIDTH + COL_GAP
-                + SOURCE_COL_WIDTH + COL_GAP;
+                + SOURCE_COL_WIDTH + LABEL_TO_MSG_GAP;
             let message_width = (full_width - label_width).max(40.0);
             let text_padding = 4.0;
             let galley_width = (message_width - text_padding).max(0.0);
