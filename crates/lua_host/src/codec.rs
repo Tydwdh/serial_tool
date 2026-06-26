@@ -18,7 +18,8 @@ fn create_codec_table(lua: &Lua, (): ()) -> mlua::Result<Value> {
             let mut hex = String::with_capacity(data.len() * 2);
             for &b in &data {
                 use std::fmt::Write;
-                write!(hex, "{:02X}", b).unwrap();
+                // write! to String is infallible (fmt::Write for String never returns Err)
+                write!(hex, "{:02X}", b).expect("write to String should be infallible");
             }
             Ok(hex)
         })?,

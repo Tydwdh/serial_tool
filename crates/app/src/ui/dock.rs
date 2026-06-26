@@ -378,7 +378,8 @@ fn paint_dock_insert_line(ui: &egui::Ui, rects: &[(PanelKind, egui::Rect)], inde
     }
 
     let x = if index >= rects.len() {
-        rects.last().unwrap().1.right() + 3.0
+        // SAFETY: rects is non-empty (guarded above), and last() always returns Some for non-empty vecs
+        rects.last().expect("rects is non-empty").1.right() + 3.0
     } else {
         rects[index].1.left() - 3.0
     };

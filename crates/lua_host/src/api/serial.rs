@@ -432,11 +432,30 @@ pub(crate) fn create_serial_api(
                 ));
             }
             let patterns: Table = opts.get("patterns").unwrap_or_else(|_| {
-                let t = lua.create_table().unwrap();
-                let entry = lua.create_table().unwrap();
-                entry.set(EXPECT_PATTERN, "^ok").unwrap();
-                entry.set(EXPECT_ACTION, "return").unwrap();
-                t.set(1, entry).unwrap();
+                // 构建默认 expect pattern 表。
+                let t = match lua.create_table() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        log::error!("serial expect create_table failed: {e}");
+                        return lua.globals();
+                    }
+                };
+                let entry = match lua.create_table() {
+                    Ok(e) => e,
+                    Err(e) => {
+                        log::error!("serial expect entry create_table failed: {e}");
+                        return t;
+                    }
+                };
+                let _ = entry.set(EXPECT_PATTERN, "^ok").map_err(|e| {
+                    log::error!("entry.set EXPECT_PATTERN failed: {e}");
+                });
+                let _ = entry.set(EXPECT_ACTION, "return").map_err(|e| {
+                    log::error!("entry.set EXPECT_ACTION failed: {e}");
+                });
+                let _ = t.set(1, entry).map_err(|e| {
+                    log::error!("t.set entry failed: {e}");
+                });
                 t
             });
 

@@ -19,7 +19,7 @@ impl WorkbenchApp {
         self.bottom_dock_rect = None;
         self.right_dock_rect = None;
 
-        egui::Panel::top("top-bar").show_inside(ui, |ui| {
+        egui::Panel::top("top-bar").show(ui, |ui| {
             self.top_bar(ui);
         });
 
@@ -27,7 +27,7 @@ impl WorkbenchApp {
             egui::Panel::left("activity-bar")
                 .resizable(false)
                 .exact_size(ACTIVITY_BAR_WIDTH)
-                .show_inside(ui, |ui| {
+                .show(ui, |ui| {
                     self.activity_bar(ui);
                 });
         }
@@ -37,7 +37,7 @@ impl WorkbenchApp {
             .resizable(false)
             .exact_size(26.0)
             .show_separator_line(true)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 self.status_bar(ui);
             });
 
@@ -47,7 +47,7 @@ impl WorkbenchApp {
                 .default_size(self.panels.dock.right_size)
                 .min_size(220.0)
                 .show_separator_line(true)
-                .show_inside(ui, |ui| {
+                .show(ui, |ui| {
                     self.dock_stack_ui(ui, DockArea::Right);
                 });
 
@@ -60,7 +60,7 @@ impl WorkbenchApp {
                 .resizable(true)
                 .default_size(self.panels.dock.bottom_size.max(BOTTOM_PANEL_MIN))
                 .min_size(BOTTOM_PANEL_MIN)
-                .show_inside(ui, |ui| {
+                .show(ui, |ui| {
                     self.dock_stack_ui(ui, DockArea::Bottom);
                 });
             self.bottom_dock_rect = Some(shown.response.rect);
@@ -70,7 +70,7 @@ impl WorkbenchApp {
 
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(theme::BG_PRIMARY))
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 egui::Frame::default()
                     .fill(theme::BG_PRIMARY)
                     .inner_margin(egui::Margin::symmetric(14, 8))

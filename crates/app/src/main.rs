@@ -82,7 +82,6 @@ fn main() -> eframe::Result<()> {
             .with_app_id("hardware-workbench")
             .with_inner_size([DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT])
             .with_icon(app_icon()),
-        vsync: true,
         persist_window: true,
         // 阻止 persist_window 恢复最大化：winit 在 Windows 上最大化窗口
         // 会导致短暂消失再出现。保留位置和大小记忆，最大化由用户手动触发。

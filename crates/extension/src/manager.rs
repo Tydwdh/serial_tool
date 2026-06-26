@@ -367,12 +367,20 @@ impl PluginManager {
         self.lua_runtimes.insert(plugin_id.to_owned(), runtime);
 
         // 自动创建设置面板（如果 manifest 声明了 contributes.settings）
-        let settings_manifest = {
-            let rec = self.records.get(plugin_id).unwrap();
-            if rec.manifest.contributes.settings.is_empty() {
+        let settings_manifest = match self.records.get(plugin_id) {
+            Some(rec) => {
+                if rec.manifest.contributes.settings.is_empty() {
+                    None
+                } else {
+                    Some(rec.manifest.clone())
+                }
+            }
+            None => {
+                log::error!(
+                    "plugin record not found for '{}' during enable — internal state inconsistency",
+                    plugin_id
+                );
                 None
-            } else {
-                Some(rec.manifest.clone())
             }
         };
         if let Some(manifest) = settings_manifest {
@@ -835,41 +843,30 @@ impl PluginManager {
                 "value": current_value,
             });
             // 可选字段
+            // SAFETY: field 刚刚从 json!({...}) 字面量构建，始终是 JSON object
+            let field_obj = field
+                .as_object_mut()
+                .expect("field is always a JSON object at this point");
             if !setting.options.is_empty() {
-                field.as_object_mut().unwrap().insert(
+                field_obj.insert(
                     "options".to_owned(),
                     serde_json::Value::Array(setting.options.clone()),
                 );
             }
             if let Some(min) = setting.min {
-                field
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("min".to_owned(), json!(min));
+                field_obj.insert("min".to_owned(), json!(min));
             }
             if let Some(max) = setting.max {
-                field
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("max".to_owned(), json!(max));
+                field_obj.insert("max".to_owned(), json!(max));
             }
             if let Some(step) = setting.step {
-                field
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("step".to_owned(), json!(step));
+                field_obj.insert("step".to_owned(), json!(step));
             }
             if let Some(rows) = setting.rows {
-                field
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("rows".to_owned(), json!(rows));
+                field_obj.insert("rows".to_owned(), json!(rows));
             }
             if let Some(ref desc) = setting.description {
-                field
-                    .as_object_mut()
-                    .unwrap()
-                    .insert("description".to_owned(), json!(desc));
+                field_obj.insert("description".to_owned(), json!(desc));
             }
             fields.push(field);
         }

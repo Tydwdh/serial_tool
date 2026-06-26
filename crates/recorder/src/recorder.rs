@@ -305,8 +305,12 @@ impl JsonlRecorder {
             ));
             worker.stop.store(true, Ordering::Relaxed);
             // 异步停止：不阻塞 UI，spin 到 Stopping 状态
+            let Some(join) = worker.join.take() else {
+                log::warn!("recorder worker has no join handle, skipping stop");
+                return;
+            };
             self.stopping = Some(StoppingRecorder {
-                join: worker.join.take().expect("worker must have join"),
+                join,
                 last_error: worker.last_error,
                 path: self.current_path.take().unwrap_or_default(),
             });

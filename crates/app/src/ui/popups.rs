@@ -42,7 +42,7 @@ impl WorkbenchApp {
             }
 
             egui::CentralPanel::default()
-                .show_inside(ui, |ui| {
+                .show(ui, |ui| {
                     let mut close = false;
 
                     ui.horizontal(|ui| {
@@ -103,7 +103,7 @@ impl WorkbenchApp {
                 return true;
             }
             egui::CentralPanel::default()
-                .show_inside(ui, |ui| {
+                .show(ui, |ui| {
                     self.send_panel_popup(ui);
                     false
                 })
@@ -239,7 +239,7 @@ impl WorkbenchApp {
 
                 egui::CentralPanel::default()
                     .frame(egui::Frame::default().fill(theme::BG_PRIMARY))
-                    .show_inside(ctx, |ui| {
+                    .show(ctx, |ui| {
                         // 再手动铺一层，避免某些平台 / resize 时出现未清屏黑边。
                         let rect = ui.max_rect();
                         ui.painter().rect_filled(rect, 0.0, theme::BG_PRIMARY);

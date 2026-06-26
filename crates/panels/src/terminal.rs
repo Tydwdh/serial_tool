@@ -836,9 +836,15 @@ fn build_visible_rows_for_port<'a>(
             });
         }
 
+        let Some(current_acc) = acc.as_mut() else {
+            // acc was just set to Some above; this shouldn't happen.
+            // Log and skip this entry rather than panicking.
+            eprintln!("[tool-panels] WARNING: line accumulator unexpectedly None, skipping entry");
+            continue;
+        };
         append_entry_to_line_rows(
             &mut rows,
-            acc.as_mut().expect("line accumulator exists"),
+            current_acc,
             &entry.raw_text,
             &owned_port,
             &mut line_seq,
@@ -1357,7 +1363,8 @@ fn format_hex(bytes: &[u8]) -> String {
         if i > 0 {
             s.push(' ');
         }
-        write!(s, "{byte:02X}").unwrap();
+        // write! to String is infallible (fmt::Write for String never returns Err)
+        write!(s, "{byte:02X}").expect("write to String should be infallible");
     }
     s
 }

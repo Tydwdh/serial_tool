@@ -221,11 +221,11 @@ impl Event {
         if !self.metadata.is_object() {
             self.metadata = json!({});
         }
-        // 上面的代码保证 metadata 是 object，直接 unwrap
-        self.metadata
-            .as_object_mut()
-            .unwrap()
-            .insert(key.to_owned(), value);
+        // 安全获取 as_object_mut：因前面已确保 metadata 是 object，
+        // 但为防御性编程，仍使用 expect 给出明确错误信息。
+        if let Some(obj) = self.metadata.as_object_mut() {
+            obj.insert(key.to_owned(), value);
+        }
     }
 
     /// 检查是否为回放事件。

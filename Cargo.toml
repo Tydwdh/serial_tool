@@ -19,8 +19,8 @@ version = "0.3.3"
 license = "MIT"
 
 [workspace.dependencies]
-eframe = { version = "0.34", features = ["persistence", "glow"] }
-egui = "0.34"
+eframe = { version = "0.35", features = ["persistence", "glow", "inspection"] }
+egui = "0.35"
 crossbeam-channel = "0.5"
 dirs-next = "2"
 log = "0.4"
