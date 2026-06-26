@@ -168,10 +168,11 @@ impl LogPanel {
                 });
 
             if (!self.search_text.is_empty() || self.source_filter.is_some())
-                && ui.small_button("清除筛选").clicked() {
-                    self.search_text.clear();
-                    self.source_filter = None;
-                }
+                && ui.small_button("清除筛选").clicked()
+            {
+                self.search_text.clear();
+                self.source_filter = None;
+            }
         });
 
         force_scroll_to_bottom |= self.auto_scroll && wheel_moves_towards_bottom;
