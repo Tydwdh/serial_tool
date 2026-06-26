@@ -26,6 +26,8 @@ const UPDATE_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 const UPDATE_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 const UPDATE_HELPER_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const UPDATE_HELPER_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+const UPDATE_HELPER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(2);
+const UPDATE_HELPER_LAUNCH_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const GITHUB_UPDATE_HOSTS: &[&str] = &["raw.githubusercontent.com", "github.com"];
 
 fn update_http_client_with_proxy(proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
@@ -338,15 +340,63 @@ fn cleanup_old_update_helpers(dir: &Path) {
     }
 }
 
+#[cfg(windows)]
+fn launch_update_helper_elevated(helper_path: &Path, target_exe: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide = |value: &std::ffi::OsStr| {
+        value
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>()
+    };
+    let verb = wide(std::ffi::OsStr::new("runas"));
+    let helper = wide(helper_path.as_os_str());
+    let parameters = format!("--apply-pending-update \"{}\"", target_exe.display());
+    let parameters = wide(std::ffi::OsStr::new(&parameters));
+
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            helper.as_ptr(),
+            parameters.as_ptr(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    } as isize;
+
+    if result > 32 {
+        append_update_helper_log("elevated helper launch requested");
+        Ok(())
+    } else {
+        Err(format!(
+            "请求管理员权限启动 updater helper 失败（ShellExecuteW={result}）：{}",
+            std::io::Error::last_os_error()
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+fn launch_update_helper_elevated(_helper_path: &Path, _target_exe: &Path) -> Result<(), String> {
+    Err("当前平台不支持请求管理员权限".into())
+}
+
 /// 复制当前 exe 为临时 helper，并启动 helper 负责替换目标 exe。
 pub fn launch_update_helper(target_exe: &Path) -> Result<(), String> {
     let helper_dir = update_helper_dir();
     std::fs::create_dir_all(&helper_dir).map_err(|e| format!("创建 updater 目录失败：{e}"))?;
     cleanup_old_update_helpers(&helper_dir);
 
+    let launch_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
     let helper_path = helper_dir.join(format!(
-        "hardware-workbench-updater-{}.exe",
-        std::process::id()
+        "hardware-workbench-updater-{}-{launch_id}.exe",
+        std::process::id(),
     ));
     std::fs::copy(target_exe, &helper_path).map_err(|e| {
         format!(
@@ -362,11 +412,61 @@ pub fn launch_update_helper(target_exe: &Path) -> Result<(), String> {
         target_exe.display()
     ));
 
-    Command::new(&helper_path)
-        .arg("--apply-pending-update")
-        .arg(target_exe)
-        .spawn()
-        .map_err(|e| format!("启动 updater helper 失败：{e}"))?;
+    let deadline = Instant::now() + UPDATE_HELPER_LAUNCH_TIMEOUT;
+    loop {
+        match Command::new(&helper_path)
+            .arg("--apply-pending-update")
+            .arg(target_exe)
+            .spawn()
+        {
+            Ok(mut child) => {
+                std::thread::sleep(UPDATE_HELPER_LAUNCH_RETRY_INTERVAL);
+                match child.try_wait() {
+                    Ok(None) => {
+                        append_update_helper_log(format!(
+                            "helper launched with pid {}",
+                            child.id()
+                        ));
+                        break;
+                    }
+                    Ok(Some(status)) => {
+                        let error = format!("updater helper 启动后立即退出：{status}");
+                        append_update_helper_log(&error);
+                        if Instant::now() >= deadline {
+                            append_update_helper_log(
+                                "normal helper launch failed; requesting elevation",
+                            );
+                            return launch_update_helper_elevated(&helper_path, target_exe)
+                                .map_err(|e| {
+                                    format!(
+                                        "{error}；{e}。日志：{}",
+                                        update_helper_log_path().display()
+                                    )
+                                });
+                        }
+                    }
+                    Err(error) => {
+                        append_update_helper_log(format!("检查 helper 状态失败：{error}"));
+                        break;
+                    }
+                }
+            }
+            Err(error) => {
+                append_update_helper_log(format!("launch helper failed: {error}"));
+                if Instant::now() >= deadline {
+                    append_update_helper_log("normal helper launch failed; requesting elevation");
+                    return launch_update_helper_elevated(&helper_path, target_exe).map_err(|e| {
+                        format!(
+                            "普通权限启动 updater helper 失败：{error}；{e}。日志：{}",
+                            update_helper_log_path().display()
+                        )
+                    });
+                }
+            }
+        }
+
+        std::thread::sleep(UPDATE_HELPER_LAUNCH_RETRY_INTERVAL);
+    }
 
     Ok(())
 }

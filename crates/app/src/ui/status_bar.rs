@@ -130,6 +130,10 @@ impl WorkbenchApp {
         // 有新版本可用
         if us.update_available {
             let version_str = us.latest_version.as_deref().unwrap_or("?");
+            if let Some(ref err) = us.error {
+                ui.label(egui::RichText::new("⚠ 更新失败").color(theme::YELLOW))
+                    .on_hover_text(err);
+            }
             let label =
                 ui.label(egui::RichText::new(format!("🔄 v{version_str} 可用")).color(theme::CYAN));
 
