@@ -27,7 +27,12 @@ pub const WIDGET_BG: Color32 = BG_TERTIARY;
 pub const WIDGET_HOVER: Color32 = Color32::from_rgb(49, 56, 68);
 pub const WIDGET_ACTIVE: Color32 = BLUE;
 pub const WIDGET_ACTIVE_WEAK: Color32 = Color32::from_rgb(34, 68, 102);
+pub const WIDGET_ACTIVE_STRONG: Color32 = Color32::from_rgb(44, 88, 132);
 pub const WIDGET_OPEN: Color32 = Color32::from_rgb(40, 47, 58);
+
+// 滚动条
+pub const SCROLLBAR: Color32 = Color32::from_rgb(55, 62, 75);
+pub const SCROLLBAR_HOVER: Color32 = Color32::from_rgb(70, 78, 92);
 
 // 边框
 pub const BORDER: Color32 = Color32::from_rgb(39, 45, 55);
