@@ -99,8 +99,7 @@ pub fn card_accent_bar(ui: &mut egui::Ui, color: Color32) {
         rect.left_top(),
         egui::vec2(3.0, rect.height().max(ui.spacing().interact_size.y)),
     );
-    ui.painter()
-        .rect_filled(accent_rect, 2.0, color);
+    ui.painter().rect_filled(accent_rect, 2.0, color);
     // 给色条右边留间距
     ui.add_space(6.0);
 }

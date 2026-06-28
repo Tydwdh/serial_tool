@@ -18,7 +18,14 @@ impl WorkbenchApp {
             let (dot_color, label) =
                 if let (Some(p), Some(b)) = (self.serial.selected_port.clone(), st.baud_rate) {
                     let label = self.serial.port_label(&p);
-                    (if st.open { theme::GREEN } else { theme::TEXT_SECONDARY }, format!("{label} @ {b}"))
+                    (
+                        if st.open {
+                            theme::GREEN
+                        } else {
+                            theme::TEXT_SECONDARY
+                        },
+                        format!("{label} @ {b}"),
+                    )
                 } else {
                     (theme::TEXT_SECONDARY, "串口已关闭".into())
                 };
@@ -28,9 +35,11 @@ impl WorkbenchApp {
                 egui::vec2(10.0, 10.0),
             );
             if st.open {
-                ui.painter().circle_filled(dot_rect.center(), 5.0, dot_color.linear_multiply(0.3));
+                ui.painter()
+                    .circle_filled(dot_rect.center(), 5.0, dot_color.linear_multiply(0.3));
             }
-            ui.painter().circle_filled(dot_rect.center(), 3.0, dot_color);
+            ui.painter()
+                .circle_filled(dot_rect.center(), 3.0, dot_color);
             ui.add_space(12.0);
             ui.label(label);
             ui.separator();
@@ -42,9 +51,21 @@ impl WorkbenchApp {
                 egui::vec2(10.0, 10.0),
             );
             if rec {
-                ui.painter().circle_filled(rec_dot_rect.center(), 5.0, theme::RED.linear_multiply(0.3));
+                ui.painter().circle_filled(
+                    rec_dot_rect.center(),
+                    5.0,
+                    theme::RED.linear_multiply(0.3),
+                );
             }
-            ui.painter().circle_filled(rec_dot_rect.center(), 3.0, if rec { theme::RED } else { theme::TEXT_SECONDARY });
+            ui.painter().circle_filled(
+                rec_dot_rect.center(),
+                3.0,
+                if rec {
+                    theme::RED
+                } else {
+                    theme::TEXT_SECONDARY
+                },
+            );
             ui.add_space(12.0);
             if rec {
                 let stats = self.recorder.stats();
@@ -77,7 +98,11 @@ impl WorkbenchApp {
                 let tag = |ui: &mut egui::Ui, label: &str, high: bool, color: Color32| {
                     let size = egui::vec2(42.0, 16.0);
                     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-                    let bg = if high { color.linear_multiply(0.25) } else { theme::BG_INPUT };
+                    let bg = if high {
+                        color.linear_multiply(0.25)
+                    } else {
+                        theme::BG_INPUT
+                    };
                     ui.painter().rect_filled(rect, 3.0, bg);
                     ui.painter().text(
                         rect.center(),

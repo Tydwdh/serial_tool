@@ -1,4 +1,8 @@
-use crate::{MAX_INGEST_PER_FRAME, fmt_ts, table::RowHighlight, table::RowSelection, theme};
+use crate::{
+    MAX_INGEST_PER_FRAME, fmt_ts,
+    table::{RowHighlight, RowSelection, edge_scroll_delta},
+    theme,
+};
 use egui::text_selection::LabelSelectionState;
 use egui::{Color32, RichText, ScrollArea, Sense, Stroke};
 use std::borrow::Cow;
@@ -152,7 +156,7 @@ impl TerminalPanel {
             selected_entry_id: None,
             detail_entry_id: None,
             font_size: 13.0,
-            merge_window_ms: 10,
+            merge_window_ms: 5,
             selection: RowSelection::new(0),
         }
     }
@@ -881,6 +885,7 @@ fn render_rows_view(
     let height = height.max(40.0);
     let font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
     let row_height = ui.fonts_mut(|f| f.row_height(&font_id));
+    selection.sync_rows(rows.iter().map(|row| row.id));
 
     // 列宽随字体大小缩放（基准 13px）
     let scale = font_size / 13.0;
@@ -1019,12 +1024,8 @@ fn render_rows_view(
 
             let total_height: f32 = row_layouts.iter().map(|r| r.height).sum();
 
-            let full_rect = ui
-                .allocate_exact_size(
-                    egui::vec2(full_width, total_height),
-                    Sense::click_and_drag(),
-                )
-                .0;
+            let (full_rect, _alloc_response) =
+                ui.allocate_exact_size(egui::vec2(full_width, total_height), Sense::hover());
 
             // Split into: labels | hex/raw/display | preview (HEX mode only)
             let label_rect = egui::Rect::from_min_size(
@@ -1043,22 +1044,82 @@ fn render_rows_view(
             } else {
                 None
             };
+            let data_rect = egui::Rect::from_min_max(hex_rect.left_top(), full_rect.right_bottom());
+            let viewport_rect = ui.clip_rect();
+            let blank_rect = (full_rect.bottom() < viewport_rect.bottom()).then(|| {
+                egui::Rect::from_min_max(
+                    egui::pos2(full_rect.left(), full_rect.bottom()),
+                    egui::pos2(full_rect.right(), viewport_rect.bottom()),
+                )
+            });
+            let blank_response = blank_rect.map(|rect| {
+                ui.interact(
+                    rect,
+                    ui.make_persistent_id(("terminal-blank", scroll_key)),
+                    Sense::click(),
+                )
+            });
 
             let label_painter = ui.painter_at(label_rect);
 
             // Draw rows with accumulated Y
             let mut hl = RowHighlight::new(ui, scroll_key);
-            let mut current_y = label_rect.top();
 
-            // ── 框选：在 full_rect 上检测拖拽 ──
-            selection.resize(rows.len());
-            let full_response = ui.interact(full_rect, ui.next_auto_id(), Sense::click_and_drag());
-            let hovered_idx = hl.row_index_at_y(
-                full_response.interact_pointer_pos().map(|p| p.y).unwrap_or(-1.0),
+            // 先记录所有行范围，当前帧的点击/拖拽才能立即命中正确行。
+            let mut recorded_y = label_rect.top();
+            for layout in &row_layouts {
+                hl.record_row(recorded_y, layout.height);
+                recorded_y += layout.height;
+            }
+
+            // 整行选择只从元数据区起手；数据区完整保留给字符级文本选择。
+            let mut ctx_response = ui.interact(
+                label_rect,
+                ui.make_persistent_id(("terminal-metadata", scroll_key)),
+                Sense::click_and_drag(),
             );
+            if let Some(response) = blank_response {
+                ctx_response |= response;
+            }
+            let hovered_idx = ui
+                .input(|input| input.pointer.hover_pos().map(|pos| pos.y))
+                .and_then(|y| hl.row_index_at_y_clamped(y));
+            let data_pressed = ui.input(|input| {
+                input.pointer.button_pressed(egui::PointerButton::Primary)
+                    && input
+                        .pointer
+                        .hover_pos()
+                        .is_some_and(|pos| data_rect.contains(pos))
+            }) && ui.rect_contains_pointer(data_rect);
+            let blank_pressed = blank_rect.is_some_and(|rect| {
+                ui.input(|input| {
+                    input.pointer.button_pressed(egui::PointerButton::Primary)
+                        && input
+                            .pointer
+                            .hover_pos()
+                            .is_some_and(|pos| rect.contains(pos))
+                }) && ui.rect_contains_pointer(rect)
+            });
+            if data_pressed || blank_pressed {
+                selection.clear();
+            }
             let mut scroll_delta: f32 = 0.0;
-            selection.handle_input(ui, &full_response, hovered_idx, &mut scroll_delta);
+            let row_selection_started = selection.handle_input(
+                ui,
+                label_rect,
+                ui.clip_rect().intersect(label_rect),
+                hovered_idx,
+                &mut scroll_delta,
+            );
+            if row_selection_started || blank_pressed || selection.is_dragging() {
+                ui.ctx()
+                    .plugin::<LabelSelectionState>()
+                    .lock()
+                    .clear_selection();
+            }
 
+            let mut current_y = label_rect.top();
+            let mut text_drag_response: Option<egui::Response> = None;
             for (row_idx, (row, layout)) in rows.iter().zip(row_layouts.iter()).enumerate() {
                 let entry_height = layout.height;
                 let label_y = current_y + row_height * 0.5;
@@ -1068,7 +1129,6 @@ fn render_rows_view(
                 if !has_selection {
                     hl.paint_background(ui, full_rect, current_y, entry_height);
                 }
-                hl.record_row(current_y, entry_height);
 
                 // 框选高亮（使用 WIDGET_HOVER 颜色，与 hover 一致）
                 if selection.is_selected(row_idx) {
@@ -1123,15 +1183,28 @@ fn render_rows_view(
                     // Use a separate id salt for hex column to avoid id collision with preview
                     let row_id = ui.make_persistent_id(("hex", row.id));
                     let response = ui.interact(row_text_rect, row_id, Sense::click_and_drag());
+                    text_drag_response = Some(match text_drag_response.take() {
+                        Some(accumulated) => accumulated | response.clone(),
+                        None => response.clone(),
+                    });
+                    ctx_response |= response.clone();
 
-                    LabelSelectionState::label_text_selection(
-                        ui,
-                        &response,
-                        galley_pos,
-                        layout.galley.clone(),
-                        text_color,
-                        Stroke::NONE,
-                    );
+                    if selection.is_dragging() {
+                        ui.painter().add(egui::epaint::TextShape::new(
+                            galley_pos,
+                            layout.galley.clone(),
+                            text_color,
+                        ));
+                    } else {
+                        LabelSelectionState::label_text_selection(
+                            ui,
+                            &response,
+                            galley_pos,
+                            layout.galley.clone(),
+                            text_color,
+                            Stroke::NONE,
+                        );
+                    }
                 }
 
                 // --- Draw preview text (HEX mode only) ---
@@ -1148,13 +1221,21 @@ fn render_rows_view(
                 current_y += entry_height;
             }
 
+            if text_drag_response
+                .as_ref()
+                .is_some_and(|response| response.dragged_by(egui::PointerButton::Primary))
+                && let Some(pointer_y) =
+                    ui.input(|input| input.pointer.hover_pos().map(|pos| pos.y))
+            {
+                scroll_delta += edge_scroll_delta(pointer_y, viewport_rect.intersect(data_rect));
+            }
+
             // 边缘滚动
             if scroll_delta != 0.0 {
                 ui.scroll_with_delta(egui::vec2(0.0, scroll_delta));
+                ui.ctx().request_repaint();
             }
 
-            // Right-click context menu — global area
-            let ctx_response = hl.click_response(ui);
             let frozen_row_idx = hl.resolve_click(
                 ui,
                 &ctx_response,
@@ -1186,42 +1267,45 @@ fn render_rows_view(
             });
 
             // 框选范围文本
-            let (selected_full, selected_data): (Option<String>, Option<String>) = selection
-                .selected_range()
-                .map(|(lo, hi)| {
-                    let full: String = rows[lo..=hi]
-                        .iter()
-                        .map(|row| {
-                            let content = row_content_text(row, show_hex, show_raw);
-                            let content_only = if show_raw {
-                                content.replace('\n', "\\n")
-                            } else {
-                                content.to_owned()
-                            };
-                            let port = row.port.as_deref().unwrap_or("");
-                            let (dir_label, _) = direction_label(row.direction);
-                            format!(
-                                "{} {} {} {}",
-                                row.timestamp_label, port, dir_label, content_only
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let data: String = rows[lo..=hi]
-                        .iter()
-                        .map(|row| {
-                            let content = row_content_text(row, show_hex, show_raw);
-                            if show_raw {
-                                content.replace('\n', "\\n")
-                            } else {
-                                content.to_owned()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    (full, data)
-                })
-                .map_or((None, None), |(f, d)| (Some(f), Some(d)));
+            let selected_indices: Vec<usize> = selection.selected_indices().collect();
+            let (selected_full, selected_data): (Option<String>, Option<String>) =
+                (!selected_indices.is_empty())
+                    .then(|| {
+                        let full: String = selected_indices
+                            .iter()
+                            .map(|&index| &rows[index])
+                            .map(|row| {
+                                let content = row_content_text(row, show_hex, show_raw);
+                                let content_only = if show_raw {
+                                    content.replace('\n', "\\n")
+                                } else {
+                                    content.to_owned()
+                                };
+                                let port = row.port.as_deref().unwrap_or("");
+                                let (dir_label, _) = direction_label(row.direction);
+                                format!(
+                                    "{} {} {} {}",
+                                    row.timestamp_label, port, dir_label, content_only
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let data: String = selected_indices
+                            .iter()
+                            .map(|&index| &rows[index])
+                            .map(|row| {
+                                let content = row_content_text(row, show_hex, show_raw);
+                                if show_raw {
+                                    content.replace('\n', "\\n")
+                                } else {
+                                    content.to_owned()
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        (full, data)
+                    })
+                    .map_or((None, None), |(f, d)| (Some(f), Some(d)));
 
             let combined_text: String = rows
                 .iter()
@@ -1238,8 +1322,12 @@ fn render_rows_view(
 
             ctx_response.context_menu(move |ctx_ui| {
                 // 统一菜单：有框选用选中文本，否则用单行文本
-                let copy_full = selected_full.clone().or_else(|| hovered_row.as_ref().map(|(f, _)| f.clone()));
-                let copy_data = selected_data.clone().or_else(|| hovered_row.as_ref().map(|(_, d)| d.clone()));
+                let copy_full = selected_full
+                    .clone()
+                    .or_else(|| hovered_row.as_ref().map(|(f, _)| f.clone()));
+                let copy_data = selected_data
+                    .clone()
+                    .or_else(|| hovered_row.as_ref().map(|(_, d)| d.clone()));
 
                 if let Some(ref text) = copy_full
                     && ctx_ui.button("复制选中行").clicked()
