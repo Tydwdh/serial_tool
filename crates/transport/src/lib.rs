@@ -316,6 +316,16 @@ impl TransportManager {
                     "transport.serial",
                     format!("closed {} @ {}", h.port_name, h.baud_rate),
                 ));
+                // 发布结构化生命周期事件，供插件监听
+                self.bus.publish(Event::new(
+                    tool_core::topics::SERIAL_CLOSED,
+                    format!("serial:{}", h.port_name),
+                    Direction::Internal,
+                    Payload::Json(serde_json::json!({
+                        "port": h.port_name,
+                        "baud_rate": h.baud_rate,
+                    })),
+                ));
                 // swap_remove 把最后一个元素移到了 i，不递增 i
             } else {
                 i += 1;
@@ -458,6 +468,18 @@ impl TransportManager {
             "transport.serial",
             format!("opened {}", source),
         ));
+
+        // 发布结构化生命周期事件，供插件监听
+        self.bus.publish(Event::new(
+            tool_core::topics::SERIAL_OPENED,
+            source,
+            Direction::Internal,
+            Payload::Json(serde_json::json!({
+                "port": config.port_name,
+                "baud_rate": config.baud_rate,
+            })),
+        ));
+
         Ok(())
     }
 
@@ -480,6 +502,16 @@ impl TransportManager {
                 LogLevel::Info,
                 "transport.serial",
                 format!("closed {} @ {}", h.port_name, h.baud_rate),
+            ));
+            // 发布结构化生命周期事件，供插件监听
+            self.bus.publish(Event::new(
+                tool_core::topics::SERIAL_CLOSED,
+                format!("serial:{}", h.port_name),
+                Direction::Internal,
+                Payload::Json(serde_json::json!({
+                    "port": h.port_name,
+                    "baud_rate": h.baud_rate,
+                })),
             ));
         }
     }

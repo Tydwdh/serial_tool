@@ -36,6 +36,10 @@
 ---@field subscribe fun(topic_prefix: string, timeout_ms?: integer): HwEvent?
 ---@field on fun(topic: string, callback: fun(event: HwEvent))
 ---@field off fun(topic: string)
+---
+--- 串口生命周期事件（通过 ctx.bus.on 监听）：
+---   transport.serial.opened  — payload: { port: string, baud_rate: integer }
+---   transport.serial.closed  — payload: { port: string, baud_rate: integer }
 
 ---@class HwSerialPortInfo
 ---@field port_name string
@@ -55,6 +59,14 @@
 ---@field timeout_ms integer?
 ---@field dtr boolean?
 ---@field rts boolean?
+
+---@class HwSerialOpenEvent
+---@field port string
+---@field baud_rate integer
+
+---@class HwSerialCloseEvent
+---@field port string
+---@field baud_rate integer
 
 ---@class HwSerialRequestOptions
 ---@field port string

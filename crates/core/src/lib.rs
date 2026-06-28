@@ -5,6 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub mod topics {
     pub const SERIAL_RX: &str = "transport.serial.default.rx";
     pub const SERIAL_TX: &str = "transport.serial.default.tx";
+    pub const SERIAL_OPENED: &str = "transport.serial.opened";
+    pub const SERIAL_CLOSED: &str = "transport.serial.closed";
     pub const PROTOCOL_PID_SAMPLE: &str = "protocol.pid.sample";
     pub const PROTOCOL_IMU_ATTITUDE: &str = "protocol.imu.attitude";
     pub const LOG_SYSTEM: &str = "log.system";
