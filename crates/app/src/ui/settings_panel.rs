@@ -6,6 +6,7 @@ use crate::state::StatusLevel;
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use tool_panels::theme;
+use tool_panels::{dynamic_form_ui, parse_fields, DynamicField};
 
 impl WorkbenchApp {
     pub(crate) fn settings_panel(&mut self, ui: &mut egui::Ui) {
@@ -92,6 +93,11 @@ impl WorkbenchApp {
                 ui.separator();
                 self.render_keymap_editor(ui);
             });
+
+        ui.add_space(8.0);
+
+        // ── 插件设置 ──
+        self.render_plugin_settings(ui);
 
         ui.add_space(8.0);
 
@@ -254,6 +260,83 @@ impl WorkbenchApp {
                 log::warn!("save_config failed: {e}")
             };
             self.set_status_force(StatusLevel::Warn, "快捷键已恢复默认");
+        }
+    }
+
+    /// 渲染所有已启用插件的设置表单
+    fn render_plugin_settings(&mut self, ui: &mut egui::Ui) {
+        let plugin_settings = self.plugin_manager.plugin_settings();
+        if plugin_settings.is_empty() {
+            return;
+        }
+        for (plugin_id, plugin_name, settings) in &plugin_settings {
+            // 从 ConfigStore 读取当前值，构建 DynamicField 列表
+            let config_store = self.plugin_manager.config_store();
+            let mut fields: Vec<DynamicField>;
+            let mut fields_json = Vec::with_capacity(settings.len());
+
+            for setting in settings {
+                let current_value = config_store.get(plugin_id, &setting.id, setting.default.clone());
+                // 首次写入默认值
+                if current_value == setting.default {
+                    let keys = config_store.keys(plugin_id);
+                    if !keys.contains(&setting.id) {
+                        let _ = config_store.set(plugin_id, &setting.id, setting.default.clone());
+                    }
+                }
+
+                let mut field_json = serde_json::json!({
+                    "id": setting.id,
+                    "label": setting.title,
+                    "kind": setting.kind,
+                    "value": current_value,
+                });
+                let obj = field_json.as_object_mut().unwrap();
+                if !setting.options.is_empty() {
+                    obj.insert("options".to_owned(), serde_json::Value::Array(setting.options.clone()));
+                }
+                if let Some(min) = setting.min {
+                    obj.insert("min".to_owned(), serde_json::json!(min));
+                }
+                if let Some(max) = setting.max {
+                    obj.insert("max".to_owned(), serde_json::json!(max));
+                }
+                if let Some(step) = setting.step {
+                    obj.insert("step".to_owned(), serde_json::json!(step));
+                }
+                if let Some(rows) = setting.rows {
+                    obj.insert("rows".to_owned(), serde_json::json!(rows));
+                }
+                fields_json.push(field_json);
+            }
+
+            if let Ok(parsed) = parse_fields(Some(&serde_json::Value::Array(fields_json))) {
+                fields = parsed;
+            } else {
+                continue;
+            }
+
+            egui::Frame::group(ui.style())
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(
+                        egui::RichText::new(format!("🧩 {plugin_name} 设置")).strong(),
+                    );
+                    ui.separator();
+
+                    let panel_id = format!("{plugin_id}.settings");
+
+                    // 手动渲染表单
+                    dynamic_form_ui(
+                        ui,
+                        &self.bus,
+                        &panel_id,
+                        &mut fields,
+                        true, // auto_apply
+                        &self.serial.ports,
+                    );
+                });
         }
     }
 }

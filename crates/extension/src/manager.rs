@@ -94,6 +94,32 @@ impl PluginManager {
         self.config_store.root()
     }
 
+    /// 获取 ConfigStore 引用，供设置面板读取/写入插件配置。
+    pub fn config_store(&self) -> &Arc<ConfigStore> {
+        &self.config_store
+    }
+
+    /// 返回所有已启用插件的设置定义：(plugin_id, plugin_name, settings)
+    pub fn plugin_settings(&self) -> Vec<(String, String, Vec<crate::manifest::PluginSetting>)> {
+        self.records
+            .iter()
+            .filter(|(_, record)| {
+                !record.manifest.contributes.settings.is_empty()
+                    && matches!(
+                        record.state,
+                        PluginState::Enabled | PluginState::Running | PluginState::Finished
+                    )
+            })
+            .map(|(id, record)| {
+                (
+                    id.clone(),
+                    record.manifest.name.clone(),
+                    record.manifest.contributes.settings.clone(),
+                )
+            })
+            .collect()
+    }
+
     pub fn set_host_services(
         &mut self,
         dialog_sender: crossbeam_channel::Sender<DialogRequest>,
@@ -366,27 +392,6 @@ impl PluginManager {
 
         self.lua_runtimes.insert(plugin_id.to_owned(), runtime);
 
-        // 自动创建设置面板（如果 manifest 声明了 contributes.settings）
-        let settings_manifest = match self.records.get(plugin_id) {
-            Some(rec) => {
-                if rec.manifest.contributes.settings.is_empty() {
-                    None
-                } else {
-                    Some(rec.manifest.clone())
-                }
-            }
-            None => {
-                log::error!(
-                    "plugin record not found for '{}' during enable — internal state inconsistency",
-                    plugin_id
-                );
-                None
-            }
-        };
-        if let Some(manifest) = settings_manifest {
-            self.create_settings_panel(plugin_id, &manifest);
-        }
-
         self.bus.publish(Event::system_log(
             LogLevel::Info,
             format!("plugin:{plugin_id}"),
@@ -439,20 +444,6 @@ impl PluginManager {
                 source.clone(),
                 Direction::Internal,
                 Payload::Json(serde_json::json!({ "id": panel_id })),
-            ));
-        }
-
-        // 移除自动生成的设置面板
-        let has_settings = self
-            .records
-            .get(plugin_id)
-            .is_some_and(|r| !r.manifest.contributes.settings.is_empty());
-        if has_settings {
-            self.bus.publish(Event::new(
-                topics::UI_PANEL_REMOVE,
-                source.clone(),
-                Direction::Internal,
-                Payload::Json(serde_json::json!({ "id": format!("{plugin_id}.settings") })),
             ));
         }
 
@@ -810,83 +801,6 @@ impl PluginManager {
                 );
             }
         }
-    }
-
-    /// 为插件自动创建设置面板（从 contributes.settings 生成 form）。
-    fn create_settings_panel(&mut self, plugin_id: &str, manifest: &PluginManifest) {
-        let settings = &manifest.contributes.settings;
-        let panel_id = format!("{plugin_id}.settings");
-
-        // 构造 fields 数组，每个 setting 对应一个表单字段
-        let mut fields = Vec::with_capacity(settings.len());
-        for setting in settings {
-            // 从 ConfigStore 读当前值，首次则写入默认值
-            let current_value =
-                self.config_store
-                    .get(plugin_id, &setting.id, setting.default.clone());
-            // 如果 key 不存在，ConfigStore::get 返回 default 但不写入；
-            // 我们主动写入以确保首次启用就有持久化默认值
-            if current_value == setting.default {
-                // 检查 key 是否真的不存在（get 对缺失 key 也返回 default）
-                let keys = self.config_store.keys(plugin_id);
-                if !keys.contains(&setting.id) {
-                    let _ = self
-                        .config_store
-                        .set(plugin_id, &setting.id, setting.default.clone());
-                }
-            }
-
-            let mut field = serde_json::json!({
-                "id": setting.id,
-                "label": setting.title,
-                "kind": setting.kind,
-                "value": current_value,
-            });
-            // 可选字段
-            // SAFETY: field 刚刚从 json!({...}) 字面量构建，始终是 JSON object
-            let field_obj = field
-                .as_object_mut()
-                .expect("field is always a JSON object at this point");
-            if !setting.options.is_empty() {
-                field_obj.insert(
-                    "options".to_owned(),
-                    serde_json::Value::Array(setting.options.clone()),
-                );
-            }
-            if let Some(min) = setting.min {
-                field_obj.insert("min".to_owned(), json!(min));
-            }
-            if let Some(max) = setting.max {
-                field_obj.insert("max".to_owned(), json!(max));
-            }
-            if let Some(step) = setting.step {
-                field_obj.insert("step".to_owned(), json!(step));
-            }
-            if let Some(rows) = setting.rows {
-                field_obj.insert("rows".to_owned(), json!(rows));
-            }
-            if let Some(ref desc) = setting.description {
-                field_obj.insert("description".to_owned(), json!(desc));
-            }
-            fields.push(field);
-        }
-
-        let payload = json!({
-            "id": panel_id,
-            "title": format!("{} 设置", manifest.name),
-            "kind": "form",
-            "plugin_id": plugin_id,
-            "auto_apply": true,
-            "is_settings_panel": true,
-            "fields": fields,
-        });
-
-        self.bus.publish(Event::new(
-            topics::UI_PANEL_CREATE,
-            format!("plugin:{plugin_id}"),
-            Direction::Internal,
-            Payload::Json(payload),
-        ));
     }
 
     /// 设置面板变更时自动持久化到 ConfigStore。

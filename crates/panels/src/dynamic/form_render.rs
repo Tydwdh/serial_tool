@@ -10,7 +10,7 @@ use tool_core::{Direction, Event, Payload, topics};
 use tool_databus::DataBus;
 use tool_transport::SerialPortDescriptor;
 
-pub(super) fn dynamic_form_ui(
+pub fn dynamic_form_ui(
     ui: &mut egui::Ui,
     bus: &DataBus,
     panel_id: &str,

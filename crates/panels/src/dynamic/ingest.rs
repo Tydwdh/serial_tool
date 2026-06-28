@@ -234,6 +234,8 @@ impl super::DynamicPanels {
         let owner_plugin_id: Option<String> = source.strip_prefix("plugin:").map(|s| s.to_owned());
         let owner_for_check = owner_plugin_id.clone();
 
+        let card = object.get("card").and_then(Value::as_bool).unwrap_or(false);
+
         let panel = match kind {
             "chart" => {
                 let topic_prefix = object
@@ -246,6 +248,7 @@ impl super::DynamicPanels {
                     title,
                     chart: ChartPanel::new_for_topic_prefix(&self.bus, topic_prefix),
                     owner_plugin_id,
+                    card,
                 }
             }
             "form" => {
@@ -259,6 +262,7 @@ impl super::DynamicPanels {
                     fields: parse_fields(object.get("fields"))?,
                     auto_apply,
                     owner_plugin_id,
+                    card,
                 }
             }
             "attitude" | "attitude3d" => {
@@ -271,6 +275,7 @@ impl super::DynamicPanels {
                     title,
                     attitude: AttitudePanel::new_for_topic(&self.bus, topic),
                     owner_plugin_id,
+                    card,
                 }
             }
             "log" => {
@@ -285,6 +290,7 @@ impl super::DynamicPanels {
                     entries: VecDeque::new(),
                     max_entries,
                     owner_plugin_id,
+                    card,
                 }
             }
             other => return Err(format!("不支持的动态面板类型 '{other}'")),

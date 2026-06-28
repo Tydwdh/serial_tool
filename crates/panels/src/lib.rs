@@ -16,6 +16,7 @@ pub(crate) const MAX_INGEST_PER_FRAME: usize = 500;
 pub use attitude::AttitudePanel;
 pub use chart::ChartPanel;
 pub use dynamic::DynamicPanels;
+pub use dynamic::{dynamic_form_ui, DynamicField, DynamicFieldKind, FieldFilter, FieldOption, parse_fields};
 pub use log::LogPanel;
 pub use manager::{Activity, DockArea, DockLayout, DockStack, PanelKind, PanelManager};
 pub use plugins::PluginsPanel;

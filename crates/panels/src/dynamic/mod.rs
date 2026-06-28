@@ -2,10 +2,11 @@ mod form_render;
 mod ingest;
 mod schema;
 
+pub use form_render::dynamic_form_ui;
+pub use schema::{DynamicField, DynamicFieldKind, FieldFilter, FieldOption, parse_fields};
+
 use crate::{AttitudePanel, ChartPanel, theme};
 use egui::RichText;
-use form_render::dynamic_form_ui;
-use schema::DynamicField;
 use std::collections::{BTreeMap, VecDeque};
 use tool_core::{LogLevel, topics};
 use tool_databus::{DataBus, Subscription, TopicFilter};
@@ -38,23 +39,27 @@ enum DynamicPanel {
         title: String,
         chart: ChartPanel,
         owner_plugin_id: Option<String>,
+        card: bool,
     },
     Form {
         title: String,
         fields: Vec<DynamicField>,
         auto_apply: bool,
         owner_plugin_id: Option<String>,
+        card: bool,
     },
     Attitude {
         title: String,
         attitude: AttitudePanel,
         owner_plugin_id: Option<String>,
+        card: bool,
     },
     Log {
         title: String,
         entries: VecDeque<LogEntry>,
         max_entries: usize,
         owner_plugin_id: Option<String>,
+        card: bool,
     },
 }
 
@@ -82,6 +87,15 @@ impl DynamicPanel {
             | DynamicPanel::Form { title, .. }
             | DynamicPanel::Attitude { title, .. }
             | DynamicPanel::Log { title, .. } => title.as_str(),
+        }
+    }
+
+    fn card(&self) -> bool {
+        match self {
+            DynamicPanel::Chart { card, .. }
+            | DynamicPanel::Form { card, .. }
+            | DynamicPanel::Attitude { card, .. }
+            | DynamicPanel::Log { card, .. } => *card,
         }
     }
 }
@@ -129,33 +143,20 @@ impl DynamicPanels {
             return;
         };
 
-        match panel {
-            DynamicPanel::Chart { chart, .. } => {
-                chart.ui(ui);
-            }
-            DynamicPanel::Form {
-                fields, auto_apply, ..
-            } => {
-                dynamic_form_ui(ui, &self.bus, id, fields, *auto_apply, &self.ports);
-            }
-            DynamicPanel::Attitude { attitude, .. } => {
-                attitude.ui(ui);
-            }
-            DynamicPanel::Log { title, entries, .. } => {
-                ui.label(RichText::new(title.as_str()).strong());
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        for entry in entries.iter() {
-                            let color = crate::level_color(entry.level);
-                            // 使用 fmt_ts 保持与内置 LogPanel 一致的时间戳精度（含毫秒）
-                            let ts = crate::fmt_ts(entry.timestamp_ms);
-                            let text = format!("[{ts}] {} {}", entry.level.as_str(), entry.message);
-                            ui.colored_label(color, RichText::new(text));
-                        }
-                    });
-            }
+        let card = panel.card();
+        let title = panel.title().to_owned();
+
+        if card {
+            egui::Frame::group(ui.style())
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(egui::RichText::new(&title).strong());
+                    ui.separator();
+                    render_panel_inner(panel, ui, id, &self.bus, &self.ports);
+                });
+        } else {
+            render_panel_inner(panel, ui, id, &self.bus, &self.ports);
         }
     }
 
@@ -218,6 +219,41 @@ impl DynamicPanels {
 
     pub fn set_ports(&mut self, ports: &[SerialPortDescriptor]) {
         self.ports = ports.to_vec();
+    }
+}
+
+/// 渲染动态面板的实际内容（不含外层卡片包装）
+fn render_panel_inner(
+    panel: &mut DynamicPanel,
+    ui: &mut egui::Ui,
+    id: &str,
+    bus: &DataBus,
+    ports: &[SerialPortDescriptor],
+) {
+    match panel {
+        DynamicPanel::Chart { chart, .. } => {
+            chart.ui(ui);
+        }
+        DynamicPanel::Form {
+            fields, auto_apply, ..
+        } => {
+            dynamic_form_ui(ui, bus, id, fields, *auto_apply, ports);
+        }
+        DynamicPanel::Attitude { attitude, .. } => {
+            attitude.ui(ui);
+        }
+        DynamicPanel::Log { entries, .. } => {
+            egui::ScrollArea::vertical()
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    for entry in entries.iter() {
+                        let color = crate::level_color(entry.level);
+                        let ts = crate::fmt_ts(entry.timestamp_ms);
+                        let text = format!("[{ts}] {} {}", entry.level.as_str(), entry.message);
+                        ui.colored_label(color, RichText::new(text));
+                    }
+                });
+        }
     }
 }
 

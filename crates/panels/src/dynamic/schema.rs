@@ -8,28 +8,28 @@
 use serde_json::Value;
 
 #[derive(Debug, Clone)]
-pub(super) struct DynamicField {
-    pub(super) id: String,
-    pub(super) label: String,
-    pub(super) kind: DynamicFieldKind,
-    pub(super) value: Value,
-    pub(super) options: Vec<FieldOption>,
-    pub(super) min: Option<f64>,
-    pub(super) max: Option<f64>,
-    pub(super) step: Option<f64>,
+pub struct DynamicField {
+    pub id: String,
+    pub label: String,
+    pub kind: DynamicFieldKind,
+    pub value: Value,
+    pub options: Vec<FieldOption>,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub step: Option<f64>,
     // ── v0.2 新增 ──
-    pub(super) rows: Option<usize>,
-    pub(super) variant: Option<String>,
-    pub(super) text: Option<String>,
-    pub(super) filters: Vec<FieldFilter>,
-    pub(super) enabled: bool,
-    pub(super) visible: bool,
+    pub rows: Option<usize>,
+    pub variant: Option<String>,
+    pub text: Option<String>,
+    pub filters: Vec<FieldFilter>,
+    pub enabled: bool,
+    pub visible: bool,
     // ── v0.3 新增 ──
-    pub(super) action: Option<String>,
+    pub action: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DynamicFieldKind {
+pub enum DynamicFieldKind {
     Text,
     Number,
     Boolean,
@@ -48,7 +48,7 @@ pub(super) enum DynamicFieldKind {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct FieldOption {
+pub struct FieldOption {
     pub(super) label: String,
     pub(super) value: String,
 }
@@ -59,7 +59,7 @@ pub struct FieldFilter {
     pub extensions: Vec<String>,
 }
 
-pub(super) fn parse_fields(value: Option<&Value>) -> Result<Vec<DynamicField>, String> {
+pub fn parse_fields(value: Option<&Value>) -> Result<Vec<DynamicField>, String> {
     let Some(Value::Array(fields)) = value else {
         return Ok(Vec::new());
     };
