@@ -189,23 +189,53 @@ impl ReplayPanel {
 
         let mut status = self.manager.status();
 
-        ui.heading("会话回放");
+        // ── 回放文件 ──
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(egui::RichText::new("📁 回放文件").strong());
+                ui.separator();
+                self.file_controls(ui);
+            });
 
-        self.file_controls(ui);
-        ui.separator();
+        ui.add_space(8.0);
 
-        self.policy_controls(ui);
-        ui.separator();
+        // ── 回放策略 ──
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(egui::RichText::new("⚙ 回放策略").strong());
+                ui.separator();
+                self.policy_controls(ui);
+            });
 
-        self.playback_controls(ui, &status);
+        ui.add_space(8.0);
 
-        // 控件可能修改了 manager 状态，这里重新取一次。
+        // ── 播放控制 ──
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(egui::RichText::new("▶ 播放控制").strong());
+                ui.separator();
+
+                // 控件可能修改了 manager 状态，这里重新取一次。
+                status = self.manager.status();
+
+                self.playback_controls(ui, &status);
+
+                status = self.manager.status();
+                self.progress_bar(ui, &status);
+                self.bookmark_controls(ui, &status);
+            });
+
+        ui.add_space(4.0);
+
+        // ── 状态信息（卡片外） ──
         status = self.manager.status();
-
-        self.progress_bar(ui, &status);
         self.status_line(ui, &status);
-
-        self.bookmark_controls(ui, &status);
 
         if let Some(message) = &self.message {
             ui.label(message);
@@ -326,7 +356,10 @@ impl ReplayPanel {
                 }
             }
         };
-        ui.label(RichText::new(status_text).color(theme::TEXT_SECONDARY));
+        ui.label(
+            egui::RichText::new(status_text)
+                .color(theme::TEXT_SECONDARY),
+        );
 
         if let Some(error) = self.manager.analyzer_error() {
             ui.colored_label(theme::RED, format!("错误: {error}"));
@@ -572,10 +605,14 @@ impl ReplayPanel {
             if let Some(path) = &status.path {
                 ui.separator();
 
-                ui.monospace(
-                    path.file_name()
-                        .map(|name| name.to_string_lossy().to_string())
-                        .unwrap_or_else(|| path.display().to_string()),
+                ui.label(
+                    egui::RichText::new(
+                        path.file_name()
+                            .map(|name| name.to_string_lossy().to_string())
+                            .unwrap_or_else(|| path.display().to_string()),
+                    )
+                    .monospace()
+                    .color(theme::TEXT_PRIMARY),
                 );
             }
         });

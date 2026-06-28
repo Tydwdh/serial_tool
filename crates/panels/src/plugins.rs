@@ -1,5 +1,5 @@
 use crate::theme;
-use egui::{Color32, RichText, ScrollArea, TextEdit};
+use egui::{Color32, ScrollArea, TextEdit};
 use std::path::PathBuf;
 use tool_extension::{
     PluginDiagnostic, PluginDiagnosticSeverity, PluginManager, PluginState, PluginSummary,
@@ -38,46 +38,64 @@ impl PluginsPanel {
             }
         }
 
-        let toolbar_status = ui
-            .horizontal(|ui| -> Option<(String, bool)> {
-                ui.label("根目录");
-                ui.add(TextEdit::singleline(&mut self.root).desired_width(240.0));
-                if ui.button("刷新").clicked() {
-                    match manager.discover_roots([PathBuf::from(self.root.trim())]) {
-                        Ok(count) => return Some((format!("发现了 {count} 个插件"), false)),
-                        Err(error) => return Some((error.to_string(), true)),
+        // ── 管理 ──
+        let toolbar_status = egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(egui::RichText::new("🔧 管理").strong());
+                ui.separator();
+                ui.horizontal(|ui| -> Option<(String, bool)> {
+                    ui.label("根目录");
+                    ui.add(TextEdit::singleline(&mut self.root).desired_width(240.0));
+                    if ui.button("刷新").clicked() {
+                        match manager.discover_roots([PathBuf::from(self.root.trim())]) {
+                            Ok(count) => return Some((format!("发现了 {count} 个插件"), false)),
+                            Err(error) => return Some((error.to_string(), true)),
+                        }
                     }
-                }
-                if ui.button("打开目录").clicked() {
-                    let _ = open::that(&self.root);
-                }
-                None
+                    if ui.button("打开目录").clicked() {
+                        let _ = open::that(&self.root);
+                    }
+                    None
+                })
+                .inner
             })
             .inner;
 
         let status = toolbar_status;
 
-        ui.separator();
         let summaries = manager.summaries();
         let diagnostics = manager.diagnostics();
 
         if summaries.is_empty() && diagnostics.is_empty() {
+            ui.add_space(8.0);
             ui.label("未找到插件");
             return status;
         }
 
+        // ── 诊断 ──
         if !diagnostics.is_empty() {
-            ui.label(RichText::new("诊断").strong());
-            for diagnostic in diagnostics {
-                diagnostic_row(ui, diagnostic);
-            }
-            ui.separator();
+            ui.add_space(8.0);
+            egui::Frame::group(ui.style())
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(egui::RichText::new("⚠ 诊断").strong());
+                    ui.separator();
+                    for diagnostic in diagnostics {
+                        diagnostic_row(ui, diagnostic);
+                    }
+                });
         }
 
         if summaries.is_empty() {
+            ui.add_space(8.0);
             ui.label("没有可加载插件");
             return status;
         }
+
+        ui.add_space(8.0);
 
         let scroll_result = ScrollArea::vertical().auto_shrink([false, false]).show(
             ui,
@@ -88,7 +106,7 @@ impl PluginsPanel {
                     if row_status.is_none() {
                         row_status = s;
                     }
-                    ui.separator();
+                    ui.add_space(8.0);
                 }
                 row_status
             },
@@ -103,125 +121,165 @@ impl PluginsPanel {
         manager: &mut PluginManager,
         summary: PluginSummary,
     ) -> Option<(String, bool)> {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(&summary.name).strong());
-            ui.monospace(&summary.id);
-            ui.label(format!("v{}", summary.version));
-            ui.label(
-                RichText::new(format!("{:?}", summary.state)).color(state_color(summary.state)),
-            );
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.label("运行时");
-            ui.monospace(&summary.runtime);
-            ui.label("权限");
-            ui.monospace(if summary.permissions.is_empty() {
-                "none".to_owned()
-            } else {
-                summary.permissions.join(", ")
-            });
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.label("路径");
-            ui.monospace(summary.path.display().to_string());
-        });
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
 
-        if !summary.contributes.panels.is_empty() {
-            ui.horizontal_wrapped(|ui| {
-                ui.label("面板");
-                for panel in &summary.contributes.panels {
-                    ui.monospace(format!("{} ({})", panel.title, panel.kind));
-                }
-            });
-        }
+                // 标题行
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(&summary.name)
+                            .strong()
+                            .color(theme::TEXT_PRIMARY),
+                    );
+                    ui.label(
+                        egui::RichText::new(&summary.id)
+                            .monospace()
+                            .color(theme::TEXT_SECONDARY),
+                    );
+                    ui.label(format!("v{}", summary.version));
+                    ui.label(
+                        egui::RichText::new(format!("{:?}", summary.state))
+                            .color(state_color(summary.state)),
+                    );
+                });
 
-        // ── 命令状态（仅 Running 时展示对账结果） ──
-        let declared = &summary.contributes.commands;
-        let registered = &summary.registered_commands;
-        let missing = &summary.missing_commands;
-        let undeclared = &summary.undeclared_commands;
-        let is_running = matches!(summary.state, PluginState::Running);
+                ui.separator();
 
-        if !declared.is_empty() || !registered.is_empty() {
-            ui.horizontal_wrapped(|ui| {
-                ui.label("命令");
-                if is_running {
-                    for cmd in declared {
-                        if registered.iter().any(|r| r == &cmd.id) {
-                            // 声明 + 已注册 → ✓ 绿色
-                            ui.colored_label(theme::GREEN, format!("✓ {}", cmd.id));
-                        } else if missing.iter().any(|m| m == &cmd.id) {
-                            // 声明 + 未注册 → ⚠ 黄色
-                            ui.colored_label(theme::YELLOW, format!("⚠ {}", cmd.id))
-                                .on_hover_text("此命令已在 manifest 声明但尚未注册 handler");
+                // 详情行
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("运行时");
+                    ui.label(
+                        egui::RichText::new(&summary.runtime)
+                            .monospace()
+                            .color(theme::TEXT_PRIMARY),
+                    );
+                    ui.label("权限");
+                    ui.label(
+                        egui::RichText::new(if summary.permissions.is_empty() {
+                            "none".to_owned()
                         } else {
-                            ui.label(cmd.id.as_str());
+                            summary.permissions.join(", ")
+                        })
+                        .monospace()
+                        .color(theme::TEXT_PRIMARY),
+                    );
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("路径");
+                    ui.label(
+                        egui::RichText::new(summary.path.display().to_string())
+                            .monospace()
+                            .color(theme::TEXT_PRIMARY),
+                    );
+                });
+
+                if !summary.contributes.panels.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("面板");
+                        for panel in &summary.contributes.panels {
+                            ui.label(
+                                egui::RichText::new(format!("{} ({})", panel.title, panel.kind))
+                                    .monospace()
+                                    .color(theme::TEXT_PRIMARY),
+                            );
+                        }
+                    });
+                }
+
+                // ── 命令状态（仅 Running 时展示对账结果） ──
+                let declared = &summary.contributes.commands;
+                let registered = &summary.registered_commands;
+                let missing = &summary.missing_commands;
+                let undeclared = &summary.undeclared_commands;
+                let is_running = matches!(summary.state, PluginState::Running);
+
+                if !declared.is_empty() || !registered.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("命令");
+                        if is_running {
+                            for cmd in declared {
+                                if registered.iter().any(|r| r == &cmd.id) {
+                                    ui.colored_label(theme::GREEN, format!("✓ {}", cmd.id));
+                                } else if missing.iter().any(|m| m == &cmd.id) {
+                                    ui.colored_label(theme::YELLOW, format!("⚠ {}", cmd.id))
+                                        .on_hover_text(
+                                            "此命令已在 manifest 声明但尚未注册 handler",
+                                        );
+                                } else {
+                                    ui.label(cmd.id.as_str());
+                                }
+                            }
+                            for cmd in undeclared {
+                                ui.colored_label(theme::TEXT_SECONDARY, format!("ℹ {}", cmd))
+                                    .on_hover_text(
+                                        "此命令在运行时动态注册，未在 manifest 声明",
+                                    );
+                            }
+                        } else {
+                            for cmd in declared {
+                                ui.label(
+                                    egui::RichText::new(&cmd.id)
+                                        .monospace()
+                                        .color(theme::TEXT_PRIMARY),
+                                );
+                            }
+                        }
+                    });
+                }
+
+                if let Some(error) = &summary.last_error {
+                    ui.colored_label(theme::RED, error);
+                }
+
+                // 按钮行
+                ui.horizontal(|ui| -> Option<(String, bool)> {
+                    let can_enable =
+                        !matches!(summary.state, PluginState::Running | PluginState::Enabled);
+                    if ui
+                        .add_enabled(can_enable, egui::Button::new("启用"))
+                        .clicked()
+                    {
+                        match manager.enable(&summary.id) {
+                            Ok(()) => {}
+                            Err(error) => return Some((error.to_string(), true)),
                         }
                     }
-                    for cmd in undeclared {
-                        // 动态注册但未声明 → ℹ 灰色
-                        ui.colored_label(theme::TEXT_SECONDARY, format!("ℹ {}", cmd))
-                            .on_hover_text("此命令在运行时动态注册，未在 manifest 声明");
+                    let can_disable = matches!(
+                        summary.state,
+                        PluginState::Running
+                            | PluginState::Enabled
+                            | PluginState::Finished
+                            | PluginState::Failed
+                    );
+                    if ui
+                        .add_enabled(can_disable, egui::Button::new("禁用"))
+                        .clicked()
+                    {
+                        match manager.disable(&summary.id) {
+                            Ok(()) => {
+                                self.recently_disabled.push(summary.id.clone());
+                            }
+                            Err(error) => return Some((error.to_string(), true)),
+                        }
                     }
-                } else {
-                    // 非 Running 状态：只列出声明，不加状态标记
-                    for cmd in declared {
-                        ui.monospace(&cmd.id);
+                    let can_restart = can_disable;
+                    if ui
+                        .add_enabled(can_restart, egui::Button::new("重启"))
+                        .on_hover_text("禁用后重新启用")
+                        .clicked()
+                    {
+                        if let Err(e) = manager.disable(&summary.id) {
+                            return Some((format!("禁用失败：{e}"), true));
+                        }
+                        self.pending_restart.push(summary.id.clone());
                     }
-                }
-            });
-        }
-
-        if let Some(error) = &summary.last_error {
-            ui.colored_label(theme::RED, error);
-        }
-
-        // 按钮行：通过闭包返回值传递操作结果
-
-        ui.horizontal(|ui| -> Option<(String, bool)> {
-            let can_enable = !matches!(summary.state, PluginState::Running | PluginState::Enabled);
-            if ui
-                .add_enabled(can_enable, egui::Button::new("启用"))
-                .clicked()
-            {
-                match manager.enable(&summary.id) {
-                    Ok(()) => {}
-                    Err(error) => return Some((error.to_string(), true)),
-                }
-            }
-            let can_disable = matches!(
-                summary.state,
-                PluginState::Running
-                    | PluginState::Enabled
-                    | PluginState::Finished
-                    | PluginState::Failed
-            );
-            if ui
-                .add_enabled(can_disable, egui::Button::new("禁用"))
-                .clicked()
-            {
-                match manager.disable(&summary.id) {
-                    Ok(()) => {
-                        self.recently_disabled.push(summary.id.clone());
-                    }
-                    Err(error) => return Some((error.to_string(), true)),
-                }
-            }
-            let can_restart = can_disable;
-            if ui
-                .add_enabled(can_restart, egui::Button::new("重启"))
-                .on_hover_text("禁用后重新启用")
-                .clicked()
-            {
-                if let Err(e) = manager.disable(&summary.id) {
-                    return Some((format!("禁用失败：{e}"), true));
-                }
-                // 不立即 enable：等待下一帧 reap_stopping_plugins 收割后再启用
-                self.pending_restart.push(summary.id.clone());
-            }
-            None
-        })
-        .inner
+                    None
+                })
+                .inner
+            })
+            .inner
     }
 }
 
@@ -249,14 +307,26 @@ fn diagnostic_row(ui: &mut egui::Ui, diagnostic: &PluginDiagnostic) {
 
     ui.horizontal_wrapped(|ui| {
         ui.colored_label(color, format!("{:?}", diagnostic.severity));
-        ui.monospace(&diagnostic.code);
+        ui.label(
+            egui::RichText::new(&diagnostic.code)
+                .monospace()
+                .color(theme::TEXT_PRIMARY),
+        );
         if let Some(plugin_id) = &diagnostic.plugin_id {
-            ui.monospace(plugin_id);
+            ui.label(
+                egui::RichText::new(plugin_id)
+                    .monospace()
+                    .color(theme::TEXT_PRIMARY),
+            );
         }
         ui.label(&diagnostic.message);
     });
     ui.horizontal_wrapped(|ui| {
         ui.label("路径");
-        ui.monospace(diagnostic.path.display().to_string());
+        ui.label(
+            egui::RichText::new(diagnostic.path.display().to_string())
+                .monospace()
+                .color(theme::TEXT_PRIMARY),
+        );
     });
 }
