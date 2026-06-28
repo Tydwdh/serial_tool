@@ -112,7 +112,7 @@ impl WorkbenchApp {
                 self.serial.port_aliases.clear();
                 self.serial.port_groups.clear();
                 self.panels.dock = tool_panels::DockLayout::default();
-                self.bottom_panel_visible = true;
+                self.panels.dock.bottom_visible = true;
                 self.set_status_force(StatusLevel::Warn, "已恢复默认设置，重启后生效");
             }
         });

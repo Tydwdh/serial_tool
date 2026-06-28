@@ -134,7 +134,6 @@ impl WorkbenchApp {
                     DockArea::Bottom => {
                         if ui.small_button("×").on_hover_text("隐藏底部面板").clicked() {
                             self.panels.dock.bottom_visible = false;
-                            self.bottom_panel_visible = false;
                             if let Err(e) = self.save_config() {
                                 log::warn!("save_config failed: {e}")
                             };

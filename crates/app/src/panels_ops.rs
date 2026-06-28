@@ -9,7 +9,6 @@ impl WorkbenchApp {
     pub(crate) fn apply_loaded_workspace_postprocess(&mut self) {
         self.panels.discard_dynamic_tabs();
         self.panels.dock.normalize_tool_layout();
-        self.bottom_panel_visible = self.panels.dock.bottom_visible;
         self.refresh_ports_silent();
         self.dynamic_panels.set_ports(&self.serial.ports);
         self.send.target_port = None;
@@ -17,7 +16,6 @@ impl WorkbenchApp {
     }
 
     pub(crate) fn set_bottom_visible(&mut self, visible: bool) {
-        self.bottom_panel_visible = visible;
         self.panels.dock.bottom_visible = visible;
     }
 

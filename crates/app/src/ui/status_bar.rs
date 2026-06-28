@@ -16,7 +16,7 @@ impl WorkbenchApp {
             // 串口状态
             let (d, l) =
                 if let (Some(p), Some(b)) = (self.serial.selected_port.clone(), st.baud_rate) {
-                    let label = self.port_label(&p);
+                    let label = self.serial.port_label(&p);
                     (if st.open { "●" } else { "○" }, format!("{label} @ {b}"))
                 } else {
                     ("○", "串口已关闭".into())

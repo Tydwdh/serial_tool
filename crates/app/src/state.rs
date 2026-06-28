@@ -168,6 +168,20 @@ pub(crate) struct SerialUiState {
     pub(crate) top_bar_serial_collapsed: bool,
 }
 
+impl SerialUiState {
+    /// 获取端口的用户友好显示名。有别名则显示 `别名 (COMx)`，否则显示原始端口名。
+    pub(crate) fn port_label(&self, port: &str) -> String {
+        match self
+            .port_aliases
+            .get(port)
+            .filter(|s| !s.trim().is_empty())
+        {
+            Some(alias) => format!("{alias} ({port})"),
+            None => port.to_owned(),
+        }
+    }
+}
+
 impl Default for SerialUiState {
     fn default() -> Self {
         Self {

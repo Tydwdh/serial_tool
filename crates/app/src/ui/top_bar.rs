@@ -86,7 +86,7 @@ impl WorkbenchApp {
                     self.serial
                         .selected_port
                         .as_deref()
-                        .map(|p| self.port_label(p))
+                        .map(|p| self.serial.port_label(p))
                         .unwrap_or_else(|| "?".to_owned())
                 )
             } else {

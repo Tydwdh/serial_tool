@@ -97,7 +97,6 @@ pub(crate) struct WorkbenchApp {
     pub(crate) recorder_path: String,
     pub(crate) status: StatusState,
     pub(crate) recent_workspaces: Vec<String>,
-    pub(crate) bottom_panel_visible: bool,
     pub(crate) send: SendUiState,
     pub(crate) terminal_popup_open: bool,
     pub(crate) terminal_popup_always_on_top: bool,
@@ -154,18 +153,6 @@ pub(crate) struct ReplayAnalyzerResult {
 // ══════════════════════════════════════════
 
 impl WorkbenchApp {
-    pub(crate) fn port_label(&self, port: &str) -> String {
-        match self
-            .serial
-            .port_aliases
-            .get(port)
-            .filter(|s| !s.trim().is_empty())
-        {
-            Some(alias) => format!("{alias} ({port})"),
-            None => port.to_owned(),
-        }
-    }
-
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // 主题必须尽早设置，否则 eframe 在 new() 返回前可能已用默认主题渲染了首帧。
         apply_theme(&cc.egui_ctx);
@@ -282,7 +269,6 @@ impl WorkbenchApp {
                 .as_ref()
                 .map(|c| c.recent_workspaces.clone())
                 .unwrap_or_default(),
-            bottom_panel_visible: rp.dock.bottom_visible,
             send,
             terminal_popup_open: false,
             terminal_popup_always_on_top: config

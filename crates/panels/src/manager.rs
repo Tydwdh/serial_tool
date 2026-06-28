@@ -149,7 +149,7 @@ impl DockStack {
             .or_else(|| self.tabs.first().cloned())
     }
 
-    pub fn discard_dynamic_tabs(&mut self) {
+    pub(crate) fn discard_dynamic_tabs(&mut self) {
         self.tabs.retain(|kind| kind.dynamic_id().is_none());
         if self
             .active
@@ -297,7 +297,7 @@ impl DockLayout {
             .collect()
     }
 
-    pub fn discard_dynamic_tabs(&mut self) {
+    fn discard_dynamic_tabs(&mut self) {
         self.center.discard_dynamic_tabs();
         self.bottom.discard_dynamic_tabs();
         self.right.discard_dynamic_tabs();

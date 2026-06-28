@@ -117,7 +117,7 @@ impl WorkbenchApp {
         ui.separator();
 
         if ui
-            .selectable_label(self.bottom_panel_visible, "▽ 终端区")
+            .selectable_label(self.panels.dock.bottom_visible, "▽ 终端区")
             .on_hover_text("Ctrl+B")
             .clicked()
         {

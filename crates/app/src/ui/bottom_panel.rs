@@ -50,7 +50,7 @@ impl WorkbenchApp {
                 self.send
                     .target_port
                     .as_deref()
-                    .map(|p| self.port_label(p))
+                    .map(|p| self.serial.port_label(p))
                     .unwrap_or_else(|| "无端口".to_owned()),
             )
             .show_ui(ui, |ui| {
@@ -58,7 +58,7 @@ impl WorkbenchApp {
                     ui.add_enabled(false, egui::Label::new("无已打开串口"));
                 } else {
                     for port in &open_ports {
-                        let label = self.port_label(port);
+                        let label = self.serial.port_label(port);
                         ui.selectable_value(&mut self.send.target_port, Some(port.clone()), label);
                     }
                 }
