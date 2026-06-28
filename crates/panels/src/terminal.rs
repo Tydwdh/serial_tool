@@ -42,6 +42,8 @@ pub struct TerminalPanel {
 
     /// 用户可调的字体大小（10-24px），默认 13.0
     pub font_size: f32,
+    /// 合并阈值：同一端口、同一方向、间隔 ≤ 此毫秒且不含 \n 的连续事件合并显示
+    pub merge_window_ms: u64,
 }
 
 #[derive(Default)]
@@ -58,6 +60,8 @@ struct TerminalEntry {
     /// 全局接收区按这个排序，避免 BTreeMap 端口顺序导致 COM 分组。
     event_id: u64,
 
+    /// 原始时间戳（毫秒），用于合并判断。
+    timestamp_ms: u64,
     timestamp_label: String,
     direction: Direction,
 
@@ -146,6 +150,7 @@ impl TerminalPanel {
             selected_entry_id: None,
             detail_entry_id: None,
             font_size: 13.0,
+            merge_window_ms: 10,
         }
     }
     pub fn ingest_all_pending(&mut self) -> usize {
@@ -560,14 +565,40 @@ impl TerminalPanel {
             utf8_preview
         };
 
+        let data = self.ports.entry(port).or_default();
+
+        // ── 合并逻辑：同端口、同方向、10ms 内、都不含 \n → 合并追加上一条 ──
+        if let Some(prev) = data.entries.back_mut()
+            && prev.direction == event.direction
+            && event.timestamp_ms.saturating_sub(prev.timestamp_ms) <= self.merge_window_ms
+            && !prev.raw_text.contains('\n')
+            && !raw_text.contains('\n')
+        {
+            prev.raw_text.push_str(&raw_text);
+            prev.display_text.push_str(&display_text);
+            prev.hex_text.push(' ');
+            prev.hex_text.push_str(&hex_text);
+            if !preview_text.is_empty() {
+                prev.preview_text.push(' ');
+                prev.preview_text.push_str(&preview_text);
+            }
+            prev.hex_preview = if prev.hex_text.is_empty() {
+                String::new()
+            } else if prev.preview_text.is_empty() {
+                prev.hex_text.clone()
+            } else {
+                format!("{} [{}]", prev.hex_text, prev.preview_text)
+            };
+            return;
+        }
+
         let entry_id = self.next_entry_id;
         self.next_entry_id = self.next_entry_id.wrapping_add(1).max(1);
-
-        let data = self.ports.entry(port).or_default();
 
         data.entries.push_back(TerminalEntry {
             id: entry_id,
             event_id: event.id,
+            timestamp_ms: event.timestamp_ms,
 
             timestamp_label: format!("[{}]", fmt_ts(event.timestamp_ms)),
             direction: event.direction,
@@ -1440,6 +1471,7 @@ mod tests {
         let first = TerminalEntry {
             id: 1,
             event_id: 1,
+            timestamp_ms: 0,
             timestamp_label: "[12:00:00.000]".to_owned(),
             direction: Direction::Rx,
             raw_text: "(42".to_owned(),
@@ -1451,6 +1483,7 @@ mod tests {
         let second = TerminalEntry {
             id: 2,
             event_id: 2,
+            timestamp_ms: 1,
             timestamp_label: "[12:00:00.001]".to_owned(),
             direction: Direction::Rx,
             raw_text: ".0000)ok*29\n".to_owned(),
