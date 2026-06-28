@@ -44,6 +44,8 @@ pub struct TerminalPanel {
     pub font_size: f32,
     /// 合并阈值：同一端口、同一方向、间隔 ≤ 此毫秒且不含 \n 的连续事件合并显示
     pub merge_window_ms: u64,
+    /// 框选状态
+    pub selection: TerminalSelection,
 }
 
 #[derive(Default)]
@@ -120,6 +122,36 @@ struct RenderOutcome {
     offset_y: f32,
 }
 
+/// 终端行框选状态。
+pub struct TerminalSelection {
+    pub start: Option<usize>,
+    pub end: Option<usize>,
+}
+
+impl TerminalSelection {
+    pub fn new() -> Self {
+        Self { start: None, end: None }
+    }
+
+    pub fn selected_range(&self) -> Option<(usize, usize)> {
+        match (self.start, self.end) {
+            (Some(a), Some(b)) if a <= b => Some((a, b)),
+            (Some(a), Some(b)) => Some((b, a)),
+            _ => None,
+        }
+    }
+
+    pub fn is_selected(&self, index: usize) -> bool {
+        self.selected_range()
+            .is_some_and(|(lo, hi)| index >= lo && index <= hi)
+    }
+
+    pub fn clear(&mut self) {
+        self.start = None;
+        self.end = None;
+    }
+}
+
 impl TerminalPanel {
     pub fn new(bus: &DataBus) -> Self {
         Self {
@@ -151,6 +183,7 @@ impl TerminalPanel {
             detail_entry_id: None,
             font_size: 13.0,
             merge_window_ms: 10,
+            selection: TerminalSelection::new(),
         }
     }
     pub fn ingest_all_pending(&mut self) -> usize {
@@ -193,6 +226,7 @@ impl TerminalPanel {
         self.show_lines = false;
         self.show_raw = false;
         self.auto_scroll = true;
+        self.selection.clear();
     }
 
     pub fn is_bookmarked(&self, entry_id: u64) -> bool {
@@ -439,6 +473,7 @@ impl TerminalPanel {
                 self.auto_scroll,
                 force_scroll_to_bottom,
                 self.font_size,
+                &mut self.selection,
             )
         };
 
@@ -871,6 +906,7 @@ fn render_rows_view(
     stick_to_bottom: bool,
     force_scroll_to_bottom: bool,
     font_size: f32,
+    selection: &mut TerminalSelection,
 ) -> RenderOutcome {
     let height = height.max(40.0);
     let font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
@@ -1043,13 +1079,57 @@ fn render_rows_view(
             // Draw rows with accumulated Y
             let mut hl = RowHighlight::new(ui, scroll_key);
             let mut current_y = label_rect.top();
-            for (row, layout) in rows.iter().zip(row_layouts.iter()) {
+
+            // ── 框选：在 full_rect 上检测拖拽 ──
+            let full_response = ui.interact(full_rect, ui.next_auto_id(), Sense::click_and_drag());
+            if full_response.drag_started_by(egui::PointerButton::Primary) {
+                let pointer_y = full_response.interact_pointer_pos().map(|p| p.y);
+                if let Some(y) = pointer_y {
+                    let idx = row_layouts.iter().enumerate().find_map(|(i, rl)| {
+                        let top = label_rect.top() + row_layouts[..i].iter().map(|r| r.height).sum::<f32>();
+                        if y >= top && y < top + rl.height { Some(i) } else { None }
+                    });
+                    selection.start = idx;
+                    selection.end = idx;
+                }
+            }
+            if full_response.dragged_by(egui::PointerButton::Primary) {
+                let pointer_y = full_response.interact_pointer_pos().map(|p| p.y);
+                if let Some(y) = pointer_y {
+                    let idx = row_layouts.iter().enumerate().find_map(|(i, rl)| {
+                        let top = label_rect.top() + row_layouts[..i].iter().map(|r| r.height).sum::<f32>();
+                        if y >= top && y < top + rl.height { Some(i) } else { None }
+                    });
+                    selection.end = idx;
+                }
+            }
+            // 单击空白区域（非拖拽）清除框选
+            if full_response.clicked_by(egui::PointerButton::Primary)
+                && full_response.drag_delta().length_sq() < 1.0
+            {
+                selection.clear();
+            }
+
+            for (row_idx, (row, layout)) in rows.iter().zip(row_layouts.iter()).enumerate() {
                 let entry_height = layout.height;
                 let label_y = current_y + row_height * 0.5;
 
                 // 高亮悬停行（在文字之前绘制）
-                hl.paint_background(ui, full_rect, current_y, entry_height);
+                let _hovered = hl.paint_background(ui, full_rect, current_y, entry_height);
                 hl.record_row(current_y, entry_height);
+
+                // 框选高亮
+                if selection.is_selected(row_idx) {
+                    let sel_rect = egui::Rect::from_min_size(
+                        egui::pos2(full_rect.left(), current_y),
+                        egui::vec2(full_rect.width(), entry_height),
+                    );
+                    ui.painter_at(full_rect).rect_filled(
+                        sel_rect,
+                        0.0,
+                        theme::BG_SELECTION,
+                    );
+                }
 
                 // --- Draw left labels ---
                 let mut x = label_rect.left() + row_left_padding;
@@ -1156,6 +1236,22 @@ fn render_rows_view(
                 })
             });
 
+            // 框选范围文本
+            let selected_text: Option<String> = selection.selected_range().map(|(lo, hi)| {
+                rows[lo..=hi]
+                    .iter()
+                    .map(|row| {
+                        let content = row_content_text(row, show_hex, show_raw);
+                        if show_raw {
+                            content.replace('\n', "\\n")
+                        } else {
+                            content.to_owned()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            });
+
             let combined_text: String = rows
                 .iter()
                 .map(|row| {
@@ -1170,6 +1266,15 @@ fn render_rows_view(
                 .join("\n");
 
             ctx_response.context_menu(move |ctx_ui| {
+                // 框选模式优先
+                if let Some(ref sel_text) = selected_text {
+                    if ctx_ui.button("复制选中行").clicked() {
+                        ctx_ui.ctx().copy_text(sel_text.clone());
+                        ctx_ui.close();
+                    }
+                    ctx_ui.separator();
+                }
+
                 if let Some((ref row_full, ref row_content)) = hovered_row {
                     if ctx_ui.button("复制此行").clicked() {
                         ctx_ui.ctx().copy_text(row_full.clone());
