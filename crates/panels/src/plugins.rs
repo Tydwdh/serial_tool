@@ -213,9 +213,7 @@ impl PluginsPanel {
                             }
                             for cmd in undeclared {
                                 ui.colored_label(theme::TEXT_SECONDARY, format!("ℹ {}", cmd))
-                                    .on_hover_text(
-                                        "此命令在运行时动态注册，未在 manifest 声明",
-                                    );
+                                    .on_hover_text("此命令在运行时动态注册，未在 manifest 声明");
                             }
                         } else {
                             for cmd in declared {

@@ -3,7 +3,7 @@ use crate::config::{pick_recorder_path, record_mode_label};
 use crate::state::StatusLevel;
 use crate::ui::baud_combo;
 use eframe::egui;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use tool_panels::theme;
 use tool_recorder::RecordMode;
 
@@ -141,11 +141,7 @@ impl WorkbenchApp {
                             .width(160.0)
                             .selected_text(record_mode_label(mode))
                             .show_ui(ui, |ui| {
-                                for &m in &[
-                                    RecordMode::StandardReplay,
-                                    RecordMode::RawSerial,
-                                    RecordMode::FullDebug,
-                                ] {
+                                for &m in &[RecordMode::StandardReplay, RecordMode::RawSerial] {
                                     ui.selectable_value(&mut mode, m, record_mode_label(m));
                                 }
                             });
@@ -211,9 +207,7 @@ impl WorkbenchApp {
                         for port in &stale {
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    egui::RichText::new(*port)
-                                        .monospace()
-                                        .color(theme::ORANGE),
+                                    egui::RichText::new(*port).monospace().color(theme::ORANGE),
                                 );
                                 if ui.small_button("强制关闭").clicked() {
                                     self.transport.close_port(port);
@@ -232,48 +226,257 @@ impl WorkbenchApp {
                     egui::RichText::new("提示：别名会显示在串口选择、发送目标和设备列表中")
                         .color(theme::TEXT_SECONDARY),
                 );
+
+                // 收集所有已有组名
+                let group_names: Vec<String> = {
+                    let names: BTreeSet<String> =
+                        self.serial.port_groups.values().cloned().collect();
+                    names.into_iter().collect()
+                };
+
                 let mut alias_changes: Vec<(String, Option<String>)> = Vec::new();
+                let mut group_changes: Vec<(String, Option<String>)> = Vec::new();
+                let mut rename_group: Option<(String, String)> = None;
+                let mut delete_group: Option<String> = None;
+
+                // 新建分组（通过 ComboBox 触发）
+                let new_group_state_id = ui.make_persistent_id("port-new-group-active");
+                let mut new_group_active =
+                    ui.data_mut(|d| d.get_persisted::<bool>(new_group_state_id).unwrap_or(false));
+                let new_group_name_id = ui.make_persistent_id("port-new-group-name");
+                let mut new_group_name = ui.data_mut(|d| {
+                    d.get_persisted::<String>(new_group_name_id)
+                        .unwrap_or_default()
+                });
+                let new_group_port_id = ui.make_persistent_id("port-new-group-port");
+                let mut new_group_port = ui.data_mut(|d| {
+                    d.get_persisted::<String>(new_group_port_id)
+                        .unwrap_or_default()
+                });
+
+                // 按分组整理端口
+                let mut groups: BTreeMap<String, Vec<&tool_transport::SerialPortDescriptor>> =
+                    BTreeMap::new();
+                for port in &self.serial.ports {
+                    let group = self
+                        .serial
+                        .port_groups
+                        .get(&port.port_name)
+                        .cloned()
+                        .unwrap_or_else(|| "未分组".to_owned());
+                    groups.entry(group).or_default().push(port);
+                }
+
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    for port in &self.serial.ports {
-                        let name = port.port_name.clone();
-                        let mut alias_buf = self
-                            .serial
-                            .port_aliases
-                            .get(&name)
-                            .cloned()
-                            .unwrap_or_default();
+                    for (group_name, ports) in &groups {
+                        let is_default_group = group_name == "未分组";
+                        let state_id =
+                            ui.make_persistent_id(format!("port-group-state-{group_name}"));
+                        let mut open =
+                            ui.data_mut(|d| d.get_persisted::<bool>(state_id).unwrap_or(true));
 
+                        // ── 组标题行 ──
                         ui.horizontal(|ui| {
-                            let open = self.transport.status_port(&name).open;
-                            ui.label(if open { "●" } else { "○" });
-                            ui.monospace(&name);
-                            ui.label(port.port_type.to_string());
-
-                            ui.label("别名");
-                            let resp = ui.add(
-                                egui::TextEdit::singleline(&mut alias_buf)
-                                    .desired_width(140.0)
-                                    .hint_text("例如 主控板 / GPS"),
+                            let toggle = if open { "▾" } else { "▸" };
+                            if ui.selectable_label(false, toggle).clicked() {
+                                open = !open;
+                            }
+                            ui.label(egui::RichText::new(group_name).color(if is_default_group {
+                                theme::TEXT_SECONDARY
+                            } else {
+                                theme::TEXT_PRIMARY
+                            }));
+                            ui.label(
+                                egui::RichText::new(format!("({})", ports.len()))
+                                    .color(theme::TEXT_DIMMED),
                             );
 
-                            if resp.changed() {
-                                let new_alias = if alias_buf.trim().is_empty() {
-                                    None
-                                } else {
-                                    Some(alias_buf.trim().to_owned())
-                                };
-                                alias_changes.push((name.clone(), new_alias));
-                            }
+                            // 分组操作菜单（非默认组）
+                            if !is_default_group {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let menu_id = ui
+                                            .make_persistent_id(format!("group-menu-{group_name}"));
+                                        let mut show_menu = ui.data_mut(|d| {
+                                            d.get_persisted::<bool>(menu_id).unwrap_or(false)
+                                        });
 
-                            if self.serial.port_aliases.contains_key(&name)
-                                && ui.small_button("清除").clicked()
-                            {
-                                alias_changes.push((name.clone(), None));
+                                        if ui.small_button("···").clicked() {
+                                            show_menu = !show_menu;
+                                        }
+                                        ui.data_mut(|d| d.insert_persisted(menu_id, show_menu));
+
+                                        if show_menu {
+                                            let mut rename_input = group_name.clone();
+                                            ui.add(
+                                                egui::TextEdit::singleline(&mut rename_input)
+                                                    .desired_width(100.0),
+                                            );
+                                            if ui.small_button("改名").clicked()
+                                                && !rename_input.trim().is_empty()
+                                                && rename_input.trim() != group_name.as_str()
+                                            {
+                                                rename_group = Some((
+                                                    group_name.clone(),
+                                                    rename_input.trim().to_owned(),
+                                                ));
+                                                ui.data_mut(|d| d.insert_persisted(menu_id, false));
+                                            }
+                                            if ui.small_button("删除").clicked() {
+                                                delete_group = Some(group_name.clone());
+                                                ui.data_mut(|d| d.insert_persisted(menu_id, false));
+                                            }
+                                        }
+                                    },
+                                );
                             }
                         });
+
+                        ui.data_mut(|d| d.insert_persisted(state_id, open));
+
+                        // ── 端口列表 ──
+                        if open {
+                            for port in ports {
+                                let name = port.port_name.clone();
+                                let mut alias_buf = self
+                                    .serial
+                                    .port_aliases
+                                    .get(&name)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                let current_group = self
+                                    .serial
+                                    .port_groups
+                                    .get(&name)
+                                    .cloned()
+                                    .unwrap_or_else(|| "未分组".to_owned());
+
+                                ui.horizontal(|ui| {
+                                    ui.add_space(16.0);
+                                    let port_open = self.transport.status_port(&name).open;
+                                    ui.label(if port_open { "●" } else { "○" });
+                                    ui.monospace(&name);
+                                    ui.label(port.port_type.to_string());
+
+                                    // 别名
+                                    ui.label("别名");
+                                    let resp = ui.add(
+                                        egui::TextEdit::singleline(&mut alias_buf)
+                                            .desired_width(100.0)
+                                            .hint_text("例如 主控板"),
+                                    );
+                                    if resp.changed() {
+                                        let new_alias = if alias_buf.trim().is_empty() {
+                                            None
+                                        } else {
+                                            Some(alias_buf.trim().to_owned())
+                                        };
+                                        alias_changes.push((name.clone(), new_alias));
+                                    }
+                                    if self.serial.port_aliases.contains_key(&name)
+                                        && ui.small_button("×").clicked()
+                                    {
+                                        alias_changes.push((name.clone(), None));
+                                    }
+
+                                    // 分组选择
+                                    let mut selected = current_group.clone();
+                                    egui::ComboBox::from_id_salt(format!("port-group-{name}"))
+                                        .width(100.0)
+                                        .selected_text(&selected)
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(
+                                                &mut selected,
+                                                "未分组".to_owned(),
+                                                "未分组",
+                                            );
+                                            for gn in &group_names {
+                                                ui.selectable_value(
+                                                    &mut selected,
+                                                    gn.clone(),
+                                                    gn.as_str(),
+                                                );
+                                            }
+                                            ui.separator();
+                                            if ui.button("+ 新建分组...").clicked() {
+                                                new_group_active = true;
+                                                new_group_port = name.clone();
+                                            }
+                                        });
+
+                                    if selected != current_group {
+                                        let new_group = if selected == "未分组" {
+                                            None
+                                        } else {
+                                            Some(selected)
+                                        };
+                                        group_changes.push((name.clone(), new_group));
+                                    }
+                                });
+                            }
+                        }
                     }
                 });
-                let has_changes = !alias_changes.is_empty();
+
+                // ── 新建分组弹窗 ──
+                if new_group_active {
+                    ui.horizontal(|ui| {
+                        ui.label("新建分组：");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut new_group_name)
+                                .desired_width(120.0)
+                                .hint_text("输入组名"),
+                        );
+                        if ui.button("确定").clicked()
+                            || (ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                && !new_group_name.trim().is_empty())
+                        {
+                            let name = new_group_name.trim().to_owned();
+                            if !name.is_empty() && !new_group_port.is_empty() {
+                                group_changes.push((new_group_port.clone(), Some(name)));
+                            }
+                            new_group_name.clear();
+                            new_group_active = false;
+                            new_group_port.clear();
+                        }
+                        if ui.small_button("取消").clicked() {
+                            new_group_name.clear();
+                            new_group_active = false;
+                            new_group_port.clear();
+                        }
+                    });
+                    ui.data_mut(|d| d.insert_persisted(new_group_state_id, new_group_active));
+                    ui.data_mut(|d| d.insert_persisted(new_group_name_id, new_group_name.clone()));
+                    ui.data_mut(|d| d.insert_persisted(new_group_port_id, new_group_port.clone()));
+                }
+
+                // ── 应用变更 ──
+                // 分组重命名
+                if let Some((old_name, new_name)) = rename_group {
+                    for (_port, group) in self.serial.port_groups.iter_mut() {
+                        if *group == old_name {
+                            *group = new_name.clone();
+                        }
+                    }
+                    if let Err(e) = self.save_config() {
+                        log::warn!("save_config failed: {e}")
+                    };
+                }
+                // 删除分组（将组内端口移回未分组）
+                if let Some(group_name) = delete_group {
+                    for (_port, group) in self.serial.port_groups.iter_mut() {
+                        if *group == group_name {
+                            *group = String::new(); // will be removed below
+                        }
+                    }
+                    self.serial.port_groups.retain(|_, v| !v.is_empty());
+                    if let Err(e) = self.save_config() {
+                        log::warn!("save_config failed: {e}")
+                    };
+                }
+
+                let has_changes = !alias_changes.is_empty() || !group_changes.is_empty();
                 for (name, new_alias) in alias_changes {
                     match new_alias {
                         Some(alias) => {
@@ -281,6 +484,16 @@ impl WorkbenchApp {
                         }
                         None => {
                             self.serial.port_aliases.remove(&name);
+                        }
+                    }
+                }
+                for (name, new_group) in group_changes {
+                    match new_group {
+                        Some(group) => {
+                            self.serial.port_groups.insert(name, group);
+                        }
+                        None => {
+                            self.serial.port_groups.remove(&name);
                         }
                     }
                 }

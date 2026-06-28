@@ -367,6 +367,27 @@ impl JsonlRecorder {
         }
     }
 
+    /// 添加录制标记点。仅在录制中有效。
+    pub fn add_bookmark(&self, name: &str) {
+        if self.worker.is_some() {
+            self.bus.publish(Event::new(
+                "recorder.bookmark",
+                "recorder",
+                Direction::Internal,
+                Payload::Text(name.to_owned()),
+            ));
+            self.bus.publish(Event::system_log(
+                LogLevel::Info,
+                "recorder",
+                if name.is_empty() {
+                    "bookmark added".to_owned()
+                } else {
+                    format!("bookmark: {name}")
+                },
+            ));
+        }
+    }
+
     pub fn is_stopping(&self) -> bool {
         self.stopping.is_some()
     }
@@ -612,16 +633,17 @@ mod tests {
             tool_core::now_timestamp_ms()
         ));
 
-        // Set FullDebug mode before start so the worker captures it
-        rec.set_mode(RecordMode::FullDebug);
+        // Set StandardReplay mode before start so the worker captures it
+        rec.set_mode(RecordMode::StandardReplay);
         rec.start(&path).unwrap();
         let s = rec.stats();
         assert!(s.running);
         assert_eq!(s.events_written, 0);
 
-        // Publish events that will be recorded (FullDebug mode records everything)
+        // Publish events that will be recorded (StandardReplay records serial/protocol/ui.panel.create)
         for i in 0..10 {
-            rec.bus.publish(test_event(&format!("test.stats.{i}")));
+            rec.bus
+                .publish(test_event(&format!("transport.serial.test.{i}")));
         }
 
         // Give the worker time to process

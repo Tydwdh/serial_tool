@@ -17,8 +17,6 @@ pub enum RecordMode {
     /// 默认：串口 + protocol.* + ui.panel.create
     #[default]
     StandardReplay,
-    /// 记录所有事件（除 replay/derived/recordable=false）
-    FullDebug,
 }
 
 pub(crate) fn write_event_counted(writer: &mut impl Write, event: &Event) -> io::Result<u64> {
@@ -53,8 +51,11 @@ pub(crate) fn should_record_event_with_mode(event: &Event, mode: RecordMode) -> 
         return false;
     }
 
-    // 录制控制事件（暂停/继续）在所有模式下都写入
-    if event.topic == "recorder.pause" || event.topic == "recorder.resume" {
+    // 录制控制事件（暂停/继续/标记）在所有模式下都写入
+    if event.topic == "recorder.pause"
+        || event.topic == "recorder.resume"
+        || event.topic == "recorder.bookmark"
+    {
         return true;
     }
 
@@ -65,7 +66,6 @@ pub(crate) fn should_record_event_with_mode(event: &Event, mode: RecordMode) -> 
                 || event.topic.starts_with("protocol.")
                 || event.topic == "ui.panel.create"
         }
-        RecordMode::FullDebug => true,
     }
 }
 
@@ -115,25 +115,9 @@ mod tests {
     }
 
     #[test]
-    fn full_debug_records_almost_everything() {
-        assert!(should_record_event_with_mode(
-            &ev("log.system"),
-            RecordMode::FullDebug
-        ));
-        assert!(should_record_event_with_mode(
-            &ev("anything.else"),
-            RecordMode::FullDebug
-        ));
-    }
-
-    #[test]
     fn recorder_markers_always_recorded() {
         // 暂停/继续 marker 在所有 mode 下都写入
-        for mode in [
-            RecordMode::RawSerial,
-            RecordMode::StandardReplay,
-            RecordMode::FullDebug,
-        ] {
+        for mode in [RecordMode::RawSerial, RecordMode::StandardReplay] {
             assert!(should_record_event_with_mode(&ev("recorder.pause"), mode));
             assert!(should_record_event_with_mode(&ev("recorder.resume"), mode));
         }
@@ -143,11 +127,7 @@ mod tests {
     fn replay_events_excluded_in_all_modes() {
         let mut event = ev("transport.serial.default.rx");
         event.meta_set("replay", serde_json::Value::Bool(true));
-        for mode in [
-            RecordMode::RawSerial,
-            RecordMode::StandardReplay,
-            RecordMode::FullDebug,
-        ] {
+        for mode in [RecordMode::RawSerial, RecordMode::StandardReplay] {
             assert!(
                 !should_record_event_with_mode(&event, mode),
                 "replay event should be excluded in {:?}",
@@ -165,7 +145,7 @@ mod tests {
         );
         assert!(!should_record_event_with_mode(
             &event,
-            RecordMode::FullDebug
+            RecordMode::StandardReplay
         ));
     }
 

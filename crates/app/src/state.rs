@@ -163,6 +163,7 @@ pub(crate) struct SerialUiState {
     pub(crate) auto_reconnect: bool,
     pub(crate) pending_reconnect: Option<PendingReconnect>,
     pub(crate) port_aliases: std::collections::HashMap<String, String>,
+    pub(crate) port_groups: std::collections::HashMap<String, String>,
     pub(crate) port_profiles: std::collections::HashMap<String, crate::config::PortProfile>,
     pub(crate) top_bar_serial_collapsed: bool,
 }
@@ -180,6 +181,7 @@ impl Default for SerialUiState {
             auto_reconnect: true,
             pending_reconnect: None,
             port_aliases: std::collections::HashMap::new(),
+            port_groups: std::collections::HashMap::new(),
             port_profiles: std::collections::HashMap::new(),
             top_bar_serial_collapsed: false,
         }

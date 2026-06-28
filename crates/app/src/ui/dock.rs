@@ -190,27 +190,35 @@ impl WorkbenchApp {
     fn dock_panel_body(&mut self, ui: &mut egui::Ui, area: DockArea, kind: PanelKind) {
         match kind {
             PanelKind::Devices => {
-                egui::ScrollArea::vertical().show(ui, |ui| self.device_panel(ui));
+                egui::ScrollArea::vertical()
+                    .id_salt("scroll-devices")
+                    .show(ui, |ui| self.device_panel(ui));
             }
             PanelKind::Replay => {
-                egui::ScrollArea::vertical().show(ui, |ui| self.replay_panel.ui(ui));
+                egui::ScrollArea::vertical()
+                    .id_salt("scroll-replay")
+                    .show(ui, |ui| self.replay_panel.ui(ui));
             }
             PanelKind::Plugins => {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    if let Some((msg, is_error)) =
-                        self.plugins_panel.ui(ui, &mut self.plugin_manager)
-                    {
-                        let level = if is_error {
-                            StatusLevel::Error
-                        } else {
-                            StatusLevel::Info
-                        };
-                        self.set_status_force(level, msg);
-                    }
-                });
+                egui::ScrollArea::vertical()
+                    .id_salt("scroll-plugins")
+                    .show(ui, |ui| {
+                        if let Some((msg, is_error)) =
+                            self.plugins_panel.ui(ui, &mut self.plugin_manager)
+                        {
+                            let level = if is_error {
+                                StatusLevel::Error
+                            } else {
+                                StatusLevel::Info
+                            };
+                            self.set_status_force(level, msg);
+                        }
+                    });
             }
             PanelKind::Settings => {
-                egui::ScrollArea::vertical().show(ui, |ui| self.settings_panel(ui));
+                egui::ScrollArea::vertical()
+                    .id_salt("scroll-settings")
+                    .show(ui, |ui| self.settings_panel(ui));
             }
             PanelKind::Terminal => {
                 if self.terminal_popup_open {

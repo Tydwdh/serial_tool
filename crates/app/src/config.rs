@@ -58,6 +58,8 @@ pub(crate) struct PersistedConfig {
     #[serde(default)]
     pub(crate) port_aliases: HashMap<String, String>,
     #[serde(default)]
+    pub(crate) port_groups: HashMap<String, String>,
+    #[serde(default)]
     pub(crate) send_history: Vec<String>,
     #[serde(default = "default_line_ending")]
     pub(crate) line_ending: LineEnding,
@@ -144,19 +146,6 @@ pub(crate) fn config_path() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("workspace.json")
 }
-pub(crate) fn pick_workspace_open_path() -> Option<PathBuf> {
-    rfd::FileDialog::new()
-        .add_filter("Workspace", &["json"])
-        .pick_file()
-}
-
-pub(crate) fn pick_workspace_save_path() -> Option<PathBuf> {
-    rfd::FileDialog::new()
-        .add_filter("Workspace", &["json"])
-        .set_file_name("workspace.json")
-        .save_file()
-}
-
 pub(crate) fn windows_open_dialog() -> Option<PathBuf> {
     rfd::FileDialog::new()
         .add_filter("JSONL", &["jsonl"])
@@ -201,7 +190,6 @@ pub(crate) fn record_mode_label(mode: RecordMode) -> &'static str {
     match mode {
         RecordMode::StandardReplay => "标准回放",
         RecordMode::RawSerial => "原始串口",
-        RecordMode::FullDebug => "完整调试",
     }
 }
 
@@ -244,6 +232,7 @@ impl WorkbenchApp {
             terminal_popup_always_on_top: self.terminal_popup_always_on_top,
             send_popup_always_on_top: self.send_popup_always_on_top,
             port_aliases: self.serial.port_aliases.clone(),
+            port_groups: self.serial.port_groups.clone(),
             send_history: self.send.send_history.iter().cloned().collect(),
             line_ending: self.send.line_ending,
             port_profiles: self.serial.port_profiles.clone(),
@@ -257,11 +246,6 @@ impl WorkbenchApp {
         let cfg = self.build_config_snapshot();
         let path = config_path();
         atomic_write_json(&path, &cfg)
-    }
-
-    pub(crate) fn save_config_to_path(&self, path: &std::path::Path) -> Result<(), String> {
-        let cfg = self.build_config_snapshot();
-        atomic_write_json(path, &cfg)
     }
 
     pub(crate) fn load_config_from_path(&mut self, path: &std::path::Path) -> Result<(), String> {
@@ -278,6 +262,7 @@ impl WorkbenchApp {
         self.terminal_popup_always_on_top = cfg.terminal_popup_always_on_top;
         self.send_popup_always_on_top = cfg.send_popup_always_on_top;
         self.serial.port_aliases = cfg.port_aliases.clone();
+        self.serial.port_groups = cfg.port_groups.clone();
         self.serial.port_profiles = cfg.port_profiles.clone();
         self.serial.auto_reconnect = cfg.auto_reconnect;
         self.keymap = cfg.keymap.clone();
@@ -336,11 +321,7 @@ mod tests {
 
     #[test]
     fn record_mode_label_all_variants_non_empty() {
-        let modes = [
-            RecordMode::StandardReplay,
-            RecordMode::RawSerial,
-            RecordMode::FullDebug,
-        ];
+        let modes = [RecordMode::StandardReplay, RecordMode::RawSerial];
         for mode in &modes {
             let label = record_mode_label(*mode);
             assert!(!label.is_empty(), "label for {mode:?} should not be empty");
@@ -355,11 +336,6 @@ mod tests {
     #[test]
     fn record_mode_label_raw_serial() {
         assert_eq!(record_mode_label(RecordMode::RawSerial), "原始串口");
-    }
-
-    #[test]
-    fn record_mode_label_full_debug() {
-        assert_eq!(record_mode_label(RecordMode::FullDebug), "完整调试");
     }
 
     // ── default_recorder_path ──

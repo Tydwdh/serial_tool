@@ -1,12 +1,10 @@
 use crate::app::WorkbenchApp;
-use crate::config::{
-    config_path, default_activity_order, default_recorder_path,
-};
+use crate::config::{config_path, default_activity_order, default_recorder_path};
 use crate::state::StatusLevel;
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use tool_panels::theme;
-use tool_panels::{dynamic_form_ui, parse_fields, DynamicField};
+use tool_panels::{DynamicField, dynamic_form_ui, parse_fields};
 
 impl WorkbenchApp {
     pub(crate) fn settings_panel(&mut self, ui: &mut egui::Ui) {
@@ -22,10 +20,7 @@ impl WorkbenchApp {
                 // 最近工作区
                 if !self.recent_workspaces.is_empty() {
                     ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new("最近工作区")
-                            .color(theme::TEXT_SECONDARY),
-                    );
+                    ui.label(egui::RichText::new("最近工作区").color(theme::TEXT_SECONDARY));
                     let paths: Vec<(usize, std::path::PathBuf)> = self
                         .recent_workspaces
                         .iter()
@@ -115,6 +110,7 @@ impl WorkbenchApp {
                 self.recorder_path = default_recorder_path();
                 self.activity_order = default_activity_order();
                 self.serial.port_aliases.clear();
+                self.serial.port_groups.clear();
                 self.panels.dock = tool_panels::DockLayout::default();
                 self.bottom_panel_visible = true;
                 self.set_status_force(StatusLevel::Warn, "已恢复默认设置，重启后生效");
@@ -131,12 +127,10 @@ impl WorkbenchApp {
                 ui.label(egui::RichText::new("ℹ 关于").strong());
                 ui.separator();
                 ui.horizontal(|ui| {
-                    ui.label(format!(
-                        "硬件调试工作台 v{}",
-                        env!("CARGO_PKG_VERSION")
-                    ));
+                    ui.label(format!("硬件调试工作台 v{}", env!("CARGO_PKG_VERSION")));
                     if ui.small_button("复制版本号").clicked() {
-                        ui.ctx().copy_text(format!("v{}", env!("CARGO_PKG_VERSION")));
+                        ui.ctx()
+                            .copy_text(format!("v{}", env!("CARGO_PKG_VERSION")));
                         self.set_status_force(
                             StatusLevel::Info,
                             format!("已复制 v{}", env!("CARGO_PKG_VERSION")),
@@ -176,7 +170,11 @@ impl WorkbenchApp {
                 ui.ctx().copy_text(path_text.clone());
                 self.set_status_force(StatusLevel::Info, format!("已复制: {path_text}"));
             }
-            if ui.small_button("📂").on_hover_text("打开所在目录").clicked() {
+            if ui
+                .small_button("📂")
+                .on_hover_text("打开所在目录")
+                .clicked()
+            {
                 match open_config_location(path, open_self) {
                     Ok(target) => self.set_status_force(
                         StatusLevel::Info,
@@ -212,8 +210,16 @@ impl WorkbenchApp {
             .min_col_width(80.0)
             .show(ui, |ui| {
                 // 表头
-                ui.label(egui::RichText::new("操作").strong().color(theme::TEXT_SECONDARY));
-                ui.label(egui::RichText::new("快捷键").strong().color(theme::TEXT_SECONDARY));
+                ui.label(
+                    egui::RichText::new("操作")
+                        .strong()
+                        .color(theme::TEXT_SECONDARY),
+                );
+                ui.label(
+                    egui::RichText::new("快捷键")
+                        .strong()
+                        .color(theme::TEXT_SECONDARY),
+                );
                 ui.label("");
                 ui.label("");
                 ui.end_row();
@@ -229,8 +235,7 @@ impl WorkbenchApp {
                     if bindings.is_empty() {
                         ui.colored_label(theme::TEXT_DIMMED, "未绑定");
                     } else {
-                        let shortcuts: Vec<String> =
-                            bindings.iter().map(|b| b.display()).collect();
+                        let shortcuts: Vec<String> = bindings.iter().map(|b| b.display()).collect();
                         ui.label(shortcuts.join(", "));
                     }
 
@@ -276,7 +281,8 @@ impl WorkbenchApp {
             let mut fields_json = Vec::with_capacity(settings.len());
 
             for setting in settings {
-                let current_value = config_store.get(plugin_id, &setting.id, setting.default.clone());
+                let current_value =
+                    config_store.get(plugin_id, &setting.id, setting.default.clone());
                 // 首次写入默认值
                 if current_value == setting.default {
                     let keys = config_store.keys(plugin_id);
@@ -293,7 +299,10 @@ impl WorkbenchApp {
                 });
                 let obj = field_json.as_object_mut().unwrap();
                 if !setting.options.is_empty() {
-                    obj.insert("options".to_owned(), serde_json::Value::Array(setting.options.clone()));
+                    obj.insert(
+                        "options".to_owned(),
+                        serde_json::Value::Array(setting.options.clone()),
+                    );
                 }
                 if let Some(min) = setting.min {
                     obj.insert("min".to_owned(), serde_json::json!(min));
@@ -320,9 +329,7 @@ impl WorkbenchApp {
                 .inner_margin(egui::Margin::symmetric(12, 8))
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
-                    ui.label(
-                        egui::RichText::new(format!("🧩 {plugin_name} 设置")).strong(),
-                    );
+                    ui.label(egui::RichText::new(format!("🧩 {plugin_name} 设置")).strong());
                     ui.separator();
 
                     let panel_id = format!("{plugin_id}.settings");

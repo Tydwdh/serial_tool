@@ -6,13 +6,6 @@ use crate::app::WorkbenchApp;
 use crate::state::StatusLevel;
 
 impl WorkbenchApp {
-    pub(crate) fn add_recent_workspace(&mut self, path: &std::path::Path) {
-        let s = path.display().to_string();
-        self.recent_workspaces.retain(|p| p != &s);
-        self.recent_workspaces.insert(0, s);
-        self.recent_workspaces.truncate(10);
-    }
-
     pub(crate) fn apply_loaded_workspace_postprocess(&mut self) {
         self.panels.discard_dynamic_tabs();
         self.panels.dock.normalize_tool_layout();

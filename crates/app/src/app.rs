@@ -262,6 +262,10 @@ impl WorkbenchApp {
                     .as_ref()
                     .map(|c| c.port_aliases.clone())
                     .unwrap_or_default(),
+                port_groups: config
+                    .as_ref()
+                    .map(|c| c.port_groups.clone())
+                    .unwrap_or_default(),
                 port_profiles: config
                     .as_ref()
                     .map(|c| c.port_profiles.clone())

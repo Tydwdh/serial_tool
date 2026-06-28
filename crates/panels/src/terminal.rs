@@ -41,10 +41,9 @@ pub struct TerminalPanel {
     detail_entry_id: Option<u64>,
 }
 
+#[derive(Default)]
 struct PortData {
     entries: VecDeque<TerminalEntry>,
-    show_rx: bool,
-    show_tx: bool,
     truncated_count: u64,
 }
 
@@ -315,90 +314,6 @@ impl TerminalPanel {
 
     pub fn port_names(&self) -> Vec<String> {
         self.ports.keys().cloned().collect()
-    }
-
-    pub fn port_ui(&mut self, ui: &mut egui::Ui, port_name: &str) {
-        let _new_entries = self.ingest();
-
-        let mut show_hex = self.show_hex;
-        let mut auto_scroll = self.auto_scroll;
-        let mut maximize_clicked = false;
-        let mut clear_selection = false;
-        let wheel_moves_towards_bottom =
-            crate::scroll_delta_moves_towards_bottom(ui.input(|input| input.smooth_scroll_delta.y));
-
-        let scroll_key = format!("terminal-port-{port_name}");
-        let mut force_scroll_to_bottom = self.pending_scroll_to_bottom_keys.remove(&scroll_key);
-
-        let render_outcome = {
-            let data = self.ports.entry(port_name.to_owned()).or_default();
-
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(port_name).monospace().strong());
-
-                ui.checkbox(&mut data.show_rx, "RX");
-                ui.checkbox(&mut data.show_tx, "TX");
-                ui.checkbox(&mut show_hex, "HEX");
-                ui.checkbox(&mut self.show_raw, "原始");
-                ui.checkbox(&mut self.show_lines, "按行显示");
-
-                force_scroll_to_bottom |= crate::theme::auto_scroll_button(ui, &mut auto_scroll);
-
-                if ui.button("清空").clicked() {
-                    data.entries.clear();
-                    clear_selection = true;
-                }
-
-                if ui.button("⛶").on_hover_text("放大查看").clicked() {
-                    maximize_clicked = true;
-                }
-
-                let dropped = self.subscription.dropped_count();
-                if dropped > 0 {
-                    ui.colored_label(theme::YELLOW, format!("已丢弃 {dropped} 条，数据不完整"));
-                }
-            });
-
-            force_scroll_to_bottom |= auto_scroll && wheel_moves_towards_bottom;
-
-            ui.separator();
-
-            let rows = build_visible_rows_for_port(
-                None,
-                data.entries
-                    .iter()
-                    .filter(|entry| entry_visible(entry.direction, data.show_rx, data.show_tx)),
-                self.show_lines,
-            );
-            let show_metadata = !self.show_lines;
-
-            let scroll_height = ui.available_height().max(40.0);
-            render_rows_view(
-                ui,
-                &scroll_key,
-                scroll_height,
-                &rows,
-                show_hex,
-                self.show_raw,
-                show_metadata,
-                false,
-                show_metadata,
-                auto_scroll,
-                force_scroll_to_bottom,
-            )
-        };
-
-        self.show_hex = show_hex;
-        self.auto_scroll = auto_scroll;
-        self.maximize_clicked |= maximize_clicked;
-
-        if clear_selection {
-            self.selected_entry_id = None;
-            self.detail_entry_id = None;
-        }
-
-        self.apply_render_outcome(&scroll_key, render_outcome, ui);
-        self.detail_popup(ui.ctx());
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
@@ -778,17 +693,6 @@ impl TerminalPanel {
 
         if !open {
             self.detail_entry_id = None;
-        }
-    }
-}
-
-impl Default for PortData {
-    fn default() -> Self {
-        Self {
-            entries: VecDeque::new(),
-            show_rx: true,
-            show_tx: true,
-            truncated_count: 0,
         }
     }
 }

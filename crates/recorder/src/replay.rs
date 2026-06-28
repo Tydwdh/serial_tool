@@ -86,7 +86,13 @@ pub struct ReplayManager {
     analyzer_warning: Option<String>,
     analyzer_cursor: usize,
     last_load_report: Option<ReplayLoadReport>,
-    bookmarks: Vec<u64>,
+    bookmarks: Vec<Bookmark>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Bookmark {
+    pub pos_ms: u64,
+    pub name: Option<String>,
 }
 
 /// 稀疏索引入口间隔：每 INDEX_STRIDE 个事件记录一条索引。
@@ -117,19 +123,19 @@ impl ReplayManager {
         }
     }
 
-    pub fn add_bookmark(&mut self) {
+    pub fn add_bookmark(&mut self, name: Option<String>) {
         let pos = self.position_ms();
-        if !self.bookmarks.contains(&pos) {
-            self.bookmarks.push(pos);
-            self.bookmarks.sort();
+        if !self.bookmarks.iter().any(|b| b.pos_ms == pos) {
+            self.bookmarks.push(Bookmark { pos_ms: pos, name });
+            self.bookmarks.sort_by_key(|b| b.pos_ms);
         }
     }
 
     pub fn remove_bookmark(&mut self, pos_ms: u64) {
-        self.bookmarks.retain(|&b| b != pos_ms);
+        self.bookmarks.retain(|b| b.pos_ms != pos_ms);
     }
 
-    pub fn bookmarks(&self) -> &[u64] {
+    pub fn bookmarks(&self) -> &[Bookmark] {
         &self.bookmarks
     }
 
@@ -212,6 +218,21 @@ impl ReplayManager {
         self.analyzer_cache_valid = false;
         self.clear_analyzer_messages();
         self.analyzer_cursor = 0;
+
+        // 从录制事件中恢复书签（recorder.bookmark 事件）
+        self.bookmarks.clear();
+        for event in &self.events {
+            if event.topic == "recorder.bookmark" {
+                let name = event.payload.text_lossy();
+                let name = if name.is_empty() { None } else { Some(name) };
+                let pos_ms = event
+                    .timestamp_ms
+                    .saturating_sub(self.events.first().map(|e| e.timestamp_ms).unwrap_or(0));
+                if !self.bookmarks.iter().any(|b| b.pos_ms == pos_ms) {
+                    self.bookmarks.push(Bookmark { pos_ms, name });
+                }
+            }
+        }
 
         self.state = if self.events.is_empty() {
             ReplayState::Empty

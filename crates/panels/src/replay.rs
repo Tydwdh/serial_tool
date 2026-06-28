@@ -356,10 +356,7 @@ impl ReplayPanel {
                 }
             }
         };
-        ui.label(
-            egui::RichText::new(status_text)
-                .color(theme::TEXT_SECONDARY),
-        );
+        ui.label(egui::RichText::new(status_text).color(theme::TEXT_SECONDARY));
 
         if let Some(error) = self.manager.analyzer_error() {
             ui.colored_label(theme::RED, format!("错误: {error}"));
@@ -573,18 +570,24 @@ impl ReplayPanel {
                 .on_hover_text("在当前时间点添加书签")
                 .clicked()
             {
-                self.manager.add_bookmark();
+                self.manager.add_bookmark(None);
             }
-            for &pos_ms in &bookmarks {
+            for bookmark in &bookmarks {
+                let label = bookmark.name.as_deref().unwrap_or("").to_owned();
+                let display = if label.is_empty() {
+                    ms_to_hms(bookmark.pos_ms).to_string()
+                } else {
+                    format!("{} {}", ms_to_hms(bookmark.pos_ms), label)
+                };
                 if ui
-                    .add_enabled(can_seek, egui::Button::new(ms_to_hms(pos_ms).to_string()))
+                    .add_enabled(can_seek, egui::Button::new(display))
                     .on_disabled_hover_text("当前回放策略需要先完成 Replay Analyzer")
                     .clicked()
                 {
-                    self.want_seek_replay = Some(pos_ms);
+                    self.want_seek_replay = Some(bookmark.pos_ms);
                 }
                 if ui.small_button("×").on_hover_text("删除此书签").clicked() {
-                    self.manager.remove_bookmark(pos_ms);
+                    self.manager.remove_bookmark(bookmark.pos_ms);
                 }
             }
         });

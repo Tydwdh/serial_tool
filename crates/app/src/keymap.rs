@@ -23,6 +23,8 @@ pub(crate) enum Action {
     StartRecording,
     /// 重连当前串口
     ReconnectPort,
+    /// 录制时添加标记点
+    AddBookmark,
     /// 插件命令: (plugin_id, command_id)
     PluginCommand(String, String),
 }
@@ -37,6 +39,7 @@ impl Action {
         Action::Send,
         Action::StartRecording,
         Action::ReconnectPort,
+        Action::AddBookmark,
     ];
 
     /// 合并内置 Action 与插件命令。
@@ -62,6 +65,7 @@ impl Action {
             Action::Send => "$Send".into(),
             Action::StartRecording => "$StartRecording".into(),
             Action::ReconnectPort => "$ReconnectPort".into(),
+            Action::AddBookmark => "$AddBookmark".into(),
             Action::PluginCommand(plugin_id, command_id) => {
                 format!("{plugin_id}:{command_id}")
             }
@@ -78,6 +82,7 @@ impl Action {
             "$Send" => Some(Action::Send),
             "$StartRecording" => Some(Action::StartRecording),
             "$ReconnectPort" => Some(Action::ReconnectPort),
+            "$AddBookmark" => Some(Action::AddBookmark),
             other => {
                 // 插件命令: "plugin_id:command_id"
                 let (plugin_id, command_id) = other.split_once(':')?;
@@ -99,6 +104,7 @@ impl Action {
             Action::Send => "发送".into(),
             Action::StartRecording => "开始/停止录制".into(),
             Action::ReconnectPort => "重连串口".into(),
+            Action::AddBookmark => "添加录制标记".into(),
             Action::PluginCommand(plugin_id, command_id) => {
                 format!("{plugin_id}:{command_id}")
             }
@@ -259,7 +265,10 @@ mod tests {
             let key = action.key();
             assert!(
                 km.bindings.contains_key(&key)
-                    || matches!(action, Action::StartRecording | Action::ReconnectPort),
+                    || matches!(
+                        action,
+                        Action::StartRecording | Action::ReconnectPort | Action::AddBookmark
+                    ),
                 "action {action:?} (key={key}) should have a default binding or be explicitly unbound"
             );
         }

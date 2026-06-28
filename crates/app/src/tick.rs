@@ -65,6 +65,11 @@ impl WorkbenchApp {
             }
             Action::StartRecording => self.start_or_stop_recording(),
             Action::ReconnectPort => self.reconnect_selected_port(),
+            Action::AddBookmark => {
+                if self.recorder.is_running() {
+                    self.recorder.add_bookmark("");
+                }
+            }
             Action::PluginCommand(plugin_id, command_id) => {
                 self.publish_plugin_command_action(&plugin_id, &command_id);
             }
