@@ -3,7 +3,7 @@ use egui::Color32;
 // ══════════════════════════════════════════
 //  背景层级：深底 → 卡片面 → 输入框
 // ══════════════════════════════════════════
-pub const BG_DEEP: Color32 = Color32::from_rgb(22, 25, 30);
+pub const BG_DEEP: Color32 = Color32::from_rgb(33, 37, 43); // #21252B
 pub const BG_PRIMARY: Color32 = Color32::from_rgb(35, 39, 47);
 pub const BG_SECONDARY: Color32 = Color32::from_rgb(28, 32, 38);
 pub const BG_TERTIARY: Color32 = Color32::from_rgb(43, 49, 60);
