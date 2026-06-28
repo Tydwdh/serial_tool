@@ -14,7 +14,10 @@ impl WorkbenchApp {
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.label(egui::RichText::new("📟 串口参数").strong());
+                ui.horizontal(|ui| {
+                    theme::card_accent_bar(ui, theme::CARD_ACCENT_DEVICE);
+                    ui.label(egui::RichText::new("📟 串口参数").heading());
+                });
                 ui.separator();
 
                 ui.horizontal(|ui| {
@@ -76,7 +79,10 @@ impl WorkbenchApp {
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.label(egui::RichText::new("⏺ 录制").strong());
+                ui.horizontal(|ui| {
+                    theme::card_accent_bar(ui, theme::CARD_ACCENT_RECORD);
+                    ui.label(egui::RichText::new("⏺ 录制").heading());
+                });
                 ui.separator();
 
                 ui.horizontal(|ui| {
@@ -186,7 +192,10 @@ impl WorkbenchApp {
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.label(egui::RichText::new("🔌 可用端口").strong());
+                ui.horizontal(|ui| {
+                    theme::card_accent_bar(ui, theme::CARD_ACCENT_PORT);
+                    ui.label(egui::RichText::new("🔌 可用端口").heading());
+                });
                 ui.separator();
 
                 // 显示已打开但不在系统端口列表中的 stale 连接

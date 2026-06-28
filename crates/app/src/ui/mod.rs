@@ -69,10 +69,10 @@ impl WorkbenchApp {
         self.paint_dock_drop_overlay(ctx);
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(theme::BG_PRIMARY))
+            .frame(egui::Frame::default().fill(theme::BG_DEEP))
             .show(ui, |ui| {
                 egui::Frame::default()
-                    .fill(theme::BG_PRIMARY)
+                    .fill(theme::BG_DEEP)
                     .inner_margin(egui::Margin::symmetric(14, 8))
                     .show(ui, |ui| {
                         self.dock_stack_ui(ui, DockArea::Center);

@@ -13,7 +13,10 @@ impl WorkbenchApp {
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.label(egui::RichText::new("📂 工作区").strong());
+                ui.horizontal(|ui| {
+                    theme::card_accent_bar(ui, theme::CARD_ACCENT_SETTINGS);
+                    ui.label(egui::RichText::new("📂 工作区").heading());
+                });
                 ui.separator();
                 self.render_config_locations(ui);
 
@@ -66,7 +69,10 @@ impl WorkbenchApp {
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.label(egui::RichText::new("🎨 外观").strong());
+                ui.horizontal(|ui| {
+                    theme::card_accent_bar(ui, theme::CARD_ACCENT_SETTINGS);
+                    ui.label(egui::RichText::new("🎨 外观").heading());
+                });
                 ui.separator();
                 let mut bottom_visible = self.panels.dock.bottom_visible;
                 if ui.checkbox(&mut bottom_visible, "显示底部面板").changed() {
@@ -84,7 +90,10 @@ impl WorkbenchApp {
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.label(egui::RichText::new("⌨ 快捷键").strong());
+                ui.horizontal(|ui| {
+                    theme::card_accent_bar(ui, theme::CARD_ACCENT_SETTINGS);
+                    ui.label(egui::RichText::new("⌨ 快捷键").heading());
+                });
                 ui.separator();
                 self.render_keymap_editor(ui);
             });
@@ -124,7 +133,10 @@ impl WorkbenchApp {
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.label(egui::RichText::new("ℹ 关于").strong());
+                ui.horizontal(|ui| {
+                    theme::card_accent_bar(ui, theme::CARD_ACCENT_SETTINGS);
+                    ui.label(egui::RichText::new("ℹ 关于").heading());
+                });
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label(format!("硬件调试工作台 v{}", env!("CARGO_PKG_VERSION")));
@@ -329,7 +341,10 @@ impl WorkbenchApp {
                 .inner_margin(egui::Margin::symmetric(12, 8))
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
-                    ui.label(egui::RichText::new(format!("🧩 {plugin_name} 设置")).strong());
+                    ui.horizontal(|ui| {
+                        theme::card_accent_bar(ui, theme::CARD_ACCENT_PLUGIN);
+                        ui.label(egui::RichText::new(format!("🧩 {plugin_name} 设置")).heading());
+                    });
                     ui.separator();
 
                     let panel_id = format!("{plugin_id}.settings");

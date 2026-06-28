@@ -194,7 +194,10 @@ impl ReplayPanel {
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.label(egui::RichText::new("📁 回放文件").strong());
+                ui.horizontal(|ui| {
+                    theme::card_accent_bar(ui, theme::CARD_ACCENT_REPLAY);
+                    ui.label(egui::RichText::new("📁 回放文件").heading());
+                });
                 ui.separator();
                 self.file_controls(ui);
             });
@@ -206,7 +209,10 @@ impl ReplayPanel {
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.label(egui::RichText::new("⚙ 回放策略").strong());
+                ui.horizontal(|ui| {
+                    theme::card_accent_bar(ui, theme::CARD_ACCENT_REPLAY);
+                    ui.label(egui::RichText::new("⚙ 回放策略").heading());
+                });
                 ui.separator();
                 self.policy_controls(ui);
             });
@@ -218,7 +224,10 @@ impl ReplayPanel {
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.label(egui::RichText::new("▶ 播放控制").strong());
+                ui.horizontal(|ui| {
+                    theme::card_accent_bar(ui, theme::CARD_ACCENT_REPLAY);
+                    ui.label(egui::RichText::new("▶ 播放控制").heading());
+                });
                 ui.separator();
 
                 // 控件可能修改了 manager 状态，这里重新取一次。

@@ -1,6 +1,7 @@
 use crate::app::WorkbenchApp;
 use crate::state::StatusLevel;
 use eframe::egui;
+use egui::Color32;
 use tool_panels::theme;
 use tool_transport::TransportStatus;
 
@@ -13,29 +14,38 @@ impl WorkbenchApp {
             .map(|p| self.transport.status_port(p))
             .unwrap_or_else(TransportStatus::closed);
         ui.horizontal(|ui| {
-            // 串口状态
-            let (d, l) =
+            // 串口状态 — 带发光效果的圆点
+            let (dot_color, label) =
                 if let (Some(p), Some(b)) = (self.serial.selected_port.clone(), st.baud_rate) {
                     let label = self.serial.port_label(&p);
-                    (if st.open { "●" } else { "○" }, format!("{label} @ {b}"))
+                    (if st.open { theme::GREEN } else { theme::TEXT_SECONDARY }, format!("{label} @ {b}"))
                 } else {
-                    ("○", "串口已关闭".into())
+                    (theme::TEXT_SECONDARY, "串口已关闭".into())
                 };
-            ui.label(egui::RichText::new(d).color(if st.open {
-                theme::GREEN
-            } else {
-                theme::TEXT_SECONDARY
-            }));
-            ui.label(l);
+            // 发光圆点：外层半透明大圆 + 内层实心小圆
+            let dot_rect = egui::Rect::from_center_size(
+                egui::pos2(ui.cursor().left() + 6.0, ui.cursor().center().y),
+                egui::vec2(10.0, 10.0),
+            );
+            if st.open {
+                ui.painter().circle_filled(dot_rect.center(), 5.0, dot_color.linear_multiply(0.3));
+            }
+            ui.painter().circle_filled(dot_rect.center(), 3.0, dot_color);
+            ui.add_space(12.0);
+            ui.label(label);
             ui.separator();
 
-            // 录制状态
+            // 录制状态 — 发光圆点
             let rec = self.recorder.is_running();
-            ui.label(egui::RichText::new("●").color(if rec {
-                theme::RED
-            } else {
-                theme::TEXT_SECONDARY
-            }));
+            let rec_dot_rect = egui::Rect::from_center_size(
+                egui::pos2(ui.cursor().left() + 6.0, ui.cursor().center().y),
+                egui::vec2(10.0, 10.0),
+            );
+            if rec {
+                ui.painter().circle_filled(rec_dot_rect.center(), 5.0, theme::RED.linear_multiply(0.3));
+            }
+            ui.painter().circle_filled(rec_dot_rect.center(), 3.0, if rec { theme::RED } else { theme::TEXT_SECONDARY });
+            ui.add_space(12.0);
             if rec {
                 let stats = self.recorder.stats();
                 if stats.paused {
@@ -61,20 +71,24 @@ impl WorkbenchApp {
                 }
             }
 
-            // DTR/RTS 状态
+            // DTR/RTS 标签
             if st.open {
                 ui.separator();
-                let dtr = if self.send.dtr_high {
-                    "DTR⬆"
-                } else {
-                    "DTR⬇"
+                let tag = |ui: &mut egui::Ui, label: &str, high: bool, color: Color32| {
+                    let size = egui::vec2(42.0, 16.0);
+                    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                    let bg = if high { color.linear_multiply(0.25) } else { theme::BG_INPUT };
+                    ui.painter().rect_filled(rect, 3.0, bg);
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        label,
+                        egui::FontId::proportional(10.0),
+                        color,
+                    );
                 };
-                let rts = if self.send.rts_high {
-                    "RTS⬆"
-                } else {
-                    "RTS⬇"
-                };
-                ui.label(format!("{dtr} {rts}"));
+                tag(ui, "DTR⬆", self.send.dtr_high, theme::GREEN);
+                tag(ui, "RTS⬆", self.send.rts_high, theme::BLUE);
             }
 
             // ── 插件贡献：status_bar.left ──

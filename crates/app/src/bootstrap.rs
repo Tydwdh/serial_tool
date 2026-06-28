@@ -153,7 +153,7 @@ pub fn apply_theme(ctx: &egui::Context) {
     );
     text_styles.insert(
         egui::TextStyle::Heading,
-        egui::FontId::new(17.0, egui::FontFamily::Proportional),
+        egui::FontId::new(18.0, egui::FontFamily::Proportional),
     );
     s.text_styles = text_styles;
 
@@ -161,14 +161,14 @@ pub fn apply_theme(ctx: &egui::Context) {
     let mut v = egui::Visuals::dark();
 
     // 圆角
-    v.window_corner_radius = 6.into();
+    v.window_corner_radius = 8.into();
     v.menu_corner_radius = 6.into();
 
-    // 背景
+    // 背景 — 使用新的层级色
     v.panel_fill = theme::BG_PRIMARY;
-    v.window_fill = theme::BG_SECONDARY;
-    v.extreme_bg_color = theme::BG_SECONDARY;
-    v.faint_bg_color = theme::BG_TERTIARY;
+    v.window_fill = theme::BG_DEEP;
+    v.extreme_bg_color = theme::BG_DEEP;
+    v.faint_bg_color = theme::BG_CARD;
     v.code_bg_color = theme::BG_INPUT;
     v.text_edit_bg_color = Some(theme::BG_INPUT);
 
@@ -197,7 +197,7 @@ pub fn apply_theme(ctx: &egui::Context) {
 
     // noninteractive（标签、分隔线等）
     w.noninteractive.corner_radius = 4.into();
-    w.noninteractive.bg_fill = theme::BG_SECONDARY;
+    w.noninteractive.bg_fill = theme::BG_CARD;
     w.noninteractive.bg_stroke = egui::Stroke::new(1.0, theme::BORDER);
     w.noninteractive.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_PRIMARY);
     w.noninteractive.weak_bg_fill = theme::BG_SECONDARY;
@@ -211,7 +211,7 @@ pub fn apply_theme(ctx: &egui::Context) {
 
     // hovered
     w.hovered.corner_radius = 6.into();
-    w.hovered.bg_fill = theme::WIDGET_HOVER;
+    w.hovered.bg_fill = theme::BG_HOVER;
     w.hovered.weak_bg_fill = theme::BG_TERTIARY;
     w.hovered.bg_stroke = egui::Stroke::new(1.0, theme::BORDER_LIGHT);
     w.hovered.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_PRIMARY);

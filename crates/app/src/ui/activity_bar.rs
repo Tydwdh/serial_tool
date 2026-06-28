@@ -48,10 +48,10 @@ impl WorkbenchApp {
                     if selected {
                         theme::BG_SELECTION
                     } else {
-                        theme::WIDGET_HOVER
+                        theme::BG_HOVER
                     }
                 } else {
-                    theme::BG_SECONDARY
+                    Color32::TRANSPARENT
                 };
 
                 let painter = ui.painter_at(rect);

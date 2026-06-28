@@ -43,7 +43,10 @@ impl PluginsPanel {
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.label(egui::RichText::new("🔧 管理").strong());
+                ui.horizontal(|ui| {
+                    theme::card_accent_bar(ui, theme::CARD_ACCENT_PLUGIN);
+                    ui.label(egui::RichText::new("🔧 管理").heading());
+                });
                 ui.separator();
                 ui.horizontal(|ui| -> Option<(String, bool)> {
                     ui.label("根目录");
@@ -81,7 +84,10 @@ impl PluginsPanel {
                 .inner_margin(egui::Margin::symmetric(12, 8))
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
-                    ui.label(egui::RichText::new("⚠ 诊断").strong());
+                    ui.horizontal(|ui| {
+                        theme::card_accent_bar(ui, theme::YELLOW);
+                        ui.label(egui::RichText::new("⚠ 诊断").heading());
+                    });
                     ui.separator();
                     for diagnostic in diagnostics {
                         diagnostic_row(ui, diagnostic);
