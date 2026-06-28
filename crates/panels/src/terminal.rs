@@ -1240,20 +1240,42 @@ fn render_rows_view(
             });
 
             // 框选范围文本
-            let selected_text: Option<String> = selection.selected_range().map(|(lo, hi)| {
-                rows[lo..=hi]
-                    .iter()
-                    .map(|row| {
-                        let content = row_content_text(row, show_hex, show_raw);
-                        if show_raw {
-                            content.replace('\n', "\\n")
-                        } else {
-                            content.to_owned()
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            });
+            let (selected_full, selected_data): (Option<String>, Option<String>) = selection
+                .selected_range()
+                .map(|(lo, hi)| {
+                    let full: String = rows[lo..=hi]
+                        .iter()
+                        .map(|row| {
+                            let content = row_content_text(row, show_hex, show_raw);
+                            let content_only = if show_raw {
+                                content.replace('\n', "\\n")
+                            } else {
+                                content.to_owned()
+                            };
+                            let port = row.port.as_deref().unwrap_or("");
+                            let (dir_label, _) = direction_label(row.direction);
+                            format!(
+                                "{} {} {} {}",
+                                row.timestamp_label, port, dir_label, content_only
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let data: String = rows[lo..=hi]
+                        .iter()
+                        .map(|row| {
+                            let content = row_content_text(row, show_hex, show_raw);
+                            if show_raw {
+                                content.replace('\n', "\\n")
+                            } else {
+                                content.to_owned()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    (full, data)
+                })
+                .map_or((None, None), |(f, d)| (Some(f), Some(d)));
 
             let combined_text: String = rows
                 .iter()
@@ -1269,23 +1291,23 @@ fn render_rows_view(
                 .join("\n");
 
             ctx_response.context_menu(move |ctx_ui| {
-                // 框选模式：只显示多选菜单
-                if let Some(ref sel_text) = selected_text {
-                    if ctx_ui.button("复制选中行").clicked() {
-                        ctx_ui.ctx().copy_text(sel_text.clone());
-                        ctx_ui.close();
-                    }
-                    ctx_ui.separator();
-                } else if let Some((ref row_full, ref row_content)) = hovered_row {
-                    // 单行模式
+                // 统一菜单：有框选用选中文本，否则用单行文本
+                let copy_full = selected_full.clone().or_else(|| hovered_row.as_ref().map(|(f, _)| f.clone()));
+                let copy_data = selected_data.clone().or_else(|| hovered_row.as_ref().map(|(_, d)| d.clone()));
+
+                if let Some(ref text) = copy_full {
                     if ctx_ui.button("复制此行").clicked() {
-                        ctx_ui.ctx().copy_text(row_full.clone());
+                        ctx_ui.ctx().copy_text(text.clone());
                         ctx_ui.close();
                     }
+                }
+                if let Some(ref text) = copy_data {
                     if ctx_ui.button("复制此行数据").clicked() {
-                        ctx_ui.ctx().copy_text(row_content.clone());
+                        ctx_ui.ctx().copy_text(text.clone());
                         ctx_ui.close();
                     }
+                }
+                if copy_full.is_some() || copy_data.is_some() {
                     ctx_ui.separator();
                 }
 
