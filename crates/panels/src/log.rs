@@ -1,4 +1,4 @@
-use crate::{MAX_INGEST_PER_FRAME, fmt_ts, table::RowHighlight, theme};
+use crate::{MAX_INGEST_PER_FRAME, fmt_ts, table::RowHighlight, table::RowSelection, theme};
 use egui::text_selection::LabelSelectionState;
 use egui::{RichText, ScrollArea, Sense, Stroke, TextEdit};
 use std::collections::{BTreeSet, VecDeque};
@@ -31,6 +31,8 @@ pub struct LogPanel {
     source_filter: Option<String>,
     /// 用户可调的字体大小（10-24px），默认 13.0
     pub font_size: f32,
+    /// 行框选状态
+    pub selection: RowSelection,
 }
 
 struct LogEntry {
@@ -59,6 +61,7 @@ impl LogPanel {
             search_text: String::new(),
             source_filter: None,
             font_size: 13.0,
+            selection: RowSelection::new(0),
         }
     }
     pub fn ingest_all_pending(&mut self) -> usize {
@@ -84,6 +87,7 @@ impl LogPanel {
         self.pending_scroll_to_bottom = false;
         self.search_text.clear();
         self.source_filter = None;
+        self.selection.clear();
     }
 
     /// 收集所有已出现过的 source 名称，用于过滤下拉框。
@@ -204,7 +208,7 @@ impl LogPanel {
             })
             .collect();
 
-        let outcome = render_log_rows(ui, &rows, self.auto_scroll, force_scroll_to_bottom, self.font_size);
+        let outcome = render_log_rows(ui, &rows, self.auto_scroll, force_scroll_to_bottom, self.font_size, &mut self.selection);
 
         self.update_auto_scroll(
             ui,
@@ -317,6 +321,7 @@ fn render_log_rows(
     stick_to_bottom: bool,
     force_scroll_to_bottom: bool,
     font_size: f32,
+    selection: &mut RowSelection,
 ) -> LogRenderOutcome {
     let font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
     let base_row_height = ui.fonts_mut(|f| f.row_height(&font_id));
@@ -411,15 +416,32 @@ fn render_log_rows(
 
             // 逐行绘制标签 + 可选择的文本
             let mut hl = RowHighlight::new(ui, LOG_SCROLL_ID);
+
+            // ── 框选交互 ──
+            selection.resize(rows.len());
+            let full_response = ui.interact(full_rect, ui.next_auto_id(), Sense::click_and_drag());
+            let hovered_idx = hl.row_index_at_y(
+                full_response.interact_pointer_pos().map(|p| p.y).unwrap_or(-1.0),
+            );
+            let mut scroll_delta: f32 = 0.0;
+            selection.handle_input(ui, &full_response, hovered_idx, &mut scroll_delta);
+
             let mut current_y = label_rect.top();
-            for (entry, layout) in rows.iter().zip(row_layouts.iter()) {
+            for (row_idx, (entry, layout)) in rows.iter().zip(row_layouts.iter()).enumerate() {
                 let entry_height = layout.height;
                 // 标签对齐第一行中心（和终端面板一致）
                 let label_y = current_y + base_row_height * 0.5;
 
-                // 高亮悬停行（在文字之前绘制）
-                hl.paint_background(ui, full_rect, current_y, entry_height);
+                // 高亮悬停行（框选模式下跳过）
+                if !selection.has_selection() {
+                    hl.paint_background(ui, full_rect, current_y, entry_height);
+                }
                 hl.record_row(current_y, entry_height);
+
+                // 框选高亮
+                if selection.is_selected(row_idx) {
+                    selection.paint(ui, full_rect, current_y, entry_height);
+                }
 
                 // --- 标签列 ---
                 let mut x = label_rect.left() + row_left_padding;
@@ -492,6 +514,11 @@ fn render_log_rows(
             }
 
             // ── 全局右键菜单 ──
+            // 边缘滚动
+            if scroll_delta != 0.0 {
+                ui.scroll_with_delta(egui::vec2(0.0, scroll_delta));
+            }
+
             let ctx_response = hl.click_response(ui);
             let frozen_row_idx = hl.resolve_click(
                 ui,
@@ -518,6 +545,32 @@ fn render_log_rows(
                 })
             });
 
+            // 框选范围文本
+            let (selected_full, selected_data): (Option<String>, Option<String>) = selection
+                .selected_range()
+                .map(|(lo, hi)| {
+                    let full: String = rows[lo..=hi]
+                        .iter()
+                        .map(|entry| {
+                            format!(
+                                "{} {} {} {}",
+                                entry.timestamp_label,
+                                entry.level.as_str(),
+                                entry.source,
+                                entry.message
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let data: String = rows[lo..=hi]
+                        .iter()
+                        .map(|entry| entry.message.clone())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    (full, data)
+                })
+                .map_or((None, None), |(f, d)| (Some(f), Some(d)));
+
             let combined_text: String = rows
                 .iter()
                 .map(|entry| {
@@ -533,15 +586,23 @@ fn render_log_rows(
                 .join("\n");
 
             ctx_response.context_menu(move |ctx_ui| {
-                if let Some((ref row_line, ref row_msg)) = hovered_row {
-                    if ctx_ui.button("复制此行").clicked() {
-                        ctx_ui.ctx().copy_text(row_line.clone());
-                        ctx_ui.close();
-                    }
-                    if ctx_ui.button("复制此行消息").clicked() {
-                        ctx_ui.ctx().copy_text(row_msg.clone());
-                        ctx_ui.close();
-                    }
+                // 统一菜单：有框选用选中文本，否则用单行文本
+                let copy_full = selected_full.clone().or_else(|| hovered_row.as_ref().map(|(f, _)| f.clone()));
+                let copy_data = selected_data.clone().or_else(|| hovered_row.as_ref().map(|(_, d)| d.clone()));
+
+                if let Some(ref text) = copy_full
+                    && ctx_ui.button("复制选中行").clicked()
+                {
+                    ctx_ui.ctx().copy_text(text.clone());
+                    ctx_ui.close();
+                }
+                if let Some(ref text) = copy_data
+                    && ctx_ui.button("复制选中行消息").clicked()
+                {
+                    ctx_ui.ctx().copy_text(text.clone());
+                    ctx_ui.close();
+                }
+                if copy_full.is_some() || copy_data.is_some() {
                     ctx_ui.separator();
                 }
 

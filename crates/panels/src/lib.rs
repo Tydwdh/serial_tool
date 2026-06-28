@@ -25,6 +25,7 @@ pub use plugins::PluginsPanel;
 pub use replay::ReplayPanel;
 pub use sender::SenderPanel;
 pub use terminal::TerminalPanel;
+pub use table::RowSelection;
 
 /// 将毫秒时间戳格式化为本地时间 HH:MM:SS.mmm
 pub fn fmt_ts(ms: u64) -> String {

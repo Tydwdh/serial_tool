@@ -1,4 +1,4 @@
-use crate::{MAX_INGEST_PER_FRAME, fmt_ts, table::RowHighlight, theme};
+use crate::{MAX_INGEST_PER_FRAME, fmt_ts, table::RowHighlight, table::RowSelection, theme};
 use egui::text_selection::LabelSelectionState;
 use egui::{Color32, RichText, ScrollArea, Sense, Stroke};
 use std::borrow::Cow;
@@ -45,7 +45,7 @@ pub struct TerminalPanel {
     /// 合并阈值：同一端口、同一方向、间隔 ≤ 此毫秒且不含 \n 的连续事件合并显示
     pub merge_window_ms: u64,
     /// 框选状态
-    pub selection: TerminalSelection,
+    pub selection: RowSelection,
 }
 
 #[derive(Default)]
@@ -122,36 +122,6 @@ struct RenderOutcome {
     offset_y: f32,
 }
 
-/// 终端行框选状态。
-pub struct TerminalSelection {
-    pub start: Option<usize>,
-    pub end: Option<usize>,
-}
-
-impl TerminalSelection {
-    pub fn new() -> Self {
-        Self { start: None, end: None }
-    }
-
-    pub fn selected_range(&self) -> Option<(usize, usize)> {
-        match (self.start, self.end) {
-            (Some(a), Some(b)) if a <= b => Some((a, b)),
-            (Some(a), Some(b)) => Some((b, a)),
-            _ => None,
-        }
-    }
-
-    pub fn is_selected(&self, index: usize) -> bool {
-        self.selected_range()
-            .is_some_and(|(lo, hi)| index >= lo && index <= hi)
-    }
-
-    pub fn clear(&mut self) {
-        self.start = None;
-        self.end = None;
-    }
-}
-
 impl TerminalPanel {
     pub fn new(bus: &DataBus) -> Self {
         Self {
@@ -183,7 +153,7 @@ impl TerminalPanel {
             detail_entry_id: None,
             font_size: 13.0,
             merge_window_ms: 10,
-            selection: TerminalSelection::new(),
+            selection: RowSelection::new(0),
         }
     }
     pub fn ingest_all_pending(&mut self) -> usize {
@@ -906,7 +876,7 @@ fn render_rows_view(
     stick_to_bottom: bool,
     force_scroll_to_bottom: bool,
     font_size: f32,
-    selection: &mut TerminalSelection,
+    selection: &mut RowSelection,
 ) -> RenderOutcome {
     let height = height.max(40.0);
     let font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
@@ -1081,57 +1051,28 @@ fn render_rows_view(
             let mut current_y = label_rect.top();
 
             // ── 框选：在 full_rect 上检测拖拽 ──
+            selection.resize(rows.len());
             let full_response = ui.interact(full_rect, ui.next_auto_id(), Sense::click_and_drag());
-            if full_response.drag_started_by(egui::PointerButton::Primary) {
-                let pointer_y = full_response.interact_pointer_pos().map(|p| p.y);
-                if let Some(y) = pointer_y {
-                    let idx = row_layouts.iter().enumerate().find_map(|(i, rl)| {
-                        let top = label_rect.top() + row_layouts[..i].iter().map(|r| r.height).sum::<f32>();
-                        if y >= top && y < top + rl.height { Some(i) } else { None }
-                    });
-                    selection.start = idx;
-                    selection.end = idx;
-                }
-            }
-            if full_response.dragged_by(egui::PointerButton::Primary) {
-                let pointer_y = full_response.interact_pointer_pos().map(|p| p.y);
-                if let Some(y) = pointer_y {
-                    let idx = row_layouts.iter().enumerate().find_map(|(i, rl)| {
-                        let top = label_rect.top() + row_layouts[..i].iter().map(|r| r.height).sum::<f32>();
-                        if y >= top && y < top + rl.height { Some(i) } else { None }
-                    });
-                    selection.end = idx;
-                }
-            }
-            // 单击空白区域（非拖拽）清除框选
-            if full_response.clicked_by(egui::PointerButton::Primary)
-                && full_response.drag_delta().length_sq() < 1.0
-            {
-                selection.clear();
-            }
+            let hovered_idx = hl.row_index_at_y(
+                full_response.interact_pointer_pos().map(|p| p.y).unwrap_or(-1.0),
+            );
+            let mut scroll_delta: f32 = 0.0;
+            selection.handle_input(ui, &full_response, hovered_idx, &mut scroll_delta);
 
             for (row_idx, (row, layout)) in rows.iter().zip(row_layouts.iter()).enumerate() {
                 let entry_height = layout.height;
                 let label_y = current_y + row_height * 0.5;
 
                 // 高亮悬停行（框选模式下跳过）
-                let has_selection = selection.selected_range().is_some();
+                let has_selection = selection.has_selection();
                 if !has_selection {
                     hl.paint_background(ui, full_rect, current_y, entry_height);
                 }
                 hl.record_row(current_y, entry_height);
 
-                // 框选高亮
+                // 框选高亮（使用 WIDGET_HOVER 颜色，与 hover 一致）
                 if selection.is_selected(row_idx) {
-                    let sel_rect = egui::Rect::from_min_size(
-                        egui::pos2(full_rect.left(), current_y),
-                        egui::vec2(full_rect.width(), entry_height),
-                    );
-                    ui.painter_at(full_rect).rect_filled(
-                        sel_rect,
-                        0.0,
-                        theme::BG_SELECTION,
-                    );
+                    selection.paint(ui, full_rect, current_y, entry_height);
                 }
 
                 // --- Draw left labels ---
@@ -1205,6 +1146,11 @@ fn render_rows_view(
                 }
 
                 current_y += entry_height;
+            }
+
+            // 边缘滚动
+            if scroll_delta != 0.0 {
+                ui.scroll_with_delta(egui::vec2(0.0, scroll_delta));
             }
 
             // Right-click context menu — global area
@@ -1295,17 +1241,17 @@ fn render_rows_view(
                 let copy_full = selected_full.clone().or_else(|| hovered_row.as_ref().map(|(f, _)| f.clone()));
                 let copy_data = selected_data.clone().or_else(|| hovered_row.as_ref().map(|(_, d)| d.clone()));
 
-                if let Some(ref text) = copy_full {
-                    if ctx_ui.button("复制此行").clicked() {
-                        ctx_ui.ctx().copy_text(text.clone());
-                        ctx_ui.close();
-                    }
+                if let Some(ref text) = copy_full
+                    && ctx_ui.button("复制选中行").clicked()
+                {
+                    ctx_ui.ctx().copy_text(text.clone());
+                    ctx_ui.close();
                 }
-                if let Some(ref text) = copy_data {
-                    if ctx_ui.button("复制此行数据").clicked() {
-                        ctx_ui.ctx().copy_text(text.clone());
-                        ctx_ui.close();
-                    }
+                if let Some(ref text) = copy_data
+                    && ctx_ui.button("复制选中行数据").clicked()
+                {
+                    ctx_ui.ctx().copy_text(text.clone());
+                    ctx_ui.close();
                 }
                 if copy_full.is_some() || copy_data.is_some() {
                     ctx_ui.separator();
