@@ -1114,8 +1114,11 @@ fn render_rows_view(
                 let entry_height = layout.height;
                 let label_y = current_y + row_height * 0.5;
 
-                // 高亮悬停行（在文字之前绘制）
-                let _hovered = hl.paint_background(ui, full_rect, current_y, entry_height);
+                // 高亮悬停行（框选模式下跳过）
+                let has_selection = selection.selected_range().is_some();
+                if !has_selection {
+                    hl.paint_background(ui, full_rect, current_y, entry_height);
+                }
                 hl.record_row(current_y, entry_height);
 
                 // 框选高亮
@@ -1266,16 +1269,15 @@ fn render_rows_view(
                 .join("\n");
 
             ctx_response.context_menu(move |ctx_ui| {
-                // 框选模式优先
+                // 框选模式：只显示多选菜单
                 if let Some(ref sel_text) = selected_text {
                     if ctx_ui.button("复制选中行").clicked() {
                         ctx_ui.ctx().copy_text(sel_text.clone());
                         ctx_ui.close();
                     }
                     ctx_ui.separator();
-                }
-
-                if let Some((ref row_full, ref row_content)) = hovered_row {
+                } else if let Some((ref row_full, ref row_content)) = hovered_row {
+                    // 单行模式
                     if ctx_ui.button("复制此行").clicked() {
                         ctx_ui.ctx().copy_text(row_full.clone());
                         ctx_ui.close();
