@@ -157,7 +157,7 @@ pub(crate) struct ReplayAnalyzerResult {
 impl WorkbenchApp {
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // 主题必须尽早设置，否则 eframe 在 new() 返回前可能已用默认主题渲染了首帧。
-        apply_theme(&cc.egui_ctx, 13.0);
+        apply_theme(&cc.egui_ctx);
         setup_fonts(cc);
         cc.egui_ctx.set_embed_viewports(false);
         let bus = DataBus::new();
@@ -322,6 +322,9 @@ impl WorkbenchApp {
                 .map(|c| c.monospace_font_size.clamp(10.0, 24.0))
                 .unwrap_or(13.0),
         };
+        // 从配置恢复等宽字体大小
+        app.terminal_panel.font_size = app.monospace_font_size;
+        app.bottom_log_panel.font_size = app.monospace_font_size;
         app.refresh_ports();
         let enabled: Vec<String> = config
             .as_ref()

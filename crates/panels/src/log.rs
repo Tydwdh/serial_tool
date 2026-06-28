@@ -29,6 +29,8 @@ pub struct LogPanel {
     search_text: String,
     /// 来源过滤：None 表示显示全部，Some 表示只显示指定 source。
     source_filter: Option<String>,
+    /// 用户可调的字体大小（10-24px），默认 13.0
+    pub font_size: f32,
 }
 
 struct LogEntry {
@@ -56,6 +58,7 @@ impl LogPanel {
             pending_scroll_to_bottom: false,
             search_text: String::new(),
             source_filter: None,
+            font_size: 13.0,
         }
     }
     pub fn ingest_all_pending(&mut self) -> usize {
@@ -201,7 +204,7 @@ impl LogPanel {
             })
             .collect();
 
-        let outcome = render_log_rows(ui, &rows, self.auto_scroll, force_scroll_to_bottom);
+        let outcome = render_log_rows(ui, &rows, self.auto_scroll, force_scroll_to_bottom, self.font_size);
 
         self.update_auto_scroll(
             ui,
@@ -313,9 +316,19 @@ fn render_log_rows(
     rows: &[&LogEntry],
     stick_to_bottom: bool,
     force_scroll_to_bottom: bool,
+    font_size: f32,
 ) -> LogRenderOutcome {
-    let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+    let font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
     let base_row_height = ui.fonts_mut(|f| f.row_height(&font_id));
+
+    // 列宽随字体大小缩放（基准 13px）
+    let scale = font_size / 13.0;
+    let time_col_width = TIME_COL_WIDTH * scale;
+    let level_col_width = LEVEL_COL_WIDTH * scale;
+    let source_col_width = SOURCE_COL_WIDTH * scale;
+    let col_gap = COL_GAP * scale;
+    let row_left_padding = ROW_LEFT_PADDING * scale;
+    let label_to_msg_gap = LABEL_TO_MSG_GAP * scale;
 
     if rows.is_empty() {
         let scroll_output = ScrollArea::vertical()
@@ -338,17 +351,17 @@ fn render_log_rows(
         .id_salt(LOG_SCROLL_ID)
         .show(ui, |ui| {
             let full_width = ui.available_width();
-            let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+            let font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
             let text_color = ui.style().visuals.text_color();
 
             // 标签列总宽度
-            let label_width = ROW_LEFT_PADDING
-                + TIME_COL_WIDTH
-                + COL_GAP
-                + LEVEL_COL_WIDTH
-                + COL_GAP
-                + SOURCE_COL_WIDTH
-                + LABEL_TO_MSG_GAP;
+            let label_width = row_left_padding
+                + time_col_width
+                + col_gap
+                + level_col_width
+                + col_gap
+                + source_col_width
+                + label_to_msg_gap;
             let message_width = (full_width - label_width).max(40.0);
             let text_padding = 4.0;
             let galley_width = (message_width - text_padding).max(0.0);
@@ -409,7 +422,7 @@ fn render_log_rows(
                 hl.record_row(current_y, entry_height);
 
                 // --- 标签列 ---
-                let mut x = label_rect.left() + ROW_LEFT_PADDING;
+                let mut x = label_rect.left() + row_left_padding;
 
                 // 时间戳
                 label_painter.text(
@@ -419,7 +432,7 @@ fn render_log_rows(
                     font_id.clone(),
                     theme::TEXT_SECONDARY,
                 );
-                x += TIME_COL_WIDTH + COL_GAP;
+                x += time_col_width + col_gap;
 
                 // 级别
                 label_painter.text(
@@ -429,13 +442,13 @@ fn render_log_rows(
                     font_id.clone(),
                     crate::level_color(entry.level),
                 );
-                x += LEVEL_COL_WIDTH + COL_GAP;
+                x += level_col_width + col_gap;
 
                 // 来源（裁剪）
                 let source_clip = egui::Rect::from_min_max(
                     egui::pos2(x, current_y),
                     egui::pos2(
-                        (x + SOURCE_COL_WIDTH).min(label_rect.right()),
+                        (x + source_col_width).min(label_rect.right()),
                         current_y + entry_height,
                     ),
                 );

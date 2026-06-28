@@ -92,7 +92,8 @@ impl WorkbenchApp {
                     );
                     if resp.changed() {
                         self.monospace_font_size = size;
-                        crate::bootstrap::update_monospace_font_size(ui.ctx(), size);
+                        self.terminal_panel.font_size = size;
+                        self.bottom_log_panel.font_size = size;
                         if let Err(e) = self.save_config() {
                             log::warn!("save_config failed: {e}")
                         };

@@ -95,7 +95,7 @@ fn set_family(fonts: &mut egui::FontDefinitions, family: egui::FontFamily, names
 }
 
 // ── 主题 ──
-pub fn apply_theme(ctx: &egui::Context, monospace_font_size: f32) {
+pub fn apply_theme(ctx: &egui::Context) {
     ctx.set_theme(egui::Theme::Dark);
     ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
     let mut s = (*ctx.global_style()).clone();
@@ -145,7 +145,7 @@ pub fn apply_theme(ctx: &egui::Context, monospace_font_size: f32) {
     );
     text_styles.insert(
         egui::TextStyle::Monospace,
-        egui::FontId::new(monospace_font_size, egui::FontFamily::Monospace),
+        egui::FontId::new(13.0, egui::FontFamily::Monospace),
     );
     text_styles.insert(
         egui::TextStyle::Small,
@@ -232,14 +232,4 @@ pub fn apply_theme(ctx: &egui::Context, monospace_font_size: f32) {
 
     s.visuals = v;
     ctx.set_global_style(s);
-}
-
-/// 运行时更新等宽字体大小（终端/日志区）。
-pub fn update_monospace_font_size(ctx: &egui::Context, size: f32) {
-    let mut style = (*ctx.global_style()).clone();
-    style.text_styles.insert(
-        egui::TextStyle::Monospace,
-        egui::FontId::new(size, egui::FontFamily::Monospace),
-    );
-    ctx.set_global_style(style);
 }

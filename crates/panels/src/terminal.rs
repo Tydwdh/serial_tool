@@ -39,6 +39,9 @@ pub struct TerminalPanel {
     next_entry_id: u64,
     selected_entry_id: Option<u64>,
     detail_entry_id: Option<u64>,
+
+    /// 用户可调的字体大小（10-24px），默认 13.0
+    pub font_size: f32,
 }
 
 #[derive(Default)]
@@ -142,6 +145,7 @@ impl TerminalPanel {
             next_entry_id: 1,
             selected_entry_id: None,
             detail_entry_id: None,
+            font_size: 13.0,
         }
     }
     pub fn ingest_all_pending(&mut self) -> usize {
@@ -429,6 +433,7 @@ impl TerminalPanel {
                 show_metadata,
                 self.auto_scroll,
                 force_scroll_to_bottom,
+                self.font_size,
             )
         };
 
@@ -834,10 +839,19 @@ fn render_rows_view(
     show_direction: bool,
     stick_to_bottom: bool,
     force_scroll_to_bottom: bool,
+    font_size: f32,
 ) -> RenderOutcome {
     let height = height.max(40.0);
-    let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+    let font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
     let row_height = ui.fonts_mut(|f| f.row_height(&font_id));
+
+    // 列宽随字体大小缩放（基准 13px）
+    let scale = font_size / 13.0;
+    let time_col_width = TIME_COL_WIDTH * scale;
+    let port_col_width = PORT_COL_WIDTH * scale;
+    let dir_col_width = DIR_COL_WIDTH * scale;
+    let col_gap = COL_GAP * scale;
+    let row_left_padding = ROW_LEFT_PADDING * scale;
 
     if rows.is_empty() {
         let scroll_output = ScrollArea::vertical()
@@ -856,15 +870,15 @@ fn render_rows_view(
     }
 
     // Compute label column width based on visible flags
-    let mut label_width = ROW_LEFT_PADDING;
+    let mut label_width = row_left_padding;
     if show_timestamp {
-        label_width += TIME_COL_WIDTH + COL_GAP;
+        label_width += time_col_width + col_gap;
     }
     if show_port {
-        label_width += PORT_COL_WIDTH + COL_GAP;
+        label_width += port_col_width + col_gap;
     }
     if show_direction {
-        label_width += DIR_COL_WIDTH + COL_GAP;
+        label_width += dir_col_width + col_gap;
     }
 
     // Pre-layout all rows to determine their galley heights
@@ -1007,7 +1021,7 @@ fn render_rows_view(
                 hl.record_row(current_y, entry_height);
 
                 // --- Draw left labels ---
-                let mut x = label_rect.left() + ROW_LEFT_PADDING;
+                let mut x = label_rect.left() + row_left_padding;
 
                 if show_timestamp {
                     label_painter.text(
@@ -1017,7 +1031,7 @@ fn render_rows_view(
                         font_id.clone(),
                         theme::TEXT_SECONDARY,
                     );
-                    x += TIME_COL_WIDTH + COL_GAP;
+                    x += time_col_width + col_gap;
                 }
 
                 if show_port {
@@ -1030,7 +1044,7 @@ fn render_rows_view(
                             theme::YELLOW,
                         );
                     }
-                    x += PORT_COL_WIDTH + COL_GAP;
+                    x += port_col_width + col_gap;
                 }
 
                 if show_direction {
