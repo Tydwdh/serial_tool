@@ -130,6 +130,8 @@ pub(crate) struct WorkbenchApp {
     pub(crate) update_state_download_progress: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     /// UI contribution 运行时状态（toggle 值、progress 值等）
     pub(crate) contribution_states: std::collections::HashMap<String, serde_json::Value>,
+    /// 等宽字体大小（终端/日志区），默认 13.0
+    pub(crate) monospace_font_size: f32,
 }
 
 pub(crate) struct ReplayAnalyzerJob {
@@ -155,7 +157,7 @@ pub(crate) struct ReplayAnalyzerResult {
 impl WorkbenchApp {
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // 主题必须尽早设置，否则 eframe 在 new() 返回前可能已用默认主题渲染了首帧。
-        apply_theme(&cc.egui_ctx);
+        apply_theme(&cc.egui_ctx, 13.0);
         setup_fonts(cc);
         cc.egui_ctx.set_embed_viewports(false);
         let bus = DataBus::new();
@@ -315,6 +317,10 @@ impl WorkbenchApp {
             update_state: UpdateState::default(),
             update_state_download_progress: None,
             contribution_states: std::collections::HashMap::new(),
+            monospace_font_size: config
+                .as_ref()
+                .map(|c| c.monospace_font_size.clamp(10.0, 24.0))
+                .unwrap_or(13.0),
         };
         app.refresh_ports();
         let enabled: Vec<String> = config

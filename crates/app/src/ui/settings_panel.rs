@@ -81,6 +81,23 @@ impl WorkbenchApp {
                         log::warn!("save_config failed: {e}")
                     };
                 }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("等宽字体大小");
+                    let mut size = self.monospace_font_size;
+                    let resp = ui.add(
+                        egui::Slider::new(&mut size, 10.0..=24.0)
+                            .step_by(1.0)
+                            .suffix("px"),
+                    );
+                    if resp.changed() {
+                        self.monospace_font_size = size;
+                        crate::bootstrap::update_monospace_font_size(ui.ctx(), size);
+                        if let Err(e) = self.save_config() {
+                            log::warn!("save_config failed: {e}")
+                        };
+                    }
+                });
             });
 
         ui.add_space(8.0);

@@ -72,10 +72,17 @@ pub(crate) struct PersistedConfig {
     /// 可配置快捷键映射（默认 VSCode 风格）。
     #[serde(default)]
     pub(crate) keymap: crate::keymap::Keymap,
+    /// 等宽字体大小（终端/日志区），默认 13.0。
+    #[serde(default = "default_monospace_font_size")]
+    pub(crate) monospace_font_size: f32,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_monospace_font_size() -> f32 {
+    13.0
 }
 
 fn default_line_ending() -> LineEnding {
@@ -239,6 +246,7 @@ impl WorkbenchApp {
             recent_workspaces: self.recent_workspaces.clone(),
             auto_reconnect: self.serial.auto_reconnect,
             keymap: self.keymap.clone(),
+            monospace_font_size: self.monospace_font_size,
         }
     }
 
@@ -266,6 +274,7 @@ impl WorkbenchApp {
         self.serial.port_profiles = cfg.port_profiles.clone();
         self.serial.auto_reconnect = cfg.auto_reconnect;
         self.keymap = cfg.keymap.clone();
+        self.monospace_font_size = cfg.monospace_font_size.clamp(10.0, 24.0);
         self.send.send_history = cfg
             .send_history
             .iter()
