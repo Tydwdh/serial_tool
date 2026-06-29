@@ -476,10 +476,14 @@ local function start_task(port, entries, use_checksum)
         local ok, err = pcall(run_entries, port, entries, use_checksum, task)
         state.active = false
         state.paused = false
-        ctx.ui.set_contribution_value("demo.gcode-sender.progress", { value = 0, text = "" })
         if not ok then
             task:set_status("插件错误")
             log("error", err)
+        end
+        -- 清理 UI 属于 best-effort，不能再次覆盖 run_entries 的原始异常。
+        if ctx.ui and ctx.ui.set_contribution_value then
+            pcall(ctx.ui.set_contribution_value,
+                "demo.gcode-sender.progress", { value = 0, text = "" })
         end
     end)
 end

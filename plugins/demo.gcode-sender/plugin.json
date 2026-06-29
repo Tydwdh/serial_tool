@@ -10,6 +10,7 @@
     "bus",
     "log",
     "serial",
+    "ui",
     "dialog",
     "fs.read.user_selected",
     "task",

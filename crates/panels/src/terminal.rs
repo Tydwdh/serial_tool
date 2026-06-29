@@ -156,7 +156,7 @@ impl TerminalPanel {
             selected_entry_id: None,
             detail_entry_id: None,
             font_size: 13.0,
-            merge_window_ms: 5,
+            merge_window_ms: 10,
             selection: RowSelection::new(0),
         }
     }
@@ -576,12 +576,12 @@ impl TerminalPanel {
 
         let data = self.ports.entry(port).or_default();
 
-        // ── 合并逻辑：同端口、同方向、10ms 内、都不含 \n → 合并追加上一条 ──
+        // ── 合并逻辑：同端口、同方向、10ms 内，且上一条末尾不是换行 → 追加上一条 ──
+        // 当前包允许包含 \n：带换行的尾包正是一个未完成行的正常结束。
         if let Some(prev) = data.entries.back_mut()
             && prev.direction == event.direction
             && event.timestamp_ms.saturating_sub(prev.timestamp_ms) <= self.merge_window_ms
-            && !prev.raw_text.contains('\n')
-            && !raw_text.contains('\n')
+            && !prev.raw_text.ends_with('\n')
         {
             prev.raw_text.push_str(&raw_text);
             prev.display_text.push_str(&display_text);
@@ -968,13 +968,7 @@ fn render_rows_view(
             let row_layouts: Vec<RowLayout> = rows
                 .iter()
                 .map(|row| {
-                    let content = row_content_text(row, show_hex, show_raw);
-                    // Raw mode: escape newlines so content stays single-line
-                    let content = if show_raw {
-                        content.replace('\n', "\\n")
-                    } else {
-                        content.to_owned()
-                    };
+                    let content = visible_row_content(row, show_hex, show_raw);
                     let content = if content.is_empty() {
                         " ".to_owned()
                     } else {
@@ -1250,12 +1244,7 @@ fn render_rows_view(
             }
             .and_then(|idx| {
                 rows.get(idx).map(|row| {
-                    let content = row_content_text(row, show_hex, show_raw);
-                    let content_only = if show_raw {
-                        content.replace('\n', "\\n")
-                    } else {
-                        content.to_owned()
-                    };
+                    let content_only = visible_row_content(row, show_hex, show_raw);
                     let port = row.port.as_deref().unwrap_or("");
                     let (dir_label, _) = direction_label(row.direction);
                     let full_line = format!(
@@ -1275,12 +1264,7 @@ fn render_rows_view(
                             .iter()
                             .map(|&index| &rows[index])
                             .map(|row| {
-                                let content = row_content_text(row, show_hex, show_raw);
-                                let content_only = if show_raw {
-                                    content.replace('\n', "\\n")
-                                } else {
-                                    content.to_owned()
-                                };
+                                let content_only = visible_row_content(row, show_hex, show_raw);
                                 let port = row.port.as_deref().unwrap_or("");
                                 let (dir_label, _) = direction_label(row.direction);
                                 format!(
@@ -1293,14 +1277,7 @@ fn render_rows_view(
                         let data: String = selected_indices
                             .iter()
                             .map(|&index| &rows[index])
-                            .map(|row| {
-                                let content = row_content_text(row, show_hex, show_raw);
-                                if show_raw {
-                                    content.replace('\n', "\\n")
-                                } else {
-                                    content.to_owned()
-                                }
-                            })
+                            .map(|row| visible_row_content(row, show_hex, show_raw))
                             .collect::<Vec<_>>()
                             .join("\n");
                         (full, data)
@@ -1309,14 +1286,7 @@ fn render_rows_view(
 
             let combined_text: String = rows
                 .iter()
-                .map(|row| {
-                    let content = row_content_text(row, show_hex, show_raw);
-                    if show_raw {
-                        content.replace('\n', "\\n")
-                    } else {
-                        content.to_owned()
-                    }
-                })
+                .map(|row| visible_row_content(row, show_hex, show_raw))
                 .collect::<Vec<_>>()
                 .join("\n");
 
@@ -1486,6 +1456,26 @@ fn row_content_text<'a>(row: &'a VisibleRow<'a>, show_hex: bool, show_raw: bool)
     }
 }
 
+/// 接收区每个条目已经独占显示行，因此隐藏一个末尾行结束符；内部换行仍保留。
+fn visible_row_content(row: &VisibleRow<'_>, show_hex: bool, show_raw: bool) -> String {
+    let content = row_content_text(row, show_hex, show_raw);
+    if show_hex {
+        return content.to_owned();
+    }
+
+    let content = content
+        .strip_suffix("\r\n")
+        .or_else(|| content.strip_suffix('\n'))
+        .or_else(|| content.strip_suffix('\r'))
+        .unwrap_or(content);
+
+    if show_raw {
+        content.replace('\n', "\\n")
+    } else {
+        content.to_owned()
+    }
+}
+
 fn entry_visible(direction: Direction, show_rx: bool, show_tx: bool) -> bool {
     match direction {
         Direction::Rx => show_rx,
@@ -1627,6 +1617,102 @@ mod tests {
 
         assert_eq!(panel.ingest_all_pending(), 0);
         assert!(panel.ports.is_empty());
+    }
+
+    #[test]
+    fn ingest_merges_newline_terminated_tail_into_unfinished_rx_entry() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+
+        for event in [
+            Event::with_timestamp(
+                1_000,
+                serial_topics::SERIAL_RX,
+                "serial:COM6",
+                Direction::Rx,
+                Payload::Bytes(b"(2.0000".to_vec()),
+            ),
+            Event::with_timestamp(
+                1_001,
+                serial_topics::SERIAL_RX,
+                "serial:COM6",
+                Direction::Rx,
+                Payload::Bytes(b"0)echo:busy: processing*26\n".to_vec()),
+            ),
+            Event::with_timestamp(
+                1_002,
+                serial_topics::SERIAL_RX,
+                "serial:COM6",
+                Direction::Rx,
+                Payload::Bytes(b"next".to_vec()),
+            ),
+        ] {
+            bus.publish(event);
+        }
+
+        assert_eq!(panel.ingest_all_pending(), 3);
+
+        let entries = &panel.ports.get("COM6").expect("COM6 should exist").entries;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].raw_text, "(2.00000)echo:busy: processing*26\n");
+        assert_eq!(entries[1].raw_text, "next");
+    }
+
+    #[test]
+    fn ingest_merges_tail_when_previous_chunk_contains_an_earlier_newline() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+
+        for event in [
+            Event::with_timestamp(
+                1_000,
+                serial_topics::SERIAL_RX,
+                "serial:COM6",
+                Direction::Rx,
+                Payload::Bytes(b"(2.00000)X first home. completed.*77\n(2.00000".to_vec()),
+            ),
+            Event::with_timestamp(
+                1_001,
+                serial_topics::SERIAL_RX,
+                "serial:COM6",
+                Direction::Rx,
+                Payload::Bytes(b")X home. timeout = 20*16\n".to_vec()),
+            ),
+        ] {
+            bus.publish(event);
+        }
+
+        assert_eq!(panel.ingest_all_pending(), 2);
+
+        let entries = &panel.ports.get("COM6").expect("COM6 should exist").entries;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].raw_text,
+            "(2.00000)X first home. completed.*77\n(2.00000)X home. timeout = 20*16\n"
+        );
+    }
+
+    #[test]
+    fn visible_row_hides_only_the_final_line_ending() {
+        let row = VisibleRow {
+            id: 1,
+            event_id: 1,
+            port: Some(Cow::Borrowed("COM6")),
+            timestamp_label: Cow::Borrowed("[10:00:39.580]"),
+            direction: Direction::Rx,
+            raw_text: Cow::Borrowed("first\r\nsecond\r\n"),
+            display_text: Cow::Borrowed("first\nsecond\n"),
+            hex_text: Cow::Borrowed("66 69 72 73 74 0D 0A"),
+            preview_text: Cow::Borrowed("first\nsecond\n"),
+        };
+
+        assert_eq!(visible_row_content(&row, false, false), "first\nsecond");
+        assert_eq!(visible_row_content(&row, false, true), "first\r\\nsecond");
+        assert_eq!(
+            visible_row_content(&row, true, false),
+            "66 69 72 73 74 0D 0A"
+        );
+        assert_eq!(row.raw_text, "first\r\nsecond\r\n");
     }
 
     #[test]
