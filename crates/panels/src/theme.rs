@@ -81,13 +81,21 @@ pub const CHART_COLORS: [Color32; 6] = [GREEN, BLUE, YELLOW, RED, PURPLE, CYAN];
 // ── 图表画布 ──
 pub const CHART_BG: Color32 = BG_SECONDARY;
 pub const CHART_GRID: Color32 = Color32::from_rgb(48, 55, 66);
+pub const CHART_CROSSHAIR: Color32 = Color32::from_rgb(100, 110, 125);
+pub const CHART_TOOLTIP_BG: Color32 = Color32::from_rgb(30, 34, 42);
 
 // ── 3D 姿态视图 ──
 pub const ATTITUDE_BG: Color32 = BG_SECONDARY;
 pub const ATTITUDE_BODY: Color32 = YELLOW;
+pub const ATTITUDE_BODY_EDGE: Color32 = Color32::from_rgb(180, 155, 60);
 pub const ATTITUDE_AXIS_X: Color32 = RED;
 pub const ATTITUDE_AXIS_Y: Color32 = GREEN;
 pub const ATTITUDE_AXIS_Z: Color32 = BLUE;
+
+// ── 仪表盘 ──
+pub const GAUGE_BG: Color32 = BG_SECONDARY;
+pub const GAUGE_ARC: Color32 = Color32::from_rgb(60, 68, 82);
+pub const GAUGE_VALUE: Color32 = CYAN;
 
 // ── 公共 UI 工具 ──
 

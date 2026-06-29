@@ -19,7 +19,6 @@ pub mod topics {
     pub const UI_FORM_SET_VISIBLE: &str = "ui.form.set_visible";
     pub const UI_FORM_FILE_BROWSE: &str = "ui.form.file_browse";
     pub const UI_FORM_FILE_SELECTED: &str = "ui.form.file_selected";
-    pub const UI_LOG_APPEND: &str = "ui.log.append";
     pub const UI_CONTRIBUTION_SET_VALUE: &str = "ui.contribution.set_value";
     pub const PLUGIN_COMMAND_EXECUTE: &str = "plugin.command.execute";
     pub const PLUGIN_COMMAND_REGISTERED: &str = "plugin.command.registered";

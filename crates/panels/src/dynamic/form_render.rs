@@ -50,7 +50,13 @@ pub fn dynamic_form_ui(
             }
             // ── 标签 ──
             DynamicFieldKind::Label => {
-                let text = field.text.as_deref().unwrap_or(&field.label);
+                // 优先用 set_value 设置的运行时文本，否则回退到静态 text / label
+                let text = field
+                    .value
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .or(field.text.as_deref())
+                    .unwrap_or(&field.label);
                 ui.label(RichText::new(text).color(theme::TEXT_SECONDARY));
             }
             // ── 按钮 ──

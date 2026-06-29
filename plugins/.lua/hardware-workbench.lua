@@ -127,14 +127,13 @@
 ---@field create_chart fun(config: HwPanelConfig)
 ---@field create_form fun(config: HwPanelConfig)
 ---@field create_attitude fun(config: HwPanelConfig)
----@field create_log fun(config: HwPanelConfig)
+---@field create_gauge fun(config: HwPanelConfig)
 ---@field remove_panel fun(panel_id: string)
 ---@field get_panel fun(panel_id: string): table?
 ---@field set_value fun(panel_id: string, field_id: string, value: any)
 ---@field set_contribution_value fun(contribution_id: string, value: any)
 ---@field set_enabled fun(panel_id: string, field_id: string, enabled: boolean)
 ---@field set_visible fun(panel_id: string, field_id: string, visible: boolean)
----@field log_append fun(panel_id: string, entry: HwLogEntry)
 
 ---@class HwTimerApi
 ---@field after fun(ms: integer, callback: fun()): string

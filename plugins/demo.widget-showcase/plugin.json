@@ -1,0 +1,23 @@
+{
+  "$schema": "../plugin.schema.json",
+  "id": "demo.widget-showcase",
+  "name": "Widget 展示",
+  "version": "0.1.0",
+  "api_version": "0.1",
+  "runtime": "lua",
+  "main": "main.lua",
+  "permissions": ["bus", "log", "ui", "timer"],
+  "live": {
+    "main": "main.lua",
+    "permissions": ["bus", "log", "ui", "timer"]
+  },
+  "contributes": {
+    "panels": [
+      { "id": "showcase.chart", "title": "正弦波图表", "kind": "chart" },
+      { "id": "showcase.gauge-temp", "title": "温度仪表", "kind": "gauge" },
+      { "id": "showcase.gauge-voltage", "title": "电压仪表", "kind": "gauge" },
+      { "id": "showcase.attitude", "title": "姿态指示器", "kind": "attitude" },
+      { "id": "showcase.form", "title": "参数控制", "kind": "form" }
+    ]
+  }
+}

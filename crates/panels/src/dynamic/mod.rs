@@ -5,10 +5,9 @@ mod schema;
 pub use form_render::dynamic_form_ui;
 pub use schema::{DynamicField, DynamicFieldKind, FieldFilter, FieldOption, parse_fields};
 
-use crate::{AttitudePanel, ChartPanel, theme};
-use egui::RichText;
-use std::collections::{BTreeMap, VecDeque};
-use tool_core::{LogLevel, topics};
+use crate::{AttitudePanel, ChartPanel, GaugePanel, theme};
+use std::collections::BTreeMap;
+use tool_core::topics;
 use tool_databus::{DataBus, Subscription, TopicFilter};
 use tool_transport::SerialPortDescriptor;
 
@@ -22,16 +21,9 @@ pub struct DynamicPanels {
     set_visible_subscription: Subscription,
     file_browse_subscription: Subscription,
     file_selected_subscription: Subscription,
-    log_append_subscription: Subscription,
     panels: BTreeMap<String, DynamicPanel>,
     last_error: Option<String>,
     ports: Vec<SerialPortDescriptor>,
-}
-
-struct LogEntry {
-    timestamp_ms: u64,
-    level: LogLevel,
-    message: String,
 }
 
 enum DynamicPanel {
@@ -54,10 +46,9 @@ enum DynamicPanel {
         owner_plugin_id: Option<String>,
         card: bool,
     },
-    Log {
+    Gauge {
         title: String,
-        entries: VecDeque<LogEntry>,
-        max_entries: usize,
+        gauge: GaugePanel,
         owner_plugin_id: Option<String>,
         card: bool,
     },
@@ -75,7 +66,7 @@ impl DynamicPanel {
             | DynamicPanel::Attitude {
                 owner_plugin_id, ..
             }
-            | DynamicPanel::Log {
+            | DynamicPanel::Gauge {
                 owner_plugin_id, ..
             } => owner_plugin_id.as_deref(),
         }
@@ -86,7 +77,7 @@ impl DynamicPanel {
             DynamicPanel::Chart { title, .. }
             | DynamicPanel::Form { title, .. }
             | DynamicPanel::Attitude { title, .. }
-            | DynamicPanel::Log { title, .. } => title.as_str(),
+            | DynamicPanel::Gauge { title, .. } => title.as_str(),
         }
     }
 
@@ -95,7 +86,7 @@ impl DynamicPanel {
             DynamicPanel::Chart { card, .. }
             | DynamicPanel::Form { card, .. }
             | DynamicPanel::Attitude { card, .. }
-            | DynamicPanel::Log { card, .. } => *card,
+            | DynamicPanel::Gauge { card, .. } => *card,
         }
     }
 }
@@ -129,8 +120,6 @@ impl DynamicPanels {
                 TopicFilter::exact(topics::UI_FORM_FILE_SELECTED),
                 UI_SUB_CAP,
             ),
-            log_append_subscription: bus
-                .subscribe_lossy_bounded(TopicFilter::exact(topics::UI_LOG_APPEND), UI_SUB_CAP),
             panels: BTreeMap::new(),
             last_error: None,
             ports: Vec::new(),
@@ -147,14 +136,11 @@ impl DynamicPanels {
         let title = panel.title().to_owned();
 
         if card {
-            egui::Frame::group(ui.style())
-                .inner_margin(egui::Margin::symmetric(12, 8))
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    ui.label(egui::RichText::new(&title).strong());
-                    ui.separator();
-                    render_panel_inner(panel, ui, id, &self.bus, &self.ports);
-                });
+            // 无边框嵌入：标题 + 内容直接贴在面板背景上，不套 Frame::group
+            ui.set_min_width(ui.available_width());
+            ui.label(egui::RichText::new(&title).strong());
+            ui.separator();
+            render_panel_inner(panel, ui, id, &self.bus, &self.ports);
         } else {
             render_panel_inner(panel, ui, id, &self.bus, &self.ports);
         }
@@ -195,8 +181,11 @@ impl DynamicPanels {
 
     pub fn clear_charts(&mut self) {
         for panel in self.panels.values_mut() {
-            if let DynamicPanel::Chart { chart, .. } = panel {
-                chart.clear();
+            match panel {
+                DynamicPanel::Chart { chart, .. } => chart.clear(),
+                DynamicPanel::Attitude { attitude, .. } => attitude.clear(),
+                DynamicPanel::Gauge { gauge, .. } => gauge.clear(),
+                _ => {}
             }
         }
     }
@@ -205,8 +194,11 @@ impl DynamicPanels {
         let mut count = 0;
 
         for panel in self.panels.values_mut() {
-            if let DynamicPanel::Chart { chart, .. } = panel {
-                count += chart.ingest_all_pending();
+            match panel {
+                DynamicPanel::Chart { chart, .. } => count += chart.ingest_all_pending(),
+                DynamicPanel::Attitude { attitude, .. } => count += attitude.ingest_all_pending(),
+                DynamicPanel::Gauge { gauge, .. } => count += gauge.ingest_all_pending(),
+                _ => {}
             }
         }
 
@@ -242,17 +234,8 @@ fn render_panel_inner(
         DynamicPanel::Attitude { attitude, .. } => {
             attitude.ui(ui);
         }
-        DynamicPanel::Log { entries, .. } => {
-            egui::ScrollArea::vertical()
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    for entry in entries.iter() {
-                        let color = crate::level_color(entry.level);
-                        let ts = crate::fmt_ts(entry.timestamp_ms);
-                        let text = format!("[{ts}] {} {}", entry.level.as_str(), entry.message);
-                        ui.colored_label(color, RichText::new(text));
-                    }
-                });
+        DynamicPanel::Gauge { gauge, .. } => {
+            gauge.ui(ui);
         }
     }
 }
@@ -390,6 +373,154 @@ mod tests {
                 .tabs()
                 .contains(&PanelKind::Dynamic("imu-attitude".to_owned()))
         );
+    }
+
+    #[test]
+    fn creates_dynamic_gauge_from_bus_event() {
+        let bus = DataBus::new();
+        let mut panels = DynamicPanels::new(&bus);
+        let mut manager = PanelManager::default();
+
+        bus.publish(Event::new(
+            topics::UI_PANEL_CREATE,
+            "plugin:a",
+            Direction::Internal,
+            Payload::Json(serde_json::json!({
+                "id": "a.gauge",
+                "title": "温度",
+                "kind": "gauge",
+                "topic": "widget.showcase.temperature",
+                "min": 0,
+                "max": 100,
+                "unit": "°C",
+                "label": "传感器温度",
+                "zones": [
+                    {"from": 0, "to": 60, "color": "green"},
+                    {"from": 60, "to": 80, "color": "yellow"},
+                    {"from": 80, "to": 100, "color": "red"}
+                ],
+                "plugin_id": "a"
+            })),
+        ));
+        panels.ingest(&mut manager);
+
+        assert_eq!(panels.count(), 1);
+        assert_eq!(panels.title("a.gauge"), Some("温度"));
+    }
+
+    #[test]
+    fn gauge_set_value_and_status_via_bus_event() {
+        let bus = DataBus::new();
+        let mut panels = DynamicPanels::new(&bus);
+        let mut manager = PanelManager::default();
+
+        bus.publish(Event::new(
+            topics::UI_PANEL_CREATE,
+            "plugin:a",
+            Direction::Internal,
+            Payload::Json(serde_json::json!({
+                "id": "a.gauge",
+                "title": "温度",
+                "kind": "gauge",
+                "topic": "widget.showcase.temperature",
+                "min": 0,
+                "max": 100,
+                "zones": [
+                    {"from": 0, "to": 60, "color": "green"},
+                    {"from": 80, "to": 100, "color": "red"}
+                ],
+                "plugin_id": "a"
+            })),
+        ));
+        panels.ingest(&mut manager);
+
+        // 通过 topic 推送数值
+        bus.publish(Event::new(
+            "widget.showcase.temperature",
+            "plugin:a",
+            Direction::Internal,
+            Payload::Json(serde_json::json!({"value": 90.0})),
+        ));
+        panels.ingest_all_pending();
+
+        // set_value 更新 value
+        bus.publish(Event::new(
+            topics::UI_FORM_SET_VALUE,
+            "plugin:a",
+            Direction::Internal,
+            Payload::Json(serde_json::json!({
+                "panel_id": "a.gauge",
+                "field_id": "value",
+                "value": 90.0,
+                "plugin_id": "a"
+            })),
+        ));
+        // set_value 更新 status
+        bus.publish(Event::new(
+            topics::UI_FORM_SET_VALUE,
+            "plugin:a",
+            Direction::Internal,
+            Payload::Json(serde_json::json!({
+                "panel_id": "a.gauge",
+                "field_id": "status",
+                "value": "过热",
+                "plugin_id": "a"
+            })),
+        ));
+        panels.ingest(&mut manager);
+
+        if let Some(DynamicPanel::Gauge { gauge, .. }) = panels.panels.get("a.gauge") {
+            assert!((gauge.value() - 90.0).abs() < f64::EPSILON);
+            assert_eq!(gauge.status_text(), "过热");
+        } else {
+            panic!("gauge panel not found");
+        }
+    }
+
+    #[test]
+    fn creates_dynamic_chart_with_exact_topic() {
+        // chart 用 topic（精确）订阅，不应收到前缀下其他 topic 的数据
+        let bus = DataBus::new();
+        let mut panels = DynamicPanels::new(&bus);
+        let mut manager = PanelManager::default();
+
+        bus.publish(Event::new(
+            topics::UI_PANEL_CREATE,
+            "plugin:a",
+            Direction::Internal,
+            Payload::Json(serde_json::json!({
+                "id": "a.chart",
+                "title": "图表",
+                "kind": "chart",
+                "topic": "widget.showcase.chart.sample",
+                "plugin_id": "a"
+            })),
+        ));
+        panels.ingest(&mut manager);
+
+        // 精确 topic 的数据应被收入
+        bus.publish(Event::new(
+            "widget.showcase.chart.sample",
+            "plugin:a",
+            Direction::Internal,
+            Payload::Json(serde_json::json!({"t": 1.0, "sine": 0.5})),
+        ));
+        // 同前缀但不同 topic 的数据不应被收入
+        bus.publish(Event::new(
+            "widget.showcase.temperature",
+            "plugin:a",
+            Direction::Internal,
+            Payload::Json(serde_json::json!({"value": 99.0})),
+        ));
+        panels.ingest_all_pending();
+
+        if let Some(DynamicPanel::Chart { chart, .. }) = panels.panels.get("a.chart") {
+            let series_names: Vec<&String> = chart.series_keys();
+            assert!(series_names.iter().any(|n| *n == "sine"));
+            assert!(!series_names.iter().any(|n| *n == "value"));
+        } else {
+            panic!("chart panel not found");
+        }
     }
 
     #[test]
@@ -544,6 +675,59 @@ mod tests {
             && let Some(field) = fields.iter().find(|f| f.id == "val")
         {
             assert_eq!(field.value.as_f64(), Some(42.0));
+        }
+    }
+
+    #[test]
+    fn label_field_accepts_set_value() {
+        // Label 字段应能通过 set_value 更新运行时文本（用于动态计数/状态展示）
+        let bus = DataBus::new();
+        let mut panels = DynamicPanels::new(&bus);
+        let mut manager = PanelManager::default();
+
+        bus.publish(Event::new(
+            topics::UI_PANEL_CREATE,
+            "plugin:a",
+            Direction::Internal,
+            Payload::Json(serde_json::json!({
+                "id": "a.form",
+                "title": "A Form",
+                "kind": "form",
+                "fields": [
+                    { "id": "samples", "label": "已生成样本", "kind": "label" }
+                ],
+                "plugin_id": "a"
+            })),
+        ));
+        panels.ingest(&mut manager);
+
+        // 初始 Label 字段 value 为空字符串
+        if let Some(DynamicPanel::Form { fields, .. }) = panels.panels.get("a.form")
+            && let Some(field) = fields.iter().find(|f| f.id == "samples")
+        {
+            assert_eq!(field.value.as_str(), Some(""));
+        }
+
+        // 插件 A 更新 samples 文本 — 应被允许并写入 field.value
+        bus.publish(Event::new(
+            topics::UI_FORM_SET_VALUE,
+            "plugin:a",
+            Direction::Internal,
+            Payload::Json(serde_json::json!({
+                "panel_id": "a.form",
+                "field_id": "samples",
+                "value": "42",
+                "plugin_id": "a"
+            })),
+        ));
+        panels.ingest(&mut manager);
+
+        if let Some(DynamicPanel::Form { fields, .. }) = panels.panels.get("a.form")
+            && let Some(field) = fields.iter().find(|f| f.id == "samples")
+        {
+            assert_eq!(field.value.as_str(), Some("42"));
+        } else {
+            panic!("samples field not found after update");
         }
     }
 

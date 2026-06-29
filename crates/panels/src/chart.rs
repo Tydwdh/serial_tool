@@ -37,6 +37,11 @@ impl ChartPanel {
         Self::new_with_filter(bus, TopicFilter::prefix(topic_prefix))
     }
 
+    /// 精确订阅单个 topic（不匹配前缀下的其他 topic）。
+    pub fn new_for_topic(bus: &DataBus, topic: impl Into<String>) -> Self {
+        Self::new_with_filter(bus, TopicFilter::exact(topic))
+    }
+
     fn new_with_filter(bus: &DataBus, filter: TopicFilter) -> Self {
         Self {
             subscription: bus.subscribe_lossy_bounded(filter, 4096),
@@ -92,14 +97,13 @@ impl ChartPanel {
         });
 
         let desired = Vec2::new(ui.available_width(), 280.0);
-        let (rect, _) = ui.allocate_exact_size(desired, Sense::hover());
-        self.paint_chart(ui, rect);
+        let (rect, response) = ui.allocate_exact_size(desired, Sense::hover());
+        self.paint_chart(ui, rect, &response);
         self.legend(ui);
     }
 
     fn ingest(&mut self) {
         if self.paused {
-            // 暂停时 drain 掉积压事件，避免恢复后补处理大量旧数据
             for _ in 0..MAX_CHART_EVENTS_PER_FRAME {
                 if self.subscription.try_recv().is_none() {
                     break;
@@ -178,9 +182,13 @@ impl ChartPanel {
         self.dropped_while_paused = 0;
     }
 
+    /// 返回当前所有 series 名称（供测试与诊断）。
+    pub fn series_keys(&self) -> Vec<&String> {
+        self.series.keys().collect()
+    }
+
     pub fn ingest_all_pending(&mut self) -> usize {
         if self.paused {
-            // 暂停时 drain 积压事件，避免恢复后补处理大量旧数据
             let mut drained = 0;
             while self.subscription.try_recv().is_some() {
                 drained += 1;
@@ -221,15 +229,9 @@ impl ChartPanel {
         }
     }
 
-    fn paint_chart(&self, ui: &egui::Ui, rect: Rect) {
+    fn paint_chart(&self, ui: &egui::Ui, rect: Rect, response: &egui::Response) {
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 4.0, theme::CHART_BG);
-        painter.rect_stroke(
-            rect,
-            4.0,
-            Stroke::new(1.0, theme::BORDER_LIGHT),
-            egui::StrokeKind::Inside,
-        );
+        // 无边框嵌入：不画背景填充与外边框，直接在面板背景上绘制网格与曲线
 
         if self.cached_window.values().all(|values| values.len() < 2) {
             painter.text(
@@ -242,12 +244,12 @@ impl ChartPanel {
             return;
         }
 
-        // 直接迭代缓存，避免每帧 collect 分配 Vec
         let samples: Vec<(&String, &Vec<Sample>)> = self.cached_window.iter().collect();
 
         let bounds = chart_bounds(&samples, self.auto_scale, self.y_min, self.y_max);
         draw_grid(&painter, rect);
-        draw_axis_labels(&painter, rect, bounds);
+        draw_y_axis_labels(&painter, rect, bounds);
+        draw_x_axis_labels(&painter, rect, bounds);
 
         for (index, (_, values)) in samples.iter().enumerate() {
             if values.len() < 2 {
@@ -259,6 +261,90 @@ impl ChartPanel {
                 .collect::<Vec<_>>();
             painter.line(points, Stroke::new(2.0, palette(index)));
         }
+
+        // ── 十字线 + Tooltip ──
+        if let Some(hover_pos) = response.hover_pos()
+            && rect.contains(hover_pos)
+        {
+            // 十字线
+            painter.line_segment(
+                [
+                    Pos2::new(hover_pos.x, rect.top()),
+                    Pos2::new(hover_pos.x, rect.bottom()),
+                ],
+                Stroke::new(1.0, theme::CHART_CROSSHAIR),
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(rect.left(), hover_pos.y),
+                    Pos2::new(rect.right(), hover_pos.y),
+                ],
+                Stroke::new(1.0, theme::CHART_CROSSHAIR),
+            );
+
+            // 找到 hover X 对应的数据值
+            let (min_x, max_x, min_y, max_y) = bounds;
+            let hover_x_ratio = ((hover_pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            let hover_x_val = min_x + hover_x_ratio as f64 * (max_x - min_x);
+            let _hover_y_val = min_y
+                + (1.0 - ((hover_pos.y - rect.top()) / rect.height()) as f64) * (max_y - min_y);
+
+            // 收集各 series 在 hover X 附近的值
+            let mut tooltip_lines = vec![format!("x: {hover_x_val:.1}")];
+            for (index, (name, values)) in samples.iter().enumerate() {
+                // 二分查找最近的样本
+                if let Some(closest) = find_closest_sample(values, hover_x_val) {
+                    tooltip_lines.push(format!("{}: {:.3}", name, closest.y));
+                    // 在数据点上画高亮圆点
+                    let point = map_point(rect, *closest, bounds);
+                    painter.circle_filled(point, 4.0, palette(index));
+                }
+            }
+
+            // 绘制 Tooltip 背景 + 文字
+            let tooltip_lines = tooltip_lines;
+            let font = egui::FontId::proportional(11.0);
+            let line_height = 14.0;
+            let tooltip_width = 100.0;
+            let tooltip_height = tooltip_lines.len() as f32 * line_height + 6.0;
+
+            // Tooltip 位置：优先右上方，溢出则左移
+            let mut tooltip_pos = Pos2::new(hover_pos.x + 8.0, hover_pos.y - tooltip_height - 4.0);
+            if tooltip_pos.x + tooltip_width > rect.right() {
+                tooltip_pos.x = hover_pos.x - tooltip_width - 8.0;
+            }
+            if tooltip_pos.y < rect.top() {
+                tooltip_pos.y = hover_pos.y + 8.0;
+            }
+
+            let tooltip_rect =
+                Rect::from_min_size(tooltip_pos, Vec2::new(tooltip_width, tooltip_height));
+            painter.rect_filled(tooltip_rect, 4.0, theme::CHART_TOOLTIP_BG);
+            painter.rect_stroke(
+                tooltip_rect,
+                4.0,
+                Stroke::new(1.0, theme::BORDER_LIGHT),
+                egui::StrokeKind::Inside,
+            );
+
+            for (i, line) in tooltip_lines.iter().enumerate() {
+                let color = if i == 0 {
+                    theme::TEXT_DIMMED
+                } else {
+                    palette(i - 1)
+                };
+                painter.text(
+                    Pos2::new(
+                        tooltip_rect.left() + 4.0,
+                        tooltip_rect.top() + 3.0 + i as f32 * line_height,
+                    ),
+                    egui::Align2::LEFT_TOP,
+                    line,
+                    font.clone(),
+                    color,
+                );
+            }
+        }
     }
 
     fn legend(&self, ui: &mut egui::Ui) {
@@ -269,6 +355,26 @@ impl ChartPanel {
                 ui.label(format!("{name}: {latest:.3}"));
             }
         });
+    }
+}
+
+/// 二分查找 x 值最近的样本
+fn find_closest_sample(values: &[Sample], target_x: f64) -> Option<&Sample> {
+    if values.is_empty() {
+        return None;
+    }
+    let pos = values.partition_point(|s| s.x < target_x);
+    match (pos.checked_sub(1), values.get(pos)) {
+        (Some(prev), Some(next)) => {
+            if (values[prev].x - target_x).abs() <= (next.x - target_x).abs() {
+                Some(&values[prev])
+            } else {
+                Some(next)
+            }
+        }
+        (Some(prev), None) => Some(&values[prev]),
+        (None, Some(next)) => Some(next),
+        (None, None) => None,
     }
 }
 
@@ -346,43 +452,44 @@ fn draw_grid(painter: &egui::Painter, rect: Rect) {
     }
 }
 
-fn draw_axis_labels(painter: &egui::Painter, rect: Rect, bounds: (f64, f64, f64, f64)) {
-    let (min_x, max_x, min_y, max_y) = bounds;
+/// 绘制 Y 轴 5 个均匀刻度标签
+fn draw_y_axis_labels(painter: &egui::Painter, rect: Rect, bounds: (f64, f64, f64, f64)) {
+    let (_, _, min_y, max_y) = bounds;
     let font = egui::FontId::proportional(11.0);
     let color = theme::TEXT_DIMMED;
 
-    // Y 轴标签 (顶部和底部)
-    let top_label = format!("{max_y:.1}");
-    let bottom_label = format!("{min_y:.1}");
-    painter.text(
-        Pos2::new(rect.left() + 4.0, rect.top() + 2.0),
-        egui::Align2::LEFT_TOP,
-        top_label,
-        font.clone(),
-        color,
-    );
-    painter.text(
-        Pos2::new(rect.left() + 4.0, rect.bottom() - 2.0),
-        egui::Align2::LEFT_BOTTOM,
-        bottom_label,
-        font.clone(),
-        color,
-    );
+    for i in 0..5 {
+        let t = i as f32 / 4.0; // 0, 0.25, 0.5, 0.75, 1.0
+        let y = egui::lerp(rect.bottom()..=rect.top(), t);
+        let val = min_y + (max_y - min_y) * t as f64;
+        let label = format!("{val:.1}");
+        painter.text(
+            Pos2::new(rect.left() + 4.0, y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            font.clone(),
+            color,
+        );
+    }
+}
 
-    // X 轴标签 (左侧和右侧)
-    let left_label = format!("{min_x:.0}");
-    let right_label = format!("{max_x:.0}");
+/// 绘制 X 轴标签（左下角 min，右下角 max）
+fn draw_x_axis_labels(painter: &egui::Painter, rect: Rect, bounds: (f64, f64, f64, f64)) {
+    let (min_x, max_x, _, _) = bounds;
+    let font = egui::FontId::proportional(11.0);
+    let color = theme::TEXT_DIMMED;
+
     painter.text(
         Pos2::new(rect.left() + 4.0, rect.bottom() - 2.0),
         egui::Align2::LEFT_BOTTOM,
-        left_label,
+        format!("{min_x:.0}"),
         font.clone(),
         color,
     );
     painter.text(
         Pos2::new(rect.right() - 4.0, rect.bottom() - 2.0),
         egui::Align2::RIGHT_BOTTOM,
-        right_label,
+        format!("{max_x:.0}"),
         font,
         color,
     );
@@ -435,5 +542,18 @@ mod tests {
 
         assert_eq!(panel.ingest_all_pending(), 0);
         assert!(panel.series.is_empty());
+    }
+
+    #[test]
+    fn find_closest_sample_finds_nearest() {
+        let samples = vec![
+            Sample { x: 1.0, y: 10.0 },
+            Sample { x: 2.0, y: 20.0 },
+            Sample { x: 3.0, y: 30.0 },
+        ];
+        assert_eq!(find_closest_sample(&samples, 1.8).map(|s| s.y), Some(20.0));
+        assert_eq!(find_closest_sample(&samples, 2.5).map(|s| s.y), Some(20.0)); // 等距时取前者
+        assert_eq!(find_closest_sample(&samples, 0.5).map(|s| s.y), Some(10.0));
+        assert_eq!(find_closest_sample(&samples, 3.5).map(|s| s.y), Some(30.0));
     }
 }

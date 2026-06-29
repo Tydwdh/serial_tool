@@ -1,4 +1,4 @@
-//! `ctx.ui.*` — UI 面板 API（create_chart/form/attitude/log + remove + set_value + set_enabled + set_visible + log_append）。
+//! `ctx.ui.*` — UI 面板 API（create_chart/form/attitude/gauge + remove + set_value + set_enabled + set_visible）。
 
 use mlua::{Lua, Table, Value};
 use serde_json::Map;
@@ -20,7 +20,7 @@ pub(crate) fn create_ui_api(
         ("create_chart", "chart"),
         ("create_form", "form"),
         ("create_attitude", "attitude"),
-        ("create_log", "log"),
+        ("create_gauge", "gauge"),
     ] {
         let bus = bus.clone();
         let source = source.clone();
@@ -143,30 +143,6 @@ pub(crate) fn create_ui_api(
         )?,
     )?;
 
-    // ctx.ui.log_append(panel_id, { level = "info", message = "..." })
-    let bus_log = bus.clone();
-    let src_log = source.clone();
-    let pid_log = plugin_id.clone();
-    table.set(
-        "log_append",
-        lua.create_function(move |_lua, (panel_id, entry): (String, Table)| {
-            let level: String = entry.get("level").unwrap_or_else(|_| "info".to_owned());
-            let message: String = entry.get("message").unwrap_or_default();
-            bus_log.publish(Event::new(
-                topics::UI_LOG_APPEND,
-                src_log.clone(),
-                Direction::Internal,
-                Payload::Json(serde_json::json!({
-                    "panel_id": panel_id,
-                    "level": level,
-                    "message": message,
-                    "plugin_id": pid_log,
-                })),
-            ));
-            Ok(())
-        })?,
-    )?;
-
     let bus_visible = bus.clone();
     let src_visible = source.clone();
     table.set(
@@ -242,7 +218,10 @@ pub(crate) fn ensure_panel_defaults(
         config.insert("title".to_owned(), serde_json::Value::String(title));
     }
 
-    if fallback_kind == "chart" && !config.contains_key("topic_prefix") {
+    if fallback_kind == "chart"
+        && !config.contains_key("topic_prefix")
+        && !config.contains_key("topic")
+    {
         config.insert(
             "topic_prefix".to_owned(),
             serde_json::Value::String("protocol.".to_owned()),
@@ -257,6 +236,13 @@ pub(crate) fn ensure_panel_defaults(
         config.insert(
             "topic".to_owned(),
             serde_json::Value::String(tool_core::topics::PROTOCOL_IMU_ATTITUDE.to_owned()),
+        );
+    }
+
+    if fallback_kind == "gauge" && !config.contains_key("topic") {
+        config.insert(
+            "topic".to_owned(),
+            serde_json::Value::String("protocol.gauge".to_owned()),
         );
     }
 

@@ -4,12 +4,11 @@
 //! `create_from_event`/`remove_from_event` 解析创建/移除指令，
 //! `is_allowed` 做跨插件 owner 校验，`handle_field_update` 处理字段更新。
 
+use super::DynamicPanel;
 use super::form_render::publish_form_changed;
 use super::schema::{DynamicField, parse_fields};
-use super::{DynamicPanel, LogEntry};
-use crate::{AttitudePanel, ChartPanel, PanelKind, PanelManager};
+use crate::{AttitudePanel, ChartPanel, GaugePanel, PanelKind, PanelManager};
 use serde_json::Value;
-use std::collections::VecDeque;
 use tool_core::{Event, LogLevel, Payload, topics};
 
 fn event_source_for_owner(event: &Event) -> &str {
@@ -61,43 +60,6 @@ impl super::DynamicPanels {
                 }
             });
         }
-        // log append 事件
-        for event in self.log_append_subscription.drain_limited(500) {
-            let owner_source = event_source_for_owner(&event).to_owned();
-            if let Payload::Json(val) = event.payload {
-                let panel_id = val.get("panel_id").and_then(Value::as_str).unwrap_or("");
-                let level_str = val.get("level").and_then(Value::as_str).unwrap_or("info");
-                let msg = val.get("message").and_then(Value::as_str).unwrap_or("");
-                let level = LogLevel::parse_name(level_str).unwrap_or(LogLevel::Info);
-                // 用事件真实来源校验 owner，不信任 payload 里的 plugin_id
-                let actual_plugin_id = owner_source
-                    .strip_prefix("plugin:")
-                    .unwrap_or(owner_source.as_str());
-                if let Some(DynamicPanel::Log {
-                    entries,
-                    max_entries,
-                    owner_plugin_id,
-                    ..
-                }) = self.panels.get_mut(panel_id)
-                {
-                    // owner 校验：拒绝非 owner 插件的写入
-                    if let Some(owner) = owner_plugin_id.as_deref()
-                        && owner != actual_plugin_id
-                    {
-                        continue;
-                    }
-                    entries.push_back(LogEntry {
-                        timestamp_ms: tool_core::now_timestamp_ms(),
-                        level,
-                        message: msg.to_owned(),
-                    });
-                    while entries.len() > *max_entries {
-                        entries.pop_front();
-                    }
-                }
-            }
-        }
-
         // file browse 事件由 main.rs 处理
         let _ = self.file_browse_subscription.drain_limited(500);
 
@@ -180,20 +142,34 @@ impl super::DynamicPanels {
         }
 
         if let Some(panel) = self.panels.get_mut(panel_id) {
-            if let DynamicPanel::Form { fields, .. } = panel {
-                if let Some(field) = fields.iter_mut().find(|f| f.id == field_id) {
-                    apply(field, new_value);
-                } else {
-                    let msg = format!("set field: field '{field_id}' not found in '{panel_id}'");
+            match panel {
+                DynamicPanel::Form { fields, .. } => {
+                    if let Some(field) = fields.iter_mut().find(|f| f.id == field_id) {
+                        apply(field, new_value);
+                    } else {
+                        let msg =
+                            format!("set field: field '{field_id}' not found in '{panel_id}'");
+                        self.last_error = Some(msg.clone());
+                        self.bus
+                            .publish(Event::system_log(LogLevel::Warn, "ui.dynamic", msg));
+                    }
+                }
+                DynamicPanel::Gauge { gauge, .. } if field_id == "value" => {
+                    if let Some(v) = new_value.as_f64() {
+                        gauge.set_value(v);
+                    }
+                }
+                DynamicPanel::Gauge { gauge, .. } if field_id == "status" => {
+                    if let Some(s) = new_value.as_str() {
+                        gauge.set_status(s.to_owned());
+                    }
+                }
+                _ => {
+                    let msg = format!("set field: panel '{panel_id}' does not support set_value");
                     self.last_error = Some(msg.clone());
                     self.bus
                         .publish(Event::system_log(LogLevel::Warn, "ui.dynamic", msg));
                 }
-            } else {
-                let msg = format!("set field: panel '{panel_id}' is not a form");
-                self.last_error = Some(msg.clone());
-                self.bus
-                    .publish(Event::system_log(LogLevel::Warn, "ui.dynamic", msg));
             }
         } else {
             let msg = format!("set field: panel '{panel_id}' not found");
@@ -238,15 +214,21 @@ impl super::DynamicPanels {
 
         let panel = match kind {
             "chart" => {
-                let topic_prefix = object
-                    .get("topic_prefix")
-                    .or_else(|| object.get("topic"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("protocol.");
+                // `topic` 精确订阅单个 topic；`topic_prefix` 订阅前缀下所有 topic。
+                // 两者都未提供时回退到默认前缀。
+                let chart = if let Some(topic) = object.get("topic").and_then(Value::as_str) {
+                    ChartPanel::new_for_topic(&self.bus, topic)
+                } else {
+                    let topic_prefix = object
+                        .get("topic_prefix")
+                        .and_then(Value::as_str)
+                        .unwrap_or("protocol.");
+                    ChartPanel::new_for_topic_prefix(&self.bus, topic_prefix)
+                };
 
                 DynamicPanel::Chart {
                     title,
-                    chart: ChartPanel::new_for_topic_prefix(&self.bus, topic_prefix),
+                    chart,
                     owner_plugin_id,
                     card,
                 }
@@ -278,17 +260,29 @@ impl super::DynamicPanels {
                     card,
                 }
             }
-            "log" => {
-                let max_entries = object
-                    .get("max_entries")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(5000) as usize;
-                // 保证最小值为 10，防止 max_entries=0 导致日志面板无用
-                let max_entries = max_entries.max(10);
-                DynamicPanel::Log {
+            "gauge" => {
+                let topic = object
+                    .get("topic")
+                    .and_then(Value::as_str)
+                    .unwrap_or("protocol.gauge");
+
+                let min = object.get("min").and_then(Value::as_f64).unwrap_or(0.0);
+                let max = object.get("max").and_then(Value::as_f64).unwrap_or(100.0);
+                let unit = object
+                    .get("unit")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                let label = object
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                let zones = crate::gauge::parse_zones(object.get("zones"));
+
+                DynamicPanel::Gauge {
                     title,
-                    entries: VecDeque::new(),
-                    max_entries,
+                    gauge: GaugePanel::from_config(&self.bus, topic, min, max, unit, zones, label),
                     owner_plugin_id,
                     card,
                 }

@@ -1,6 +1,7 @@
 mod attitude;
 mod chart;
 mod dynamic;
+mod gauge;
 mod log;
 mod manager;
 mod plugins;
@@ -19,6 +20,7 @@ pub use dynamic::DynamicPanels;
 pub use dynamic::{
     DynamicField, DynamicFieldKind, FieldFilter, FieldOption, dynamic_form_ui, parse_fields,
 };
+pub use gauge::GaugePanel;
 pub use log::LogPanel;
 pub use manager::{Activity, DockArea, DockLayout, DockStack, PanelKind, PanelManager};
 pub use plugins::PluginsPanel;
