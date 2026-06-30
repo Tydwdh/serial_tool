@@ -1,12 +1,12 @@
-use crate::app::CheckResult;
 use crate::app::WorkbenchApp;
+use crate::state::CheckResult;
 use std::sync::Arc;
 
 impl WorkbenchApp {
     /// 自动更新调度：启动检查、收割结果、启动下载、收割下载、处理重启。
     pub(super) fn tick_update(&mut self) {
         // 从 Arc 读取下载进度
-        if let Some(ref progress_arc) = self.update_state_download_progress {
+        if let Some(ref progress_arc) = self.update_state.download_progress_arc {
             let raw = progress_arc.load(std::sync::atomic::Ordering::Relaxed);
             self.update_state.download_progress = raw as f32 / 1000.0;
         }
@@ -237,7 +237,7 @@ impl WorkbenchApp {
             })
         }));
 
-        self.update_state_download_progress = Some(progress);
+        self.update_state.download_progress_arc = Some(progress);
     }
 
     /// 用户手动触发检查更新（跳过 24h 缓存）。

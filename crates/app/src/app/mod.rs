@@ -1,6 +1,6 @@
 use crate::config::default_activity_order;
 use crate::config::{ConfigLoadResult, PersistedConfig, default_recorder_path, load_config};
-use crate::state::{MAX_SEND_HISTORY, SendUiState, SerialUiState, StatusState};
+use crate::state::{MAX_SEND_HISTORY, SendUiState, SerialUiState, StatusState, UpdateState};
 use eframe::egui;
 use std::collections::{BTreeSet, VecDeque};
 use std::path::PathBuf;
@@ -19,68 +19,6 @@ use tool_transport::TransportManager;
 use crate::bootstrap::{app_dir, apply_theme, setup_fonts};
 
 // ── 数据结构 ──
-
-/// 自动更新状态。
-pub(crate) struct UpdateState {
-    /// 远端最新版本号（如 "0.3.0"）
-    pub(crate) latest_version: Option<String>,
-    /// 更新日志
-    pub(crate) changelog: Vec<String>,
-    /// 下载进度 0.0–1.0
-    pub(crate) download_progress: f32,
-    /// 是否有新版本可用
-    pub(crate) update_available: bool,
-    /// 更新包是否已下载完成
-    pub(crate) downloaded: bool,
-    /// 错误信息
-    pub(crate) error: Option<String>,
-    /// 是否正在检查更新
-    pub(crate) checking: bool,
-    /// 是否正在下载
-    pub(crate) downloading: bool,
-    /// 后台检查线程的 JoinHandle
-    pub(crate) check_handle: Option<std::thread::JoinHandle<Result<CheckResult, String>>>,
-    /// 后台下载线程的 JoinHandle
-    pub(crate) download_handle: Option<std::thread::JoinHandle<Result<String, String>>>,
-    /// 下载 URL（从 update.json 获取）
-    pub(crate) download_url: Option<String>,
-    /// 下载完成后的 SHA256
-    pub(crate) downloaded_sha256: Option<String>,
-    /// 用户点击"更新并重启"后，标记需要退出
-    pub(crate) want_restart: bool,
-    /// 用户手动触发检查（跳过 24h 缓存）
-    pub(crate) force_check: bool,
-}
-
-/// 后台检查线程的返回结果。
-pub(crate) struct CheckResult {
-    pub(crate) version: String,
-    pub(crate) download_url: String,
-    pub(crate) changelog: Vec<String>,
-    /// 是否已缓存跳过（无需更新 UI）
-    pub(crate) cached: bool,
-}
-
-impl Default for UpdateState {
-    fn default() -> Self {
-        Self {
-            latest_version: None,
-            changelog: Vec::new(),
-            download_progress: 0.0,
-            update_available: false,
-            downloaded: false,
-            error: None,
-            checking: false,
-            downloading: false,
-            check_handle: None,
-            download_handle: None,
-            download_url: None,
-            downloaded_sha256: None,
-            want_restart: false,
-            force_check: false,
-        }
-    }
-}
 
 pub(crate) struct WorkbenchApp {
     pub(crate) bus: DataBus,
@@ -126,8 +64,6 @@ pub(crate) struct WorkbenchApp {
     pub(crate) key_recording: Option<crate::keymap::Action>,
     /// 自动更新状态
     pub(crate) update_state: UpdateState,
-    /// 下载进度共享变量（0-1000 表示 0.0%-100.0%）
-    pub(crate) update_state_download_progress: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     /// UI contribution 运行时状态（toggle 值、progress 值等）
     pub(crate) contribution_states: std::collections::HashMap<String, serde_json::Value>,
     /// 等宽字体大小（终端/日志区），默认 13.0
@@ -315,7 +251,6 @@ impl WorkbenchApp {
             pending_action: None,
             key_recording: None,
             update_state: UpdateState::default(),
-            update_state_download_progress: None,
             contribution_states: std::collections::HashMap::new(),
             monospace_font_size: config
                 .as_ref()
