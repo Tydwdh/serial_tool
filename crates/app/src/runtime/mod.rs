@@ -10,10 +10,8 @@ mod periodic_send;
 mod plugin;
 mod port_refresh;
 mod replay;
-mod update;
-
-#[cfg(test)]
 mod timing;
+mod update;
 
 use crate::app::WorkbenchApp;
 use eframe::egui;

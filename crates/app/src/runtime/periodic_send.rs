@@ -1,4 +1,5 @@
 use crate::app::WorkbenchApp;
+use crate::runtime::timing::wait_until_deadline;
 use crate::state::StatusLevel;
 use eframe::egui;
 use tool_transport::send_impl_to;
@@ -63,16 +64,6 @@ impl WorkbenchApp {
         let interval = std::time::Duration::from_secs_f64(interval_ms / 1000.0);
 
         std::thread::spawn(move || {
-            // 提升为实时优先级，减少 OS 调度延迟
-            #[cfg(target_os = "windows")]
-            unsafe {
-                unsafe extern "system" {
-                    fn SetThreadPriority(thread: isize, priority: i32) -> i32;
-                    fn GetCurrentThread() -> isize;
-                }
-                SetThreadPriority(GetCurrentThread(), 15); // THREAD_PRIORITY_TIME_CRITICAL
-            }
-
             let start = std::time::Instant::now();
             let mut count: u64 = 0;
 
@@ -80,14 +71,9 @@ impl WorkbenchApp {
                 // 基于 start_time + count * interval 计算 absolute deadline
                 let deadline = start + interval * (count as u32 + 1);
 
-                // 纯 spin-wait 到 deadline
-                let mut spin_count = 0u32;
-                while std::time::Instant::now() < deadline {
-                    std::hint::spin_loop();
-                    spin_count = spin_count.wrapping_add(1);
-                    if spin_count & 0xFF == 0 && cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                        return;
-                    }
+                // 等到 deadline 或被 cancel：剩余 >2ms 时 sleep 让出 CPU，最后阶段 spin 保精度
+                if wait_until_deadline(deadline, Some(&cancel)) {
+                    return;
                 }
 
                 // 恰好到期，发送
