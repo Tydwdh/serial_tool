@@ -4,7 +4,7 @@ use egui::Color32;
 use tool_panels::{PanelKind, theme};
 
 impl WorkbenchApp {
-    pub(crate) fn activity_bar(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn activity_bar(&mut self, ui: &mut egui::Ui) {
         let pointer = ui.ctx().pointer_latest_pos();
         let mut activity_rects = Vec::with_capacity(self.activity_order.len());
 
@@ -124,7 +124,7 @@ impl WorkbenchApp {
             self.toggle_bottom_panel();
         }
     }
-    pub(crate) fn dynamic_panel_shortcuts(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn dynamic_panel_shortcuts(&mut self, ui: &mut egui::Ui) {
         let items: Vec<(String, String)> = self
             .panels
             .tabs()
@@ -220,7 +220,7 @@ impl WorkbenchApp {
             self.dynamic_drag_source = None;
         }
     }
-    pub(crate) fn reorder_dynamic_tabs(&mut self, source_index: usize, mut insert_index: usize) {
+    pub(super) fn reorder_dynamic_tabs(&mut self, source_index: usize, mut insert_index: usize) {
         let mut dynamic_tabs: Vec<PanelKind> = self
             .panels
             .dock
@@ -272,7 +272,7 @@ impl WorkbenchApp {
 
 use tool_panels::Activity;
 
-pub(crate) fn aicon(a: Activity) -> &'static str {
+pub(super) fn aicon(a: Activity) -> &'static str {
     match a {
         Activity::Devices => "📟",
         Activity::Replay => "⏪",
@@ -281,7 +281,7 @@ pub(crate) fn aicon(a: Activity) -> &'static str {
         _ => "",
     }
 }
-pub(crate) fn ashortcut(_a: Activity) -> &'static str {
+pub(super) fn ashortcut(_a: Activity) -> &'static str {
     ""
 }
 
@@ -359,24 +359,24 @@ fn paint_insert_line(ui: &egui::Ui, rects: &[egui::Rect], insert_index: usize) {
     painter.circle_filled(egui::pos2(right - 6.0, y), 3.0, theme::BLUE);
 }
 
-pub(crate) fn activity_insert_index_from_pointer(
+pub(super) fn activity_insert_index_from_pointer(
     rects: &[egui::Rect],
     pointer: egui::Pos2,
 ) -> Option<usize> {
     insert_index_from_pointer(rects, pointer, 14.0)
 }
 
-pub(crate) fn paint_activity_insert_line(ui: &egui::Ui, rects: &[egui::Rect], insert_index: usize) {
+pub(super) fn paint_activity_insert_line(ui: &egui::Ui, rects: &[egui::Rect], insert_index: usize) {
     paint_insert_line(ui, rects, insert_index);
 }
 
-pub(crate) fn vertical_insert_index_from_pointer(
+pub(super) fn vertical_insert_index_from_pointer(
     rects: &[egui::Rect],
     pointer: egui::Pos2,
 ) -> Option<usize> {
     insert_index_from_pointer(rects, pointer, 10.0)
 }
 
-pub(crate) fn paint_vertical_insert_line(ui: &egui::Ui, rects: &[egui::Rect], insert_index: usize) {
+pub(super) fn paint_vertical_insert_line(ui: &egui::Ui, rects: &[egui::Rect], insert_index: usize) {
     paint_insert_line(ui, rects, insert_index);
 }

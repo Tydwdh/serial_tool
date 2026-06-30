@@ -8,7 +8,7 @@ use tool_panels::theme;
 use tool_recorder::RecordMode;
 
 impl WorkbenchApp {
-    pub(crate) fn device_panel(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn device_panel(&mut self, ui: &mut egui::Ui) {
         // ── 串口参数 ──
         egui::Frame::group(ui.style())
             .inner_margin(egui::Margin::symmetric(12, 8))

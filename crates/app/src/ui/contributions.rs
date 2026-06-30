@@ -23,7 +23,7 @@ struct ResolvedUiContribution {
 }
 
 impl WorkbenchApp {
-    pub(crate) fn ui_contribution_slot(&mut self, ui: &mut egui::Ui, slot: &str) {
+    pub(super) fn ui_contribution_slot(&mut self, ui: &mut egui::Ui, slot: &str) {
         let items = self.resolved_ui_contributions(slot);
         if items.is_empty() {
             return;

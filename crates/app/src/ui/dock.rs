@@ -5,7 +5,7 @@ use crate::app::WorkbenchApp;
 use crate::state::StatusLevel;
 
 impl WorkbenchApp {
-    pub(crate) fn dock_stack_ui(&mut self, ui: &mut egui::Ui, area: DockArea) {
+    pub(super) fn dock_stack_ui(&mut self, ui: &mut egui::Ui, area: DockArea) {
         let tabs = self.panels.dock.stack(area).tabs.clone();
 
         if tabs.is_empty() {
@@ -283,14 +283,14 @@ impl WorkbenchApp {
         });
     }
 
-    pub(crate) fn panel_title(&self, kind: &PanelKind) -> String {
+    pub(super) fn panel_title(&self, kind: &PanelKind) -> String {
         match kind {
             PanelKind::Dynamic(id) => self.dynamic_panels.title(id).unwrap_or(id).to_owned(),
             _ => kind.title(),
         }
     }
 
-    pub(crate) fn paint_dock_drop_overlay(&mut self, ctx: &egui::Context) {
+    pub(super) fn paint_dock_drop_overlay(&mut self, ctx: &egui::Context) {
         let Some(kind) = self.dock_dragging_panel.clone() else {
             return;
         };

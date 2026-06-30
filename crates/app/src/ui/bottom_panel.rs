@@ -41,7 +41,7 @@ impl WorkbenchApp {
             .is_some_and(|p| self.transport.status_port(p).open)
     }
 
-    pub(crate) fn send_target_port_combo(&mut self, ui: &mut egui::Ui, id_salt: &'static str) {
+    pub(super) fn send_target_port_combo(&mut self, ui: &mut egui::Ui, id_salt: &'static str) {
         let open_ports: Vec<String> = self.transport.open_ports();
 
         egui::ComboBox::from_id_salt(id_salt)
@@ -67,15 +67,15 @@ impl WorkbenchApp {
 
     // ── 对外入口：三个布局都走这一个核心方法 ──
 
-    pub(crate) fn send_panel_horizontal(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn send_panel_horizontal(&mut self, ui: &mut egui::Ui) {
         self.send_panel_body(ui, SendLayout::Horizontal);
     }
 
-    pub(crate) fn send_panel_vertical(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn send_panel_vertical(&mut self, ui: &mut egui::Ui) {
         self.send_panel_body(ui, SendLayout::Vertical);
     }
 
-    pub(crate) fn send_panel_popup(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn send_panel_popup(&mut self, ui: &mut egui::Ui) {
         self.send_panel_body(ui, SendLayout::Popup);
     }
 
@@ -422,7 +422,7 @@ impl WorkbenchApp {
         // 不再每次发送都同步落盘，依赖 tick_auto_save 每 60 秒自动保存
     }
 
-    pub(crate) fn send_history_combo(&mut self, ui: &mut egui::Ui, id_salt: &'static str) {
+    pub(super) fn send_history_combo(&mut self, ui: &mut egui::Ui, id_salt: &'static str) {
         if self.send.send_history.is_empty() {
             return;
         }

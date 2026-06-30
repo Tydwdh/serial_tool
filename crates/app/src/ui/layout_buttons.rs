@@ -9,7 +9,7 @@ pub(crate) enum LayoutButtonKind {
     RightDock,
 }
 
-pub(crate) fn layout_icon_button(
+pub(super) fn layout_icon_button(
     ui: &mut egui::Ui,
     kind: LayoutButtonKind,
     active: bool,

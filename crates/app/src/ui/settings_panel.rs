@@ -7,7 +7,7 @@ use tool_panels::theme;
 use tool_panels::{DynamicField, dynamic_form_ui, parse_fields};
 
 impl WorkbenchApp {
-    pub(crate) fn settings_panel(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn settings_panel(&mut self, ui: &mut egui::Ui) {
         // ── 工作区 ──
         egui::Frame::group(ui.style())
             .inner_margin(egui::Margin::symmetric(12, 8))

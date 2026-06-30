@@ -3,7 +3,7 @@ use tool_transport::SerialPortDescriptor;
 
 const SERIAL_ACTION_BUTTON_SIZE: egui::Vec2 = egui::vec2(52.0, 26.0);
 
-pub(crate) fn serial_combo(
+pub(super) fn serial_combo(
     ui: &mut egui::Ui,
     id: &'static str,
     w: f32,
@@ -52,11 +52,11 @@ pub(crate) fn serial_combo(
         });
 }
 
-pub(crate) fn serial_action_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+pub(super) fn serial_action_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add_sized(SERIAL_ACTION_BUTTON_SIZE, egui::Button::new(text))
 }
 
-pub(crate) fn serial_action_button_enabled(
+pub(super) fn serial_action_button_enabled(
     ui: &mut egui::Ui,
     enabled: bool,
     text: &str,
@@ -73,7 +73,7 @@ use crate::ui::layout_buttons::{LayoutButtonKind, layout_icon_button};
 use tool_panels::theme;
 
 impl WorkbenchApp {
-    pub(crate) fn top_bar(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let so = self
                 .serial

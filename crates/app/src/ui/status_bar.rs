@@ -6,7 +6,7 @@ use tool_panels::theme;
 use tool_transport::TransportStatus;
 
 impl WorkbenchApp {
-    pub(crate) fn status_bar(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn status_bar(&mut self, ui: &mut egui::Ui) {
         let st = self
             .serial
             .selected_port
