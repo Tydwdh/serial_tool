@@ -157,26 +157,20 @@ ctx.serial.close()
 ctx.serial.close_port("COM3")
 ```
 
-### send / send_to
+### send_to / send_hex_to
+
+向指定端口发送文本或十六进制。十六进制字符串支持空格分隔，如 `"01 02 0A FF"`。
 
 ```lua
-ctx.serial.send("hello\n")
 ctx.serial.send_to("COM3", "hello\n")
-```
-
-### send_hex / send_hex_to
-
-```lua
-ctx.serial.send_hex("01 02 0A FF")
 ctx.serial.send_hex_to("COM3", "01 02 0A FF")
 ```
 
-### status / status_port / open_ports
+### status_port / open_ports
 
 ```lua
-local s = ctx.serial.status()
-local s2 = ctx.serial.status_port("COM3")
-local ports = ctx.serial.open_ports()
+local s = ctx.serial.status_port("COM3")  -- { open, port_name, baud_rate }
+local ports = ctx.serial.open_ports()     -- 当前已打开的端口名列表
 ```
 
 ### expect(pattern, timeout_ms)
@@ -296,7 +290,20 @@ end
 
 ### create_chart(config)
 
+图表显示匹配 topic 的 JSON payload 中所有数值字段。两种订阅方式：
+
+- `topic_prefix`：订阅该前缀下所有 topic（适合一组相关信号）。
+- `topic`：精确订阅单个 topic（推荐，避免前缀下其他数据混入）。
+
 ```lua
+-- 精确订阅单个 topic
+ctx.ui.create_chart({
+  id = "my-plugin.chart",
+  title = "我的图表",
+  topic = "protocol.my-plugin.sample"
+})
+
+-- 或前缀订阅
 ctx.ui.create_chart({
   id = "my-plugin.chart",
   title = "我的图表",
@@ -304,7 +311,7 @@ ctx.ui.create_chart({
 })
 ```
 
-图表会显示匹配 topic 的 JSON payload 中所有数值字段。
+payload 中除 `t`/`time`/`timestamp` 外的数值字段都会成为一条曲线，`t` 用作 X 轴。
 
 ### create_form(config)
 
@@ -329,12 +336,22 @@ ctx.ui.create_form({
 支持字段 `kind`：
 
 ```text
-text
-number
-checkbox / boolean / bool
-select / choice / enum / dropdown
-slider / range
+text            单行文本
+number          数值
+checkbox / boolean / bool   复选框
+select / choice / enum / dropdown   下拉选择（需提供 options）
+slider / range  滑块（需提供 min/max/step）
+button          按钮（点击发布 ui.form.changed，field_id 即按钮 id）
+textarea        多行文本
+file            文件选择（点击触发宿主对话框，结果写入字段值）
+progress        进度条（0..1 或 0..100，由 set_value 更新）
+status          状态指示（{ text, level }，level: running/idle/warn/error）
+label           只读文本（可由 set_value 更新）
+serial          串口选择下拉（选项由宿主自动填充）
+separator       分隔线（无 id）
 ```
+
+`select` 字段的 `options` 形如 `{ { label = "10 Hz", value = "10" }, ... }`。
 
 表单应用后会发布 `ui.form.changed`，payload 形如：
 
@@ -365,6 +382,8 @@ end)
 
 ### create_attitude(config)
 
+3D 姿态指示器，订阅 `{ roll, pitch, yaw }`（度）的 topic。
+
 ```lua
 ctx.ui.create_attitude({
   id = "my-plugin.attitude",
@@ -372,6 +391,29 @@ ctx.ui.create_attitude({
   topic = "protocol.imu.attitude"
 })
 ```
+
+### create_gauge(config)
+
+仪表盘，订阅 `{ value }` 的 topic。可定义色区（green/yellow/red 对应 正常/预警/异常），状态文本自动按当前值所在色区生成，也可由 `set_value(panel, "status", text)` 运行时覆盖。
+
+```lua
+ctx.ui.create_gauge({
+  id = "my-plugin.gauge-temp",
+  title = "温度",
+  topic = "my-plugin.temperature",
+  min = 0,
+  max = 100,
+  unit = "°C",
+  label = "传感器温度",
+  zones = {
+    { from = 0,  to = 60,  color = "green" },
+    { from = 60, to = 80,  color = "yellow" },
+    { from = 80, to = 100, color = "red" }
+  }
+})
+```
+
+`zones` 的 `color` 支持：`green`/`yellow`/`red`/`blue`/`cyan`/`purple`/`orange`。建议 zones 覆盖整个 `min..max` 区间，否则未覆盖段会显示为灰色轨道。
 
 ### remove_panel(panel_id)
 
@@ -385,38 +427,33 @@ ctx.ui.remove_panel("my-plugin.chart")
 local panel = ctx.ui.get_panel("my-plugin.chart")
 ```
 
-### create_log(config)
-
-```lua
-ctx.ui.create_log({
-  id = "my-plugin.log",
-  title = "插件日志"
-})
-```
-
 ### set_value / set_enabled / set_visible
 
-用于由插件主动更新表单字段状态。
+用于由插件主动更新表单字段或面板状态。
 
 ```lua
+-- 表单字段
 ctx.ui.set_value("my-plugin.form", "status", {
   text = "运行中",
   level = "running"
 })
-
 ctx.ui.set_enabled("my-plugin.form", "start_btn", false)
 ctx.ui.set_visible("my-plugin.form", "advanced", true)
+
+-- 仪表盘：field_id = "value" 设数值，"status" 设状态文本
+ctx.ui.set_value("my-plugin.gauge-temp", "value", 75.0)
+ctx.ui.set_value("my-plugin.gauge-temp", "status", "预热中")
+
+-- label 字段也可用 set_value 更新文本
+ctx.ui.set_value("my-plugin.form", "samples", "919")
 ```
 
-### log_append(panel_id, entry)
+### set_contribution_value(contribution_id, value)
 
-向插件创建的 log 面板追加一条日志。
+更新 `contributes.ui` 声明的控件运行时状态（如 toggle / progress / label）。
 
 ```lua
-ctx.ui.log_append("my-plugin.log", {
-  level = "info",
-  message = "started"
-})
+ctx.ui.set_contribution_value("my-plugin.send.progress", 0.6)
 ```
 
 ## ctx.timer
@@ -548,6 +585,35 @@ on_disable(function()
   ctx.ui.remove_panel("my-plugin.chart")
   ctx.log.info("plugin stopped")
 end)
+```
+
+## 回放分析器
+
+当插件声明了 `replay` 配置（见 `plugin-manifest.md`），其 `replay.lua` 在回放期间运行，可使用 `ctx.replay` 和以下回调。普通实时插件不会用到这些 API。
+
+### ctx.replay
+
+```lua
+ctx.replay.emit("protocol.demo.sample", { value = 1.0 })  -- 向回放流注入事件
+ctx.replay.log("分析进度...")                              -- 写入回放日志
+local ev = ctx.replay.current_event()                     -- 当前输入事件
+```
+
+### on_replay_begin(session) / on_replay_event(event) / on_replay_end()
+
+```lua
+function on_replay_begin(session)
+  -- session.start_ms / end_ms / event_count
+  ctx.log.info("回放开始，共 " .. tostring(session.event_count) .. " 条")
+end
+
+function on_replay_event(event)
+  -- 逐条处理回放事件
+end
+
+function on_replay_end()
+  ctx.log.info("回放结束")
+end
 ```
 
 ## event 对象

@@ -152,6 +152,7 @@
 ```text
 chart
 form
+gauge
 attitude
 ```
 
