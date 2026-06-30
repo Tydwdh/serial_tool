@@ -71,45 +71,37 @@ impl WorkbenchApp {
     }
 
     fn do_replay_rebuild(&mut self, position: Option<u64>, ctx: &egui::Context) {
+        // 与 cursor 版本不同：仅在 position.is_some() 时检查 block。
+        // None 表示走整段重建路径，不触发 seek 阻断判定。
         if position.is_some() && self.warn_if_replay_blocked() {
             return;
         }
-
-        self.terminal_panel.clear();
-        self.bottom_log_panel.clear();
-        self.dynamic_panels.clear_charts();
-
-        self.bus.publish(Event::new(
-            "ui.replay.reset",
-            "ui.replay",
-            Direction::Internal,
-            Payload::Empty,
-        ));
-
-        if let Some(pos) = position {
-            self.replay_panel.do_seek_panel_phase(pos);
-            self.dynamic_panels.ingest(&mut self.panels);
-            self.replay_panel.do_seek_data_phase(pos);
-        }
-
-        let terminal_count = self.terminal_panel.ingest_all_pending();
-        let log_count = self.bottom_log_panel.ingest_all_pending();
-        let chart_count = self.dynamic_panels.ingest_all_pending();
-
-        self.set_status(
-            StatusLevel::Info,
-            format!(
-                "回放重建完成：接收 {terminal_count} 条，日志 {log_count} 条，图表 {chart_count} 条"
-            ),
-        );
-        ctx.request_repaint();
+        let pos = position;
+        self.rebuild_replay(ctx, |app| {
+            if let Some(pos) = pos {
+                app.replay_panel.do_seek_panel_phase(pos);
+                app.dynamic_panels.ingest(&mut app.panels);
+                app.replay_panel.do_seek_data_phase(pos);
+            }
+        });
     }
 
     fn do_replay_cursor_rebuild(&mut self, target_cursor: usize, ctx: &egui::Context) {
         if self.warn_if_replay_blocked() {
             return;
         }
+        self.rebuild_replay(ctx, |app| {
+            app.replay_panel.do_seek_cursor_panel_phase(target_cursor);
+            app.dynamic_panels.ingest(&mut app.panels);
+            app.replay_panel.do_seek_cursor_data_phase(target_cursor);
+        });
+    }
 
+    /// 回放重建的共用骨架：清理面板 → 发 reset → 执行 seek 阶段（由调用方闭包提供）
+    /// → ingest 全部待处理事件 → 状态栏汇报 → 请求重绘。
+    ///
+    /// `seek_phase` 闭包接收 `&mut Self`，内部完成 seek 到目标位置并触发数据注入。
+    fn rebuild_replay(&mut self, ctx: &egui::Context, seek_phase: impl FnOnce(&mut Self)) {
         self.terminal_panel.clear();
         self.bottom_log_panel.clear();
         self.dynamic_panels.clear_charts();
@@ -121,9 +113,7 @@ impl WorkbenchApp {
             Payload::Empty,
         ));
 
-        self.replay_panel.do_seek_cursor_panel_phase(target_cursor);
-        self.dynamic_panels.ingest(&mut self.panels);
-        self.replay_panel.do_seek_cursor_data_phase(target_cursor);
+        seek_phase(self);
 
         let terminal_count = self.terminal_panel.ingest_all_pending();
         let log_count = self.bottom_log_panel.ingest_all_pending();
