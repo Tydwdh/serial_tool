@@ -1,13 +1,13 @@
-pub mod activity_bar;
-pub mod bottom_panel;
-pub mod contributions;
-pub mod device_panel;
-pub mod dock;
-pub mod layout_buttons;
-pub mod popups;
-pub mod settings_panel;
-pub mod status_bar;
-pub mod top_bar;
+mod activity_bar;
+mod bottom_panel;
+mod contributions;
+mod device_panel;
+mod dock;
+mod layout_buttons;
+mod popups;
+mod settings_panel;
+mod status_bar;
+mod top_bar;
 
 use crate::app::WorkbenchApp;
 use crate::bootstrap::{ACTIVITY_BAR_WIDTH, BOTTOM_PANEL_MIN};
