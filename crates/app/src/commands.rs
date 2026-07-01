@@ -209,18 +209,40 @@ impl WorkbenchApp {
             self.set_status_force(StatusLevel::Warn, "请选择串口");
             return;
         };
-        if self.transport.status_port(&port).open {
-            self.transport.close_port(&port);
-            self.set_status_force(StatusLevel::Info, format!("{port} 已断开"));
-        } else {
-            match self.open_selected_port_result() {
-                Ok(()) => {
-                    self.set_status_force(StatusLevel::Info, format!("{port} 已连接"));
-                }
-                Err(e) => {
-                    self.set_status_force(StatusLevel::Error, e);
-                }
-            }
+        self.toggle_port_by_name(&port);
+    }
+
+    /// 点击端口列表圆点切换开/关（支持任意端口，不限当前选中）。
+    ///
+    /// 三种状态：
+    /// - 已打开（●）：关闭该端口
+    /// - 自动重连中（⟳）：取消重连
+    /// - 未打开（○）：切换 selected_port 到该端口（恢复其配置档案）并打开
+    pub(crate) fn toggle_port_by_name(&mut self, name: &str) {
+        // 自动重连中：取消重连
+        if let Some(pending) = &self.serial.pending_reconnect
+            && pending.port_name == name
+        {
+            self.serial.pending_reconnect = None;
+            self.set_status_force(StatusLevel::Info, format!("已取消 {name} 的自动重连"));
+            return;
+        }
+
+        if self.transport.status_port(name).open {
+            // 已打开：关闭
+            self.transport.close_port(name);
+            self.set_status_force(StatusLevel::Info, format!("{name} 已断开"));
+            return;
+        }
+
+        // 未打开：切换 selected_port（恢复该端口的配置档案）后打开
+        let old = self.serial.selected_port.clone();
+        if old.as_deref() != Some(name) {
+            self.switch_port_selection(old.as_deref(), name);
+        }
+        match self.open_selected_port_result() {
+            Ok(()) => self.set_status_force(StatusLevel::Info, format!("{name} 已连接")),
+            Err(e) => self.set_status_force(StatusLevel::Error, e),
         }
     }
 

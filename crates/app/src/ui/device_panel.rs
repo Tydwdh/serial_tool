@@ -247,6 +247,9 @@ impl WorkbenchApp {
                 let mut group_changes: Vec<(String, Option<String>)> = Vec::new();
                 let mut rename_group: Option<(String, String)> = None;
                 let mut delete_group: Option<String> = None;
+                // 圆点点击切换开/关：ScrollArea 闭包持有 &self.serial 不可变借用，
+                // 无法在其中 &mut self，故收集到闭包外统一处理。
+                let mut toggled_port: Option<String> = None;
 
                 // 新建分组（通过 ComboBox 触发）
                 let new_group_state_id = ui.make_persistent_id("port-new-group-active");
@@ -364,7 +367,33 @@ impl WorkbenchApp {
                                 ui.horizontal(|ui| {
                                     ui.add_space(16.0);
                                     let port_open = self.transport.status_port(&name).open;
-                                    ui.label(if port_open { "●" } else { "○" });
+                                    let pending_reconnect = self
+                                        .serial
+                                        .pending_reconnect
+                                        .as_ref()
+                                        .is_some_and(|p| p.port_name == name);
+                                    // 圆点可点击切换开/关/取消重连：●(绿)=已开→关闭，
+                                    // ○(红)=未开→打开，⟳(黄)=重连中→取消重连。
+                                    let (dot, color, tooltip) = if pending_reconnect {
+                                        ("⟳", theme::YELLOW, "重连中，点击取消")
+                                    } else if port_open {
+                                        ("●", theme::GREEN, "已打开，点击关闭")
+                                    } else {
+                                        ("○", theme::RED, "未打开，点击打开")
+                                    };
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                egui::RichText::new(dot).color(color),
+                                            )
+                                            .frame(false)
+                                            .small(),
+                                        )
+                                        .on_hover_text(tooltip)
+                                        .clicked()
+                                    {
+                                        toggled_port = Some(name.clone());
+                                    }
                                     ui.monospace(&name);
                                     ui.label(port.port_type.to_string());
 
@@ -479,6 +508,11 @@ impl WorkbenchApp {
                     ui.data_mut(|d| d.insert_persisted(new_group_state_id, new_group_active));
                     ui.data_mut(|d| d.insert_persisted(new_group_name_id, new_group_name.clone()));
                     ui.data_mut(|d| d.insert_persisted(new_group_port_id, new_group_port.clone()));
+                }
+
+                // 圆点点击：在 ScrollArea 闭包外处理（避免与 &self.serial 不可变借用冲突）。
+                if let Some(name) = toggled_port {
+                    self.toggle_port_by_name(&name);
                 }
 
                 // ── 应用变更 ──
