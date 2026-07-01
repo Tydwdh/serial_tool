@@ -564,11 +564,8 @@ impl TransportManager {
             })
         };
         if let Some((port_name, baud_rate, join)) = closing_info {
-            self.bus.publish(Event::system_log(
-                LogLevel::Info,
-                "transport.serial",
-                format!("closing {} @ {}", port_name, baud_rate),
-            ));
+            // 不发 closing 中间态日志：紧接着会有 closed 日志（reap_closing 时），
+            // 且状态栏已显示"已断开"，避免冗余。
             if let Some(join) = join {
                 self.closing.lock().push(ClosingHandle {
                     port_name,
