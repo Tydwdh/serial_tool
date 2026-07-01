@@ -114,6 +114,8 @@ git push origin v0.1.1
 - `%APPDATA%\HardwareWorkbench\workspace.json`。
 - `%APPDATA%\HardwareWorkbench\workspace.json.backup`。
 - `%APPDATA%\HardwareWorkbench\plugin-config\`。
+- `%APPDATA%\HardwareWorkbench\update\`（更新下载残留）。
+- `%APPDATA%\HardwareWorkbench\updater\`（更新 helper 日志）。
 - 安装目录中旧版残留的 `workspace.json` 和 `plugin-config\`。
 
 这符合“卸载不残留配置”的目标，但也意味着用户插件配置不会保留。
