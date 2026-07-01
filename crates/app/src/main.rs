@@ -86,7 +86,7 @@ fn main() -> eframe::Result<()> {
         // 阻止 persist_window 恢复最大化：winit 在 Windows 上最大化窗口
         // 会导致短暂消失再出现。保留位置和大小记忆，最大化由用户手动触发。
         window_builder: Some(Box::new(|builder| builder.with_maximized(false))),
-
+        renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
     eframe::run_native(
