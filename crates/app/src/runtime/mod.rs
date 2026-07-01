@@ -18,6 +18,10 @@ use eframe::egui;
 
 impl WorkbenchApp {
     pub(crate) fn tick_pre_ui(&mut self, ctx: &egui::Context) {
+        // 帧级缓存重置：每帧 UI 构建前清空 plugin_summaries_cache，使其在首次
+        // ui_contribution_slot 调用时重新计算，同帧后续调用复用。
+        self.plugin_summaries_cache = std::cell::OnceCell::new();
+
         self.clear_status_if_expired();
         self.tick_recorder_status();
         self.tick_terminal_maximize();

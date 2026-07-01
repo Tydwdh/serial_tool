@@ -11,6 +11,7 @@ use std::thread::{self, JoinHandle};
 use crossbeam_channel::Receiver;
 use tool_core::{Event, LogLevel};
 use tool_databus::DataBus;
+use crate::RepaintWaker;
 use windows_sys::Win32::Devices::Communication::{
     CLRDTR, CLRRTS, COMMTIMEOUTS, COMSTAT, DCB, EVENPARITY, EscapeCommFunction, GetCommState,
     NOPARITY, ODDPARITY, ONESTOPBIT, PURGE_RXABORT, PURGE_RXCLEAR, PURGE_TXABORT, PURGE_TXCLEAR,
@@ -132,6 +133,7 @@ pub(crate) fn spawn_native_serial_worker(
     alive: Arc<AtomicBool>,
     bus: DataBus,
     source: String,
+    repaint_waker: Option<Arc<dyn RepaintWaker>>,
 ) -> TransportResult<(JoinHandle<()>, Arc<WakeEvent>)> {
     let port = NativeSerialPort::open(config)?;
     let wake = WakeEvent::new()?;
@@ -146,6 +148,7 @@ pub(crate) fn spawn_native_serial_worker(
             alive,
             bus,
             source,
+            repaint_waker,
         }
         .run();
     });
@@ -161,6 +164,7 @@ struct NativeWorker {
     alive: Arc<AtomicBool>,
     bus: DataBus,
     source: String,
+    repaint_waker: Option<Arc<dyn RepaintWaker>>,
 }
 
 impl NativeWorker {
@@ -179,7 +183,9 @@ impl NativeWorker {
             }
             Err(_) => {}
         }
-        self.alive.store(false, Ordering::Relaxed);
+        // Release 与调用方（send_to/open_serial/reap_dead_ports）的 Acquire load 配对，
+        // 确保弱内存模型（ARM/AArch64）上 worker 已死状态对其他线程可见。
+        self.alive.store(false, Ordering::Release);
     }
 
     fn run_impl(&self) -> io::Result<()> {
@@ -194,8 +200,17 @@ impl NativeWorker {
         loop {
             if self.stop.load(Ordering::Acquire) {
                 if read_pending {
+                    // MSDN 契约：CancelIoEx 返回 ≠ I/O 完成，必须经 GetOverlappedResult
+                    // 确认取消完成方可释放栈上的 OVERLAPPED，否则内核/驱动仍持有其引用。
                     unsafe {
                         let _ = CancelIoEx(self.port.handle, &read_overlapped);
+                        let mut transferred = 0_u32;
+                        let _ = GetOverlappedResult(
+                            self.port.handle,
+                            &read_overlapped,
+                            &mut transferred,
+                            0,
+                        );
                     }
                 }
                 return Ok(());
@@ -207,11 +222,19 @@ impl NativeWorker {
                 &self.dtr_rts_rx,
                 &self.bus,
                 &self.source,
+                &self.repaint_waker,
             )?;
             if self.stop.load(Ordering::Acquire) {
                 if read_pending {
                     unsafe {
                         let _ = CancelIoEx(self.port.handle, &read_overlapped);
+                        let mut transferred = 0_u32;
+                        let _ = GetOverlappedResult(
+                            self.port.handle,
+                            &read_overlapped,
+                            &mut transferred,
+                            0,
+                        );
                     }
                 }
                 return Ok(());
@@ -230,6 +253,8 @@ impl NativeWorker {
                                 &self.bus,
                                 &self.source,
                                 &first_byte[..size],
+                                &self.stop,
+                                &self.repaint_waker,
                             )?;
                         }
                         continue;
@@ -269,6 +294,8 @@ impl NativeWorker {
                         &self.bus,
                         &self.source,
                         &first_byte[..(transferred as usize).min(first_byte.len())],
+                        &self.stop,
+                        &self.repaint_waker,
                     )?;
                 }
             } else if wait == WAIT_OBJECT_0 + 1 {
@@ -284,6 +311,7 @@ fn drain_commands(
     dtr_rts_rx: &Receiver<DtrRtsCommand>,
     bus: &DataBus,
     source: &str,
+    repaint_waker: &Option<Arc<dyn RepaintWaker>>,
 ) -> io::Result<()> {
     while let Ok(cmd) = dtr_rts_rx.try_recv() {
         match cmd {
@@ -295,6 +323,9 @@ fn drain_commands(
     while let Ok(bytes) = write_rx.try_recv() {
         port.write_all(&bytes)?;
         bus.publish(serial_tx_event(source.to_owned(), bytes));
+        if let Some(w) = repaint_waker {
+            w.wake();
+        }
     }
     Ok(())
 }
@@ -304,11 +335,27 @@ fn publish_available(
     bus: &DataBus,
     source: &str,
     first: &[u8],
+    stop: &AtomicBool,
+    repaint_waker: &Option<Arc<dyn RepaintWaker>>,
 ) -> io::Result<()> {
     let mut data = Vec::with_capacity(first.len() + 4096);
     data.extend_from_slice(first);
 
+    // 排空循环加 stop 检查 + 预算，复刻 lib.rs 的 MAX_EXTRA_READS=8 / 5ms 模式，
+    // 防止高速持续 RX（USB-CDC cbInQue 始终 >0）下循环无法退出，导致 worker 回不到
+    // run_impl 顶部 stop 检查、close_port_blocking 超时。
+    const MAX_EXTRA_READS: usize = 8;
+    const MAX_EXTRA_READ_DURATION_MS: u64 = 5;
+    let started = std::time::Instant::now();
+    let mut extra_reads = 0usize;
+
     loop {
+        if stop.load(Ordering::Relaxed)
+            || extra_reads >= MAX_EXTRA_READS
+            || started.elapsed() > std::time::Duration::from_millis(MAX_EXTRA_READ_DURATION_MS)
+        {
+            break;
+        }
         let queued = port.bytes_to_read()?;
         if queued == 0 {
             break;
@@ -319,6 +366,7 @@ fn publish_available(
             break;
         }
         data.extend_from_slice(&buffer[..size]);
+        extra_reads += 1;
         if size < buffer.len() {
             break;
         }
@@ -326,6 +374,9 @@ fn publish_available(
 
     if !data.is_empty() {
         bus.publish(serial_rx_event(source.to_owned(), data));
+        if let Some(w) = repaint_waker {
+            w.wake();
+        }
     }
     Ok(())
 }

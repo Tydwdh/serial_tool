@@ -23,6 +23,21 @@ pub(crate) enum DtrRtsCommand {
 }
 use tool_databus::DataBus;
 
+/// UI 重绘唤醒器。由 app 层注入，worker 在 publish RX/TX 事件后调用，
+/// 使 UI 立即重绘而非等待 80ms 轮询。
+///
+/// 实现应为 `Weak::upgrade + has_repaint + request_repaint` 的轻量闭包。
+/// 失败（Weak 失效）必须静默忽略，不得 panic。
+pub trait RepaintWaker: Send + Sync + 'static {
+    fn wake(&self);
+}
+
+impl<F: Fn() + Send + Sync + 'static> RepaintWaker for F {
+    fn wake(&self) {
+        (self)();
+    }
+}
+
 /// 串口 topic 常量。从 tool_core::topics 上移至此，core 中保留向后兼容 re-export。
 pub mod serial_topics {
     pub const SERIAL_RX: &str = "transport.serial.default.rx";
@@ -238,6 +253,9 @@ pub struct TransportManager {
     closing: Arc<Mutex<Vec<ClosingHandle>>>,
     /// 上次 reap_closing 的时间戳，用于节流。
     last_reap_time: Arc<std::sync::atomic::AtomicU64>,
+    /// UI 重绘唤醒器，app 层注入。worker publish 串口事件后调用以立即重绘。
+    /// `Arc<Mutex<Option<...>>>` 让所有 TransportManager clone 共享同一 waker（仅 app 启动时设一次）。
+    repaint_waker: Arc<Mutex<Option<Arc<dyn RepaintWaker>>>>,
 }
 
 struct PortHandle {
@@ -264,7 +282,13 @@ impl TransportManager {
             ports: Arc::new(Mutex::new(HashMap::new())),
             closing: Arc::new(Mutex::new(Vec::new())),
             last_reap_time: Arc::new(AtomicU64::new(0)),
+            repaint_waker: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// 注入 UI 重绘唤醒器。app 层在启动时调用一次，传入捕获 `Weak<egui::Context>` 的闭包。
+    pub fn set_repaint_waker(&self, waker: Arc<dyn RepaintWaker>) {
+        *self.repaint_waker.lock() = Some(waker);
     }
 
     /// 大小写不敏感解析已打开端口名。先在 HashMap 精确查找，再大小写宽松匹配。
@@ -394,6 +418,8 @@ impl TransportManager {
         let thread_bus = self.bus.clone();
         let source = format!("serial:{}", config.port_name);
         let thread_source = source.clone();
+        // 取 UI 重绘唤醒器（app 层注入），传给 worker 在 publish 后调用。
+        let thread_waker = self.repaint_waker.lock().clone();
 
         #[cfg(windows)]
         let (join, wake) = {
@@ -405,6 +431,7 @@ impl TransportManager {
                 thread_alive,
                 thread_bus,
                 thread_source,
+                thread_waker.clone(),
             ) {
                 Ok((join, wake)) => (join, Some(wake)),
                 Err(error) => {
@@ -444,6 +471,7 @@ impl TransportManager {
                     thread_alive,
                     thread_bus,
                     thread_source,
+                    thread_waker.clone(),
                 );
             });
             (join, None::<()>)
@@ -715,22 +743,47 @@ impl TransportManager {
 
     /// 清理已退出 worker 的 stale port handle（alive == false）。
     /// 可在 status 查询、list/open/close 或定时刷新时调用。
+    ///
+    /// 在 ports 锁内完成 dead handle 的 remove + stop + 取 join，仅把 push(closing)
+    /// 移到锁外。这样消除原实现"释放锁后逐个 close_port"的 TOCTOU 窗口——若另一
+    /// 线程在窗口内以同名+新配置重新打开，旧 close_port 会误关全新且 alive 的 handle。
     pub fn reap_dead_ports(&self) {
-        let dead: Vec<(String, u32)> = {
-            let guard = self.ports.lock();
-            guard
+        // 收集 dead handle 的完整信息（含 join），在锁内移除，避免与并发 reopen 竞态。
+        let dead: Vec<(String, u32, Option<JoinHandle<()>>)> = {
+            let mut guard = self.ports.lock();
+            let dead_names: Vec<String> = guard
                 .iter()
                 .filter(|(_, h)| !h.alive.load(Ordering::Acquire))
-                .map(|(name, h)| (name.clone(), h.config.baud_rate))
+                .map(|(name, _)| name.clone())
+                .collect();
+            dead_names
+                .into_iter()
+                .filter_map(|name| {
+                    let mut handle = guard.remove(&name)?;
+                    // stop 已无意义（worker 已死），但保持对称并防御性置位。
+                    handle.stop.store(true, Ordering::Release);
+                    #[cfg(windows)]
+                    if let Some(wake) = &handle.wake {
+                        wake.set();
+                    }
+                    let join = handle.join.take();
+                    Some((handle.config.port_name.clone(), handle.config.baud_rate, join))
+                })
                 .collect()
         };
-        for (name, baud) in &dead {
+        for (name, baud, join) in dead {
             self.bus.publish(Event::system_log(
                 LogLevel::Error,
                 "transport.serial",
                 format!("串口 {name} @{baud} 已断开连接"),
             ));
-            self.close_port(name);
+            if let Some(join) = join {
+                self.closing.lock().push(ClosingHandle {
+                    port_name: name,
+                    baud_rate: baud,
+                    join,
+                });
+            }
         }
     }
 }
@@ -777,8 +830,9 @@ fn serial_worker_loop(
     alive: Arc<AtomicBool>,
     bus: DataBus,
     source: String,
+    waker: Option<Arc<dyn RepaintWaker>>,
 ) {
-    serial_worker_loop_impl(port, write_rx, dtr_rts_rx, stop, alive, bus, source)
+    serial_worker_loop_impl(port, write_rx, dtr_rts_rx, stop, alive, bus, source, waker)
 }
 
 #[cfg(any(not(windows), test))]
@@ -790,8 +844,14 @@ fn serial_worker_loop_impl(
     alive: Arc<AtomicBool>,
     bus: DataBus,
     source: String,
+    waker: Option<Arc<dyn RepaintWaker>>,
 ) {
     let mut buffer = [0_u8; 4096];
+    let wake = || {
+        if let Some(w) = &waker {
+            w.wake();
+        }
+    };
 
     while !stop.load(Ordering::Acquire) {
         // 处理 DTR/RTS 命令
@@ -822,6 +882,7 @@ fn serial_worker_loop_impl(
             match port.write_all(&bytes) {
                 Ok(()) => {
                     bus.publish(serial_tx_event(source.clone(), bytes));
+                    wake();
                 }
                 Err(error) => {
                     bus.publish(Event::system_log(
@@ -860,6 +921,7 @@ fn serial_worker_loop_impl(
                     }
                 }
                 bus.publish(serial_rx_event(source.clone(), data));
+                wake();
             }
             Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
             Err(error) => {
@@ -868,12 +930,12 @@ fn serial_worker_loop_impl(
                     "transport.serial",
                     format!("read failed on {source}: {error}"),
                 ));
-                alive.store(false, Ordering::Relaxed);
+                alive.store(false, Ordering::Release);
                 return;
             }
         }
     }
-    alive.store(false, Ordering::Relaxed);
+    alive.store(false, Ordering::Release);
 }
 
 // ── parse_hex 等辅助函数不变 ──
@@ -889,32 +951,69 @@ pub fn parse_hex(input: &str) -> TransportResult<Vec<u8>> {
         .filter(|token| !token.is_empty())
         .collect();
 
-    if tokens.len() == 1 {
-        let mut token = normalize_hex_token(tokens[0]);
-        if token.len() > 2 && !token.len().is_multiple_of(2) {
-            token.insert(0, '0');
-        }
-        if token.len() > 2 {
-            return token
-                .as_bytes()
-                .chunks(2)
-                .map(|chunk| parse_byte(std::str::from_utf8(chunk).unwrap_or_default()))
-                .collect();
-        }
+    // 单 token 与多 token 走同一个 parse_hex_token，保证分块/补0规则一致。
+    let mut out = Vec::new();
+    for token in &tokens {
+        out.extend(parse_hex_token(token)?);
     }
+    Ok(out)
+}
 
-    tokens
-        .into_iter()
-        .map(|token| {
-            let token = normalize_hex_token(token);
-            if token.is_empty() || token.len() > 2 {
-                return Err(TransportError::InvalidHex(format!(
-                    "invalid hex: '{token}'"
-                )));
-            }
-            parse_byte(&token)
-        })
-        .collect()
+/// 解析单个 HEX token，返回其对应的字节。
+///
+/// 规则（单 token 与多 token 一致）：
+/// - 去除 `0x`/`0X` 前缀，删除 `_`/`-` 分隔符。
+/// - 长度 ≤ 2：直接解析为单字节（单 nibble 如 `"A"` 自动左补 0 → `0x0A`）。
+/// - 长度 > 2 且为奇数：左补一个 `0` 再按每 2 字符分块。
+/// - 长度 > 2 且为偶数：直接按每 2 字符分块。
+fn parse_hex_token(token: &str) -> TransportResult<Vec<u8>> {
+    let mut token = normalize_hex_token(token);
+    if token.is_empty() {
+        return Err(TransportError::InvalidHex("empty token".to_owned()));
+    }
+    if token.len() > 2 && !token.len().is_multiple_of(2) {
+        token.insert(0, '0');
+    }
+    if token.len() <= 2 {
+        Ok(vec![parse_byte(&token)?])
+    } else {
+        token
+            .as_bytes()
+            .chunks(2)
+            .map(|chunk| parse_byte(std::str::from_utf8(chunk).unwrap_or_default()))
+            .collect()
+    }
+}
+
+/// 严格模式解析整行 HEX：每个 token normalize 后长度必须恰为 2（拒绝单 nibble
+/// 自动补0，与 hover 提示"严格模式：奇数 HEX 长度报错而非自动补0"一致）。
+/// 逐 token 校验，确保 `"0xA 0xB"` 这类单 nibble 输入报错而非静默补0。
+fn parse_hex_strict_line(line: &str) -> TransportResult<Vec<u8>> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Err(TransportError::InvalidHex("empty input".to_owned()));
+    }
+    let tokens: Vec<&str> = trimmed
+        .split(|ch: char| ch.is_ascii_whitespace() || ch == ',' || ch == ';')
+        .filter(|token| !token.is_empty())
+        .collect();
+    let mut out = Vec::new();
+    for token in &tokens {
+        let normalized = normalize_hex_token(token);
+        if normalized.is_empty() {
+            return Err(TransportError::InvalidHex(format!(
+                "严格模式: 空 token \"{token}\""
+            )));
+        }
+        if normalized.len() != 2 {
+            return Err(TransportError::InvalidHex(format!(
+                "严格模式: \"{token}\" 规范化后为 {nib} 个字符，必须恰为 2（偶数 hex 长度），请补0或关闭严格模式",
+                nib = normalized.len()
+            )));
+        }
+        out.push(parse_byte(&normalized)?);
+    }
+    Ok(out)
 }
 
 fn normalize_hex_token(token: &str) -> String {
@@ -1027,21 +1126,22 @@ pub fn send_impl_to(
         return Ok(());
     }
     if hex {
+        // 事务性预校验：先解析所有行，任一行失败则不发送任何数据（避免部分发送）。
+        // 严格模式下额外要求每个 token normalize 后长度恰为 2（拒绝单 nibble 自动补0）。
+        let mut pending: Vec<Vec<u8>> = Vec::with_capacity(input.lines().count());
         for line in input.lines() {
             let x = line.trim();
             if x.is_empty() {
                 continue;
             }
-            if hex_strict {
-                let compact: String = x.chars().filter(|c| !c.is_whitespace()).collect();
-                if !compact.len().is_multiple_of(2) {
-                    return Err(TransportError::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("HEX 严格模式: 奇数字节数 \"{x}\", 请补0或关闭严格模式"),
-                    )));
-                }
-            }
-            t.send_hex_to(port, x)?;
+            pending.push(if hex_strict {
+                parse_hex_strict_line(x)?
+            } else {
+                parse_hex(x)?
+            });
+        }
+        for bytes in pending {
+            t.send_to(port, bytes)?;
         }
         Ok(())
     } else {
@@ -1051,14 +1151,25 @@ pub fn send_impl_to(
     }
 }
 
-/// 将传输错误消息翻译为用户友好的中文提示。
-pub fn translate_error(m: &str) -> String {
-    if m.contains("no serial") {
-        "串口未打开".into()
-    } else if m.contains("invalid hex") {
-        format!("无效HEX: {}", m.trim_start_matches("invalid hex input: "))
-    } else {
-        m.to_owned()
+/// 将传输错误翻译为用户友好的中文提示。
+///
+/// 按 `TransportError` 变体类型化分发，而非字符串匹配（文案微调不会导致漏译）。
+/// 调用方应在错误产生时立即调用本函数并保存返回的中文文案，而非保存原始
+/// `Display` 字符串后再翻译。
+pub fn translate_error(err: &TransportError) -> String {
+    match err {
+        TransportError::NoOpenPort => "未打开任何串口".into(),
+        TransportError::PortNotOpen(port) => format!("串口 {port} 未打开（可能已断开，请重连）"),
+        TransportError::WorkerClosed => "串口工作线程已关闭（可能已断开，请重连）".into(),
+        TransportError::QueueFull => "发送队列已满：发送过快，请降低频率".into(),
+        TransportError::InvalidHex(msg) => format!("无效HEX：{msg}"),
+        TransportError::Serial(e) => format!("串口错误：{e}"),
+        TransportError::Io(e) => match e.kind() {
+            std::io::ErrorKind::WouldBlock => e.to_string(), // "正在关闭中" 等业务状态文案已含中文
+            std::io::ErrorKind::TimedOut => format!("操作超时：{e}"),
+            std::io::ErrorKind::InvalidData => e.to_string(), // HEX 严格模式奇偶校验文案已含中文
+            _ => format!("IO 错误：{e}"),
+        },
     }
 }
 
@@ -1085,6 +1196,56 @@ mod tests {
     #[test]
     fn parses_spaced_single_digits() {
         assert_eq!(parse_hex("1 2 3").unwrap(), vec![1, 2, 3]);
+    }
+
+    // ── #9: 单 token 与多 token 路径一致性 ──
+    #[test]
+    fn parse_hex_multitoken_long_token_chunks_like_single() {
+        // "0A0B0C 0D"（多 token，首段 len=6）应与 "0A0B0C0D"（单 token）结果一致。
+        assert_eq!(parse_hex("0A0B0C 0D").unwrap(), vec![0x0A, 0x0B, 0x0C, 0x0D]);
+        assert_eq!(parse_hex("0A0B0C0D").unwrap(), vec![0x0A, 0x0B, 0x0C, 0x0D]);
+    }
+
+    #[test]
+    fn parse_hex_multitoken_odd_long_token_pads_left() {
+        // 多 token 中含奇数长度长 token（"abc 01"）应左补0，与单 token "abc" 一致。
+        assert_eq!(parse_hex("abc 01").unwrap(), vec![0x0A, 0xBC, 0x01]);
+        assert_eq!(parse_hex("abc").unwrap(), vec![0x0A, 0xBC]);
+    }
+
+    // ── #23: 严格模式逐 token 校验，拒绝单 nibble ──
+    #[test]
+    fn parse_hex_strict_rejects_single_nibble_token() {
+        // "0xA 0xB" 在旧实现中通过（compact 长度偶数），严格模式应拒绝单 nibble。
+        assert!(parse_hex_strict_line("0xA 0xB").is_err());
+        assert!(parse_hex_strict_line("A B").is_err());
+    }
+
+    #[test]
+    fn parse_hex_strict_accepts_even_tokens() {
+        assert_eq!(
+            parse_hex_strict_line("0A 0B 0C").unwrap(),
+            vec![0x0A, 0x0B, 0x0C]
+        );
+        assert_eq!(parse_hex_strict_line("0xFF").unwrap(), vec![0xFF]);
+    }
+
+    #[test]
+    fn parse_hex_strict_rejects_odd_long_token() {
+        // 三字符 token "ABC" 严格模式应报错（不能自动补0）。
+        assert!(parse_hex_strict_line("ABC").is_err());
+    }
+
+    // ── #8: translate_error 按变体分发 ──
+    #[test]
+    fn translate_error_covers_all_variants() {
+        assert!(!translate_error(&TransportError::NoOpenPort).is_empty());
+        assert!(translate_error(&TransportError::PortNotOpen("COM3".into()))
+            .contains("COM3"));
+        assert!(!translate_error(&TransportError::WorkerClosed).is_empty());
+        assert!(!translate_error(&TransportError::QueueFull).is_empty());
+        assert!(translate_error(&TransportError::InvalidHex("bad".into()))
+            .contains("bad"));
     }
 
     #[test]
@@ -1195,6 +1356,7 @@ mod tests {
                 thread_alive,
                 thread_bus,
                 "serial:COM1".to_owned(),
+                None,
             );
         });
 
@@ -1240,6 +1402,7 @@ mod tests {
                 thread_alive,
                 thread_bus,
                 "serial:COM1".to_owned(),
+                None,
             );
         });
 
@@ -1332,5 +1495,122 @@ mod transport_tests {
         assert_eq!(natural_sort_key("COM3"), ("COM".to_owned(), 3));
         assert_eq!(natural_sort_key("COM10"), ("COM".to_owned(), 10));
         assert_eq!(natural_sort_key("USB0"), ("USB".to_owned(), 0));
+    }
+
+    // ── #13: TransportManager 并发状态机测试 ──
+
+    /// 构造测试用 PortHandle（无真实 worker 线程，join=None）。
+    fn make_test_handle(alive: bool) -> PortHandle {
+        PortHandle {
+            config: SerialConfig::default(),
+            writer: bounded::<Vec<u8>>(1).0,
+            dtr_rts_tx: bounded::<DtrRtsCommand>(1).0,
+            #[cfg(windows)]
+            wake: None,
+            stop: Arc::new(AtomicBool::new(false)),
+            alive: Arc::new(AtomicBool::new(alive)),
+            join: None,
+        }
+    }
+
+    #[test]
+    fn send_to_returns_port_not_open_for_unknown_port() {
+        let bus = DataBus::new();
+        let tm = TransportManager::new(bus);
+        // 端口表为空，任意端口名应返回 PortNotOpen。
+        let err = tm.send_to("COM99", vec![0x01]).unwrap_err();
+        assert!(matches!(err, TransportError::PortNotOpen(_)));
+    }
+
+    #[test]
+    fn send_to_returns_worker_closed_for_dead_handle() {
+        let bus = DataBus::new();
+        let tm = TransportManager::new(bus);
+        // 手动塞入一个 dead handle（alive=false），模拟 worker 已退出但 handle 未清理。
+        tm.ports
+            .lock()
+            .insert("COM3".to_owned(), make_test_handle(false));
+        let err = tm.send_to("COM3", vec![0x01]).unwrap_err();
+        assert!(matches!(err, TransportError::WorkerClosed), "got {err:?}");
+    }
+
+    #[test]
+    fn send_to_returns_queue_full_when_channel_full() {
+        let bus = DataBus::new();
+        let tm = TransportManager::new(bus);
+        // 用 capacity=1 的 writer，塞入一条后下一条应 QueueFull。
+        let mut handle = make_test_handle(true);
+        let (writer, _rx) = bounded::<Vec<u8>>(1);
+        handle.writer = writer;
+        tm.ports.lock().insert("COM3".to_owned(), handle);
+        // 先发一条填满 channel（capacity=1）。
+        assert!(tm.send_to("COM3", vec![0x01]).is_ok());
+        // 第二条应 QueueFull。
+        let err = tm.send_to("COM3", vec![0x02]).unwrap_err();
+        assert!(matches!(err, TransportError::QueueFull), "got {err:?}");
+    }
+
+    #[test]
+    fn close_port_blocking_returns_ok_for_unknown_port() {
+        let bus = DataBus::new();
+        let tm = TransportManager::new(bus);
+        // 不存在的端口：close_port_blocking 应返回 Ok（无操作），不 panic。
+        let result = tm.close_port_blocking("COM99", Duration::from_millis(10));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn close_port_blocking_sets_stop_and_removes_handle() {
+        let bus = DataBus::new();
+        let tm = TransportManager::new(bus);
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut handle = make_test_handle(true);
+        handle.stop = Arc::clone(&stop);
+        tm.ports.lock().insert("COM3".to_owned(), handle);
+        // close_port_blocking 无 join（join=None）时直接返回 Ok。
+        let result = tm.close_port_blocking("COM3", Duration::from_millis(10));
+        assert!(result.is_ok());
+        // stop 应被置 true。
+        assert!(stop.load(Ordering::Acquire));
+        // ports 表中应已移除。
+        assert!(tm.ports.lock().get("COM3").is_none());
+    }
+
+    #[test]
+    fn reap_dead_ports_removes_dead_handles() {
+        let bus = DataBus::new();
+        let tm = TransportManager::new(bus);
+        // 塞入一个 alive、一个 dead。
+        tm.ports.lock().insert("COM3".to_owned(), make_test_handle(true));
+        tm.ports
+            .lock()
+            .insert("COM4".to_owned(), make_test_handle(false));
+        tm.reap_dead_ports();
+        let ports = tm.ports.lock();
+        assert!(ports.contains_key("COM3"), "alive handle 应保留");
+        assert!(!ports.contains_key("COM4"), "dead handle 应被 reap 移除");
+    }
+
+    #[test]
+    fn status_port_returns_closed_for_dead_handle() {
+        let bus = DataBus::new();
+        let tm = TransportManager::new(bus);
+        tm.ports
+            .lock()
+            .insert("COM3".to_owned(), make_test_handle(false));
+        let status = tm.status_port("COM3");
+        assert!(!status.open, "dead handle 的 status 应为 closed");
+    }
+
+    #[test]
+    fn status_port_returns_open_for_alive_handle() {
+        let bus = DataBus::new();
+        let tm = TransportManager::new(bus);
+        tm.ports
+            .lock()
+            .insert("COM3".to_owned(), make_test_handle(true));
+        let status = tm.status_port("COM3");
+        assert!(status.open);
+        assert_eq!(status.port_name.as_deref(), Some(""));
     }
 }

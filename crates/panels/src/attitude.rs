@@ -2,6 +2,7 @@ use crate::theme;
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use serde_json::Value;
 use tool_core::{Event, Payload, topics};
+use std::sync::Arc;
 use tool_databus::{DataBus, Subscription, TopicFilter};
 
 pub struct AttitudePanel {
@@ -46,29 +47,30 @@ impl AttitudePanel {
     }
 
     fn ingest(&mut self) {
-        for event in self.subscription.drain_limited(500) {
-            self.push_event(event);
+        // 零 clone 批量消费：取 Arc<Event> 引用。
+        for arc in self.subscription.drain_limited_arc(500) {
+            self.push_event(&arc);
         }
     }
 
-    fn push_event(&mut self, event: Event) {
-        match event.payload {
+    fn push_event(&mut self, event: &Arc<Event>) {
+        match &event.payload {
             Payload::Json(value) => {
-                if let Some((roll, pitch, yaw)) = attitude_from_json(&value) {
+                if let Some((roll, pitch, yaw)) = attitude_from_json(value) {
                     self.roll = roll;
                     self.pitch = pitch;
                     self.yaw = yaw;
                     self.samples += 1;
-                    self.last_source = event.source;
+                    self.last_source = event.source.clone();
                 }
             }
             Payload::Text(text) => {
-                if let Some((roll, pitch, yaw)) = attitude_from_text(&text) {
+                if let Some((roll, pitch, yaw)) = attitude_from_text(text) {
                     self.roll = roll;
                     self.pitch = pitch;
                     self.yaw = yaw;
                     self.samples += 1;
-                    self.last_source = event.source;
+                    self.last_source = event.source.clone();
                 }
             }
             Payload::Bytes(_) | Payload::Empty => {}
@@ -76,7 +78,7 @@ impl AttitudePanel {
     }
 
     pub fn clear(&mut self) {
-        while self.subscription.try_recv().is_some() {}
+        while self.subscription.try_recv_arc().is_some() {}
         self.roll = 0.0;
         self.pitch = 0.0;
         self.yaw = 0.0;
@@ -85,8 +87,8 @@ impl AttitudePanel {
 
     pub fn ingest_all_pending(&mut self) -> usize {
         let mut count = 0;
-        while let Some(event) = self.subscription.try_recv() {
-            self.push_event(event);
+        for arc in self.subscription.drain_arc() {
+            self.push_event(&arc);
             count += 1;
         }
         count

@@ -13,7 +13,7 @@ impl WorkbenchApp {
             }
             return;
         }
-        // 线程已结束（cancel flag 为 true），清理状态
+        // 线程已结束（cancel flag 为 true），清理状态并回写用户可见反馈
         if self
             .periodic_send_cancel
             .as_ref()
@@ -22,6 +22,16 @@ impl WorkbenchApp {
             self.periodic_send_cancel = None;
             self.send.periodic_enabled = false;
             self.send.periodic_send_count = 0;
+            // 读取后台线程写入的结束原因（失败/完成），回写状态栏。
+            // 先 take 出值释放锁，再调 set_status_force（避免 &self 与 &mut self 借用冲突）。
+            let outcome_msg = self
+                .periodic_send_outcome
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take());
+            if let Some((level, msg)) = outcome_msg {
+                self.set_status_force(level, msg);
+            }
             return;
         }
         if self.periodic_send_cancel.is_some() {
@@ -61,6 +71,7 @@ impl WorkbenchApp {
         let transport = self.transport.clone();
         let max_count = self.send.periodic_max_count;
         let bus = self.bus.clone();
+        let outcome = self.periodic_send_outcome.clone();
         let interval = std::time::Duration::from_secs_f64(interval_ms / 1000.0);
 
         std::thread::spawn(move || {
@@ -86,15 +97,19 @@ impl WorkbenchApp {
                     &transport,
                 )
                 .err()
-                .map(|e| e.to_string());
+                .map(|e| tool_transport::translate_error(&e));
 
                 if let Some(e) = err {
-                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    cancel.store(true, std::sync::atomic::Ordering::Release);
+                    let msg = format!("周期发送已在第 {count} 次后停止：{e}");
                     bus.publish(tool_core::Event::system_log(
                         tool_core::LogLevel::Error,
                         "periodic",
-                        format!("周期发送失败: {e}"),
+                        msg.clone(),
                     ));
+                    if let Ok(mut slot) = outcome.lock() {
+                        *slot = Some((StatusLevel::Error, msg));
+                    }
                     return;
                 }
 
@@ -102,12 +117,16 @@ impl WorkbenchApp {
                 if let Some(max) = max_count
                     && count >= max
                 {
-                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    cancel.store(true, std::sync::atomic::Ordering::Release);
+                    let msg = format!("周期发送已完成（{max} 次）");
                     bus.publish(tool_core::Event::system_log(
                         tool_core::LogLevel::Info,
                         "periodic",
-                        format!("周期发送已完成 ({max} 次)"),
+                        msg.clone(),
                     ));
+                    if let Ok(mut slot) = outcome.lock() {
+                        *slot = Some((StatusLevel::Info, msg));
+                    }
                     return;
                 }
             }

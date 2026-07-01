@@ -43,7 +43,8 @@ impl WorkbenchApp {
         self.replay_panel.analyzer_busy = self
             .replay_analyzer_job
             .as_ref()
-            .is_some_and(|job| !job.handle.is_finished());
+            .and_then(|job| job.handle.as_ref())
+            .is_some_and(|h| !h.is_finished());
 
         self.poll_replay_analyzer_result();
 

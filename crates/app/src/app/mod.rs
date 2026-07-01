@@ -56,6 +56,10 @@ pub(crate) struct WorkbenchApp {
     pub(crate) replay_analyzer_generation: u64,
     /// 周期发送后台线程的取消信号
     pub(crate) periodic_send_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// 周期发送后台线程的结束原因（失败/完成），主线程 tick 读取后回写状态栏。
+    /// 后台线程无 &mut self，只能通过共享通道传递用户可见反馈。
+    pub(crate) periodic_send_outcome:
+        std::sync::Arc<std::sync::Mutex<Option<(crate::state::StatusLevel, String)>>>,
     /// 可配置快捷键映射
     pub(crate) keymap: crate::keymap::Keymap,
     /// 当前帧触发的快捷键动作（handle_keys 设置，tick 执行）
@@ -66,6 +70,11 @@ pub(crate) struct WorkbenchApp {
     pub(crate) update_state: UpdateState,
     /// UI contribution 运行时状态（toggle 值、progress 值等）
     pub(crate) contribution_states: std::collections::HashMap<String, serde_json::Value>,
+    /// 插件 summaries 帧级缓存：每帧首次需要时计算一次，避免 ui_contribution_slot
+    /// 在 top_bar/status_bar/bottom_panel 每帧共 5+ 次重复全量 clone manifest + 命令对账。
+    /// 在 tick_pre_ui 开头 take() 重置。
+    pub(crate) plugin_summaries_cache:
+        std::cell::OnceCell<Vec<tool_extension::PluginSummary>>,
     /// 等宽字体大小（终端/日志区），默认 13.0
     pub(crate) monospace_font_size: f32,
 }
@@ -74,7 +83,27 @@ pub(crate) struct ReplayAnalyzerJob {
     pub(crate) generation: u64,
     pub(crate) source_path: String,
     pub(crate) cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    pub(crate) handle: std::thread::JoinHandle<ReplayAnalyzerResult>,
+    pub(crate) handle: Option<std::thread::JoinHandle<ReplayAnalyzerResult>>,
+}
+
+impl Drop for ReplayAnalyzerJob {
+    fn drop(&mut self) {
+        // 退出时取消 analyzer 线程并尝试 join（带超时，避免卡住 drop）。
+        // analyzer 线程有 budget hook（30_000 指令）+ cancel 检查，最终会终止；
+        // 此处 join 只为回收资源、避免 detach。
+        self.cancel.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(handle) = self.handle.take() {
+            // 短轮询等待最多 ~2s，超时则放弃 join（线程最终会自行退出）。
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !handle.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
+            // 否则 detach：analyzer 线程会在 cancel 信号下自然退出，不泄漏。
+        }
+    }
 }
 
 pub(crate) struct ReplayAnalyzerResult {
@@ -98,6 +127,19 @@ impl WorkbenchApp {
         cc.egui_ctx.set_embed_viewports(false);
         let bus = DataBus::new();
         let transport = TransportManager::new(bus.clone());
+
+        // 注入 UI 重绘唤醒器：串口 worker publish RX/TX 后立即 request_repaint，
+        // 消除 80ms 轮询导致的显示延迟。has_repaint 短路防止重复唤醒风暴。
+        // egui 0.35 的 Context 无 weak()，用强引用 clone（worker 退出前 Context 保持存活，
+        // app 退出时 transport.close_serial() 先让 worker 退出，再 drop 闭包释放 Context）。
+        {
+            let ctx_strong = cc.egui_ctx.clone();
+            transport.set_repaint_waker(std::sync::Arc::new(move || {
+                if !ctx_strong.has_requested_repaint() {
+                    ctx_strong.request_repaint();
+                }
+            }));
+        }
 
         let (dialog_sender, dialog_receiver) = crossbeam_channel::unbounded::<DialogRequest>();
         let file_broker = Arc::new(FileAccessBroker::default());
@@ -241,6 +283,7 @@ impl WorkbenchApp {
             replay_analyzer_job: None,
             replay_analyzer_generation: 0,
             periodic_send_cancel: None,
+            periodic_send_outcome: std::sync::Arc::new(std::sync::Mutex::new(None)),
             dock_dragging_panel: None,
             bottom_dock_rect: None,
             right_dock_rect: None,
@@ -252,6 +295,7 @@ impl WorkbenchApp {
             key_recording: None,
             update_state: UpdateState::default(),
             contribution_states: std::collections::HashMap::new(),
+            plugin_summaries_cache: std::cell::OnceCell::new(),
             monospace_font_size: config
                 .as_ref()
                 .map(|c| c.monospace_font_size.clamp(10.0, 24.0))

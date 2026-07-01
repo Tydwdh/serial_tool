@@ -579,6 +579,18 @@ fn apply_pending_update_impl(
     }
     std::fs::create_dir_all(&temp_dir).map_err(|e| format!("创建临时目录失败：{e}"))?;
 
+    // RAII guard：无论后续步骤成功或失败，都清理 temp_dir，避免残留含 exe 的解压文件。
+    // 成功路径会在 cleanup_update_dir() 之前 drop（此时 temp_dir 已可删）。
+    struct TempDirGuard<'a>(&'a Path);
+    impl Drop for TempDirGuard<'_> {
+        fn drop(&mut self) {
+            if self.0.exists() {
+                let _ = std::fs::remove_dir_all(self.0);
+            }
+        }
+    }
+    let _temp_guard = TempDirGuard(&temp_dir);
+
     extract_zip(&zip_path, &temp_dir).map_err(|e| format!("解压更新包失败：{e}"))?;
 
     // 查找新 exe
@@ -606,7 +618,7 @@ fn apply_pending_update_impl(
     // 删除备份
     let _ = std::fs::remove_file(&backup_path);
 
-    // 清理更新目录
+    // 清理更新目录（temp_dir 由 _temp_guard 在作用域结束时清理，此处清理其余文件）
     cleanup_update_dir();
 
     log::info!("updater: 更新 v{} 已应用", manifest.version);
@@ -692,6 +704,15 @@ fn copy_updated_resources(src_dir: &Path, dest_dir: &Path) {
             if file_name == APP_EXE_NAME || file_name == "logs" || file_name == "extract_tmp" {
                 continue;
             }
+            // 安全：拒绝可执行扩展名，防止 DLL 侧加载植入（version.dll/winhttp.dll 等）。
+            // exe 本身由 helper 替换流程处理，不在此处复制。
+            if is_unsafe_resource_extension(&src_path) {
+                log::warn!(
+                    "updater: 跳过可疑可执行资源 {}（扩展名被拒）",
+                    src_path.display()
+                );
+                continue;
+            }
             let dest_path = dest_dir.join(file_name);
             if src_path.is_dir() {
                 let _ = copy_dir_recursive(&src_path, &dest_path);
@@ -699,6 +720,20 @@ fn copy_updated_resources(src_dir: &Path, dest_dir: &Path) {
                 let _ = std::fs::copy(&src_path, &dest_path);
             }
         }
+    }
+}
+
+/// 判断文件扩展名是否为不应通过更新 zip 投递的可执行类型。
+///
+/// Windows DLL 搜索顺序优先应用目录，若放行 .dll 等可被侧加载。
+/// 根本解是二进制签名校验；此处为纵深防御。
+fn is_unsafe_resource_extension(path: &Path) -> bool {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "dll" | "exe" | "sys" | "cpl" | "ocx" | "drv" | "scr" | "bat" | "cmd" | "ps1" | "vbs"
+        ),
+        None => false,
     }
 }
 
@@ -715,6 +750,14 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), io::Error> {
         if src_path.is_dir() {
             copy_dir_recursive(&src_path, &dest_path)?;
         } else {
+            // 安全：递归复制同样拒绝可执行扩展名，防止把 dll 藏在子目录绕过拦截。
+            if is_unsafe_resource_extension(&src_path) {
+                log::warn!(
+                    "updater: 跳过可疑可执行资源 {}（扩展名被拒）",
+                    src_path.display()
+                );
+                continue;
+            }
             std::fs::copy(&src_path, &dest_path)?;
         }
     }
@@ -735,7 +778,38 @@ fn cleanup_update_dir() {
 ///
 /// `on_progress` 回调接收 (已下载字节, 总字节) 参数。
 /// 返回下载文件的 SHA256 哈希值。
+/// 下载 URL 必须满足的安全约束：https 且 host 在白名单。
+///
+/// 防止被篡改的远端 update.json 把下载指向攻击者控制的域（即使 zip 的 SHA256
+/// 与 manifest 一致，manifest 本身也来自同一被篡改的 update.json，无法提供保护）。
+/// 这是最廉价的一层劫持面拦截；真正的端到端保护需要二进制签名校验。
+const DOWNLOAD_HOST_WHITELIST: &[&str] = &[
+    "raw.githubusercontent.com",
+    "github.com",
+    "objects.githubusercontent.com", // GitHub release 附件实际下载域
+];
+
+fn validate_download_url(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|_| format!("下载 URL 格式无效：{url}"))?;
+    if parsed.scheme() != "https" {
+        return Err(format!(
+            "下载 URL 必须为 https，实际为 {}：{url}",
+            parsed.scheme()
+        ));
+    }
+    let host = parsed.host_str().unwrap_or("");
+    if !DOWNLOAD_HOST_WHITELIST.iter().any(|&allowed| host == allowed) {
+        return Err(format!(
+            "下载 URL 的域名 {host} 不在允许列表内，疑似被篡改的更新源"
+        ));
+    }
+    Ok(())
+}
+
 pub async fn download_update(url: &str, on_progress: impl Fn(u64, u64)) -> Result<String, String> {
+    // 安全：强制 https 且 host 在白名单，防止被篡改的 update.json 把下载指向任意域。
+    validate_download_url(url)?;
+
     let dir = update_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建更新目录失败：{e}"))?;
 
@@ -804,6 +878,9 @@ pub async fn download_update(url: &str, on_progress: impl Fn(u64, u64)) -> Resul
 }
 
 /// 写入 update.json 标记文件（待更新标记，用于启动时替换）。
+///
+/// 原子写入：先写 .tmp 再 rename，避免崩溃留下损坏 manifest。
+/// 与 ConfigStore 的 atomic_write_json 模式一致。
 pub fn write_update_manifest(version: &str, sha256: &str) -> Result<(), String> {
     let manifest = UpdateManifest {
         version: version.to_owned(),
@@ -816,7 +893,12 @@ pub fn write_update_manifest(version: &str, sha256: &str) -> Result<(), String> 
     let dir = update_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建更新目录失败：{e}"))?;
     let data = serde_json::to_string_pretty(&manifest).map_err(|e| format!("序列化失败：{e}"))?;
-    std::fs::write(update_manifest_path(), data).map_err(|e| format!("写入失败：{e}"))?;
+    let manifest_path = update_manifest_path();
+    let tmp_path = manifest_path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, &data).map_err(|e| format!("写入临时文件失败：{e}"))?;
+    // 同目录 rename 是原子的（同一卷）。
+    std::fs::rename(&tmp_path, &manifest_path)
+        .map_err(|e| format!("重命名 manifest 失败：{e}"))?;
     Ok(())
 }
 
@@ -966,5 +1048,58 @@ mod tests {
             had_update: false,
         };
         assert!(!is_cache_valid(&cache));
+    }
+
+    // ── #2: 下载 URL 域白名单 + https 强制 ──
+    #[test]
+    fn validate_download_url_accepts_github_https() {
+        assert!(validate_download_url(
+            "https://github.com/Tydwdh/serial_tool/releases/download/v0.4.2/app.zip"
+        )
+        .is_ok());
+        assert!(validate_download_url(
+            "https://objects.githubusercontent.com/abc/pkg.zip"
+        )
+        .is_ok());
+        assert!(validate_download_url(
+            "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/update.json"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_download_url_rejects_http() {
+        let err = validate_download_url("http://github.com/x.zip").unwrap_err();
+        assert!(err.contains("https"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_download_url_rejects_off_domain() {
+        assert!(validate_download_url("https://evil.example.com/x.zip").is_err());
+        assert!(validate_download_url("https://github.com.evil.com/x.zip").is_err());
+    }
+
+    #[test]
+    fn validate_download_url_rejects_malformed() {
+        assert!(validate_download_url("not a url").is_err());
+        assert!(validate_download_url("").is_err());
+    }
+
+    // ── #15: 资源扩展名过滤 ──
+    #[test]
+    fn is_unsafe_resource_extension_flags_executables() {
+        assert!(is_unsafe_resource_extension(Path::new("version.dll")));
+        assert!(is_unsafe_resource_extension(Path::new("winhttp.DLL")));
+        assert!(is_unsafe_resource_extension(Path::new("evil.exe")));
+        assert!(is_unsafe_resource_extension(Path::new("evil.SYS")));
+        assert!(is_unsafe_resource_extension(Path::new("run.bat")));
+    }
+
+    #[test]
+    fn is_unsafe_resource_extension_allows_safe() {
+        assert!(!is_unsafe_resource_extension(Path::new("assets/icon.png")));
+        assert!(!is_unsafe_resource_extension(Path::new("config.json")));
+        assert!(!is_unsafe_resource_extension(Path::new("README")));
+        assert!(!is_unsafe_resource_extension(Path::new("font.ttf")));
     }
 }

@@ -428,33 +428,48 @@ impl WorkbenchApp {
                     }
                 });
 
-                // ── 新建分组弹窗 ──
+                // ── 新建分组弹窗（独立 Window，贴近触发点、支持 Escape、自动聚焦） ──
                 if new_group_active {
-                    ui.horizontal(|ui| {
-                        ui.label("新建分组：");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut new_group_name)
-                                .desired_width(120.0)
-                                .hint_text("输入组名"),
-                        );
-                        if ui.button("确定").clicked()
-                            || (ui.input(|i| i.key_pressed(egui::Key::Enter))
-                                && !new_group_name.trim().is_empty())
-                        {
-                            let name = new_group_name.trim().to_owned();
-                            if !name.is_empty() && !new_group_port.is_empty() {
-                                group_changes.push((new_group_port.clone(), Some(name)));
-                            }
-                            new_group_name.clear();
-                            new_group_active = false;
-                            new_group_port.clear();
-                        }
-                        if ui.small_button("取消").clicked() {
-                            new_group_name.clear();
-                            new_group_active = false;
-                            new_group_port.clear();
-                        }
-                    });
+                    let mut keep_open = true;
+                    egui::Window::new("新建分组")
+                        .open(&mut keep_open)
+                        .resizable(false)
+                        .collapsible(false)
+                        .show(ui.ctx(), |ui| {
+                            // 自动聚焦输入框：首次打开时 request_focus
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut new_group_name)
+                                    .desired_width(160.0)
+                                    .hint_text("输入组名"),
+                            );
+                            resp.request_focus();
+                            ui.horizontal(|ui| {
+                                if ui.button("确定").clicked()
+                                    || (ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                        && !new_group_name.trim().is_empty())
+                                {
+                                    let name = new_group_name.trim().to_owned();
+                                    if !name.is_empty() && !new_group_port.is_empty() {
+                                        group_changes.push((new_group_port.clone(), Some(name)));
+                                    }
+                                    new_group_name.clear();
+                                    new_group_active = false;
+                                    new_group_port.clear();
+                                }
+                                if ui.small_button("取消").clicked()
+                                    || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                                {
+                                    new_group_name.clear();
+                                    new_group_active = false;
+                                    new_group_port.clear();
+                                }
+                            });
+                        });
+                    if !keep_open {
+                        new_group_name.clear();
+                        new_group_active = false;
+                        new_group_port.clear();
+                    }
                     ui.data_mut(|d| d.insert_persisted(new_group_state_id, new_group_active));
                     ui.data_mut(|d| d.insert_persisted(new_group_name_id, new_group_name.clone()));
                     ui.data_mut(|d| d.insert_persisted(new_group_port_id, new_group_port.clone()));

@@ -149,6 +149,17 @@ impl WorkbenchApp {
                     .color(theme::TEXT_SECONDARY),
                 );
             }
+            // 自动重连进度：拔串口后顶部栏直接可见，无需展开 device_panel。
+            if let Some(ref pending) = self.serial.pending_reconnect {
+                let now = tool_core::now_timestamp_ms() as f64 / 1000.0;
+                let remaining = (pending.next_try_at - now).max(0.0);
+                let label = format!(
+                    "⟳ 重连中 {} {:.1}s ({}/{})",
+                    pending.port_name, remaining, pending.attempts + 1, 10
+                );
+                ui.label(egui::RichText::new(label).color(theme::YELLOW))
+                    .on_hover_text("点击关闭按钮可取消等待重连");
+            }
             ui.separator();
             // ── 插件贡献：top_bar.left ──
             self.ui_contribution_slot(ui, "top_bar.left");

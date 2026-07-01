@@ -96,21 +96,15 @@ impl WorkbenchApp {
             self.send.error = None;
         }
 
-        let ctrl_enter = resp.has_focus()
-            && ui
-                .ctx()
-                .input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter));
-
-        if ctrl_enter && send_port_open && !self.send.input.trim().is_empty() {
-            self.do_send();
-        }
+        // Ctrl+Enter 发送统一由 keymap(Action::Send → handle_keys)处理,
+        // 不在此处重复检测,避免同帧双重触发 do_send 导致重复发送。
 
         // ── 3. 操作栏 ──
         self.render_send_actions(ui, layout, send_port_open);
 
         // ── 4. 错误提示 ──
         if let Some(err) = &self.send.error {
-            ui.colored_label(theme::RED, translate_error(err));
+            ui.colored_label(theme::RED, err);
         }
     }
 
@@ -390,7 +384,7 @@ impl WorkbenchApp {
             &self.transport,
         )
         .err()
-        .map(|e| e.to_string());
+        .map(|e| translate_error(&e));
 
         if self.send.error.is_none() && !self.send.input.trim().is_empty() {
             let text = self.send.input.clone();

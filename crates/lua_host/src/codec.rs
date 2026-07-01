@@ -29,7 +29,16 @@ fn create_codec_table(lua: &Lua, (): ()) -> mlua::Result<Value> {
         "from_hex",
         lua.create_function(|lua, hex: mlua::String| {
             let hex_str = hex.to_str()?;
-            let hex_clean: String = hex_str.chars().filter(|c| !c.is_whitespace()).collect();
+            // 与 tool_transport::parse_hex 的 normalize_hex_token 保持一致：
+            // 去除 0x/0X 前缀、删除 _/- 分隔符、过滤空白，使两端对 0xFF/AA_BB 等输入行为一致。
+            let hex_clean: String = hex_str
+                .trim()
+                .trim_start_matches("0x")
+                .trim_start_matches("0X")
+                .replace(['_', '-'], "")
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
             if !hex_clean.len().is_multiple_of(2) {
                 return Err(mlua::Error::RuntimeError(
                     "hex string must have even length".into(),
@@ -258,6 +267,23 @@ mod tests {
             .load("local c = require('hw.codec'); c.from_hex('ZZ')")
             .exec();
         assert!(result.is_err());
+    }
+
+    // ── #25: from_hex 与 Rust parse_hex 归一化规则一致 ──
+    #[test]
+    fn from_hex_strips_0x_prefix() {
+        let lua = setup();
+        lua.load("local c = require('hw.codec'); assert(c.from_hex('0xFF') == '\\xFF')")
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
+    fn from_hex_strips_underscores_and_dashes() {
+        let lua = setup();
+        lua.load("local c = require('hw.codec'); assert(c.from_hex('AA_BB-CC') == '\\xAA\\xBB\\xCC')")
+            .exec()
+            .unwrap();
     }
 
     #[test]

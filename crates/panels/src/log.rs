@@ -30,8 +30,10 @@ pub struct LogPanel {
     max_entries: usize,
     last_scroll_offset_y: f32,
     pending_scroll_to_bottom: bool,
-    /// 搜索文本（大小写不敏感，同时匹配 source 和 message）。
+    /// 搜索文本（默认大小写不敏感，同时匹配 source 和 message）。
     search_text: String,
+    /// 搜索是否大小写敏感。
+    search_case_sensitive: bool,
     /// 来源过滤：None 表示显示全部，Some 表示只显示指定 source。
     source_filter: Option<String>,
     /// 用户可调的字体大小（10-24px），默认 13.0
@@ -66,6 +68,7 @@ impl LogPanel {
             last_scroll_offset_y: 0.0,
             pending_scroll_to_bottom: false,
             search_text: String::new(),
+            search_case_sensitive: false,
             source_filter: None,
             font_size: 13.0,
             selection: RowSelection::new(0),
@@ -169,6 +172,16 @@ impl LogPanel {
                     .desired_width(120.0)
                     .hint_text("关键词"),
             );
+            let case_btn = egui::Button::new("Aa")
+                .selected(self.search_case_sensitive)
+                .small();
+            if ui
+                .add(case_btn)
+                .on_hover_text("区分大小写")
+                .clicked()
+            {
+                self.search_case_sensitive = !self.search_case_sensitive;
+            }
 
             ui.label("来源");
             egui::ComboBox::from_id_salt("log-source-filter")
@@ -194,7 +207,11 @@ impl LogPanel {
         ui.separator();
 
         // ── 构建可见行列表 ──
-        let search_lower = self.search_text.trim().to_ascii_lowercase();
+        let search_key = if self.search_case_sensitive {
+            self.search_text.trim().to_owned()
+        } else {
+            self.search_text.trim().to_ascii_lowercase()
+        };
         let rows: Vec<&LogEntry> = self
             .entries
             .iter()
@@ -207,11 +224,17 @@ impl LogPanel {
                 }
             })
             .filter(|entry| {
-                if search_lower.is_empty() {
+                if search_key.is_empty() {
                     return true;
                 }
-                entry.source.to_ascii_lowercase().contains(&search_lower)
-                    || entry.message.to_ascii_lowercase().contains(&search_lower)
+                let matches = |haystack: &str| -> bool {
+                    if self.search_case_sensitive {
+                        haystack.contains(&search_key)
+                    } else {
+                        haystack.to_ascii_lowercase().contains(&search_key)
+                    }
+                };
+                matches(&entry.source) || matches(&entry.message)
             })
             .collect();
 
@@ -634,50 +657,37 @@ fn render_log_rows(
                 })
             });
 
-            // 框选范围文本
+            // 框选范围文本（移入 context_menu 闭包内按需构造，避免菜单未打开时每帧构造）
             let selected_indices: Vec<usize> = selection.selected_indices().collect();
-            let (selected_full, selected_data): (Option<String>, Option<String>) =
-                (!selected_indices.is_empty())
-                    .then(|| {
-                        let full: String = selected_indices
-                            .iter()
-                            .map(|&index| rows[index])
-                            .map(|entry| {
-                                format!(
-                                    "{} {} {} {}",
-                                    entry.timestamp_label,
-                                    entry.level.as_str(),
-                                    entry.source,
-                                    entry.message
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        let data: String = selected_indices
-                            .iter()
-                            .map(|&index| rows[index])
-                            .map(|entry| entry.message.clone())
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        (full, data)
-                    })
-                    .map_or((None, None), |(f, d)| (Some(f), Some(d)));
-
-            let combined_text: String = rows
-                .iter()
-                .map(|entry| {
-                    format!(
-                        "{} {} {} {}",
-                        entry.timestamp_label,
-                        entry.level.as_str(),
-                        entry.source,
-                        entry.message
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
 
             ctx_response.context_menu(move |ctx_ui| {
+                let (selected_full, selected_data): (Option<String>, Option<String>) =
+                    (!selected_indices.is_empty())
+                        .then(|| {
+                            let full: String = selected_indices
+                                .iter()
+                                .map(|&index| rows[index])
+                                .map(|entry| {
+                                    format!(
+                                        "{} {} {} {}",
+                                        entry.timestamp_label,
+                                        entry.level.as_str(),
+                                        entry.source,
+                                        entry.message
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            let data: String = selected_indices
+                                .iter()
+                                .map(|&index| rows[index])
+                                .map(|entry| entry.message.clone())
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            (full, data)
+                        })
+                        .map_or((None, None), |(f, d)| (Some(f), Some(d)));
+
                 // 统一菜单：有框选用选中文本，否则用单行文本
                 let copy_full = selected_full
                     .clone()
@@ -703,7 +713,21 @@ fn render_log_rows(
                 }
 
                 if ctx_ui.button("复制全部可见内容").clicked() {
-                    ctx_ui.ctx().copy_text(combined_text.clone());
+                    // 按需构造，避免菜单未打开时每帧 join 全部行。
+                    let combined_text: String = rows
+                        .iter()
+                        .map(|entry| {
+                            format!(
+                                "{} {} {} {}",
+                                entry.timestamp_label,
+                                entry.level.as_str(),
+                                entry.source,
+                                entry.message
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    ctx_ui.ctx().copy_text(combined_text);
                     ctx_ui.close();
                 }
 

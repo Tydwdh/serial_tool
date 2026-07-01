@@ -3,6 +3,7 @@ use egui::{Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
 use tool_core::{Event, Payload};
+use std::sync::Arc;
 use tool_databus::{DataBus, Subscription, TopicFilter};
 
 const MAX_CHART_EVENTS_PER_FRAME: usize = 1_000;
@@ -105,7 +106,7 @@ impl ChartPanel {
     fn ingest(&mut self) {
         if self.paused {
             for _ in 0..MAX_CHART_EVENTS_PER_FRAME {
-                if self.subscription.try_recv().is_none() {
+                if self.subscription.try_recv_arc().is_none() {
                     break;
                 }
                 self.dropped_while_paused += 1;
@@ -113,24 +114,24 @@ impl ChartPanel {
             return;
         }
 
-        for _ in 0..MAX_CHART_EVENTS_PER_FRAME {
-            let Some(event) = self.subscription.try_recv() else {
-                break;
-            };
-
-            self.push_event(event);
+        // 零 clone 批量消费：取 Arc<Event> 引用，避免每事件深克隆 payload。
+        let events = self
+            .subscription
+            .drain_limited_arc(MAX_CHART_EVENTS_PER_FRAME);
+        for arc in events {
+            self.push_event(&arc);
         }
     }
 
-    fn push_event(&mut self, event: Event) {
-        match event.payload {
+    fn push_event(&mut self, event: &Arc<Event>) {
+        match &event.payload {
             Payload::Json(value) => self.push_json(event.timestamp_ms as f64, value),
-            Payload::Text(text) => self.push_text(event.timestamp_ms as f64, &text),
+            Payload::Text(text) => self.push_text(event.timestamp_ms as f64, text),
             Payload::Bytes(_) | Payload::Empty => {}
         }
     }
 
-    fn push_json(&mut self, fallback_x: f64, value: Value) {
+    fn push_json(&mut self, fallback_x: f64, value: &Value) {
         let Some(object) = value.as_object() else {
             return;
         };
@@ -190,7 +191,7 @@ impl ChartPanel {
     pub fn ingest_all_pending(&mut self) -> usize {
         if self.paused {
             let mut drained = 0;
-            while self.subscription.try_recv().is_some() {
+            while self.subscription.try_recv_arc().is_some() {
                 drained += 1;
             }
             self.dropped_while_paused += drained;
@@ -198,9 +199,8 @@ impl ChartPanel {
         }
 
         let mut count = 0;
-
-        while let Some(event) = self.subscription.try_recv() {
-            self.push_event(event);
+        for arc in self.subscription.drain_arc() {
+            self.push_event(&arc);
             count += 1;
         }
 

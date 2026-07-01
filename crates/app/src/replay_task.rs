@@ -11,7 +11,11 @@ impl WorkbenchApp {
         self.replay_panel.want_run_analyzers = false;
 
         if let Some(ref job) = self.replay_analyzer_job
-            && !job.handle.is_finished()
+            && !job
+                .handle
+                .as_ref()
+                .map(|h| h.is_finished())
+                .unwrap_or(true)
         {
             self.set_status(StatusLevel::Warn, "回放：analyzer 正在运行中，请等待完成");
             return;
@@ -129,26 +133,44 @@ impl WorkbenchApp {
             generation,
             source_path,
             cancel,
-            handle,
+            handle: Some(handle),
         });
     }
 
     pub(crate) fn poll_replay_analyzer_result(&mut self) {
-        let Some(job) = self.replay_analyzer_job.take() else {
+        let Some(mut job) = self.replay_analyzer_job.take() else {
             return;
         };
-        if !job.handle.is_finished() {
+        if !job
+            .handle
+            .as_ref()
+            .map(|h| h.is_finished())
+            .unwrap_or(true)
+        {
             self.replay_analyzer_job = Some(job);
             return;
         }
-        let result = job.handle.join().unwrap_or(ReplayAnalyzerResult {
-            total: 0,
-            succeeded: 0,
-            failed: 1,
-            derived_events: vec![],
-            errors: vec!["analyzer thread panicked".into()],
-            logs: vec![],
-        });
+        // 取出 handle 进行 join（用 take 而非 unwrap，因 ReplayAnalyzerJob 实现了 Drop，
+        // 不能 partial move；take 后 Drop 不会重复 join）。handle 理论上始终为 Some
+        //（构造时置 Some，仅在此消费路径 take），None 时按 panic 兜底处理。
+        let result = match job.handle.take() {
+            Some(handle) => handle.join().unwrap_or(ReplayAnalyzerResult {
+                total: 0,
+                succeeded: 0,
+                failed: 1,
+                derived_events: vec![],
+                errors: vec!["analyzer thread panicked".into()],
+                logs: vec![],
+            }),
+            None => ReplayAnalyzerResult {
+                total: 0,
+                succeeded: 0,
+                failed: 1,
+                derived_events: vec![],
+                errors: vec!["analyzer handle already consumed".into()],
+                logs: vec![],
+            },
+        };
 
         // 忽略过期 generation 的结果（用户已重新触发）
         if job.generation < self.replay_analyzer_generation {

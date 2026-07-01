@@ -29,6 +29,8 @@ pub struct TerminalPanel {
     auto_scroll: bool,
 
     search_text: String,
+    /// 搜索是否大小写敏感（false=不敏感，默认；true=敏感）。
+    search_case_sensitive: bool,
     port_filter: Option<String>,
     bookmarked_entry_ids: BTreeSet<u64>,
 
@@ -141,6 +143,7 @@ impl TerminalPanel {
             auto_scroll: true,
 
             search_text: String::new(),
+            search_case_sensitive: false,
             port_filter: None,
             bookmarked_entry_ids: BTreeSet::new(),
 
@@ -213,10 +216,19 @@ impl TerminalPanel {
         }
     }
 
-    fn collect_visible_rows(&self, line_mode: bool) -> Vec<VisibleRow<'_>> {
-        let search_lower = self.search_text.trim().to_ascii_lowercase();
-        let mut rows = Vec::new();
+    /// 返回用于匹配的搜索词：大小写敏感时保留原样，否则转小写。
+    fn search_query(&self) -> String {
+        let trimmed = self.search_text.trim();
+        if self.search_case_sensitive {
+            trimmed.to_owned()
+        } else {
+            trimmed.to_ascii_lowercase()
+        }
+    }
 
+    fn collect_visible_rows(&self, line_mode: bool) -> Vec<VisibleRow<'_>> {
+        let search_key = self.search_query();
+        let mut rows = Vec::new();
         for (port, data) in &self.ports {
             if let Some(ref filter) = self.port_filter
                 && filter != port
@@ -224,7 +236,11 @@ impl TerminalPanel {
                 continue;
             }
 
-            let port_lower = port.to_ascii_lowercase();
+            let port_key = if self.search_case_sensitive {
+                port.clone()
+            } else {
+                port.to_ascii_lowercase()
+            };
             let mut port_rows = build_visible_rows_for_port(
                 Some(port.as_str()),
                 data.entries
@@ -232,8 +248,10 @@ impl TerminalPanel {
                     .filter(|entry| entry_visible(entry.direction, self.show_rx, self.show_tx)),
                 line_mode,
             );
-            if !search_lower.is_empty() {
-                port_rows.retain(|row| row_matches_search(&port_lower, row, &search_lower));
+            if !search_key.is_empty() {
+                port_rows.retain(|row| {
+                    row_matches_search(&port_key, row, &search_key, self.search_case_sensitive)
+                });
             }
             rows.extend(port_rows);
         }
@@ -366,6 +384,17 @@ impl TerminalPanel {
                     .desired_width(140.0)
                     .hint_text("文本 / HEX"),
             );
+            // 大小写敏感切换：选中时 "Aa" 高亮，匹配区分大小写。
+            let case_btn = egui::Button::new("Aa")
+                .selected(self.search_case_sensitive)
+                .small();
+            if ui
+                .add(case_btn)
+                .on_hover_text("区分大小写（HEX 为大写，默认不区分）")
+                .clicked()
+            {
+                self.search_case_sensitive = !self.search_case_sensitive;
+            }
 
             ui.label("端口");
             egui::ComboBox::from_id_salt("terminal-port-filter")
@@ -387,8 +416,8 @@ impl TerminalPanel {
         ui.separator();
 
         let render_outcome = {
-            // 预计算搜索查询的小写版本，避免在渲染循环中重复分配
-            let search_lower = self.search_text.trim().to_ascii_lowercase();
+            // 预计算搜索查询：大小写敏感时保留原样，否则转小写（避免渲染循环中重复分配）。
+            let search_key = self.search_query();
             let mut rows: Vec<VisibleRow<'_>> = Vec::new();
 
             for (port, data) in &self.ports {
@@ -397,7 +426,11 @@ impl TerminalPanel {
                 {
                     continue;
                 }
-                let port_lower = port.to_ascii_lowercase();
+                let port_key = if self.search_case_sensitive {
+                    port.clone()
+                } else {
+                    port.to_ascii_lowercase()
+                };
 
                 let mut port_rows = build_visible_rows_for_port(
                     Some(port.as_str()),
@@ -406,8 +439,10 @@ impl TerminalPanel {
                         .filter(|entry| entry_visible(entry.direction, self.show_rx, self.show_tx)),
                     self.show_lines,
                 );
-                if !search_lower.is_empty() {
-                    port_rows.retain(|row| row_matches_search(&port_lower, row, &search_lower));
+                if !search_key.is_empty() {
+                    port_rows.retain(|row| {
+                        row_matches_search(&port_key, row, &search_key, self.search_case_sensitive)
+                    });
                 }
                 rows.extend(port_rows);
             }
@@ -1114,8 +1149,22 @@ fn render_rows_view(
 
             let mut current_y = label_rect.top();
             let mut text_drag_response: Option<egui::Response> = None;
+            // 视口剔除：视口外的行跳过 paint/interact（record_row 已全量记录，点击映射不受影响）。
+            // 行高来自全量 layout（egui galley 缓存已省下排版），此处只省绘制阶段的 shape 构造。
+            // 上下各留 1 行 buffer，避免边界行因浮点误差被误剔。
+            let clip_top = viewport_rect.top() - row_height;
+            let clip_bottom = viewport_rect.bottom() + row_height;
             for (row_idx, (row, layout)) in rows.iter().zip(row_layouts.iter()).enumerate() {
                 let entry_height = layout.height;
+
+                // 视口外整行跳过绘制（current_y 是内容坐标系，与 clip_rect 对齐）。
+                let row_bottom = current_y + entry_height;
+                let in_viewport = row_bottom >= clip_top && current_y <= clip_bottom;
+                if !in_viewport {
+                    current_y = row_bottom;
+                    continue;
+                }
+
                 let label_y = current_y + row_height * 0.5;
 
                 // 高亮悬停行（框选模式下跳过）
@@ -1255,42 +1304,39 @@ fn render_rows_view(
                 })
             });
 
-            // 框选范围文本
+            // 框选范围文本（移入 context_menu 闭包内按需构造，避免菜单未打开时每帧构造）
             let selected_indices: Vec<usize> = selection.selected_indices().collect();
-            let (selected_full, selected_data): (Option<String>, Option<String>) =
-                (!selected_indices.is_empty())
-                    .then(|| {
-                        let full: String = selected_indices
-                            .iter()
-                            .map(|&index| &rows[index])
-                            .map(|row| {
-                                let content_only = visible_row_content(row, show_hex, show_raw);
-                                let port = row.port.as_deref().unwrap_or("");
-                                let (dir_label, _) = direction_label(row.direction);
-                                format!(
-                                    "{} {} {} {}",
-                                    row.timestamp_label, port, dir_label, content_only
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        let data: String = selected_indices
-                            .iter()
-                            .map(|&index| &rows[index])
-                            .map(|row| visible_row_content(row, show_hex, show_raw))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        (full, data)
-                    })
-                    .map_or((None, None), |(f, d)| (Some(f), Some(d)));
-
-            let combined_text: String = rows
-                .iter()
-                .map(|row| visible_row_content(row, show_hex, show_raw))
-                .collect::<Vec<_>>()
-                .join("\n");
 
             ctx_response.context_menu(move |ctx_ui| {
+                // 闭包仅在菜单打开时执行，此处构造选中文本开销可接受。
+                let (selected_full, selected_data): (Option<String>, Option<String>) =
+                    (!selected_indices.is_empty())
+                        .then(|| {
+                            let full: String = selected_indices
+                                .iter()
+                                .map(|&index| &rows[index])
+                                .map(|row| {
+                                    let content_only =
+                                        visible_row_content(row, show_hex, show_raw);
+                                    let port = row.port.as_deref().unwrap_or("");
+                                    let (dir_label, _) = direction_label(row.direction);
+                                    format!(
+                                        "{} {} {} {}",
+                                        row.timestamp_label, port, dir_label, content_only
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            let data: String = selected_indices
+                                .iter()
+                                .map(|&index| &rows[index])
+                                .map(|row| visible_row_content(row, show_hex, show_raw))
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            (full, data)
+                        })
+                        .map_or((None, None), |(f, d)| (Some(f), Some(d)));
+
                 // 统一菜单：有框选用选中文本，否则用单行文本
                 let copy_full = selected_full
                     .clone()
@@ -1316,7 +1362,13 @@ fn render_rows_view(
                 }
 
                 if ctx_ui.button("复制全部可见内容").clicked() {
-                    ctx_ui.ctx().copy_text(combined_text.clone());
+                    // 按需构造，避免菜单未打开时每帧 join ~2000 行。
+                    let combined_text: String = rows
+                        .iter()
+                        .map(|row| visible_row_content(row, show_hex, show_raw))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    ctx_ui.ctx().copy_text(combined_text);
                     ctx_ui.close();
                 }
 
@@ -1484,14 +1536,26 @@ fn entry_visible(direction: Direction, show_rx: bool, show_tx: bool) -> bool {
     }
 }
 
-fn row_matches_search(port_lower: &str, row: &VisibleRow<'_>, search_lower: &str) -> bool {
-    if search_lower.is_empty() {
+fn row_matches_search(
+    port_key: &str,
+    row: &VisibleRow<'_>,
+    search_key: &str,
+    case_sensitive: bool,
+) -> bool {
+    if search_key.is_empty() {
         return true;
     }
-    port_lower.contains(search_lower)
-        || row.raw_text.to_ascii_lowercase().contains(search_lower)
-        || row.display_text.to_ascii_lowercase().contains(search_lower)
-        || row.hex_text.to_ascii_lowercase().contains(search_lower)
+    let contains = |haystack: &str| -> bool {
+        if case_sensitive {
+            haystack.contains(search_key)
+        } else {
+            haystack.to_ascii_lowercase().contains(search_key)
+        }
+    };
+    contains(port_key)
+        || contains(row.raw_text.as_ref())
+        || contains(row.display_text.as_ref())
+        || contains(row.hex_text.as_ref())
 }
 
 fn csv_cell(s: &str) -> String {
