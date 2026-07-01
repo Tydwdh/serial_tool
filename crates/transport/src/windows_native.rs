@@ -178,7 +178,10 @@ impl NativeWorker {
                 self.bus.publish(Event::system_log(
                     LogLevel::Error,
                     "transport.serial",
-                    format!("native serial failed on {}: {error}", self.source),
+                    format!(
+                        "{} 串口错误：{error}",
+                        self.source.trim_start_matches("serial:")
+                    ),
                 ));
             }
             Err(_) => {}

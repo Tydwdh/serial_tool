@@ -338,7 +338,7 @@ impl TransportManager {
                 self.bus.publish(Event::system_log(
                     LogLevel::Info,
                     "transport.serial",
-                    format!("closed {} @ {}", h.port_name, h.baud_rate),
+                    format!("已关闭 {} @ {}", h.port_name, h.baud_rate),
                 ));
                 // 发布结构化生命周期事件，供插件监听
                 self.bus.publish(Event::new(
@@ -438,7 +438,10 @@ impl TransportManager {
                     self.bus.publish(Event::system_log(
                         LogLevel::Error,
                         "transport.serial",
-                        format!("failed to open {}: {error}", config.port_name),
+                        format!(
+                            "打开 {} @ {} 失败：{error}",
+                            config.port_name, config.baud_rate
+                        ),
                     ));
                     return Err(error);
                 }
@@ -457,7 +460,10 @@ impl TransportManager {
                 self.bus.publish(Event::system_log(
                     LogLevel::Error,
                     "transport.serial",
-                    format!("failed to open {}: {error}", config.port_name),
+                    format!(
+                        "打开 {} @ {} 失败：{error}",
+                        config.port_name, config.baud_rate
+                    ),
                 ));
                 TransportError::from(error)
             })?;
@@ -494,7 +500,7 @@ impl TransportManager {
         self.bus.publish(Event::system_log(
             LogLevel::Info,
             "transport.serial",
-            format!("opened {}", source),
+            format!("已打开 {} @ {}", config.port_name, config.baud_rate),
         ));
 
         // 发布结构化生命周期事件，供插件监听
@@ -529,7 +535,7 @@ impl TransportManager {
             self.bus.publish(Event::system_log(
                 LogLevel::Info,
                 "transport.serial",
-                format!("closed {} @ {}", h.port_name, h.baud_rate),
+                format!("已关闭 {} @ {}", h.port_name, h.baud_rate),
             ));
             // 发布结构化生命周期事件，供插件监听
             self.bus.publish(Event::new(
@@ -772,7 +778,7 @@ impl TransportManager {
             self.bus.publish(Event::system_log(
                 LogLevel::Error,
                 "transport.serial",
-                format!("串口 {name} @{baud} 已断开连接"),
+                format!("串口 {name} @ {baud} 已断开连接"),
             ));
             if let Some(join) = join {
                 self.closing.lock().push(ClosingHandle {
@@ -844,6 +850,8 @@ fn serial_worker_loop_impl(
     waker: Option<Arc<dyn RepaintWaker>>,
 ) {
     let mut buffer = [0_u8; 4096];
+    // 日志用干净端口名（去掉 "serial:" 前缀）。
+    let port_name = extract_port(&source);
     let wake = || {
         if let Some(w) = &waker {
             w.wake();
@@ -859,7 +867,7 @@ fn serial_worker_loop_impl(
                         bus.publish(Event::system_log(
                             LogLevel::Error,
                             "transport.serial",
-                            format!("set DTR failed on {source}: {e}"),
+                            format!("{port_name} 设置 DTR 失败：{e}"),
                         ));
                     }
                 }
@@ -868,7 +876,7 @@ fn serial_worker_loop_impl(
                         bus.publish(Event::system_log(
                             LogLevel::Error,
                             "transport.serial",
-                            format!("set RTS failed on {source}: {e}"),
+                            format!("{port_name} 设置 RTS 失败：{e}"),
                         ));
                     }
                 }
@@ -885,7 +893,7 @@ fn serial_worker_loop_impl(
                     bus.publish(Event::system_log(
                         LogLevel::Error,
                         "transport.serial",
-                        format!("write failed on {source}: {error}"),
+                        format!("{port_name} 写入失败：{error}"),
                     ));
                     alive.store(false, Ordering::Release);
                     return;
@@ -925,7 +933,7 @@ fn serial_worker_loop_impl(
                 bus.publish(Event::system_log(
                     LogLevel::Error,
                     "transport.serial",
-                    format!("read failed on {source}: {error}"),
+                    format!("{port_name} 读取失败：{error}"),
                 ));
                 alive.store(false, Ordering::Release);
                 return;
