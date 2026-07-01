@@ -86,7 +86,7 @@ impl PluginManager {
         self.bus.publish(Event::system_log(
             LogLevel::Info,
             "extension",
-            format!("config workspace: {}", config_root.display()),
+            format!("配置工作区：{}", config_root.display()),
         ));
     }
 
@@ -152,7 +152,7 @@ impl PluginManager {
         self.bus.publish(Event::system_log(
             LogLevel::Info,
             "extension",
-            format!("discovered {count} plugin(s)"),
+            format!("发现 {count} 个插件"),
         ));
 
         Ok(count)
@@ -395,7 +395,7 @@ impl PluginManager {
         self.bus.publish(Event::system_log(
             LogLevel::Info,
             format!("plugin:{plugin_id}"),
-            "plugin enabled",
+            "插件已启用",
         ));
 
         Ok(())
@@ -450,7 +450,7 @@ impl PluginManager {
         self.bus.publish(Event::system_log(
             LogLevel::Info,
             format!("plugin:{plugin_id}"),
-            "plugin stopping...",
+            "正在停止插件...",
         ));
 
         Ok(())
@@ -465,7 +465,7 @@ impl PluginManager {
             self.bus.publish(Event::system_log(
                 LogLevel::Info,
                 format!("plugin:{id}"),
-                "plugin stopped",
+                "插件已停止",
             ));
             false // remove — Drop will join the finished thread
         });
@@ -656,7 +656,7 @@ impl PluginManager {
                     self.bus.publish(Event::system_log(
                         LogLevel::Warn,
                         "extension",
-                        format!("dropped {} Lua events (queue full)", self.dropped_events),
+                        format!("已丢弃 {} 条 Lua 事件（队列已满）", self.dropped_events),
                     ));
                 }
             }

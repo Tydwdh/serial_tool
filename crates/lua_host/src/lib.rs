@@ -222,7 +222,7 @@ impl LuaHost {
         bus.publish(Event::system_log(
             LogLevel::Info,
             run_source,
-            format!("running {}", config.script_name),
+            format!("正在运行 {}", config.script_name),
         ));
 
         let join = thread::spawn(move || {
@@ -241,7 +241,7 @@ impl LuaHost {
                     bus.publish(Event::system_log(
                         LogLevel::Info,
                         config.source,
-                        format!("{} finished", config.script_name),
+                        format!("{} 已完成", config.script_name),
                     ));
                 }
                 Err(error) if thread_stop.load(Ordering::Relaxed) => {
@@ -250,7 +250,7 @@ impl LuaHost {
                     bus.publish(Event::system_log(
                         LogLevel::Warn,
                         config.source,
-                        format!("{} stopped: {error}", config.script_name),
+                        format!("{} 已停止：{error}", config.script_name),
                     ));
                 }
                 Err(error) => {
@@ -259,7 +259,7 @@ impl LuaHost {
                     bus.publish(Event::system_log(
                         LogLevel::Error,
                         config.source,
-                        format!("{} failed: {error}", config.script_name),
+                        format!("{} 失败：{error}", config.script_name),
                     ));
                 }
             }
@@ -284,7 +284,7 @@ impl LuaHost {
             worker.stop.store(true, Ordering::Relaxed);
 
             self.bus
-                .publish(Event::system_log(LogLevel::Warn, "lua", "stop requested"));
+                .publish(Event::system_log(LogLevel::Warn, "lua", "请求停止"));
         }
 
         self.reap_finished();
@@ -361,7 +361,7 @@ pub fn run_plugin(
     bus.publish(Event::system_log(
         LogLevel::Info,
         &plugin_source,
-        format!("starting plugin {}", config.script_name),
+        format!("正在启动插件 {}", config.script_name),
     ));
 
     let thread_outcome = Arc::new(ParkingMutex::new(None));
@@ -425,7 +425,7 @@ fn plugin_event_loop(
             bus.publish(Event::system_log(
                 LogLevel::Error,
                 &config.source,
-                format!("failed to create lua: {error}"),
+                format!("创建 Lua 状态失败：{error}"),
             ));
             alive.store(false, Ordering::Relaxed);
             return;
@@ -438,7 +438,7 @@ fn plugin_event_loop(
         mlua::HookTriggers::new().every_nth_instruction(10_000),
         move |_lua, _debug| {
             if hook_stop.load(Ordering::Relaxed) {
-                return Err(mlua::Error::RuntimeError("plugin stopped".into()));
+                return Err(mlua::Error::RuntimeError("插件已停止".into()));
             }
             Ok(VmState::Continue)
         },
@@ -447,7 +447,7 @@ fn plugin_event_loop(
         bus.publish(Event::system_log(
             LogLevel::Error,
             &config.source,
-            format!("failed to set hook: {e}"),
+            format!("设置指令 hook 失败：{e}"),
         ));
         alive.store(false, Ordering::Relaxed);
         return;
@@ -458,7 +458,7 @@ fn plugin_event_loop(
         bus.publish(Event::system_log(
             LogLevel::Error,
             &config.source,
-            format!("failed to install ctx: {error}"),
+            format!("安装上下文失败：{error}"),
         ));
         alive.store(false, Ordering::Relaxed);
         return;
@@ -470,7 +470,7 @@ fn plugin_event_loop(
         bus.publish(Event::system_log(
             LogLevel::Error,
             &config.source,
-            format!("failed to install task helpers: {error}"),
+            format!("安装任务辅助函数失败：{error}"),
         ));
         alive.store(false, Ordering::Relaxed);
         return;
@@ -491,7 +491,7 @@ fn plugin_event_loop(
         bus.publish(Event::system_log(
             LogLevel::Error,
             &config.source,
-            format!("script error: {error}"),
+            format!("脚本错误：{error}"),
         ));
         alive.store(false, Ordering::Relaxed);
         return;
@@ -529,7 +529,7 @@ fn plugin_event_loop(
         bus.publish(Event::system_log(
             LogLevel::Info,
             &config.source,
-            "plugin finished (no callbacks)",
+            "插件已完成（无回调）",
         ));
         alive.store(false, Ordering::Relaxed);
         return;
@@ -607,7 +607,7 @@ fn plugin_event_loop(
                             bus.publish(Event::system_log(
                                 LogLevel::Warn,
                                 &config.source,
-                                format!("on_event error: {error}"),
+                                format!("on_event 回调错误：{error}"),
                             ));
                         }
                     }
@@ -673,7 +673,7 @@ fn handle_plugin_command_event(
         bus.publish(Event::system_log(
             LogLevel::Warn,
             &config.source,
-            "plugin command event ignored: payload is not JSON",
+            "已忽略插件命令事件：payload 不是 JSON",
         ));
         return true;
     };
@@ -692,7 +692,7 @@ fn handle_plugin_command_event(
         bus.publish(Event::system_log(
             LogLevel::Warn,
             &config.source,
-            "plugin command event ignored: missing command",
+            "已忽略插件命令事件：缺少 command 字段",
         ));
         return true;
     };
@@ -703,7 +703,7 @@ fn handle_plugin_command_event(
             bus.publish(Event::system_log(
                 LogLevel::Warn,
                 &config.source,
-                format!("plugin command table unavailable: {error}"),
+                format!("插件命令表不可用：{error}"),
             ));
             return true;
         }
@@ -715,7 +715,7 @@ fn handle_plugin_command_event(
             bus.publish(Event::system_log(
                 LogLevel::Debug,
                 &config.source,
-                format!("plugin command '{command}' is not registered"),
+                format!("插件命令 '{command}' 未注册"),
             ));
             return true;
         }
@@ -727,7 +727,7 @@ fn handle_plugin_command_event(
                 bus.publish(Event::system_log(
                     LogLevel::Warn,
                     &config.source,
-                    format!("plugin command '{command}' failed: {error}"),
+                    format!("插件命令 '{command}' 执行失败：{error}"),
                 ));
             }
         }
@@ -735,7 +735,7 @@ fn handle_plugin_command_event(
             bus.publish(Event::system_log(
                 LogLevel::Warn,
                 &config.source,
-                format!("plugin command '{command}' payload conversion failed: {error}"),
+                format!("插件命令 '{command}' payload 转换失败：{error}"),
             ));
         }
     }
@@ -852,7 +852,7 @@ fn process_timers(lua: &Lua, bus: &DataBus, config: &LuaRunConfig) {
                 bus.publish(Event::system_log(
                     LogLevel::Warn,
                     &config.source,
-                    format!("timer error: {error}"),
+                    format!("定时器错误：{error}"),
                 ));
             }
 
@@ -900,7 +900,7 @@ fn drain_serial_rx_to_buffers(event: &Event, host_services: &LuaHostServices, bu
             LogLevel::Warn,
             &host_services.plugin_id,
             format!(
-                "serial buffer overflow on {port}: dropped {} lines, {} bytes",
+                "{port} 串口缓冲区溢出：丢弃 {} 行、{} 字节",
                 stats.lines_dropped, stats.bytes_dropped
             ),
         ));
@@ -965,11 +965,11 @@ fn install_budget_hook(lua: &Lua, timeout_ms: u64, stop: Arc<AtomicBool>) -> mlu
         mlua::HookTriggers::new().every_nth_instruction(10_000),
         move |_lua, _debug| {
             if stop.load(Ordering::Relaxed) {
-                return Err(mlua::Error::RuntimeError("script stopped".to_owned()));
+                return Err(mlua::Error::RuntimeError("脚本已停止".to_owned()));
             }
 
             if Instant::now() >= deadline {
-                return Err(mlua::Error::RuntimeError("script timeout".to_owned()));
+                return Err(mlua::Error::RuntimeError("脚本超时".to_owned()));
             }
 
             Ok(VmState::Continue)

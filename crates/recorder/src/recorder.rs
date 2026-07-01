@@ -236,7 +236,7 @@ impl JsonlRecorder {
                 bus.publish(Event::system_log(
                     LogLevel::Error,
                     "recorder",
-                    format!("flush failed: {e}"),
+                    format!("写入失败：{e}"),
                 ));
             }
 
@@ -290,7 +290,7 @@ impl JsonlRecorder {
         self.bus.publish(Event::system_log(
             LogLevel::Info,
             "recorder",
-            format!("recording to {} (mode: {:?})", path.display(), self.mode),
+            format!("正在录制到 {}（模式：{:?}）", path.display(), self.mode),
         ));
         Ok(())
     }
@@ -301,7 +301,7 @@ impl JsonlRecorder {
             self.bus.publish(Event::system_log(
                 LogLevel::Info,
                 "recorder",
-                "stopping recording...",
+                "正在停止录制...",
             ));
             worker.stop.store(true, Ordering::Relaxed);
             // 异步停止：不阻塞 UI，spin 到 Stopping 状态
@@ -339,7 +339,7 @@ impl JsonlRecorder {
             self.bus.publish(Event::system_log(
                 LogLevel::Info,
                 "recorder",
-                "recording paused",
+                "录制已暂停",
             ));
             worker.pause.store(true, Ordering::Relaxed);
             let mut s = self.stats.lock();
@@ -362,7 +362,7 @@ impl JsonlRecorder {
             self.bus.publish(Event::system_log(
                 LogLevel::Info,
                 "recorder",
-                "recording resumed",
+                "录制已恢复",
             ));
         }
     }
@@ -404,7 +404,7 @@ impl JsonlRecorder {
                         self.bus.publish(Event::system_log(
                             LogLevel::Error,
                             "recorder",
-                            format!("recording failed for {}: {e}", s.path.display()),
+                            format!("录制失败：{}：{e}", s.path.display()),
                         ));
                         return Some(Err(e));
                     }
@@ -412,7 +412,7 @@ impl JsonlRecorder {
                         self.bus.publish(Event::system_log(
                             LogLevel::Info,
                             "recorder",
-                            format!("recording saved to {}", s.path.display()),
+                            format!("录制已保存到 {}", s.path.display()),
                         ));
                         return Some(Ok(s.path));
                     }

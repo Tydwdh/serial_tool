@@ -152,7 +152,7 @@ impl WorkbenchApp {
             bus.publish(Event::system_log(
                 LogLevel::Error,
                 "ext",
-                format!("plugin discover: {e}"),
+                format!("插件发现失败：{e}"),
             ));
         }
         let recorder = JsonlRecorder::new(bus.clone());

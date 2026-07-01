@@ -264,7 +264,7 @@ pub(crate) fn process_tasks(
                 _bus.publish(Event::system_log(
                     LogLevel::Error,
                     &_config.source,
-                    format!("task '{id}' failed: {e}"),
+                    format!("任务 '{id}' 失败：{e}"),
                 ));
             }
         }
@@ -507,7 +507,7 @@ pub(crate) fn create_task_api(
             bus_start.publish(Event::system_log(
                 LogLevel::Info,
                 &src_start,
-                format!("[plugin:{}] task {} started", pid_start, id),
+                format!("[插件:{}] 任务 {} 已启动", pid_start, id),
             ));
 
             // 首次 resume：把 task_obj 传给 function(task)
@@ -551,7 +551,7 @@ pub(crate) fn create_task_api(
                 tasks_ref.publish(Event::system_log(
                     LogLevel::Info,
                     &src_cancel,
-                    format!("task {} cancelled", id),
+                    format!("任务 {} 已取消", id),
                 ));
             }
             Ok(())
@@ -672,7 +672,7 @@ pub(crate) fn cancel_all_tasks(lua: &Lua, bus: &DataBus, config: &LuaRunConfig) 
     bus.publish(Event::system_log(
         LogLevel::Info,
         &config.source,
-        format!("cancelled {} task(s)", task_ids.len()),
+        format!("已取消 {} 个任务", task_ids.len()),
     ));
 }
 
@@ -686,7 +686,7 @@ pub(crate) fn call_disable(lua: &Lua, bus: &DataBus, config: &LuaRunConfig) {
         bus.publish(Event::system_log(
             LogLevel::Warn,
             &config.source,
-            format!("on_disable error: {error}"),
+            format!("on_disable 回调错误：{error}"),
         ));
     }
 }
