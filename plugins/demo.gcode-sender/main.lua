@@ -121,10 +121,10 @@ local function parse_response(line)
     if text == "" then
         return { kind = "ok", line = text }
     end
-    -- Resend:N / rs N
+    -- Resend:N / rs N（Marlin 实际格式 "Resend: N123"，也兼容 "Resend:N123"/"Resend: 123"）
     local no = tonumber(text:match("[Rr]esend:%s*N?(%d+)"))
         or tonumber(text:match("[Rr]esend%s*N?(%d+)"))
-        or tonumber(text:match("rs%s*N?(%d+)"))
+        or tonumber(text:match("^rs%s+N?(%d+)"))
     if no then
         return { kind = "resend", no = no, line = text }
     end
@@ -132,8 +132,8 @@ local function parse_response(line)
     if text:find("Printer halted", 1, true) or text:find("Heating failed", 1, true) then
         return { kind = "terminated", line = text }
     end
-    -- OK
-    if text:lower():find("ok", 1, true) then
+    -- OK（必须行首锚定，避免 "rookie"/"Bed OK"/"echo: ok" 等含 ok 子串的行误判）
+    if text:lower():match("^ok") then
         return { kind = "ok", line = text }
     end
     -- Error
@@ -144,14 +144,16 @@ local function parse_response(line)
 end
 
 -- ── response patterns（静态，只建一次） ──
+-- pattern 经宿主 match_pat 处理：^ 前缀 = starts_with，否则 = contains。
+-- ok/resend/error 必须用 ^ 锚定，避免含子串的设备回显误匹配。
 
 local RESPONSE_PATTERNS = {
-    { name = "ok", pattern = "ok", action = "return" },
-    { name = "ok", pattern = "OK", action = "return" },
-    { name = "resend", pattern = "Resend", action = "return" },
-    { name = "rs", pattern = "rs ", action = "return" },
-    { name = "halted", pattern = "Printer halted", action = "return" },
-    { name = "heating_failed", pattern = "Heating failed", action = "return" },
+    { name = "ok", pattern = "^ok", action = "return" },
+    { name = "ok", pattern = "^OK", action = "return" }, -- 兼容 Repetier 等大写 ack
+    { name = "resend", pattern = "^Resend:", action = "return" },
+    { name = "rs", pattern = "^rs ", action = "return" },
+    { name = "halted", pattern = "^Printer halted", action = "return" },
+    { name = "heating_failed", pattern = "^Heating failed", action = "return" },
     { name = "error", pattern = "^Error", action = "return" },
     { name = "busy", pattern = "busy", action = "continue" },
     { name = "dwin", pattern = "Dwin command", action = "continue" },
@@ -176,6 +178,12 @@ end
 
 -- ── file reading ──
 
+-- 移除 G-code 括号注释 (...)。G-code 标准不支持嵌套括号，%b() 平衡匹配即可。
+-- 必须在算校验和前移除：Marlin 解析时移除括号内容，若原文带括号会导致校验和不一致。
+local function strip_parens(s)
+    return (s:gsub("%b()", ""))
+end
+
 local function clean_gcode_file(path, s)
     local lines = {}
     local skipped_long = 0
@@ -191,7 +199,8 @@ local function clean_gcode_file(path, s)
     end
 
     for raw_line in iter do
-        local clean = trim((codec.trim_line(raw_line):match("^[^;]*") or ""))
+        -- 去注释：先移除行内括号注释 (...)，再去 ; 行注释，再 trim
+        local clean = trim(strip_parens(raw_line):match("^[^;]*") or "")
         if clean == "" or clean:sub(1, 1) == "(" then
             -- skip blank / comment
         elseif clean:find("M110", 1, true) then
@@ -205,8 +214,8 @@ local function clean_gcode_file(path, s)
         end
     end
 
-    -- 确保以 M2 结束
-    if #lines > 0 and not (last_clean or ""):find("M2", 1, true) then
+    -- 确保以 M2 结束（精确匹配裸 M2，避免 M200 等子串误判）
+    if #lines > 0 and not (last_clean or ""):match("^M2%s*$") then
         lines[#lines + 1] = "M2"
     end
 
@@ -280,9 +289,12 @@ local function send_and_wait(port, wire, s, task, use_checksum)
         return { kind = "ok", line = line }
     end
 
-    -- resend
+    -- resend（序号提取与 parse_response 一致：锚定到 : 或空格后的数字）
     if name == "resend" or name == "rs" then
-        return { kind = "resend", no = tonumber(line:match("N?(%d+)")) or 0, line = line }
+        local no = tonumber(line:match(":%s*N?(%d+)"))
+            or tonumber(line:match("%sN?(%d+)"))
+            or 0
+        return { kind = "resend", no = no, line = line }
     end
 
     -- terminated
@@ -292,13 +304,11 @@ local function send_and_wait(port, wire, s, task, use_checksum)
 
     -- error: 尝试恢复
     if name == "error" then
+        -- Unknown command 往往是前一行错位/截断导致，不应当 ok 跳过（会让错位累积）。
+        -- 当作 timeout 处理：主循环会重发当前行，给设备一次纠正机会。
         if line:find("Unknown command", 1, true) then
-            log("warn", "设备不支持该 G-code，已忽略: " .. line)
-            local fu = read_followup(port, s, task)
-            if fu.kind == "resend" and use_checksum then
-                return fu
-            end
-            return { kind = "ok", line = line }
+            log("warn", "设备报告未知命令，重发当前行: " .. line)
+            return { kind = "timeout", line = line }
         end
 
         local fu = read_followup(port, s, task)
@@ -308,9 +318,8 @@ local function send_and_wait(port, wire, s, task, use_checksum)
         if fu.kind == "terminated" then
             return fu
         end
-        if fu.kind == "ok" and use_checksum then
-            return { kind = "ok", line = line }
-        end
+        -- followup 收到 ok 不能吞掉 error：可能是上一行迟到的 stale ok。
+        -- 保守按 error 处理，避免掩盖真实的设备错误（如加热失败）。
         return { kind = "error", line = line }
     end
 
@@ -323,12 +332,18 @@ local function send_start_command(port, s, task)
     local start_wire = "N0 M110 N0*" .. tostring(codec.xor8("N0 M110 N0"))
     task:set_status("同步 G-code 行号")
 
-    for attempt = 1, 10 do
+    -- M110 失败大概率是串口未连/波特率错，重试 3 次足够；间隔用 start_timeout_ms
+    -- 避免与设置脱节。每次重试前 flush，清掉上次可能的 stale 响应。
+    local max_attempts = 3
+    for attempt = 1, max_attempts do
+        if attempt > 1 then
+            ctx.serial.flush_rx(port)
+        end
         log("debug", "→ " .. start_wire)
         local resp = ctx.serial.write_line_and_expect(port, start_wire, {
             delimiter = "\n",
             timeout_ms = s.start_timeout_ms,
-            flush_before_send = false,
+            flush_before_send = false, -- 循环内已显式 flush
             patterns = RESPONSE_PATTERNS,
         })
 
@@ -341,8 +356,11 @@ local function send_start_command(port, s, task)
             return false
         end
 
-        log("warn", "M110 无响应，重试 " .. attempt .. "/10")
-        task:sleep_ms(3000)
+        if attempt < max_attempts then
+            log("warn", string.format("M110 无响应，重试 %d/%d（等待 %dms）",
+                attempt, max_attempts, s.start_timeout_ms))
+            task:sleep_ms(s.start_timeout_ms)
+        end
     end
 
     log("error", "M110 同步失败，请检查串口通信")
@@ -410,6 +428,17 @@ local function run_entries(port, entries, use_checksum, task)
             if not use_checksum then
                 log("warn", "raw 模式忽略 Resend: " .. (result.line or ""))
                 pos = pos + 1
+            elseif result.no == 0 then
+                -- Resend:0 表示设备请求重传 M110（N0），不在 entries 里。
+                -- 重新执行 M110 行号同步，然后从第 1 行继续。
+                log("warn", "设备请求重传 N0，重新同步行号")
+                ctx.serial.flush_rx(port)
+                if send_start_command(port, s, task) then
+                    pos = 1
+                else
+                    task:set_status("行号重新同步失败")
+                    return
+                end
             else
                 local resend_pos = result.no and index_by_no[result.no]
                 if not resend_pos then
@@ -418,6 +447,8 @@ local function run_entries(port, entries, use_checksum, task)
                     return
                 end
                 log("warn", "设备请求重传 N" .. tostring(result.no))
+                -- 重传前 flush，避免缓冲区残留的 stale resend/ok 误匹配
+                ctx.serial.flush_rx(port)
                 pos = resend_pos
             end
         elseif result.kind == "timeout" then
