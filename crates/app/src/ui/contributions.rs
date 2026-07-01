@@ -138,16 +138,32 @@ impl WorkbenchApp {
                 {
                     return;
                 }
+                // ProgressBar 内部 height = desired_height.unwrap_or(interact_size.y)
+                // （progress_bar.rs:115）。本项目把 interact_size.y 设为 28（bootstrap.rs:106），
+                // 而状态栏面板 exact_size(26) 可用内容高仅 22（inner_margin 上下各 2）。
+                // 于是 ProgressBar 主动占 28px > 22 可用，超出 6px 被 clip_rect 裁掉底部，
+                // 导致状态栏 label 只显示一半。add_sized 的 8.0 对 ProgressBar 无效，必须显式
+                // desired_height。再用 left_to_right(Align::Min) 包裹：cross_align=Min 时
+                // vertical_align()=Min，不触发 next_frame_ignore_wrap 里 “Center 时 frame 填到
+                // available” 的填充，避免父 Center 把 frame 抬到 22 之外。
+                let bar_height = 8.0;
+                let bar_width = 46.0;
                 let response = ui
-                    .horizontal(|ui| {
-                        let response =
-                            ui.add_sized([46.0, 8.0], egui::ProgressBar::new(value as f32));
-                        if !text.is_empty() {
-                            ui.label(egui::RichText::new(text).color(theme::TEXT_SECONDARY));
-                        }
-                        response
-                    })
+                    .allocate_ui_with_layout(
+                        egui::vec2(bar_width, bar_height),
+                        egui::Layout::left_to_right(egui::Align::Min),
+                        |ui| {
+                            ui.add(
+                                egui::ProgressBar::new(value as f32)
+                                    .desired_width(bar_width)
+                                    .desired_height(bar_height),
+                            )
+                        },
+                    )
                     .inner;
+                if !text.is_empty() {
+                    ui.label(egui::RichText::new(text).color(theme::TEXT_SECONDARY));
+                }
                 if let Some(tooltip) = item.tooltip.as_deref().filter(|t| !t.trim().is_empty()) {
                     response.on_hover_text(tooltip);
                 }
