@@ -432,17 +432,23 @@ impl WorkbenchApp {
                 if new_group_active {
                     let mut keep_open = true;
                     egui::Window::new("新建分组")
+                        .id(egui::Id::new("new-group-window"))
                         .open(&mut keep_open)
                         .resizable(false)
                         .collapsible(false)
+                        // 固定初始位置，避免每帧漂移导致 IME 候选框跳动打断中文输入。
+                        .current_pos(egui::pos2(120.0, 80.0))
                         .show(ui.ctx(), |ui| {
-                            // 自动聚焦输入框：首次打开时 request_focus
                             let resp = ui.add(
                                 egui::TextEdit::singleline(&mut new_group_name)
                                     .desired_width(160.0)
                                     .hint_text("输入组名"),
                             );
-                            resp.request_focus();
+                            // 只在未聚焦时 request_focus：每帧重复 request 会中断 IME
+                            // 组合状态，导致中文输入法候选框被打断、拼音被强制提交。
+                            if !resp.has_focus() {
+                                resp.request_focus();
+                            }
                             ui.horizontal(|ui| {
                                 if ui.button("确定").clicked()
                                     || (ui.input(|i| i.key_pressed(egui::Key::Enter))
