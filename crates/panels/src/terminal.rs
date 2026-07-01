@@ -1307,35 +1307,23 @@ fn render_rows_view(
             // 框选范围文本（移入 context_menu 闭包内按需构造，避免菜单未打开时每帧构造）
             let selected_indices: Vec<usize> = selection.selected_indices().collect();
 
+            // Ctrl+C 复制选中行：终端有选中、Ctrl+C 按下、鼠标在终端区域内时触发。
+            // 复制 full（含时间戳/端口/方向前缀），与右键菜单"复制选中行"一致。
+            if !selected_indices.is_empty()
+                && ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::C))
+                && ui.rect_contains_pointer(label_rect)
+            {
+                if let (Some(full), _) =
+                    build_selected_text(&rows, &selected_indices, show_hex, show_raw)
+                {
+                    ui.ctx().copy_text(full);
+                }
+            }
+
             ctx_response.context_menu(move |ctx_ui| {
                 // 闭包仅在菜单打开时执行，此处构造选中文本开销可接受。
-                let (selected_full, selected_data): (Option<String>, Option<String>) =
-                    (!selected_indices.is_empty())
-                        .then(|| {
-                            let full: String = selected_indices
-                                .iter()
-                                .map(|&index| &rows[index])
-                                .map(|row| {
-                                    let content_only =
-                                        visible_row_content(row, show_hex, show_raw);
-                                    let port = row.port.as_deref().unwrap_or("");
-                                    let (dir_label, _) = direction_label(row.direction);
-                                    format!(
-                                        "{} {} {} {}",
-                                        row.timestamp_label, port, dir_label, content_only
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            let data: String = selected_indices
-                                .iter()
-                                .map(|&index| &rows[index])
-                                .map(|row| visible_row_content(row, show_hex, show_raw))
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            (full, data)
-                        })
-                        .map_or((None, None), |(f, d)| (Some(f), Some(d)));
+                let (selected_full, selected_data) =
+                    build_selected_text(&rows, &selected_indices, show_hex, show_raw);
 
                 // 统一菜单：有框选用选中文本，否则用单行文本
                 let copy_full = selected_full
@@ -1534,6 +1522,37 @@ fn entry_visible(direction: Direction, show_rx: bool, show_tx: bool) -> bool {
         Direction::Tx => show_tx,
         Direction::Internal => false,
     }
+}
+
+/// 构造选中行的文本：full（含时间戳/端口/方向前缀）和 data（仅内容）。
+/// 供右键菜单和 Ctrl+C 复用。
+fn build_selected_text<'a>(
+    rows: &[VisibleRow<'a>],
+    selected_indices: &[usize],
+    show_hex: bool,
+    show_raw: bool,
+) -> (Option<String>, Option<String>) {
+    if selected_indices.is_empty() {
+        return (None, None);
+    }
+    let full: String = selected_indices
+        .iter()
+        .map(|&index| &rows[index])
+        .map(|row| {
+            let content_only = visible_row_content(row, show_hex, show_raw);
+            let port = row.port.as_deref().unwrap_or("");
+            let (dir_label, _) = direction_label(row.direction);
+            format!("{} {} {} {}", row.timestamp_label, port, dir_label, content_only)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let data: String = selected_indices
+        .iter()
+        .map(|&index| &rows[index])
+        .map(|row| visible_row_content(row, show_hex, show_raw))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (Some(full), Some(data))
 }
 
 fn row_matches_search(

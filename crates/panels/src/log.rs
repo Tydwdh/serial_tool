@@ -660,33 +660,20 @@ fn render_log_rows(
             // 框选范围文本（移入 context_menu 闭包内按需构造，避免菜单未打开时每帧构造）
             let selected_indices: Vec<usize> = selection.selected_indices().collect();
 
+            // Ctrl+C 复制选中行：有选中、Ctrl+C 按下、鼠标在日志区域内时触发。
+            // 复制 full（含时间戳/级别/来源前缀），与右键菜单"复制选中行"一致。
+            if !selected_indices.is_empty()
+                && ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::C))
+                && ui.rect_contains_pointer(label_rect)
+            {
+                if let (Some(full), _) = build_selected_text_log(&rows, &selected_indices) {
+                    ui.ctx().copy_text(full);
+                }
+            }
+
             ctx_response.context_menu(move |ctx_ui| {
-                let (selected_full, selected_data): (Option<String>, Option<String>) =
-                    (!selected_indices.is_empty())
-                        .then(|| {
-                            let full: String = selected_indices
-                                .iter()
-                                .map(|&index| rows[index])
-                                .map(|entry| {
-                                    format!(
-                                        "{} {} {} {}",
-                                        entry.timestamp_label,
-                                        entry.level.as_str(),
-                                        entry.source,
-                                        entry.message
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            let data: String = selected_indices
-                                .iter()
-                                .map(|&index| rows[index])
-                                .map(|entry| entry.message.clone())
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            (full, data)
-                        })
-                        .map_or((None, None), |(f, d)| (Some(f), Some(d)));
+                let (selected_full, selected_data) =
+                    build_selected_text_log(&rows, &selected_indices);
 
                 // 统一菜单：有框选用选中文本，否则用单行文本
                 let copy_full = selected_full
@@ -778,6 +765,38 @@ fn render_log_rows(
         content_height: scroll_output.content_size.y,
         offset_y: scroll_output.state.offset.y,
     }
+}
+
+/// 构造选中日志行的文本：full（含时间戳/级别/来源前缀）和 data（仅 message）。
+/// 供右键菜单和 Ctrl+C 复用。
+fn build_selected_text_log(
+    rows: &[&LogEntry],
+    selected_indices: &[usize],
+) -> (Option<String>, Option<String>) {
+    if selected_indices.is_empty() {
+        return (None, None);
+    }
+    let full: String = selected_indices
+        .iter()
+        .map(|&index| rows[index])
+        .map(|entry| {
+            format!(
+                "{} {} {} {}",
+                entry.timestamp_label,
+                entry.level.as_str(),
+                entry.source,
+                entry.message
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let data: String = selected_indices
+        .iter()
+        .map(|&index| rows[index])
+        .map(|entry| entry.message.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    (Some(full), Some(data))
 }
 
 fn csv_cell(s: &str) -> String {
