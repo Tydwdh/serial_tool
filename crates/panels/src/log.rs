@@ -660,11 +660,13 @@ fn render_log_rows(
             // 框选范围文本（移入 context_menu 闭包内按需构造，避免菜单未打开时每帧构造）
             let selected_indices: Vec<usize> = selection.selected_indices().collect();
 
-            // Ctrl+C 复制选中行：有选中、Ctrl+C 按下、鼠标在日志区域内时触发。
+            // Ctrl+C 复制选中行：有选中、收到 Event::Copy、且无 TextEdit 聚焦时触发。
             // 复制 full（含时间戳/级别/来源前缀），与右键菜单"复制选中行"一致。
+            // egui 0.35 把 Ctrl+C 转成 Event::Copy 事件，用 text_edit_focused 判断 TextEdit 聚焦。
+            let copy_requested = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
             if !selected_indices.is_empty()
-                && ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::C))
-                && ui.rect_contains_pointer(label_rect)
+                && copy_requested
+                && !ui.ctx().text_edit_focused()
             {
                 if let (Some(full), _) = build_selected_text_log(&rows, &selected_indices) {
                     ui.ctx().copy_text(full);
