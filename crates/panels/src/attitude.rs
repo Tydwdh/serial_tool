@@ -1,8 +1,8 @@
 use crate::theme;
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use serde_json::Value;
-use tool_core::{Event, Payload, topics};
 use std::sync::Arc;
+use tool_core::{Event, Payload, topics};
 use tool_databus::{DataBus, Subscription, TopicFilter};
 
 pub struct AttitudePanel {

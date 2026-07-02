@@ -11,11 +11,7 @@ impl WorkbenchApp {
         self.replay_panel.want_run_analyzers = false;
 
         if let Some(ref job) = self.replay_analyzer_job
-            && !job
-                .handle
-                .as_ref()
-                .map(|h| h.is_finished())
-                .unwrap_or(true)
+            && !job.handle.as_ref().map(|h| h.is_finished()).unwrap_or(true)
         {
             self.set_status(StatusLevel::Warn, "回放：analyzer 正在运行中，请等待完成");
             return;
@@ -141,12 +137,7 @@ impl WorkbenchApp {
         let Some(mut job) = self.replay_analyzer_job.take() else {
             return;
         };
-        if !job
-            .handle
-            .as_ref()
-            .map(|h| h.is_finished())
-            .unwrap_or(true)
-        {
+        if !job.handle.as_ref().map(|h| h.is_finished()).unwrap_or(true) {
             self.replay_analyzer_job = Some(job);
             return;
         }

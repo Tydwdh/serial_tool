@@ -569,16 +569,14 @@ impl TransportManager {
                 (port_name, baud_rate, join)
             })
         };
-        if let Some((port_name, baud_rate, join)) = closing_info {
+        if let Some((port_name, baud_rate, Some(join))) = closing_info {
             // 不发 closing 中间态日志：紧接着会有 closed 日志（reap_closing 时），
             // 且状态栏已显示"已断开"，避免冗余。
-            if let Some(join) = join {
-                self.closing.lock().push(ClosingHandle {
-                    port_name,
-                    baud_rate,
-                    join,
-                });
-            }
+            self.closing.lock().push(ClosingHandle {
+                port_name,
+                baud_rate,
+                join,
+            });
         }
     }
 
@@ -770,7 +768,11 @@ impl TransportManager {
                         wake.set();
                     }
                     let join = handle.join.take();
-                    Some((handle.config.port_name.clone(), handle.config.baud_rate, join))
+                    Some((
+                        handle.config.port_name.clone(),
+                        handle.config.baud_rate,
+                        join,
+                    ))
                 })
                 .collect()
         };
@@ -839,6 +841,7 @@ fn serial_worker_loop(
 }
 
 #[cfg(any(not(windows), test))]
+#[allow(clippy::too_many_arguments)]
 fn serial_worker_loop_impl(
     mut port: impl SerialIo,
     write_rx: crossbeam_channel::Receiver<Vec<u8>>,
@@ -1207,7 +1210,10 @@ mod tests {
     #[test]
     fn parse_hex_multitoken_long_token_chunks_like_single() {
         // "0A0B0C 0D"（多 token，首段 len=6）应与 "0A0B0C0D"（单 token）结果一致。
-        assert_eq!(parse_hex("0A0B0C 0D").unwrap(), vec![0x0A, 0x0B, 0x0C, 0x0D]);
+        assert_eq!(
+            parse_hex("0A0B0C 0D").unwrap(),
+            vec![0x0A, 0x0B, 0x0C, 0x0D]
+        );
         assert_eq!(parse_hex("0A0B0C0D").unwrap(), vec![0x0A, 0x0B, 0x0C, 0x0D]);
     }
 
@@ -1245,12 +1251,10 @@ mod tests {
     #[test]
     fn translate_error_covers_all_variants() {
         assert!(!translate_error(&TransportError::NoOpenPort).is_empty());
-        assert!(translate_error(&TransportError::PortNotOpen("COM3".into()))
-            .contains("COM3"));
+        assert!(translate_error(&TransportError::PortNotOpen("COM3".into())).contains("COM3"));
         assert!(!translate_error(&TransportError::WorkerClosed).is_empty());
         assert!(!translate_error(&TransportError::QueueFull).is_empty());
-        assert!(translate_error(&TransportError::InvalidHex("bad".into()))
-            .contains("bad"));
+        assert!(translate_error(&TransportError::InvalidHex("bad".into())).contains("bad"));
     }
 
     #[test]
@@ -1586,7 +1590,9 @@ mod transport_tests {
         let bus = DataBus::new();
         let tm = TransportManager::new(bus);
         // 塞入一个 alive、一个 dead。
-        tm.ports.lock().insert("COM3".to_owned(), make_test_handle(true));
+        tm.ports
+            .lock()
+            .insert("COM3".to_owned(), make_test_handle(true));
         tm.ports
             .lock()
             .insert("COM4".to_owned(), make_test_handle(false));

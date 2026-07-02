@@ -1312,22 +1312,21 @@ fn render_rows_view(
             // egui 0.35 把 Ctrl+C 转成 Event::Copy 事件（而非 Event::Key{C}），
             // 用 text_edit_focused 判断 TextEdit 聚焦（egui_wants_keyboard_input 过于宽泛，
             // 任何控件聚焦都返回 true）。
-            let copy_requested = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+            let copy_requested =
+                ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
             if !selected_indices.is_empty()
                 && copy_requested
                 && !ui.ctx().text_edit_focused()
+                && let (Some(full), _) =
+                    build_selected_text(rows, &selected_indices, show_hex, show_raw)
             {
-                if let (Some(full), _) =
-                    build_selected_text(&rows, &selected_indices, show_hex, show_raw)
-                {
-                    ui.ctx().copy_text(full);
-                }
+                ui.ctx().copy_text(full);
             }
 
             ctx_response.context_menu(move |ctx_ui| {
                 // 闭包仅在菜单打开时执行，此处构造选中文本开销可接受。
                 let (selected_full, selected_data) =
-                    build_selected_text(&rows, &selected_indices, show_hex, show_raw);
+                    build_selected_text(rows, &selected_indices, show_hex, show_raw);
 
                 // 统一菜单：有框选用选中文本，否则用单行文本
                 let copy_full = selected_full
@@ -1546,7 +1545,10 @@ fn build_selected_text<'a>(
             let content_only = visible_row_content(row, show_hex, show_raw);
             let port = row.port.as_deref().unwrap_or("");
             let (dir_label, _) = direction_label(row.direction);
-            format!("{} {} {} {}", row.timestamp_label, port, dir_label, content_only)
+            format!(
+                "{} {} {} {}",
+                row.timestamp_label, port, dir_label, content_only
+            )
         })
         .collect::<Vec<_>>()
         .join("\n");

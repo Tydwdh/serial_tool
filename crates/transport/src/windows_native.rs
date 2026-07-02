@@ -8,10 +8,10 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 
+use crate::RepaintWaker;
 use crossbeam_channel::Receiver;
 use tool_core::{Event, LogLevel};
 use tool_databus::DataBus;
-use crate::RepaintWaker;
 use windows_sys::Win32::Devices::Communication::{
     CLRDTR, CLRRTS, COMMTIMEOUTS, COMSTAT, DCB, EVENPARITY, EscapeCommFunction, GetCommState,
     NOPARITY, ODDPARITY, ONESTOPBIT, PURGE_RXABORT, PURGE_RXCLEAR, PURGE_TXABORT, PURGE_TXCLEAR,
@@ -125,6 +125,7 @@ impl Drop for NativeSerialPort {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_native_serial_worker(
     config: &SerialConfig,
     write_rx: Receiver<Vec<u8>>,

@@ -155,7 +155,10 @@ impl WorkbenchApp {
                 let remaining = (pending.next_try_at - now).max(0.0);
                 let label = format!(
                     "⟳ 重连中 {} {:.1}s ({}/{})",
-                    pending.port_name, remaining, pending.attempts + 1, 10
+                    pending.port_name,
+                    remaining,
+                    pending.attempts + 1,
+                    10
                 );
                 ui.label(egui::RichText::new(label).color(theme::YELLOW))
                     .on_hover_text("点击关闭按钮可取消等待重连");

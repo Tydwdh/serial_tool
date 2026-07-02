@@ -281,9 +281,11 @@ mod tests {
     #[test]
     fn from_hex_strips_underscores_and_dashes() {
         let lua = setup();
-        lua.load("local c = require('hw.codec'); assert(c.from_hex('AA_BB-CC') == '\\xAA\\xBB\\xCC')")
-            .exec()
-            .unwrap();
+        lua.load(
+            "local c = require('hw.codec'); assert(c.from_hex('AA_BB-CC') == '\\xAA\\xBB\\xCC')",
+        )
+        .exec()
+        .unwrap();
     }
 
     #[test]

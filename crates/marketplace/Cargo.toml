@@ -1,0 +1,18 @@
+[package]
+name = "tool-marketplace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "tool_marketplace"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+log.workspace = true
+tool-updater = { path = "../updater" }
+
+[dev-dependencies]
+tempfile = "3"

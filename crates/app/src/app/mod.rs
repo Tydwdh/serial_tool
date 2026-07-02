@@ -3,7 +3,6 @@ use crate::config::{ConfigLoadResult, PersistedConfig, default_recorder_path, lo
 use crate::state::{MAX_SEND_HISTORY, SendUiState, SerialUiState, StatusState, UpdateState};
 use eframe::egui;
 use std::collections::{BTreeSet, VecDeque};
-use std::path::PathBuf;
 use std::sync::Arc;
 use tool_core::{Event, LogLevel};
 use tool_databus::DataBus;
@@ -73,10 +72,16 @@ pub(crate) struct WorkbenchApp {
     /// 插件 summaries 帧级缓存：每帧首次需要时计算一次，避免 ui_contribution_slot
     /// 在 top_bar/status_bar/bottom_panel 每帧共 5+ 次重复全量 clone manifest + 命令对账。
     /// 在 tick_pre_ui 开头 take() 重置。
-    pub(crate) plugin_summaries_cache:
-        std::cell::OnceCell<Vec<tool_extension::PluginSummary>>,
+    pub(crate) plugin_summaries_cache: std::cell::OnceCell<Vec<tool_extension::PluginSummary>>,
     /// 等宽字体大小（终端/日志区），默认 13.0
     pub(crate) monospace_font_size: f32,
+    /// 市场索引 URL（None 表示用默认）。
+    pub(crate) marketplace_url: Option<String>,
+    /// 市场索引刷新后台线程句柄。
+    pub(crate) marketplace_refresh_job:
+        Option<std::thread::JoinHandle<Result<tool_marketplace::Registry, String>>>,
+    /// 市场插件安装后台任务句柄。
+    pub(crate) marketplace_install_job: Option<crate::runtime::marketplace::MarketplaceInstallJob>,
 }
 
 pub(crate) struct ReplayAnalyzerJob {
@@ -91,7 +96,8 @@ impl Drop for ReplayAnalyzerJob {
         // 退出时取消 analyzer 线程并尝试 join（带超时，避免卡住 drop）。
         // analyzer 线程有 budget hook（30_000 指令）+ cancel 检查，最终会终止；
         // 此处 join 只为回收资源、避免 detach。
-        self.cancel.store(true, std::sync::atomic::Ordering::Release);
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Release);
         if let Some(handle) = self.handle.take() {
             // 短轮询等待最多 ~2s，超时则放弃 join（线程最终会自行退出）。
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -148,7 +154,11 @@ impl WorkbenchApp {
         pm.set_host_services(dialog_sender, file_broker.clone());
 
         let plugin_dir = app_dir().join("plugins");
-        if let Err(e) = pm.discover_roots([plugin_dir, PathBuf::from("plugins")]) {
+        // 启动时清理上次安装可能残留的 <id>.old.<pid>/ 暂存目录（新版本已就位、旧目录未及删除）。
+        tool_marketplace::retire_old_plugin_dirs(&plugin_dir);
+        // 只扫安装目录（跟随 exe）。不再扫 cwd/plugins/——生产期 cwd 不可控，
+        // 且会与安装目录的同名插件冲突。
+        if let Err(e) = pm.discover_roots([plugin_dir]) {
             bus.publish(Event::system_log(
                 LogLevel::Error,
                 "ext",
@@ -300,6 +310,9 @@ impl WorkbenchApp {
                 .as_ref()
                 .map(|c| c.monospace_font_size.clamp(10.0, 24.0))
                 .unwrap_or(13.0),
+            marketplace_url: None,
+            marketplace_refresh_job: None,
+            marketplace_install_job: None,
         };
         // 从配置恢复等宽字体大小
         app.terminal_panel.font_size = app.monospace_font_size;

@@ -23,7 +23,7 @@ pub use dynamic::{
 pub use gauge::GaugePanel;
 pub use log::LogPanel;
 pub use manager::{Activity, DockArea, DockLayout, DockStack, PanelKind, PanelManager};
-pub use plugins::PluginsPanel;
+pub use plugins::{MarketplaceState, PluginPanelEvent, PluginTab, PluginsPanel};
 pub use replay::ReplayPanel;
 pub use sender::SenderPanel;
 pub use table::RowSelection;

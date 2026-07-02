@@ -31,10 +31,24 @@ const UPDATE_HELPER_LAUNCH_RETRY_INTERVAL: Duration = Duration::from_millis(100)
 const GITHUB_UPDATE_HOSTS: &[&str] = &["raw.githubusercontent.com", "github.com"];
 
 fn update_http_client_with_proxy(proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
+    // 安全：自定义重定向策略——每次跳转前重新校验目标 host 在下载白名单内。
+    // 默认 Policy 会无差别跟随最多 10 次重定向，可被「初始 URL 过白名单 + 302 跳到攻击者域」绕过。
+    // 此处放行 GitHub raw→objects.githubusercontent.com 这类正常跳转，拒绝跳到白名单外域。
+    let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
+        let host = attempt.url().host_str().unwrap_or("");
+        if is_allowed_download_host(host) {
+            attempt.follow()
+        } else {
+            log::warn!("updater: 拒绝重定向到非白名单域 {host}");
+            attempt.stop()
+        }
+    });
+
     let mut builder = reqwest::Client::builder()
         .user_agent(UPDATE_USER_AGENT)
         .connect_timeout(UPDATE_CONNECT_TIMEOUT)
-        .timeout(UPDATE_REQUEST_TIMEOUT);
+        .timeout(UPDATE_REQUEST_TIMEOUT)
+        .redirect(redirect_policy);
 
     if let Some(proxy_url) = proxy_url {
         log::info!("updater: 使用代理 {}", redact_proxy_url(proxy_url));
@@ -50,7 +64,12 @@ fn update_http_client_with_proxy(proxy_url: Option<&str>) -> Result<reqwest::Cli
         .map_err(|e| format!("构建 HTTP 客户端失败：{}", describe_reqwest_error(&e)))
 }
 
-pub(crate) async fn send_update_get(url: &str) -> Result<reqwest::Response, String> {
+/// 判断 host 是否在下载白名单内（供 redirect Policy 与 validate_download_url 共用）。
+fn is_allowed_download_host(host: &str) -> bool {
+    DOWNLOAD_HOST_WHITELIST.contains(&host)
+}
+
+pub async fn send_update_get(url: &str) -> Result<reqwest::Response, String> {
     let configured_proxy = explicit_proxy_url();
     let client = update_http_client_with_proxy(configured_proxy.as_deref())?;
 
@@ -626,7 +645,7 @@ fn apply_pending_update_impl(
 }
 
 /// 解压 zip 文件到指定目录。
-fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), String> {
+pub fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), String> {
     let file = std::fs::File::open(zip_path).map_err(|e| format!("打开 zip 失败：{e}"))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("读取 zip 失败：{e}"))?;
 
@@ -639,6 +658,49 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), String> {
             Some(path) => dest.join(path),
             None => continue,
         };
+
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out_path)
+                .map_err(|e| format!("创建目录 {} 失败：{e}", out_path.display()))?;
+        } else {
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("创建父目录 {} 失败：{e}", parent.display()))?;
+            }
+            let mut outfile = std::fs::File::create(&out_path)
+                .map_err(|e| format!("创建文件 {} 失败：{e}", out_path.display()))?;
+            io::copy(&mut entry, &mut outfile)
+                .map_err(|e| format!("写入文件 {} 失败：{e}", out_path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// 解压 zip 并在落盘前拒绝危险可执行扩展名（纵深防御）。
+///
+/// 与 [`extract_zip`] 的区别：每个文件写入前调用 [`is_unsafe_resource_extension`]，
+/// 防止 zip 投递 dll/exe 等可被侧加载的文件。供 marketplace 安装第三方插件时复用。
+pub fn extract_zip_filtered(zip_path: &Path, dest: &Path) -> Result<(), String> {
+    let file = std::fs::File::open(zip_path).map_err(|e| format!("打开 zip 失败：{e}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("读取 zip 失败：{e}"))?;
+
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("读取 zip 条目 {i} 失败：{e}"))?;
+
+        let out_path = match entry.enclosed_name() {
+            Some(path) => dest.join(path),
+            None => continue,
+        };
+
+        if !entry.is_dir() && is_unsafe_resource_extension(&out_path) {
+            log::warn!(
+                "updater: 解压时跳过可疑可执行文件 {}（扩展名被拒）",
+                out_path.display()
+            );
+            continue;
+        }
 
         if entry.is_dir() {
             std::fs::create_dir_all(&out_path)
@@ -731,7 +793,12 @@ fn is_unsafe_resource_extension(path: &Path) -> bool {
     match path.extension().and_then(|e| e.to_str()) {
         Some(ext) => matches!(
             ext.to_ascii_lowercase().as_str(),
-            "dll" | "exe" | "sys" | "cpl" | "ocx" | "drv" | "scr" | "bat" | "cmd" | "ps1" | "vbs"
+            // 原生可执行映像 / 驱动
+            "dll" | "exe" | "sys" | "cpl" | "ocx" | "drv" | "scr" | "com" | "pif"
+            // 脚本宿主（WSH / mshta）可加载执行
+            | "bat" | "cmd" | "ps1" | "vbs" | "hta" | "js" | "jse" | "wsf" | "wsh"
+            // 快捷方式 / URL 文件可侧加载
+            | "lnk" | "url" | "scf"
         ),
         None => false,
     }
@@ -789,7 +856,7 @@ const DOWNLOAD_HOST_WHITELIST: &[&str] = &[
     "objects.githubusercontent.com", // GitHub release 附件实际下载域
 ];
 
-fn validate_download_url(url: &str) -> Result<(), String> {
+pub fn validate_download_url(url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|_| format!("下载 URL 格式无效：{url}"))?;
     if parsed.scheme() != "https" {
         return Err(format!(
@@ -798,7 +865,7 @@ fn validate_download_url(url: &str) -> Result<(), String> {
         ));
     }
     let host = parsed.host_str().unwrap_or("");
-    if !DOWNLOAD_HOST_WHITELIST.iter().any(|&allowed| host == allowed) {
+    if !is_allowed_download_host(host) {
         return Err(format!(
             "下载 URL 的域名 {host} 不在允许列表内，疑似被篡改的更新源"
         ));
@@ -814,26 +881,50 @@ pub async fn download_update(url: &str, on_progress: impl Fn(u64, u64)) -> Resul
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建更新目录失败：{e}"))?;
 
     let zip_path = downloaded_zip_path();
-    let part_path = zip_path.with_extension("zip.part");
 
     // 旧版本可能留下已下载 zip 或半截 .part。下载新版本前先清掉，
     // 避免把旧 zip 的 hash 写进新版本 manifest。
     let _ = std::fs::remove_file(&zip_path);
+    let _ = std::fs::remove_file(zip_path.with_extension("zip.part"));
+
+    let hash = download_to_file(url, &zip_path, on_progress).await?;
+
+    // download_to_file 内部已通过 .part 原子 rename 到 zip_path。
+    Ok(hash)
+}
+
+/// 通用下载：把 URL 内容下载到 `dest_path`，流式写入并同步计算 SHA256，返回哈希值。
+///
+/// - 安全：调用前应自行调用 `validate_download_url`（本函数不重复校验，供已校验场景复用）。
+/// - 原子性：先写 `dest_path + ".part"`，完成后 rename 到 `dest_path`。
+/// - 进度：`on_progress(downloaded, total)`，total 为 0 时表示未知长度。
+///
+/// marketplace 与 updater 共用此实现，避免重复大依赖（reqwest/tokio）与代理/DNS 逻辑。
+pub async fn download_to_file(
+    url: &str,
+    dest_path: &Path,
+    on_progress: impl Fn(u64, u64),
+) -> Result<String, String> {
+    if let Some(parent) = dest_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建下载目录失败：{e}"))?;
+    }
+
+    let part_path = dest_path.with_extension("zip.part");
+    // 清理可能残留的半截 .part。
     let _ = std::fs::remove_file(&part_path);
 
     let mut resp = send_update_get(url)
         .await
-        .map_err(|e| format!("下载更新失败：{e}"))?;
+        .map_err(|e| format!("下载失败：{e}"))?;
 
     if !resp.status().is_success() {
-        return Err(format!("下载更新返回状态码 {}", resp.status()));
+        return Err(format!("下载返回状态码 {}", resp.status()));
     }
 
     let total = resp.content_length().unwrap_or(0);
     let mut downloaded: u64 = 0;
     let mut hasher = Sha256::new();
 
-    // 临时文件：先下载到 .part，完成后 rename
     let mut part_file =
         std::fs::File::create(&part_path).map_err(|e| format!("创建临时下载文件失败：{e}"))?;
 
@@ -868,7 +959,7 @@ pub async fn download_update(url: &str, on_progress: impl Fn(u64, u64)) -> Resul
     drop(part_file);
 
     // 重命名 .part → 最终文件名
-    if let Err(e) = std::fs::rename(&part_path, &zip_path) {
+    if let Err(e) = std::fs::rename(&part_path, dest_path) {
         cleanup_partial_download(&part_path);
         return Err(format!("重命名下载文件失败：{e}"));
     }
@@ -897,8 +988,7 @@ pub fn write_update_manifest(version: &str, sha256: &str) -> Result<(), String> 
     let tmp_path = manifest_path.with_extension("json.tmp");
     std::fs::write(&tmp_path, &data).map_err(|e| format!("写入临时文件失败：{e}"))?;
     // 同目录 rename 是原子的（同一卷）。
-    std::fs::rename(&tmp_path, &manifest_path)
-        .map_err(|e| format!("重命名 manifest 失败：{e}"))?;
+    std::fs::rename(&tmp_path, &manifest_path).map_err(|e| format!("重命名 manifest 失败：{e}"))?;
     Ok(())
 }
 
@@ -1053,18 +1143,19 @@ mod tests {
     // ── #2: 下载 URL 域白名单 + https 强制 ──
     #[test]
     fn validate_download_url_accepts_github_https() {
-        assert!(validate_download_url(
-            "https://github.com/Tydwdh/serial_tool/releases/download/v0.4.2/app.zip"
-        )
-        .is_ok());
-        assert!(validate_download_url(
-            "https://objects.githubusercontent.com/abc/pkg.zip"
-        )
-        .is_ok());
-        assert!(validate_download_url(
-            "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/update.json"
-        )
-        .is_ok());
+        assert!(
+            validate_download_url(
+                "https://github.com/Tydwdh/serial_tool/releases/download/v0.4.2/app.zip"
+            )
+            .is_ok()
+        );
+        assert!(validate_download_url("https://objects.githubusercontent.com/abc/pkg.zip").is_ok());
+        assert!(
+            validate_download_url(
+                "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/update.json"
+            )
+            .is_ok()
+        );
     }
 
     #[test]

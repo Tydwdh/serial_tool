@@ -15,6 +15,7 @@ serde_json.workspace = true
 tool-core = { path = "../core" }
 tool-databus = { path = "../databus" }
 tool-extension = { path = "../extension" }
+tool-marketplace = { path = "../marketplace" }
 tool-recorder = { path = "../recorder" }
 tool-transport = { path = "../transport" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

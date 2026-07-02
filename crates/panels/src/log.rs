@@ -175,11 +175,7 @@ impl LogPanel {
             let case_btn = egui::Button::new("Aa")
                 .selected(self.search_case_sensitive)
                 .small();
-            if ui
-                .add(case_btn)
-                .on_hover_text("区分大小写")
-                .clicked()
-            {
+            if ui.add(case_btn).on_hover_text("区分大小写").clicked() {
                 self.search_case_sensitive = !self.search_case_sensitive;
             }
 
@@ -663,19 +659,19 @@ fn render_log_rows(
             // Ctrl+C 复制选中行：有选中、收到 Event::Copy、且无 TextEdit 聚焦时触发。
             // 复制 full（含时间戳/级别/来源前缀），与右键菜单"复制选中行"一致。
             // egui 0.35 把 Ctrl+C 转成 Event::Copy 事件，用 text_edit_focused 判断 TextEdit 聚焦。
-            let copy_requested = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+            let copy_requested =
+                ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
             if !selected_indices.is_empty()
                 && copy_requested
                 && !ui.ctx().text_edit_focused()
+                && let (Some(full), _) = build_selected_text_log(rows, &selected_indices)
             {
-                if let (Some(full), _) = build_selected_text_log(&rows, &selected_indices) {
-                    ui.ctx().copy_text(full);
-                }
+                ui.ctx().copy_text(full);
             }
 
             ctx_response.context_menu(move |ctx_ui| {
                 let (selected_full, selected_data) =
-                    build_selected_text_log(&rows, &selected_indices);
+                    build_selected_text_log(rows, &selected_indices);
 
                 // 统一菜单：有框选用选中文本，否则用单行文本
                 let copy_full = selected_full

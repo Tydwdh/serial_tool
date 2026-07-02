@@ -2,8 +2,8 @@ use crate::theme;
 use egui::{Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
-use tool_core::{Event, Payload};
 use std::sync::Arc;
+use tool_core::{Event, Payload};
 use tool_databus::{DataBus, Subscription, TopicFilter};
 
 const MAX_CHART_EVENTS_PER_FRAME: usize = 1_000;

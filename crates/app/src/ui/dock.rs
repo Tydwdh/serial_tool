@@ -199,20 +199,11 @@ impl WorkbenchApp {
                     .show(ui, |ui| self.replay_panel.ui(ui));
             }
             PanelKind::Plugins => {
-                egui::ScrollArea::vertical()
+                let events = egui::ScrollArea::vertical()
                     .id_salt("scroll-plugins")
-                    .show(ui, |ui| {
-                        if let Some((msg, is_error)) =
-                            self.plugins_panel.ui(ui, &mut self.plugin_manager)
-                        {
-                            let level = if is_error {
-                                StatusLevel::Error
-                            } else {
-                                StatusLevel::Info
-                            };
-                            self.set_status_force(level, msg);
-                        }
-                    });
+                    .show(ui, |ui| self.plugins_panel.ui(ui, &mut self.plugin_manager))
+                    .inner;
+                self.handle_plugin_panel_events(events);
             }
             PanelKind::Settings => {
                 egui::ScrollArea::vertical()
@@ -254,6 +245,41 @@ impl WorkbenchApp {
                         .show(ui, |ui| self.dynamic_panels.ui_body(ui, &id));
                 } else {
                     ui.colored_label(theme::RED, format!("动态面板不存在：{id}"));
+                }
+            }
+        }
+    }
+
+    /// 处理插件面板产生的事件（状态反馈 / 刷新市场 / 安装插件）。
+    fn handle_plugin_panel_events(&mut self, events: Vec<tool_panels::PluginPanelEvent>) {
+        for event in events {
+            use tool_panels::PluginPanelEvent as Ev;
+            match event {
+                Ev::Status(msg, is_error) => {
+                    let level = if is_error {
+                        StatusLevel::Error
+                    } else {
+                        StatusLevel::Info
+                    };
+                    self.set_status_force(level, msg);
+                }
+                Ev::RefreshMarket => {
+                    self.start_marketplace_refresh();
+                }
+                Ev::InstallPlugin(id) => {
+                    // 从面板缓存的 registry 中查找对应条目，转交后台安装。
+                    match self.plugins_panel.find_market_plugin(&id) {
+                        Some(entry) => self.start_marketplace_install(entry),
+                        None => {
+                            self.set_status(
+                                StatusLevel::Warn,
+                                format!("找不到插件 {id} 的市场条目，请先刷新市场"),
+                            );
+                        }
+                    }
+                }
+                Ev::UninstallPlugin(id) => {
+                    self.uninstall_plugin(&id);
                 }
             }
         }

@@ -6,6 +6,7 @@
 
 mod autosave;
 mod keys;
+pub(crate) mod marketplace;
 mod periodic_send;
 mod plugin;
 mod port_refresh;
@@ -27,6 +28,7 @@ impl WorkbenchApp {
         self.tick_terminal_maximize();
         self.tick_replay(ctx);
         self.tick_plugin_lifecycle();
+        self.sync_marketplace_installed_ids();
         self.handle_keys(ctx);
         self.flush_pending_action();
         self.tick_key_recording(ctx);
@@ -34,6 +36,7 @@ impl WorkbenchApp {
         self.tick_periodic_send(ctx);
         self.tick_auto_save(ctx);
         self.tick_update();
+        self.tick_marketplace();
     }
 
     pub(crate) fn tick_post_ui(&mut self, ctx: &egui::Context) {

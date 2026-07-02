@@ -336,11 +336,8 @@ impl JsonlRecorder {
                 Direction::Internal,
                 Payload::Text("paused".to_owned()),
             ));
-            self.bus.publish(Event::system_log(
-                LogLevel::Info,
-                "recorder",
-                "录制已暂停",
-            ));
+            self.bus
+                .publish(Event::system_log(LogLevel::Info, "recorder", "录制已暂停"));
             worker.pause.store(true, Ordering::Relaxed);
             let mut s = self.stats.lock();
             s.paused = true;
@@ -359,11 +356,8 @@ impl JsonlRecorder {
                 Direction::Internal,
                 Payload::Text("resumed".to_owned()),
             ));
-            self.bus.publish(Event::system_log(
-                LogLevel::Info,
-                "recorder",
-                "录制已恢复",
-            ));
+            self.bus
+                .publish(Event::system_log(LogLevel::Info, "recorder", "录制已恢复"));
         }
     }
 
