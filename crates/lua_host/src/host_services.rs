@@ -149,6 +149,18 @@ impl LineBuffer {
     pub(crate) fn next_line(&mut self) -> Option<String> {
         self.lines.pop_front()
     }
+
+    /// 把一行回灌到队首（恢复 next_line 取出的顺序）。
+    ///
+    /// 用于 `write_line_and_expect` 的匹配循环：发送后从缓冲区 drain 出若干行
+    /// 逐个匹配 pattern，**不匹配的行不能丢弃**——否则噪声行会把后续真正的
+    /// ok/ack 一起挤掉，导致命令反复超时重发。回灌后下个 tick 仍能取到。
+    /// 传入的行按"取出顺序"的反序 push_front，从而恢复原始队列顺序。
+    pub(crate) fn push_front_lines(&mut self, lines: Vec<String>) {
+        for line in lines.into_iter().rev() {
+            self.lines.push_front(line);
+        }
+    }
 }
 
 /// 跨组件共享的行缓冲区映射。
