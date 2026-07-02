@@ -1,6 +1,6 @@
 {
-  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v0.5.0/hardware-workbench-app.zip",
-  "date": "2026-07-02",
+  "version": "0.5.1",
+  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v0.5.1/hardware-workbench-app.zip",
   "changelog": [],
-  "version": "0.5.0"
+  "date": "2026-07-02"
 }
