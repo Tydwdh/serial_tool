@@ -156,20 +156,105 @@ fn fallback_proxy_url() -> Option<String> {
 
 #[cfg(windows)]
 fn windows_internet_settings_proxy_url() -> Option<String> {
-    let output = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "$p=(Get-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings').ProxyServer; if ($p) { [Console]::Out.Write($p) }",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
+    use windows_sys::Win32::System::Registry::{
+        HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
+    };
+
+    const SUBKEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
+    let subkey_utf16: Vec<u16> = SUBKEY.encode_utf16().chain(std::iter::once(0)).collect();
+
+    // 安全：直接读注册表而非 spawn powershell，避免 GUI 进程启动控制台子进程
+    // 导致黑窗一闪（powershell.exe 是控制台子系统程序）。
+    let mut hkey = std::ptr::null_mut();
+    let status = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            subkey_utf16.as_ptr(),
+            0,
+            KEY_READ,
+            &mut hkey,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    // RAII 关闭句柄
+    struct RegGuard(*mut std::ffi::c_void);
+    impl Drop for RegGuard {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { RegCloseKey(self.0) };
+            }
+        }
+    }
+    let _guard = RegGuard(hkey);
+
+    // 先读 ProxyEnable(DWORD)：仅当为 1 时才使用系统代理
+    let mut enable: u32 = 0;
+    let mut enable_len: u32 = std::mem::size_of::<u32>() as u32;
+    let mut enable_type: u32 = 0;
+    let enable_name: Vec<u16> = "ProxyEnable\0".encode_utf16().collect();
+    let status = unsafe {
+        RegQueryValueExW(
+            hkey,
+            enable_name.as_ptr(),
+            std::ptr::null(),
+            &mut enable_type,
+            &mut enable as *mut u32 as *mut u8,
+            &mut enable_len,
+        )
+    };
+    // ProxyEnable 不是 1 则视为未启用系统代理
+    if status != 0 || enable != 1 {
         return None;
     }
 
-    let proxy = String::from_utf8_lossy(&output.stdout);
+    // 读 ProxyServer(REG_SZ)
+    let server_name: Vec<u16> = "ProxyServer\0".encode_utf16().collect();
+    let mut server_type: u32 = 0;
+    // 先查长度
+    let mut buf_len: u32 = 0;
+    let status = unsafe {
+        RegQueryValueExW(
+            hkey,
+            server_name.as_ptr(),
+            std::ptr::null(),
+            &mut server_type,
+            std::ptr::null_mut(),
+            &mut buf_len,
+        )
+    };
+    if status != 0 || buf_len == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; buf_len as usize];
+    let status = unsafe {
+        RegQueryValueExW(
+            hkey,
+            server_name.as_ptr(),
+            std::ptr::null(),
+            &mut server_type,
+            buf.as_mut_ptr(),
+            &mut buf_len,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    // REG_SZ 可能以 null 结尾；去掉末尾的 0
+    while buf.len() >= 2 {
+        let last = buf.len() - 2;
+        if buf[last] == 0 && buf[last + 1] == 0 {
+            buf.truncate(last);
+        } else {
+            break;
+        }
+    }
+    let proxy = String::from_utf16_lossy(
+        &buf.chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect::<Vec<u16>>(),
+    );
     proxy_server_value_to_url(proxy.trim())
 }
 
@@ -403,6 +488,33 @@ fn launch_update_helper_elevated(_helper_path: &Path, _target_exe: &Path) -> Res
     Err("当前平台不支持请求管理员权限".into())
 }
 
+/// 探测目标 exe 所在目录当前用户是否有写权限。
+///
+/// 用于在启动 helper 前判断是否需要提权：安装到 Program Files 时普通用户对
+/// 该目录无写权限，helper（普通权限）替换 exe（需在目录内重命名/创建文件）
+/// 会失败。直接对运行中的 exe 做 open(write) 在 Windows 会因共享违例失败，
+/// 即使有权限也判否，故改为在 exe 同目录尝试创建临时文件来探测目录可写性。
+/// 不可写 ⇒ 需要 elevated。
+fn exe_is_writable(target_exe: &Path) -> bool {
+    let Some(dir) = target_exe.parent() else {
+        return false;
+    };
+    let probe = dir.join(format!(
+        ".hw_update_probe_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// 复制当前 exe 为临时 helper，并启动 helper 负责替换目标 exe。
 pub fn launch_update_helper(target_exe: &Path) -> Result<(), String> {
     let helper_dir = update_helper_dir();
@@ -430,6 +542,22 @@ pub fn launch_update_helper(target_exe: &Path) -> Result<(), String> {
         helper_path.display(),
         target_exe.display()
     ));
+
+    // 提前探测目标 exe 是否可写。安装到 Program Files 时，普通用户无写权限，
+    // helper（普通权限）反复 std::fs::copy 替换 exe 必然失败、重试 30s 后退出，
+    // 而主程序早已 exit 无法转 elevated。故此处不可写时直接走 elevated（runas），
+    // 让 helper 以管理员权限运行，一次成功。可写时走普通启动路径。
+    if !exe_is_writable(target_exe) {
+        append_update_helper_log(
+            "target exe not writable by current user; requesting elevation upfront",
+        );
+        return launch_update_helper_elevated(&helper_path, target_exe).map_err(|e| {
+            format!(
+                "请求管理员权限启动 updater helper 失败：{e}。日志：{}",
+                update_helper_log_path().display()
+            )
+        });
+    }
 
     let deadline = Instant::now() + UPDATE_HELPER_LAUNCH_TIMEOUT;
     loop {
