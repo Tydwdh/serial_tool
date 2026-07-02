@@ -15,12 +15,34 @@ use crate::globals::{
 };
 use crate::host_services::{LuaHostServices, line_buffer_key};
 
-/// 简单 Lua pattern 匹配：支持 ^ 锚点和子串匹配。
+/// 简单 Lua pattern 匹配：支持 `^` 锚点和子串匹配。
+///
+/// `^xxx`：行首匹配。部分固件（如某些 Marlin 分支）会在每行响应前加一个
+/// `(数字)` 调试/时间戳前缀（如 `(0.00000)ok*43`）。为兼容这类固件，`^` 锚定
+/// 会先跳过行首一个可选的 `(...)` 前缀（以 `(` 开头、`)` 结尾、内部无换行），
+/// 再做 starts_with。行首无 `(` 时行为不变，向后兼容。
+///
+/// 无 `^`：子串匹配（contains）。
 pub(crate) fn match_pat(line: &str, pat: &str) -> bool {
     if let Some(suffix) = pat.strip_prefix('^') {
-        line.starts_with(suffix)
+        // 跳过行首可选的 (...) 前缀，兼容带 (0.00000) 前缀的固件响应。
+        let after_prefix = strip_leading_paren_prefix(line);
+        after_prefix.starts_with(suffix)
     } else {
         line.contains(pat)
+    }
+}
+
+/// 若 `line` 以 `(...)` 开头（`(` 到第一个 `)`，内部无换行），返回去掉该前缀
+/// 后的剩余部分；否则原样返回。
+fn strip_leading_paren_prefix(line: &str) -> &str {
+    if line.starts_with('(')
+        && let Some(close) = line.find(')')
+    {
+        // 前缀内不能跨行（find 到的 ) 必须在同一行内，line 本身已是单行）
+        &line[close + 1..]
+    } else {
+        line
     }
 }
 
@@ -654,4 +676,47 @@ end
         .set_name("serial-blocking-wrappers")
         .eval()?;
     install.call::<()>(serial.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn match_pat_anchor_matches_plain_line() {
+        // 行首无 (...) 前缀：行为与原 starts_with 一致
+        assert!(match_pat("ok*43", "^ok"));
+        assert!(match_pat("ok", "^ok"));
+        assert!(!match_pat("rookie", "^ok"));
+        assert!(!match_pat("Bed OK", "^ok"));
+    }
+
+    #[test]
+    fn match_pat_anchor_skips_paren_prefix() {
+        // 部分 Marlin 分支给每行加 (数字) 前缀，^ 锚定应跳过它
+        assert!(match_pat("(0.00000)ok*43", "^ok"));
+        assert!(match_pat("(2.00000)Resend: N5", "^Resend:"));
+        assert!(match_pat("(1.00000)Error:Printer halted", "^Error"));
+        assert!(match_pat("(0.00000)OK", "^OK"));
+    }
+
+    #[test]
+    fn match_pat_anchor_with_paren_prefix_still_precise() {
+        // 跳过前缀后仍需精确 starts_with，避免误匹配
+        assert!(!match_pat("(0.00000)rookie", "^ok"));
+        assert!(!match_pat("(0.00000)Bed OK", "^ok"));
+    }
+
+    #[test]
+    fn match_pat_substring_unaffected() {
+        // 无 ^ 的 pattern 走 contains，不受前缀跳过影响
+        assert!(match_pat("(0.00000)echo:busy: processing", "busy"));
+        assert!(!match_pat("(0.00000)ok", "resend"));
+    }
+
+    #[test]
+    fn match_pat_paren_prefix_no_close_is_left_as_is() {
+        // 行首 ( 但无 )：不当作前缀，原样 starts_with（必然不匹配 ^ok）
+        assert!(!match_pat("(unclosed ok", "^ok"));
+    }
 }
