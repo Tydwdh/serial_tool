@@ -6,6 +6,12 @@
   "api_version": "0.1",
   "runtime": "lua",
   "main": "main.lua",
+  "description": "串口数据图表模板：订阅 RX 事件绘制曲线，含回放分析器（演示 replay 配置）",
+  "author": "Tydwdh",
+  "homepage": "https://github.com/Tydwdh/serial_tool",
+  "repository": "https://github.com/Tydwdh/serial_tool",
+  "license": "MIT",
+  "category": "chart",
   "permissions": ["bus", "log", "serial", "ui", "storage"],
   "live": {
     "main": "main.lua",

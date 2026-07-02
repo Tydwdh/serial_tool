@@ -6,6 +6,12 @@
   "api_version": "0.1",
   "runtime": "lua",
   "main": "main.lua",
+  "description": "内置控件展示：正弦波图表、温度/电压仪表、姿态指示器、参数表单",
+  "author": "Tydwdh",
+  "homepage": "https://github.com/Tydwdh/serial_tool",
+  "repository": "https://github.com/Tydwdh/serial_tool",
+  "license": "MIT",
+  "category": "demo",
   "permissions": ["bus", "log", "ui", "timer"],
   "live": {
     "main": "main.lua",

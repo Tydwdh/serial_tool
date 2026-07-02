@@ -6,6 +6,12 @@
   "api_version": "0.1",
   "runtime": "lua",
   "main": "main.lua",
+  "description": "面向 Marlin 固件的 G-code 发送器：支持文件/单条发送、行号校验、暂停/恢复/取消、进度显示",
+  "author": "Tydwdh",
+  "homepage": "https://github.com/Tydwdh/serial_tool",
+  "repository": "https://github.com/Tydwdh/serial_tool",
+  "license": "MIT",
+  "category": "gcode",
   "permissions": [
     "bus",
     "log",

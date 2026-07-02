@@ -532,6 +532,13 @@ impl PluginManager {
                     contributes: record.manifest.contributes.clone(),
                     path: record.root.clone(),
                     last_error: record.last_error.clone(),
+                    description: record.manifest.description.clone(),
+                    author: record.manifest.author.clone(),
+                    homepage: record.manifest.homepage.clone(),
+                    repository: record.manifest.repository.clone(),
+                    license: record.manifest.license.clone(),
+                    category: record.manifest.category.clone(),
+                    icon: record.manifest.icon.clone(),
                     has_replay_analyzer: record.manifest.has_replay_analyzer(),
                     replay_subscriptions: record.manifest.replay_subscriptions().to_vec(),
                     replay_outputs: record.manifest.replay_outputs().to_vec(),
@@ -909,6 +916,13 @@ ctx.bus.publish('protocol.pid.sample', { t = 1, target = 50, actual = 43, output
             contributes: crate::manifest::PluginContributes::default(),
             live: None,
             replay: None,
+            description: None,
+            author: None,
+            homepage: None,
+            repository: None,
+            license: None,
+            category: None,
+            icon: None,
         };
 
         assert!(PermissionManager::default().check(&manifest).is_err());

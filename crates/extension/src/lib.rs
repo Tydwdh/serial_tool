@@ -291,6 +291,13 @@ mod tests {
             contributes: PluginContributes::default(),
             live: None,
             replay: None,
+            description: None,
+            author: None,
+            homepage: None,
+            repository: None,
+            license: None,
+            category: None,
+            icon: None,
         };
 
         assert!(PermissionManager::default().check(&manifest).is_err());

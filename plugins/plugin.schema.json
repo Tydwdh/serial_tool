@@ -33,6 +33,37 @@
     "permissions": {
       "$ref": "#/$defs/permissions"
     },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "author": {
+      "type": "string",
+      "minLength": 1
+    },
+    "homepage": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^https?://"
+    },
+    "repository": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^https?://"
+    },
+    "license": {
+      "type": "string",
+      "minLength": 1
+    },
+    "category": {
+      "type": "string",
+      "minLength": 1
+    },
+    "icon": {
+      "type": "string",
+      "minLength": 1,
+      "description": "图标文件相对路径（相对插件根目录），建议 PNG/SVG"
+    },
     "live": {
       "$ref": "#/$defs/liveConfig"
     },

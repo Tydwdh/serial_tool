@@ -27,6 +27,35 @@ pub struct PluginManifest {
     #[serde(default)]
     pub permissions: Vec<String>,
 
+    // ── 市场元数据（全部可选，用于插件市场展示与索引） ──
+    /// 一句话描述插件功能
+    #[serde(default)]
+    pub description: Option<String>,
+
+    /// 作者。建议 "名字 <邮箱>" 或 "GitHub 用户名" 格式
+    #[serde(default)]
+    pub author: Option<String>,
+
+    /// 主页 URL（通常是仓库地址）
+    #[serde(default)]
+    pub homepage: Option<String>,
+
+    /// 源码仓库 URL（与 homepage 可相同）
+    #[serde(default)]
+    pub repository: Option<String>,
+
+    /// SPDX 许可证标识，如 "MIT"、"Apache-2.0"
+    #[serde(default)]
+    pub license: Option<String>,
+
+    /// 分类标签，用于市场筛选。如 "gcode"、"chart"、"template"
+    #[serde(default)]
+    pub category: Option<String>,
+
+    /// 图标文件相对路径（相对插件根目录），如 "icon.png"。市场 UI 展示用
+    #[serde(default)]
+    pub icon: Option<String>,
+
     #[serde(default)]
     pub contributes: PluginContributes,
 
@@ -364,6 +393,22 @@ pub struct PluginSummary {
     pub contributes: PluginContributes,
     pub path: PathBuf,
     pub last_error: Option<String>,
+
+    // ── 市场元数据（镜像 manifest，供 UI 展示） ──
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub homepage: Option<String>,
+    #[serde(default)]
+    pub repository: Option<String>,
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
 
     // ── replay analyzer ──
     pub has_replay_analyzer: bool,
