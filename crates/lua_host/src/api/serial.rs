@@ -483,13 +483,24 @@ pub(crate) fn create_serial_api(
             if let Some(ref map) = lb_expect {
                 let mut map_lock = map.lock();
                 if let Some(buffer) = map_lock.get_mut(&key) {
+                    // drain 出最多 64 行做立即匹配；不匹配的行最后回灌，避免噪声行
+                    // 挤掉后续真正的 ok/ack（与 process_tasks 侧语义一致）。
+                    let mut candidates: Vec<String> = Vec::new();
                     while let Some(candidate) = buffer.next_line() {
+                        candidates.push(candidate);
+                        if candidates.len() >= 64 {
+                            break;
+                        }
+                    }
+                    let mut matched: Option<(Table, String)> = None;
+                    let mut consumed = 0; // 命中 continue/return 的行数（含该行）
+                    for (i, candidate) in candidates.iter().enumerate() {
                         for pair in patterns.pairs::<Value, Table>().flatten() {
                             let p: Table = pair.1;
                             let pat: String = p.get(EXPECT_PATTERN).unwrap_or_default();
                             let action: String =
                                 p.get(EXPECT_ACTION).unwrap_or_else(|_| "return".to_owned());
-                            if match_pat(&candidate, &pat) {
+                            if match_pat(candidate, &pat) {
                                 if action == "continue" {
                                     // 更新 task status 让用户看到设备忙碌
                                     let tid: String = lua
@@ -506,21 +517,35 @@ pub(crate) fn create_serial_api(
                                             );
                                         }
                                     }
+                                    consumed = i + 1;
                                     break;
                                 }
-                                let r = lua.create_table()?;
-                                r.set("name", p.get::<String>("name").unwrap_or_default())?;
-                                r.set("line", candidate)?;
-                                r.set("elapsed_ms", 0_u64)?;
-                                let wrapper = lua.create_table()?;
-                                wrapper.set("result", r)?;
-                                wrapper.set("err", Value::Nil)?;
-                                let ready = lua.create_table()?;
-                                ready.set("__ready", true)?;
-                                ready.set("value", wrapper)?;
-                                return Ok(Value::Table(ready));
+                                matched = Some((p, candidate.clone()));
+                                consumed = i + 1;
+                                break;
                             }
                         }
+                        if matched.is_some() {
+                            break;
+                        }
+                    }
+                    // 回灌未消费的行（matched 之后的，或全不匹配时的全部）
+                    let unconsumed: Vec<String> = candidates.into_iter().skip(consumed).collect();
+                    if !unconsumed.is_empty() {
+                        buffer.push_front_lines(unconsumed);
+                    }
+                    if let Some((p, candidate)) = matched {
+                        let r = lua.create_table()?;
+                        r.set("name", p.get::<String>("name").unwrap_or_default())?;
+                        r.set("line", candidate)?;
+                        r.set("elapsed_ms", 0_u64)?;
+                        let wrapper = lua.create_table()?;
+                        wrapper.set("result", r)?;
+                        wrapper.set("err", Value::Nil)?;
+                        let ready = lua.create_table()?;
+                        ready.set("__ready", true)?;
+                        ready.set("value", wrapper)?;
+                        return Ok(Value::Table(ready));
                     }
                 }
             }

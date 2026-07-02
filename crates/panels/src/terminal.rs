@@ -1500,23 +1500,27 @@ fn row_content_text<'a>(row: &'a VisibleRow<'a>, show_hex: bool, show_raw: bool)
 }
 
 /// 接收区每个条目已经独占显示行，因此隐藏一个末尾行结束符；内部换行仍保留。
+///
+/// 原始模式（show_raw）例外：用户开启原始模式正是为了看到原始字节（含末尾换行），
+/// 因此不剥末尾行结束符，并把所有 `\n` 转义为字面 `\n` 以便可见。
 fn visible_row_content(row: &VisibleRow<'_>, show_hex: bool, show_raw: bool) -> String {
     let content = row_content_text(row, show_hex, show_raw);
     if show_hex {
         return content.to_owned();
     }
 
+    if show_raw {
+        // 原始模式：保留末尾换行，转义所有 \n 为字面 \n 以便可见
+        return content.replace('\n', "\\n");
+    }
+
+    // 普通显示模式：隐藏末尾一个行结束符，内部换行保留
     let content = content
         .strip_suffix("\r\n")
         .or_else(|| content.strip_suffix('\n'))
         .or_else(|| content.strip_suffix('\r'))
         .unwrap_or(content);
-
-    if show_raw {
-        content.replace('\n', "\\n")
-    } else {
-        content.to_owned()
-    }
+    content.to_owned()
 }
 
 fn entry_visible(direction: Direction, show_rx: bool, show_tx: bool) -> bool {
@@ -1796,7 +1800,11 @@ mod tests {
         };
 
         assert_eq!(visible_row_content(&row, false, false), "first\nsecond");
-        assert_eq!(visible_row_content(&row, false, true), "first\r\\nsecond");
+        // 原始模式：不剥末尾换行，所有 \n 转义为字面 \n（\r 保留）
+        assert_eq!(
+            visible_row_content(&row, false, true),
+            "first\r\\nsecond\r\\n"
+        );
         assert_eq!(
             visible_row_content(&row, true, false),
             "66 69 72 73 74 0D 0A"
