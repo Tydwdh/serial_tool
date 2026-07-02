@@ -140,11 +140,20 @@ impl WorkbenchApp {
                     self.set_status(StatusLevel::Info, format!("{port} 已关闭"));
                 }
             } else if so {
-                // 折叠时显示当前配置摘要
+                // 折叠时显示当前配置摘要：波特率 数据位 校验位 停止位
+                // 校验位缩写：none→N, odd→O, even→E（标准串口缩写 8N1）
+                let parity_abbr = match self.serial.parity.as_str() {
+                    "odd" => 'O',
+                    "even" => 'E',
+                    _ => 'N',
+                };
                 ui.label(
                     egui::RichText::new(format!(
-                        "· {} {}N{}",
-                        self.serial.baud_rate, self.serial.data_bits, self.serial.stop_bits,
+                        "· {} {}{}{}",
+                        self.serial.baud_rate,
+                        self.serial.data_bits,
+                        parity_abbr,
+                        self.serial.stop_bits,
                     ))
                     .color(theme::TEXT_SECONDARY),
                 );
@@ -161,7 +170,14 @@ impl WorkbenchApp {
                     10
                 );
                 ui.label(egui::RichText::new(label).color(theme::YELLOW))
-                    .on_hover_text("点击关闭按钮可取消等待重连");
+                    .on_hover_text("点击 × 取消等待重连");
+                if ui.small_button("×").on_hover_text("取消重连").clicked() {
+                    self.serial.pending_reconnect = None;
+                    self.set_status_force(
+                        StatusLevel::Info,
+                        "已取消自动重连".to_owned(),
+                    );
+                }
             }
             ui.separator();
             // ── 插件贡献：top_bar.left ──

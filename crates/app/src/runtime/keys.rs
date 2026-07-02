@@ -52,6 +52,12 @@ impl WorkbenchApp {
                 };
             }
             Action::ToggleBottomPanel => self.toggle_bottom_panel(),
+            Action::ToggleRightDock => {
+                self.panels.dock.right_visible = !self.panels.dock.right_visible;
+                if let Err(e) = self.save_config() {
+                    log::warn!("save_config failed: {e}")
+                };
+            }
             Action::Send => {
                 if self.send_target_port_open() && !self.send.input.trim().is_empty() {
                     self.do_send();
@@ -63,6 +69,10 @@ impl WorkbenchApp {
                 if self.recorder.is_running() {
                     self.recorder.add_bookmark("");
                 }
+            }
+            Action::CommandPalette => {
+                self.command_palette_open = !self.command_palette_open;
+                self.command_palette_query.clear();
             }
             Action::PluginCommand(plugin_id, command_id) => {
                 self.publish_plugin_command_action(&plugin_id, &command_id);

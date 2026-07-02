@@ -92,18 +92,30 @@ impl WorkbenchApp {
                 }
             }
 
-            // DTR/RTS 标签
+            // DTR/RTS 标签：可点击切换，复用发送面板的信号控制路径。
+            // 注意：dtr_high/rts_high 是 send.target_port 的状态；状态栏显示 selected_port，
+            // 通常两者一致（ensure_send_target_port 会回退到 selected_port）。
             if st.open {
                 ui.separator();
-                let tag = |ui: &mut egui::Ui, label: &str, high: bool, color: Color32| {
+                let port = self.send.target_port.clone();
+                let target_open = self.send_target_port_open();
+                let tag = |ui: &mut egui::Ui, label: &str, high: bool, color: Color32| -> bool {
                     let size = egui::vec2(42.0, 16.0);
-                    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
                     let bg = if high {
                         color.linear_multiply(0.25)
                     } else {
                         theme::BG_INPUT
                     };
                     ui.painter().rect_filled(rect, 3.0, bg);
+                    if resp.hovered() {
+                        ui.painter().rect_stroke(
+                            rect,
+                            3.0,
+                            egui::Stroke::new(1.0, color),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
                     ui.painter().text(
                         rect.center(),
                         egui::Align2::CENTER_CENTER,
@@ -111,9 +123,29 @@ impl WorkbenchApp {
                         egui::FontId::proportional(10.0),
                         color,
                     );
+                    resp.clicked()
                 };
-                tag(ui, "DTR⬆", self.send.dtr_high, theme::GREEN);
-                tag(ui, "RTS⬆", self.send.rts_high, theme::BLUE);
+                // 仅当 target_port 打开时才允许点击切换；否则仅展示。
+                if target_open && port.is_some() {
+                    let port = port.clone().expect("checked Some above");
+                    if tag(ui, "DTR⬆", self.send.dtr_high, theme::GREEN) {
+                        let new_dtr = !self.send.dtr_high;
+                        match self.transport.set_dtr(&port, new_dtr) {
+                            Ok(()) => self.send.dtr_high = new_dtr,
+                            Err(e) => self.set_status_force(StatusLevel::Error, e.to_string()),
+                        }
+                    }
+                    if tag(ui, "RTS⬆", self.send.rts_high, theme::BLUE) {
+                        let new_rts = !self.send.rts_high;
+                        match self.transport.set_rts(&port, new_rts) {
+                            Ok(()) => self.send.rts_high = new_rts,
+                            Err(e) => self.set_status_force(StatusLevel::Error, e.to_string()),
+                        }
+                    }
+                } else {
+                    tag(ui, "DTR⬆", self.send.dtr_high, theme::GREEN);
+                    tag(ui, "RTS⬆", self.send.rts_high, theme::BLUE);
+                }
             }
 
             // ── 插件贡献：status_bar.left ──

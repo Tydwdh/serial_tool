@@ -1,6 +1,22 @@
 {
-  "version": "0.5.1",
-  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v0.5.1/hardware-workbench-app.zip",
-  "changelog": [],
-  "date": "2026-07-02"
+  "version": "0.6.0",
+  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v0.6.0/hardware-workbench-app.zip",
+  "changelog": [
+    "命令面板 Ctrl+K：搜索并执行内置命令、插件命令或历史发送",
+    "终端暂停接收按钮：冻结画面查看，暂停期间丢弃新数据不积压",
+    "波特率自定义输入：补 128000/256000/512000/1M/2M/3M 高速档 + 自由输入",
+    "发送历史 popup：搜索、单条删除、清空全部、点中直接发送",
+    "右侧边栏快捷键 Alt+Ctrl+B（可配置）",
+    "DTR/RTS 状态栏标签可点击切换",
+    "端口圆点改成带文字按钮 + 加大命中区（色盲友好）",
+    "周期发送非法间隔时阻止启用",
+    "插件重启按钮 Disabled/Finished/Failed 态可直接点",
+    "回放速度预设按钮 0.5x/2x/5x/10x",
+    "设置面板暴露终端合并阈值/保留条数/字体大小，持久化",
+    "折叠态串口摘要补真实校验位（115200 8N1）",
+    "自动重连一键取消按钮",
+    "终端/日志空状态引导文案",
+    "README 完整重写，快捷键表与实现对齐"
+  ],
+  "date": "2026-07-03"
 }

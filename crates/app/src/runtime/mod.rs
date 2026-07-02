@@ -44,5 +44,6 @@ impl WorkbenchApp {
         self.detached_dynamic_panel_viewports(ctx);
         self.send_popup(ctx);
         self.terminal_popup(ctx);
+        self.command_palette(ctx);
     }
 }

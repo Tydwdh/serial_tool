@@ -110,6 +110,8 @@ pub(crate) struct SendUiState {
     pub(crate) popup_open: bool,
     pub(crate) target_port: Option<String>,
     pub(crate) send_history: std::collections::VecDeque<String>,
+    /// 发送历史 popup 的搜索框文本。
+    pub(crate) history_search: String,
     pub(crate) hex_strict: bool,
     pub(crate) dtr_high: bool,
     pub(crate) rts_high: bool,
@@ -129,6 +131,7 @@ impl Default for SendUiState {
             popup_open: false,
             target_port: None,
             send_history: std::collections::VecDeque::new(),
+            history_search: String::new(),
             hex_strict: true,
             dtr_high: true,
             rts_high: true,

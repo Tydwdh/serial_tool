@@ -372,22 +372,25 @@ impl WorkbenchApp {
                                         .pending_reconnect
                                         .as_ref()
                                         .is_some_and(|p| p.port_name == name);
-                                    // 圆点可点击切换开/关/取消重连：●(绿)=已开→关闭，
-                                    // ○(红)=未开→打开，⟳(黄)=重连中→取消重连。
-                                    let (dot, color, tooltip) = if pending_reconnect {
-                                        ("⟳", theme::YELLOW, "重连中，点击取消")
+                                    // 端口状态按钮：带文字 + 颜色，加大命中区，色盲友好。
+                                    // ●开(绿)=已开→点击关闭，○关(红)=未开→点击打开，⟳连(黄)=重连中→点击取消。
+                                    let (icon, text, color, tooltip) = if pending_reconnect {
+                                        ("⟳", "连", theme::YELLOW, "重连中，点击取消")
                                     } else if port_open {
-                                        ("●", theme::GREEN, "已打开，点击关闭")
+                                        ("●", "开", theme::GREEN, "已打开，点击关闭")
                                     } else {
-                                        ("○", theme::RED, "未打开，点击打开")
+                                        ("○", "关", theme::RED, "未打开，点击打开")
                                     };
+                                    let btn_label = format!("{icon}{text}");
                                     if ui
                                         .add(
                                             egui::Button::new(
-                                                egui::RichText::new(dot).color(color),
+                                                egui::RichText::new(btn_label)
+                                                    .color(color)
+                                                    .small(),
                                             )
                                             .frame(false)
-                                            .small(),
+                                            .min_size(egui::vec2(36.0, 18.0)),
                                         )
                                         .on_hover_text(tooltip)
                                         .clicked()
@@ -404,6 +407,8 @@ impl WorkbenchApp {
                                             .desired_width(100.0)
                                             .hint_text("例如 主控板"),
                                     );
+                                    // alias_buf 每帧从 port_aliases 重新 clone，必须即时回写，
+                                    // 否则下一帧旧值会覆盖用户输入。save_config 有 60s autosave 兜底。
                                     if resp.changed() {
                                         let new_alias = if alias_buf.trim().is_empty() {
                                             None

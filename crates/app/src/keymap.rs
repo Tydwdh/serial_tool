@@ -17,6 +17,8 @@ pub(crate) enum Action {
     ToggleActivityBar,
     /// 切换底部面板
     ToggleBottomPanel,
+    /// 切换右侧边栏
+    ToggleRightDock,
     /// 发送当前输入
     Send,
     /// 开始/停止录制
@@ -25,6 +27,8 @@ pub(crate) enum Action {
     ReconnectPort,
     /// 录制时添加标记点
     AddBookmark,
+    /// 打开命令面板
+    CommandPalette,
     /// 插件命令: (plugin_id, command_id)
     PluginCommand(String, String),
 }
@@ -36,10 +40,12 @@ impl Action {
         Action::OpenPort,
         Action::ToggleActivityBar,
         Action::ToggleBottomPanel,
+        Action::ToggleRightDock,
         Action::Send,
         Action::StartRecording,
         Action::ReconnectPort,
         Action::AddBookmark,
+        Action::CommandPalette,
     ];
 
     /// 合并内置 Action 与插件命令。
@@ -62,10 +68,12 @@ impl Action {
             Action::OpenPort => "$OpenPort".into(),
             Action::ToggleActivityBar => "$ToggleActivityBar".into(),
             Action::ToggleBottomPanel => "$ToggleBottomPanel".into(),
+            Action::ToggleRightDock => "$ToggleRightDock".into(),
             Action::Send => "$Send".into(),
             Action::StartRecording => "$StartRecording".into(),
             Action::ReconnectPort => "$ReconnectPort".into(),
             Action::AddBookmark => "$AddBookmark".into(),
+            Action::CommandPalette => "$CommandPalette".into(),
             Action::PluginCommand(plugin_id, command_id) => {
                 format!("{plugin_id}:{command_id}")
             }
@@ -79,10 +87,12 @@ impl Action {
             "$OpenPort" => Some(Action::OpenPort),
             "$ToggleActivityBar" => Some(Action::ToggleActivityBar),
             "$ToggleBottomPanel" => Some(Action::ToggleBottomPanel),
+            "$ToggleRightDock" => Some(Action::ToggleRightDock),
             "$Send" => Some(Action::Send),
             "$StartRecording" => Some(Action::StartRecording),
             "$ReconnectPort" => Some(Action::ReconnectPort),
             "$AddBookmark" => Some(Action::AddBookmark),
+            "$CommandPalette" => Some(Action::CommandPalette),
             other => {
                 // 插件命令: "plugin_id:command_id"
                 let (plugin_id, command_id) = other.split_once(':')?;
@@ -101,10 +111,12 @@ impl Action {
             Action::OpenPort => "打开/关闭串口".into(),
             Action::ToggleActivityBar => "切换左侧活动栏".into(),
             Action::ToggleBottomPanel => "切换底部面板".into(),
+            Action::ToggleRightDock => "切换右侧边栏".into(),
             Action::Send => "发送".into(),
             Action::StartRecording => "开始/停止录制".into(),
             Action::ReconnectPort => "重连串口".into(),
             Action::AddBookmark => "添加录制标记".into(),
+            Action::CommandPalette => "命令面板".into(),
             Action::PluginCommand(plugin_id, command_id) => {
                 format!("{plugin_id}:{command_id}")
             }
@@ -246,8 +258,16 @@ fn default_bindings() -> HashMap<String, Vec<KeyBinding>> {
         vec![KeyBinding::new("Backtick", true, false, false)],
     );
     m.insert(
+        Action::ToggleRightDock.key(),
+        vec![KeyBinding::new("B", true, false, true)],
+    );
+    m.insert(
         Action::Send.key(),
         vec![KeyBinding::new("Enter", true, false, false)],
+    );
+    m.insert(
+        Action::CommandPalette.key(),
+        vec![KeyBinding::new("K", true, false, false)],
     );
     // StartRecording、ReconnectPort 默认无快捷键
 

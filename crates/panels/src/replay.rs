@@ -494,6 +494,14 @@ impl ReplayPanel {
                 self.manager.set_speed(1.0);
             }
 
+            // 常用速度预设：点击直接跳到对应倍速，免去对数滑块拖不准。
+            for &preset in &[0.5_f64, 2.0, 5.0, 10.0] {
+                if ui.small_button(format!("{preset}x")).clicked() {
+                    self.speed = preset;
+                    self.manager.set_speed(preset);
+                }
+            }
+
             speed_resp.on_hover_text(format!("回放速度 {:.2}x  |  范围 0.1x ~ 16x", self.speed));
         });
 

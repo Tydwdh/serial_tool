@@ -27,7 +27,7 @@ pub struct LogPanel {
     next_entry_id: u64,
     min_level: LogLevel,
     auto_scroll: bool,
-    max_entries: usize,
+    pub max_entries: usize,
     last_scroll_offset_y: f32,
     pending_scroll_to_bottom: bool,
     /// 搜索文本（默认大小写不敏感，同时匹配 source 和 message）。
@@ -117,8 +117,14 @@ impl LogPanel {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let _new_entries = self.ingest();
 
-        let wheel_moves_towards_bottom =
-            crate::scroll_delta_moves_towards_bottom(ui.input(|input| input.smooth_scroll_delta.y));
+        // 仅当指针位于本面板内时，滚轮向下才触发强制滚到底；
+        // 否则全局 smooth_scroll_delta 会误捕获其它区域的滚轮事件。
+        let panel_rect = ui.max_rect();
+        let pointer_inside = ui
+            .input(|input| input.pointer.hover_pos())
+            .is_some_and(|pos| panel_rect.contains(pos));
+        let wheel_moves_towards_bottom = pointer_inside
+            && crate::scroll_delta_moves_towards_bottom(ui.input(|input| input.smooth_scroll_delta.y));
         let mut force_scroll_to_bottom = self.pending_scroll_to_bottom;
         self.pending_scroll_to_bottom = false;
 
@@ -378,7 +384,7 @@ fn render_log_rows(
             .auto_shrink([false, false])
             .id_salt(LOG_SCROLL_ID)
             .show(ui, |ui| {
-                ui.label(RichText::new("暂无日志").color(theme::TEXT_SECONDARY));
+                ui.label(RichText::new("应用日志会显示在这里").color(theme::TEXT_SECONDARY));
             });
 
         return LogRenderOutcome {

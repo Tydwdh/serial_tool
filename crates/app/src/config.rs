@@ -75,6 +75,27 @@ pub(crate) struct PersistedConfig {
     /// 等宽字体大小（终端/日志区），默认 13.0。
     #[serde(default = "default_monospace_font_size")]
     pub(crate) monospace_font_size: f32,
+    /// 终端合并阈值（ms），同端口同方向间隔 ≤ 此值的连续包合并显示。默认 5。
+    #[serde(default = "default_terminal_merge_window_ms")]
+    pub(crate) terminal_merge_window_ms: u64,
+    /// 终端保留条数上限。默认 2000。
+    #[serde(default = "default_terminal_max_entries")]
+    pub(crate) terminal_max_entries: usize,
+    /// 日志保留条数上限。默认 2000。
+    #[serde(default = "default_log_max_entries")]
+    pub(crate) log_max_entries: usize,
+}
+
+fn default_terminal_merge_window_ms() -> u64 {
+    5
+}
+
+fn default_terminal_max_entries() -> usize {
+    2000
+}
+
+fn default_log_max_entries() -> usize {
+    2000
 }
 
 fn default_true() -> bool {
@@ -247,6 +268,9 @@ impl WorkbenchApp {
             auto_reconnect: self.serial.auto_reconnect,
             keymap: self.keymap.clone(),
             monospace_font_size: self.monospace_font_size,
+            terminal_merge_window_ms: self.terminal_panel.merge_window_ms,
+            terminal_max_entries: self.terminal_panel.max_entries,
+            log_max_entries: self.bottom_log_panel.max_entries,
         }
     }
 
@@ -275,6 +299,9 @@ impl WorkbenchApp {
         self.serial.auto_reconnect = cfg.auto_reconnect;
         self.keymap = cfg.keymap.clone();
         self.monospace_font_size = cfg.monospace_font_size.clamp(10.0, 24.0);
+        self.terminal_panel.merge_window_ms = cfg.terminal_merge_window_ms;
+        self.terminal_panel.max_entries = cfg.terminal_max_entries.max(100);
+        self.bottom_log_panel.max_entries = cfg.log_max_entries.max(100);
         self.send.send_history = cfg
             .send_history
             .iter()

@@ -65,6 +65,10 @@ pub(crate) struct WorkbenchApp {
     pub(crate) pending_action: Option<crate::keymap::Action>,
     /// 快捷键录制状态：点击"录制"后等待用户按键
     pub(crate) key_recording: Option<crate::keymap::Action>,
+    /// 命令面板是否打开
+    pub(crate) command_palette_open: bool,
+    /// 命令面板搜索文本
+    pub(crate) command_palette_query: String,
     /// 自动更新状态
     pub(crate) update_state: UpdateState,
     /// UI contribution 运行时状态（toggle 值、progress 值等）
@@ -303,6 +307,8 @@ impl WorkbenchApp {
                 .unwrap_or_default(),
             pending_action: None,
             key_recording: None,
+            command_palette_open: false,
+            command_palette_query: String::new(),
             update_state: UpdateState::default(),
             contribution_states: std::collections::HashMap::new(),
             plugin_summaries_cache: std::cell::OnceCell::new(),
@@ -317,6 +323,12 @@ impl WorkbenchApp {
         // 从配置恢复等宽字体大小
         app.terminal_panel.font_size = app.monospace_font_size;
         app.bottom_log_panel.font_size = app.monospace_font_size;
+        // 从配置恢复终端/日志的数据参数
+        if let Some(c) = config.as_ref() {
+            app.terminal_panel.merge_window_ms = c.terminal_merge_window_ms;
+            app.terminal_panel.max_entries = c.terminal_max_entries.max(100);
+            app.bottom_log_panel.max_entries = c.log_max_entries.max(100);
+        }
         app.refresh_ports();
         let enabled: Vec<String> = config
             .as_ref()

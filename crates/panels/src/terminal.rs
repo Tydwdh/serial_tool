@@ -7,7 +7,7 @@ use egui::text_selection::LabelSelectionState;
 use egui::{Color32, RichText, ScrollArea, Sense, Stroke};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use tool_core::{Direction, Event, Payload};
+use tool_core::{Direction, Event};
 use tool_databus::{DataBus, Subscription, TopicFilter};
 use tool_transport::serial_topics;
 
@@ -27,6 +27,9 @@ pub struct TerminalPanel {
     show_raw: bool,
     show_lines: bool,
     auto_scroll: bool,
+    /// 暂停接收：置位后 ingest 直接 drain subscription，不 push 新事件，
+    /// 已显示内容冻结。用于高速数据流下停下来仔细看一段数据。
+    paused: bool,
 
     search_text: String,
     /// 搜索是否大小写敏感（false=不敏感，默认；true=敏感）。
@@ -34,7 +37,7 @@ pub struct TerminalPanel {
     port_filter: Option<String>,
     bookmarked_entry_ids: BTreeSet<u64>,
 
-    max_entries: usize,
+    pub max_entries: usize,
 
     pub height: f32,
     pub maximize_clicked: bool,
@@ -58,6 +61,9 @@ pub struct TerminalPanel {
 struct PortData {
     entries: VecDeque<TerminalEntry>,
     truncated_count: u64,
+    /// 跨包未完成行缓存：上一包末尾换行符之后的数据，前插到下一包。
+    /// 这样换行符后的数据会拼接到下一次数据中去，而不是单独成条。
+    pending_tail: String,
 }
 
 struct TerminalEntry {
@@ -141,6 +147,7 @@ impl TerminalPanel {
             show_raw: false,
             show_lines: false,
             auto_scroll: true,
+            paused: false,
 
             search_text: String::new(),
             search_case_sensitive: false,
@@ -159,7 +166,7 @@ impl TerminalPanel {
             selected_entry_id: None,
             detail_entry_id: None,
             font_size: 13.0,
-            merge_window_ms: 10,
+            merge_window_ms: 5,
             selection: RowSelection::new(0),
         }
     }
@@ -167,6 +174,12 @@ impl TerminalPanel {
         // 每帧最多摄入 5000 条，防止大量数据突发时 UI 卡顿
         const MAX_INGEST_ALL: usize = 5000;
         let mut count = 0;
+
+        // 暂停接收：drain subscription 避免积压，但不 push 新事件，视图冻结。
+        if self.paused {
+            while self.subscription.try_recv().is_some() {}
+            return 0;
+        }
 
         while let Some(event) = self.subscription.try_recv() {
             if !matches!(
@@ -353,8 +366,14 @@ impl TerminalPanel {
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let scroll_key = "terminal-all".to_owned();
-        let wheel_moves_towards_bottom =
-            crate::scroll_delta_moves_towards_bottom(ui.input(|input| input.smooth_scroll_delta.y));
+        // 仅当指针位于本面板内时，滚轮向下才触发强制滚到底；
+        // 否则全局 smooth_scroll_delta 会误捕获其它区域的滚轮事件。
+        let panel_rect = ui.max_rect();
+        let pointer_inside = ui
+            .input(|input| input.pointer.hover_pos())
+            .is_some_and(|pos| panel_rect.contains(pos));
+        let wheel_moves_towards_bottom = pointer_inside
+            && crate::scroll_delta_moves_towards_bottom(ui.input(|input| input.smooth_scroll_delta.y));
         let mut force_scroll_to_bottom = self.pending_scroll_to_bottom_keys.remove(&scroll_key);
 
         ui.horizontal_wrapped(|ui| {
@@ -365,6 +384,24 @@ impl TerminalPanel {
             ui.checkbox(&mut self.show_lines, "按行显示");
 
             force_scroll_to_bottom |= crate::theme::auto_scroll_button(ui, &mut self.auto_scroll);
+
+            // 暂停接收：与「暂停自动滚动」不同——这个会停止接收新数据，
+            // 已显示内容冻结，高速数据流下便于仔细查看一段数据。
+            let pause_icon = if self.paused { "▶" } else { "⏸" };
+            if ui
+                .add(
+                    egui::Button::new(pause_icon)
+                        .selected(self.paused),
+                )
+                .on_hover_text(if self.paused {
+                    "已暂停接收，点击继续"
+                } else {
+                    "暂停接收"
+                })
+                .clicked()
+            {
+                self.paused = !self.paused;
+            }
 
             if ui.button("清空").clicked() {
                 self.clear();
@@ -469,6 +506,12 @@ impl TerminalPanel {
 
             let scroll_height = ui.available_height().max(40.0);
             let show_metadata = !self.show_lines;
+            // 空状态引导：从未收到任何数据 vs 有数据但被筛选/搜索过滤光。
+            let empty_hint = if self.ports.is_empty() {
+                "暂无数据 · 选择并打开串口后开始接收"
+            } else {
+                "无匹配数据 · 试着清除筛选或搜索条件"
+            };
             render_rows_view(
                 ui,
                 &scroll_key,
@@ -483,6 +526,7 @@ impl TerminalPanel {
                 force_scroll_to_bottom,
                 self.font_size,
                 &mut self.selection,
+                empty_hint,
             )
         };
 
@@ -555,6 +599,12 @@ impl TerminalPanel {
     fn ingest(&mut self) -> usize {
         let mut count = 0;
 
+        // 暂停接收：drain subscription 避免积压，但不 push 新事件，视图冻结。
+        if self.paused {
+            while self.subscription.try_recv().is_some() {}
+            return 0;
+        }
+
         for _ in 0..MAX_INGEST_PER_FRAME {
             let Some(event) = self.subscription.try_recv() else {
                 break;
@@ -583,16 +633,40 @@ impl TerminalPanel {
             .unwrap_or("default")
             .to_owned();
 
-        let bytes = match &event.payload {
-            Payload::Bytes(bytes) => bytes.clone(),
-            _ => event.payload.text_lossy().into_bytes(),
+        let data = self.ports.entry(port).or_default();
+
+        // ── 跨包未完成行拼接：把上一包换行符之后的尾巴前插到本包 ──
+        // 这样换行符后的数据会拼接到下一次数据中去，而不是单独成条。
+        let raw_text = if data.pending_tail.is_empty() {
+            event.payload.text_lossy()
+        } else {
+            let tail = std::mem::take(&mut data.pending_tail);
+            let mut combined = String::with_capacity(tail.len() + event.payload.text_lossy().len());
+            combined.push_str(&tail);
+            combined.push_str(&event.payload.text_lossy());
+            combined
         };
 
-        let raw_text = event.payload.text_lossy();
-        let display_text = format_terminal_text(&raw_text);
+        // 基于（可能前插过 tail 的）raw_text 取 bytes，供 hex 计算
+        let bytes = raw_text.as_bytes().to_vec();
 
-        let hex_text = format_hex(&bytes);
-        let utf8_preview = format_utf8_preview(&bytes);
+        // ── 拆分：若含换行符且末尾非换行，则把最后一个 \n 之后的数据缓存为下一包的尾巴 ──
+        // entry 只保留到最后一个 \n（含），保证每条 entry 都是完整的行。
+        let (entry_raw, entry_bytes) = if let Some(idx) = raw_text.rfind('\n')
+            && idx != raw_text.len() - 1
+        {
+            // 换行符之后还有数据 → 缓存为尾巴；\n 是单字节 ASCII，idx 即字节偏移
+            data.pending_tail = raw_text[idx + 1..].to_owned();
+            (raw_text[..=idx].to_owned(), bytes[..=idx].to_vec())
+        } else {
+            // 不含 \n，或恰好以 \n 结尾 → 无尾巴
+            data.pending_tail.clear();
+            (raw_text, bytes)
+        };
+
+        let display_text = format_terminal_text(&entry_raw);
+        let hex_text = format_hex(&entry_bytes);
+        let utf8_preview = format_utf8_preview(&entry_bytes);
 
         let hex_preview = if hex_text.is_empty() {
             String::new()
@@ -609,16 +683,14 @@ impl TerminalPanel {
             utf8_preview
         };
 
-        let data = self.ports.entry(port).or_default();
-
-        // ── 合并逻辑：同端口、同方向、10ms 内，且上一条末尾不是换行 → 追加上一条 ──
-        // 当前包允许包含 \n：带换行的尾包正是一个未完成行的正常结束。
+        // ── 合并逻辑：同端口、同方向、5ms 内，且上一条末尾不是换行 → 追加上一条 ──
+        // 上一条不以 \n 结尾说明是未完成行，本包（已含完整行）补齐它。
         if let Some(prev) = data.entries.back_mut()
             && prev.direction == event.direction
             && event.timestamp_ms.saturating_sub(prev.timestamp_ms) <= self.merge_window_ms
             && !prev.raw_text.ends_with('\n')
         {
-            prev.raw_text.push_str(&raw_text);
+            prev.raw_text.push_str(&entry_raw);
             prev.display_text.push_str(&display_text);
             prev.hex_text.push(' ');
             prev.hex_text.push_str(&hex_text);
@@ -647,7 +719,7 @@ impl TerminalPanel {
             timestamp_label: format!("[{}]", fmt_ts(event.timestamp_ms)),
             direction: event.direction,
 
-            raw_text,
+            raw_text: entry_raw,
             display_text,
 
             hex_text,
@@ -916,6 +988,7 @@ fn render_rows_view(
     force_scroll_to_bottom: bool,
     font_size: f32,
     selection: &mut RowSelection,
+    empty_hint: &str,
 ) -> RenderOutcome {
     let height = height.max(40.0);
     let font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
@@ -936,7 +1009,7 @@ fn render_rows_view(
             .auto_shrink([false, false])
             .id_salt((scroll_key, "v2"))
             .show(ui, |ui| {
-                ui.label(RichText::new("暂无串口数据").color(theme::TEXT_SECONDARY));
+                ui.label(RichText::new(empty_hint).color(theme::TEXT_SECONDARY));
             });
 
         return RenderOutcome {
@@ -1662,6 +1735,7 @@ fn detail_text_rows(text: &str, min_rows: usize, max_rows: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tool_core::Payload;
     use tool_databus::DataBus;
 
     #[test]
@@ -1710,6 +1784,55 @@ mod tests {
 
         assert_eq!(panel.ingest_all_pending(), 0);
         assert!(panel.ports.is_empty());
+    }
+
+    #[test]
+    fn paused_ingest_drains_subscription_without_pushing() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+
+        // 暂停前置一条已有数据，验证暂停期间不新增。
+        bus.publish(
+            Event::new(
+                serial_topics::SERIAL_RX,
+                "serial:COM1",
+                Direction::Rx,
+                Payload::Bytes(b"first".to_vec()),
+            )
+            .with_metadata(serde_json::json!({ "port": "COM1" })),
+        );
+        assert_eq!(panel.ingest_all_pending(), 1);
+
+        panel.paused = true;
+
+        // 暂停期间发布两条，ingest 应返回 0 且不 push。
+        bus.publish(
+            Event::new(
+                serial_topics::SERIAL_RX,
+                "serial:COM1",
+                Direction::Rx,
+                Payload::Bytes(b"dropped1".to_vec()),
+            )
+            .with_metadata(serde_json::json!({ "port": "COM1" })),
+        );
+        bus.publish(
+            Event::new(
+                serial_topics::SERIAL_RX,
+                "serial:COM1",
+                Direction::Rx,
+                Payload::Bytes(b"dropped2".to_vec()),
+            )
+            .with_metadata(serde_json::json!({ "port": "COM1" })),
+        );
+
+        assert_eq!(panel.ingest_all_pending(), 0);
+        let port = panel.ports.get("COM1").expect("COM1 still present");
+        assert_eq!(port.entries.len(), 1, "paused should not push new entries");
+        assert_eq!(port.entries.front().unwrap().raw_text, "first");
+
+        // 恢复后，subscription 已被 drain，旧数据不会补放（丢弃语义）。
+        panel.paused = false;
+        assert_eq!(panel.ingest_all_pending(), 0);
     }
 
     #[test]
@@ -1778,11 +1901,90 @@ mod tests {
         assert_eq!(panel.ingest_all_pending(), 2);
 
         let entries = &panel.ports.get("COM6").expect("COM6 should exist").entries;
-        assert_eq!(entries.len(), 1);
+        // 新逻辑：换行符后的数据作为尾巴缓存并前插到下一包，
+        // 每条 entry 都是完整的行（以 \n 结尾），因此产生 2 条而非 1 条。
+        assert_eq!(entries.len(), 2);
         assert_eq!(
             entries[0].raw_text,
-            "(2.00000)X first home. completed.*77\n(2.00000)X home. timeout = 20*16\n"
+            "(2.00000)X first home. completed.*77\n"
         );
+        assert_eq!(entries[1].raw_text, "(2.00000)X home. timeout = 20*16\n");
+    }
+
+    #[test]
+    fn ingest_carries_trailing_data_after_newline_into_next_chunk() {
+        // 验证用户需求：换行符后面的数据，哪怕是一次的数据，也自动拼接到下一次数据中去。
+        // 包1 "abc\ndef" → entry1 = "abc\n"，"def" 缓存为尾巴。
+        // 包2 "ghi\n" → 前插 tail = "defghi\n"，entry2 = "defghi\n"。
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+
+        for event in [
+            Event::with_timestamp(
+                1_000,
+                serial_topics::SERIAL_RX,
+                "serial:COM7",
+                Direction::Rx,
+                Payload::Bytes(b"abc\ndef".to_vec()),
+            ),
+            Event::with_timestamp(
+                1_001,
+                serial_topics::SERIAL_RX,
+                "serial:COM7",
+                Direction::Rx,
+                Payload::Bytes(b"ghi\n".to_vec()),
+            ),
+        ] {
+            bus.publish(event);
+        }
+
+        assert_eq!(panel.ingest_all_pending(), 2);
+
+        let entries = &panel.ports.get("COM7").expect("COM7 should exist").entries;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].raw_text, "abc\n");
+        assert_eq!(entries[1].raw_text, "defghi\n");
+        // 尾巴已被下一包消费，无残留
+        assert!(panel
+            .ports
+            .get("COM7")
+            .unwrap()
+            .pending_tail
+            .is_empty());
+    }
+
+    #[test]
+    fn ingest_holds_unterminated_tail_until_next_chunk_arrives() {
+        // 包1 "abc\ndef" → entry1="abc\n"，tail="def"
+        // 包2 "ghi"（无换行，5ms 内）→ 前插 tail → raw="defghi"，prev 不以 \n 结尾 → 合并到 entry1？
+        // 注意：entry1 以 \n 结尾，故不合并，新建 entry2="defghi"（无 \n，tail 清空）。
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+
+        for event in [
+            Event::with_timestamp(
+                1_000,
+                serial_topics::SERIAL_RX,
+                "serial:COM8",
+                Direction::Rx,
+                Payload::Bytes(b"abc\ndef".to_vec()),
+            ),
+            Event::with_timestamp(
+                1_001,
+                serial_topics::SERIAL_RX,
+                "serial:COM8",
+                Direction::Rx,
+                Payload::Bytes(b"ghi".to_vec()),
+            ),
+        ] {
+            bus.publish(event);
+        }
+
+        assert_eq!(panel.ingest_all_pending(), 2);
+        let entries = &panel.ports.get("COM8").expect("COM8 should exist").entries;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].raw_text, "abc\n");
+        assert_eq!(entries[1].raw_text, "defghi");
     }
 
     #[test]

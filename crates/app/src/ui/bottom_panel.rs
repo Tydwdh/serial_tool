@@ -85,11 +85,41 @@ impl WorkbenchApp {
         self.ensure_send_target_port();
         let send_port_open = self.send_target_port_open();
 
-        // ── 1. 选项栏 ──
+        // ── 1. 选项栏（顶部，自然高度）──
         self.render_send_options(ui, layout);
 
-        // ── 2. 输入区（固定高度 + 滚动条）──
-        let resp = self.render_send_input(ui, layout, send_port_open);
+        // ── 2. 输入区（吃满中间）+ 操作栏（沉底）+ 错误提示 ──
+        // 视觉顺序（自顶向底）：输入区 → 操作栏 → 错误提示。
+        //
+        // egui resizable 面板的高度跟随 content 的 min_rect（Frame outer_rect 写回 PanelState）：
+        //   · content < panel → 面板缩回 content min_rect（拖大后回弹到 min_size）；
+        //   · content > panel → 面板被撑大（正反馈涨到顶满）。
+        // 要让面板稳定在用户拖动高度，content min_rect 必须恰好 = panel 内容区。
+        // 末尾 `ui.take_available_space()` 把 content min_rect 撑到 max_rect（= panel 内容区），
+        // 配合 dock 面板 `Frame::NONE`（margin=0），Frame outer = content = panel，PanelState
+        // 写回 = panel，面板稳定。注意不能用 `set_min_height(max_rect.height())`——它在 cursor
+        // 位置加 max_rect 高度（cursor+max_rect）会撑爆；take_available_space 用 available_size
+        // （max_rect - cursor）正确撑到 max_rect。
+        //
+        // 输入区用 add_sized(available - 预留) 视觉吃满，操作栏在其下方；reserved 是操作栏估算
+        // 高度，偏大也无妨（take_available_space 保证 content = panel，留白在操作栏下方）。
+        let avail = ui.available_size();
+        let reserved_for_bottom = match layout {
+            SendLayout::Vertical => 150.0,
+            SendLayout::Horizontal | SendLayout::Popup => 84.0,
+        };
+        let input_height = (avail.y - reserved_for_bottom).max(80.0);
+
+        let resp = self.render_send_input(ui, layout, send_port_open, input_height);
+
+        // 操作栏 + 错误提示（在输入区下方，沉底）
+        self.render_send_actions(ui, layout, send_port_open);
+        if let Some(err) = &self.send.error {
+            ui.colored_label(theme::RED, err);
+        }
+
+        // 撑满 panel 内容区，打破 resizable 面板的正反馈（面板稳定在用户拖动高度）。
+        ui.take_available_space();
 
         if resp.changed() {
             self.send.periodic_send_count = 0;
@@ -98,14 +128,6 @@ impl WorkbenchApp {
 
         // Ctrl+Enter 发送统一由 keymap(Action::Send → handle_keys)处理,
         // 不在此处重复检测,避免同帧双重触发 do_send 导致重复发送。
-
-        // ── 3. 操作栏 ──
-        self.render_send_actions(ui, layout, send_port_open);
-
-        // ── 4. 错误提示 ──
-        if let Some(err) = &self.send.error {
-            ui.colored_label(theme::RED, err);
-        }
     }
 
     // ── 选项栏 ──
@@ -197,51 +219,37 @@ impl WorkbenchApp {
         ui: &mut egui::Ui,
         layout: SendLayout,
         send_port_open: bool,
+        input_height: f32,
     ) -> egui::Response {
-        let (max_height, desired_rows, id_salt, hint_text) = match layout {
+        let hint_text = match layout {
             SendLayout::Horizontal => {
-                let h = ui.text_style_height(&egui::TextStyle::Monospace) * 6.0 + 8.0;
-                (
-                    h,
-                    5,
-                    "send-input-scroll-h",
-                    if send_port_open {
-                        "Ctrl+Enter 发送 | ⛶ 放大编辑"
-                    } else {
-                        "请选择已打开的串口"
-                    },
-                )
+                if send_port_open {
+                    "Ctrl+Enter 发送 | ⛶ 放大编辑"
+                } else {
+                    "请选择已打开的串口"
+                }
             }
-            SendLayout::Vertical => {
-                let h = ui.text_style_height(&egui::TextStyle::Monospace) * 10.0 + 8.0;
-                (h, 8, "send-input-scroll-v", "输入要发送的数据")
-            }
-            SendLayout::Popup => (
-                popup_send_input_height(ui),
-                24,
-                "send-input-scroll-popup",
-                "Ctrl+Enter 发送",
-            ),
+            SendLayout::Vertical => "Ctrl+Enter 发送",
+            SendLayout::Popup => "Ctrl+Enter 发送",
         };
 
-        let mut scroll = egui::ScrollArea::vertical()
-            .id_salt(id_salt)
-            .max_height(max_height);
-
-        if layout == SendLayout::Popup {
-            scroll = scroll.auto_shrink([false, false]);
-        }
-
-        scroll
-            .show(ui, |ui| {
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.send.input)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(desired_rows)
-                        .hint_text(hint_text),
-                )
-            })
-            .inner
+        // 输入区用 add_sized 撑满传入高度（视觉吃满剩余空间）。
+        // 配合 send_panel_body 末尾的 take_available_space() + dock 面板 Frame::NONE，
+        // content min_rect = panel，打破 egui resizable 面板的正反馈（参见 send_panel_body 注释）。
+        // 显式 id_salt 稳定控件 id（前面有条件渲染的 error 标签、hex_preview、contribution 槽）。
+        let id_salt = match layout {
+            SendLayout::Horizontal => "send-input-h",
+            SendLayout::Vertical => "send-input-v",
+            SendLayout::Popup => "send-input-popup",
+        };
+        let width = ui.available_width();
+        ui.add_sized(
+            egui::vec2(width, input_height),
+            egui::TextEdit::multiline(&mut self.send.input)
+                .desired_width(f32::INFINITY)
+                .id_salt(id_salt)
+                .hint_text(hint_text),
+        )
     }
 
     // ── 操作栏 ──
@@ -288,8 +296,14 @@ impl WorkbenchApp {
 
     /// 周期发送控件
     fn render_periodic_controls(&mut self, ui: &mut egui::Ui, width: f32) {
+        // 间隔合法性：空串视为未设置（可取消勾选但不能新启用）；非正数或非数字视为非法。
+        let trimmed: String = self.send.periodic_interval_ms.trim().to_owned();
+        let interval_valid = trimmed.is_empty()
+            || trimmed.parse::<f64>().map(|v| v > 0.0).unwrap_or(false);
+        // 已启用时即使输入变非法也允许取消勾选；未启用且非法时禁止勾选。
+        let can_toggle = interval_valid || self.send.periodic_enabled;
         if ui
-            .checkbox(&mut self.send.periodic_enabled, "周期发送")
+            .add_enabled(can_toggle, egui::Checkbox::new(&mut self.send.periodic_enabled, "周期发送"))
             .changed()
         {
             self.send.periodic_send_count = 0;
@@ -304,7 +318,6 @@ impl WorkbenchApp {
         );
         ui.label("ms");
         // 实时验证：非空且非正数时给出提示
-        let trimmed = self.send.periodic_interval_ms.trim();
         if !trimmed.is_empty() {
             match trimmed.parse::<f64>() {
                 Ok(v) if v <= 0.0 => {
@@ -421,42 +434,94 @@ impl WorkbenchApp {
             return;
         }
 
-        let entries: Vec<String> = self
-            .send
-            .send_history
-            .iter()
-            .take(MAX_SEND_HISTORY)
-            .cloned()
-            .collect();
         ui.separator();
-        egui::ComboBox::from_id_salt(id_salt)
-            .width(140.0)
-            .selected_text("发送历史")
-            .show_ui(ui, |ui| {
-                for item in entries {
-                    if ui.button(shorten_for_ui(&item, 48)).clicked() {
-                        self.send.input = item;
-                    }
-                }
+        // 历史 popup：搜索 + 单条删除 + 清空全部。点条目直接发送。
+        let btn_resp = ui.button("历史");
+        let popup_id = ui.id().with(id_salt);
+        let popup = egui::Popup::from_response(&btn_resp)
+            .open_memory(btn_resp.clicked().then_some(egui::SetOpenCommand::Toggle))
+            .id(popup_id)
+            .layout(egui::Layout::top_down(egui::Align::LEFT));
+
+        popup.show(|ui| {
+            ui.set_min_width(280.0);
+            ui.set_max_width(380.0);
+
+            // 搜索框
+            ui.horizontal(|ui| {
+                ui.label("搜索");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.send.history_search)
+                        .desired_width(220.0)
+                        .hint_text("过滤历史"),
+                );
             });
+            ui.separator();
+
+            // 过滤后的条目（克隆避免在删除时同时遍历）
+            let query = self.send.history_search.to_lowercase();
+            let entries: Vec<String> = self
+                .send
+                .send_history
+                .iter()
+                .filter(|item| query.is_empty() || item.to_lowercase().contains(&query))
+                .take(MAX_SEND_HISTORY)
+                .cloned()
+                .collect();
+
+            if entries.is_empty() {
+                ui.label(
+                    egui::RichText::new(if self.send.send_history.is_empty() {
+                        "无历史"
+                    } else {
+                        "无匹配"
+                    })
+                    .color(theme::TEXT_SECONDARY),
+                );
+            }
+
+            egui::ScrollArea::vertical()
+                .max_height(240.0)
+                .show(ui, |ui| {
+                    for item in &entries {
+                        ui.horizontal(|ui| {
+                            // 点击条目：填入 input 并直接发送
+                            if ui
+                                .add(
+                                    egui::Button::new(shorten_for_ui(item, 40))
+                                        .frame(false)
+                                        .wrap_mode(egui::TextWrapMode::Truncate),
+                                )
+                                .clicked()
+                            {
+                                self.send.input = item.clone();
+                                self.do_send();
+                                egui::Popup::close_id(ui.ctx(), popup_id);
+                            }
+                            // 单条删除
+                            if ui.small_button("×").clicked() {
+                                self.send.send_history.retain(|h| h != item);
+                                if let Err(e) = self.save_config() {
+                                    log::warn!("save_config failed: {e}")
+                                }
+                            }
+                        });
+                    }
+                });
+
+            ui.separator();
+            if ui.button("清空全部历史").clicked() {
+                self.send.send_history.clear();
+                if let Err(e) = self.save_config() {
+                    log::warn!("save_config failed: {e}")
+                }
+                egui::Popup::close_id(ui.ctx(), popup_id);
+            }
+        });
     }
 }
 
 use tool_transport::{hex_preview, send_impl_to, translate_error};
-
-fn popup_send_input_height(ui: &egui::Ui) -> f32 {
-    let action_rows = ui.text_style_height(&egui::TextStyle::Button) * 2.0;
-    let spacing = ui.spacing().item_spacing.y * 5.0;
-    let reserved_for_actions = action_rows + spacing + 18.0;
-    let fallback = ui.text_style_height(&egui::TextStyle::Monospace) * 14.0 + 8.0;
-    let available = ui.available_height();
-
-    if available.is_finite() && available > reserved_for_actions {
-        (available - reserved_for_actions).max(120.0)
-    } else {
-        fallback
-    }
-}
 
 fn shorten_for_ui(s: &str, max_chars: usize) -> String {
     let mut out = s.chars().take(max_chars).collect::<String>();
@@ -465,3 +530,53 @@ fn shorten_for_ui(s: &str, max_chars: usize) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui;
+
+    /// 验证发送区 top_down 布局：输入区（固定 desired_rows 的 ScrollArea）与操作栏不重叠。
+    /// 输入区在上方，操作栏在下方，两者垂直方向不重叠。
+    #[test]
+    fn send_layout_input_does_not_overlap_actions() {
+        egui::__run_test_ui(|ui| {
+            ui.set_max_size(egui::vec2(600.0, 400.0));
+
+            // 选项栏
+            ui.horizontal(|ui| {
+                ui.label("发送到");
+                ui.label("COM1");
+                ui.separator();
+            });
+
+            let input_resp = egui::ScrollArea::vertical()
+                .id_salt("test-send-input")
+                .max_height(200.0)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut String::new())
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(8),
+                    )
+                })
+                .inner;
+
+            let actions_top = ui.cursor().min.y;
+
+            ui.horizontal_wrapped(|ui| {
+                let _ = ui.button("发送");
+                let _ = ui.button("清空");
+            });
+
+            // 输入区底部应 ≤ 操作栏顶部（不重叠）
+            let input_bottom = input_resp.rect.bottom();
+            assert!(
+                input_bottom <= actions_top + 0.5,
+                "输入区底部 {} 超过操作栏顶部 {}，发生重叠",
+                input_bottom,
+                actions_top
+            );
+        });
+    }
+}
+

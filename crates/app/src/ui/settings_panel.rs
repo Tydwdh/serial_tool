@@ -103,6 +103,74 @@ impl WorkbenchApp {
 
         ui.add_space(8.0);
 
+        // ── 数据 ──
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    theme::card_accent_bar(ui, theme::CARD_ACCENT_SETTINGS);
+                    ui.label(egui::RichText::new("📊 数据").heading());
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("终端合并阈值");
+                    let mut ms = self.terminal_panel.merge_window_ms;
+                    let resp = ui.add(
+                        egui::Slider::new(&mut ms, 0..=100)
+                            .step_by(5.0)
+                            .suffix("ms"),
+                    );
+                    if resp.changed() {
+                        self.terminal_panel.merge_window_ms = ms;
+                        if let Err(e) = self.save_config() {
+                            log::warn!("save_config failed: {e}")
+                        };
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "同一端口、同一方向、间隔 ≤ 此毫秒且不含换行符的连续数据包合并显示。\
+                     慢设备调小避免误合并，高速流调大减少视觉碎片。",
+                );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("终端保留条数");
+                    let mut n = self.terminal_panel.max_entries;
+                    let resp = ui.add(
+                        egui::Slider::new(&mut n, 500..=50000)
+                            .step_by(500.0),
+                    );
+                    if resp.changed() {
+                        self.terminal_panel.max_entries = n;
+                        if let Err(e) = self.save_config() {
+                            log::warn!("save_config failed: {e}")
+                        };
+                    }
+                })
+                .response
+                .on_hover_text("接收区保留的最近条数上限，超出后丢弃最旧条目。");
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("日志保留条数");
+                    let mut n = self.bottom_log_panel.max_entries;
+                    let resp = ui.add(
+                        egui::Slider::new(&mut n, 500..=50000)
+                            .step_by(500.0),
+                    );
+                    if resp.changed() {
+                        self.bottom_log_panel.max_entries = n;
+                        if let Err(e) = self.save_config() {
+                            log::warn!("save_config failed: {e}")
+                        };
+                    }
+                })
+                .response
+                .on_hover_text("日志面板保留的最近条数上限。");
+            });
+
+        ui.add_space(8.0);
+
         // ── 快捷键 ──
         egui::Frame::group(ui.style())
             .inner_margin(egui::Margin::symmetric(12, 8))
@@ -140,6 +208,12 @@ impl WorkbenchApp {
                 self.serial.port_groups.clear();
                 self.panels.dock = tool_panels::DockLayout::default();
                 self.panels.dock.bottom_visible = true;
+                self.terminal_panel.merge_window_ms = 5;
+                self.terminal_panel.max_entries = 2000;
+                self.bottom_log_panel.max_entries = 2000;
+                self.monospace_font_size = 13.0;
+                self.terminal_panel.font_size = 13.0;
+                self.bottom_log_panel.font_size = 13.0;
                 self.set_status_force(StatusLevel::Warn, "已恢复默认设置，重启后生效");
             }
         });

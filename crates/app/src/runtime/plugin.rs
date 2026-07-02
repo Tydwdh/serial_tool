@@ -3,7 +3,7 @@ use tool_core::{Direction, Event, Payload, topics};
 
 impl WorkbenchApp {
     /// 发布插件命令动作（模拟 UI 按钮点击）。
-    pub(super) fn publish_plugin_command_action(&mut self, plugin_id: &str, command_id: &str) {
+    pub(crate) fn publish_plugin_command_action(&mut self, plugin_id: &str, command_id: &str) {
         // 查找该插件的 UI contribution 信息以确定是否 record_send_input
         let summaries = self.plugin_manager.summaries();
         let record_send_input = summaries
