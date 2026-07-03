@@ -42,6 +42,9 @@ pub struct TerminalPanel {
     pub height: f32,
     pub maximize_clicked: bool,
 
+    /// 是否发生过截断（用于状态栏提示，显示后清除）
+    pub truncated: bool,
+
     last_scroll_offsets: BTreeMap<String, f32>,
     pending_scroll_to_bottom_keys: BTreeSet<String>,
 
@@ -154,10 +157,11 @@ impl TerminalPanel {
             port_filter: None,
             bookmarked_entry_ids: BTreeSet::new(),
 
-            max_entries: 2_000,
+            max_entries: 50_000,
 
             height: 350.0,
             maximize_clicked: false,
+            truncated: false,
 
             last_scroll_offsets: BTreeMap::new(),
             pending_scroll_to_bottom_keys: BTreeSet::new(),
@@ -385,19 +389,19 @@ impl TerminalPanel {
 
             force_scroll_to_bottom |= crate::theme::auto_scroll_button(ui, &mut self.auto_scroll);
 
-            // 暂停接收：与「暂停自动滚动」不同——这个会停止接收新数据，
-            // 已显示内容冻结，高速数据流下便于仔细查看一段数据。
-            let pause_icon = if self.paused { "▶" } else { "⏸" };
+            // 暂停接收：用文字按钮而非 ⏸，避免与自动滚动按钮（⏸/↓）视觉撞图。
+            // 语义不同：暂停接收会冻结已显示内容并丢弃新数据，自动滚动只控制滚到底。
+            let (pause_label, pause_hint) = if self.paused {
+                ("继续", "已暂停接收 · 新数据被丢弃，点击继续")
+            } else {
+                ("暂停", "暂停接收 · 冻结画面查看")
+            };
             if ui
                 .add(
-                    egui::Button::new(pause_icon)
+                    egui::Button::new(pause_label)
                         .selected(self.paused),
                 )
-                .on_hover_text(if self.paused {
-                    "已暂停接收，点击继续"
-                } else {
-                    "暂停接收"
-                })
+                .on_hover_text(pause_hint)
                 .clicked()
             {
                 self.paused = !self.paused;
@@ -482,18 +486,6 @@ impl TerminalPanel {
                     });
                 }
                 rows.extend(port_rows);
-            }
-
-            // 截断提示
-            let total_truncated: u64 = self.ports.values().map(|d| d.truncated_count).sum();
-            if total_truncated > 0 {
-                ui.label(
-                    RichText::new(format!(
-                        "已截断 {total_truncated} 条，当前仅保留最近 {} 条",
-                        self.max_entries
-                    ))
-                    .color(theme::YELLOW),
-                );
             }
 
             // 关键修复：
@@ -743,6 +735,7 @@ impl TerminalPanel {
                 self.bookmarked_entry_ids.remove(&removed.id);
             }
             data.truncated_count += 1;
+            self.truncated = true;
         }
     }
 

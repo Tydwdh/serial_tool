@@ -84,6 +84,9 @@ pub(crate) struct PersistedConfig {
     /// 日志保留条数上限。默认 2000。
     #[serde(default = "default_log_max_entries")]
     pub(crate) log_max_entries: usize,
+    /// 命令面板使用顺序（label key 列表，最近使用的在前）。
+    #[serde(default)]
+    pub(crate) command_usage_order: Vec<String>,
 }
 
 fn default_terminal_merge_window_ms() -> u64 {
@@ -91,11 +94,11 @@ fn default_terminal_merge_window_ms() -> u64 {
 }
 
 fn default_terminal_max_entries() -> usize {
-    2000
+    50_000
 }
 
 fn default_log_max_entries() -> usize {
-    2000
+    50_000
 }
 
 fn default_true() -> bool {
@@ -271,6 +274,7 @@ impl WorkbenchApp {
             terminal_merge_window_ms: self.terminal_panel.merge_window_ms,
             terminal_max_entries: self.terminal_panel.max_entries,
             log_max_entries: self.bottom_log_panel.max_entries,
+            command_usage_order: self.command_usage_order.clone(),
         }
     }
 
@@ -302,6 +306,7 @@ impl WorkbenchApp {
         self.terminal_panel.merge_window_ms = cfg.terminal_merge_window_ms;
         self.terminal_panel.max_entries = cfg.terminal_max_entries.max(100);
         self.bottom_log_panel.max_entries = cfg.log_max_entries.max(100);
+        self.command_usage_order = cfg.command_usage_order;
         self.send.send_history = cfg
             .send_history
             .iter()

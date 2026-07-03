@@ -151,25 +151,50 @@ impl WorkbenchApp {
             // ── 插件贡献：status_bar.left ──
             self.ui_contribution_slot(ui, "status_bar.left");
 
-            // ── 状态消息（左对齐） ──
-            if !self.status.message.is_empty() {
+            // ── 通知队列（多来源独立，互不覆盖） ──
+            // 截断提醒也走通知队列
+            if self.terminal_panel.truncated {
+                self.notifications.push(
+                    "terminal",
+                    StatusLevel::Warn,
+                    format!("终端已截断，仅保留最近 {} 条", self.terminal_panel.max_entries),
+                );
+                self.terminal_panel.truncated = false;
+            }
+            if self.bottom_log_panel.truncated {
+                self.notifications.push(
+                    "log",
+                    StatusLevel::Warn,
+                    format!("日志已截断，仅保留最近 {} 条", self.bottom_log_panel.max_entries),
+                );
+                self.bottom_log_panel.truncated = false;
+            }
+            // 重新获取（包含刚推送的截断通知）
+            let notifications = self.notifications.current();
+
+            if !notifications.is_empty() {
                 ui.separator();
-                let status_color = match self.status.level {
-                    StatusLevel::Info => theme::TEXT_SECONDARY,
-                    StatusLevel::Warn => theme::YELLOW,
-                    StatusLevel::Error => theme::RED,
-                };
-                let shown = {
-                    let mut chars = self.status.message.chars();
-                    let head: String = chars.by_ref().take(80).collect();
-                    if chars.next().is_some() {
-                        format!("{head}…")
-                    } else {
-                        head
-                    }
-                };
-                ui.label(egui::RichText::new(&shown).color(status_color))
-                    .on_hover_text(&self.status.message);
+                // 最多显示 3 条，超出显示 "…及 N 条消息"
+                let max_show = 3;
+                let total = notifications.len();
+                let shown: Vec<_> = notifications.iter().take(max_show).collect();
+                for n in &shown {
+                    let color = match n.level {
+                        StatusLevel::Info => theme::TEXT_SECONDARY,
+                        StatusLevel::Warn => theme::YELLOW,
+                        StatusLevel::Error => theme::RED,
+                    };
+                    let text = truncate_for_status(&n.text, 60);
+                    ui.label(egui::RichText::new(&text).color(color))
+                        .on_hover_text(&n.text);
+                }
+                if total > max_show {
+                    ui.label(
+                        egui::RichText::new(format!("…及 {} 条消息", total - max_show))
+                            .small()
+                            .color(theme::TEXT_SECONDARY),
+                    );
+                }
             }
 
             // ── 插件贡献：status_bar.right ──
@@ -259,5 +284,16 @@ impl WorkbenchApp {
         {
             self.force_check_update();
         }
+    }
+}
+
+/// 状态栏消息截断：保留前 max_chars 个字符，超出加 …。
+fn truncate_for_status(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let head: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
     }
 }

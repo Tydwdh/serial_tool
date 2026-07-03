@@ -73,6 +73,7 @@ impl WorkbenchApp {
             Action::CommandPalette => {
                 self.command_palette_open = !self.command_palette_open;
                 self.command_palette_query.clear();
+                self.command_palette_selected = None;
             }
             Action::PluginCommand(plugin_id, command_id) => {
                 self.publish_plugin_command_action(&plugin_id, &command_id);

@@ -23,7 +23,7 @@ impl WorkbenchApp {
         // ui_contribution_slot 调用时重新计算，同帧后续调用复用。
         self.plugin_summaries_cache = std::cell::OnceCell::new();
 
-        self.clear_status_if_expired();
+        // 通知队列在 status_bar 渲染时自动清理过期消息。
         self.tick_recorder_status();
         self.tick_terminal_maximize();
         self.tick_replay(ctx);

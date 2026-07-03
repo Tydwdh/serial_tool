@@ -18,6 +18,73 @@ impl StatusLevel {
     }
 }
 
+/// 通知：状态栏消息的最小单元。每条消息独立存在、独立过期。
+#[derive(Clone)]
+pub(crate) struct Notification {
+    pub(crate) level: StatusLevel,
+    pub(crate) text: String,
+    /// 过期时间戳（ms），过期后自动从队列移除。
+    pub(crate) deadline_ms: u64,
+}
+
+/// 通知队列：多条消息按时间排列，互不覆盖。
+/// 同 source 的新消息会替换该 source 的旧消息（避免刷屏）。
+#[derive(Clone)]
+pub(crate) struct NotificationQueue {
+    /// (source, Notification) — 按插入顺序排列。
+    entries: std::collections::VecDeque<(String, Notification)>,
+}
+
+impl NotificationQueue {
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// 推送一条通知。同 source 的旧消息被替换（去重但不丢失历史位置）。
+    pub(crate) fn push(&mut self, source: &str, level: StatusLevel, text: impl Into<String>) {
+        let now = tool_core::now_timestamp_ms();
+        let notification = Notification {
+            level,
+            text: text.into(),
+            deadline_ms: now + level.ttl_ms(),
+        };
+
+        // 同 source 替换旧消息，保持队列位置不变
+        for (s, n) in self.entries.iter_mut().rev() {
+            if s == source {
+                *n = notification;
+                return;
+            }
+        }
+        // 新 source：推入末尾
+        self.entries
+            .push_back((source.to_owned(), notification));
+    }
+
+    /// 获取当前未过期的所有通知（按插入顺序）。
+    pub(crate) fn current(&mut self) -> Vec<Notification> {
+        let now = tool_core::now_timestamp_ms();
+        while self
+            .entries
+            .front()
+            .is_some_and(|(_, n)| now > n.deadline_ms)
+        {
+            self.entries.pop_front();
+        }
+        // 也清理中间过期的（保留顺序）
+        self.entries.retain(|(_, n)| now <= n.deadline_ms);
+        self.entries.iter().map(|(_, n)| n.clone()).collect()
+    }
+}
+
+impl Default for NotificationQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub(crate) const MAX_SEND_HISTORY: usize = 200;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -25,51 +92,6 @@ pub(crate) enum DetachedPanelAction {
     None,
     Attach,
     Close,
-}
-
-#[derive(Clone)]
-pub(crate) struct StatusState {
-    pub(crate) message: String,
-    pub(crate) level: StatusLevel,
-    pub(crate) deadline_ms: u64,
-}
-
-impl Default for StatusState {
-    fn default() -> Self {
-        Self {
-            message: "就绪".into(),
-            level: StatusLevel::Info,
-            deadline_ms: 0,
-        }
-    }
-}
-
-impl StatusState {
-    /// 统一状态入口。低级别不能覆盖未过期的高级消息。
-    pub(crate) fn set(&mut self, level: StatusLevel, text: impl Into<String>) {
-        let now = tool_core::now_timestamp_ms();
-        if level as u8 >= self.level as u8 || now > self.deadline_ms {
-            self.level = level;
-            self.message = text.into();
-            self.deadline_ms = now + level.ttl_ms();
-        }
-    }
-
-    /// 用户主动操作：总是更新状态（不被旧错误阻塞）。
-    pub(crate) fn set_force(&mut self, level: StatusLevel, text: impl Into<String>) {
-        let now = tool_core::now_timestamp_ms();
-        self.level = level;
-        self.message = text.into();
-        self.deadline_ms = now + level.ttl_ms();
-    }
-
-    /// 过期后重置为就绪。每帧调用。
-    pub(crate) fn clear_if_expired(&mut self) {
-        if tool_core::now_timestamp_ms() > self.deadline_ms {
-            self.level = StatusLevel::Info;
-            self.message = "就绪".into();
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

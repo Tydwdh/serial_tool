@@ -435,30 +435,65 @@ impl WorkbenchApp {
         }
 
         ui.separator();
-        // 历史 popup：搜索 + 单条删除 + 清空全部。点条目直接发送。
         let btn_resp = ui.button("历史");
         let popup_id = ui.id().with(id_salt);
         let popup = egui::Popup::from_response(&btn_resp)
             .open_memory(btn_resp.clicked().then_some(egui::SetOpenCommand::Toggle))
             .id(popup_id)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .layout(egui::Layout::top_down(egui::Align::LEFT));
 
+        // pending 模式：popup 闭包内只收集要执行的动作，闭包返回后再
+        // 调用 do_send / retain / clear。直接在 egui 回调里 &mut self 调
+        // do_send 会触发深度借用崩溃（do_send → record_send_history 会修改
+        // 正被遍历的 send_history）。
+        enum PendingHistory {
+            Send(String),
+            Delete(String),
+            Clear,
+        }
+        let mut pending: Option<PendingHistory> = None;
+
         popup.show(|ui| {
-            ui.set_min_width(280.0);
-            ui.set_max_width(380.0);
+            ui.set_min_width(320.0);
+            ui.set_max_width(420.0);
+            ui.spacing_mut().item_spacing.y = 4.0;
 
-            // 搜索框
+            // 标题
             ui.horizontal(|ui| {
-                ui.label("搜索");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.send.history_search)
-                        .desired_width(220.0)
-                        .hint_text("过滤历史"),
+                ui.label(
+                    egui::RichText::new("发送历史")
+                        .strong()
+                        .color(theme::TEXT_WHITE),
                 );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} 条",
+                            self.send.send_history.len()
+                        ))
+                        .small()
+                        .color(theme::TEXT_DIMMED),
+                    );
+                });
             });
-            ui.separator();
 
-            // 过滤后的条目（克隆避免在删除时同时遍历）
+            // 搜索框：占满宽度
+            ui.add_space(2.0);
+            let search_resp = ui.add(
+                egui::TextEdit::singleline(&mut self.send.history_search)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("🔍 过滤历史…"),
+            );
+            if !search_resp.has_focus() {
+                search_resp.request_focus();
+            }
+
+            ui.add_space(2.0);
+            ui.separator();
+            ui.add_space(2.0);
+
+            // 过滤后的条目（克隆，避免遍历与删除/发送同时持有引用）
             let query = self.send.history_search.to_lowercase();
             let entries: Vec<String> = self
                 .send
@@ -470,66 +505,200 @@ impl WorkbenchApp {
                 .collect();
 
             if entries.is_empty() {
-                ui.label(
-                    egui::RichText::new(if self.send.send_history.is_empty() {
-                        "无历史"
-                    } else {
-                        "无匹配"
-                    })
-                    .color(theme::TEXT_SECONDARY),
-                );
+                ui.vertical_centered(|ui| {
+                    ui.add_space(12.0);
+                    ui.label(
+                        egui::RichText::new(if self.send.send_history.is_empty() {
+                            "暂无历史"
+                        } else {
+                            "无匹配项"
+                        })
+                        .color(theme::TEXT_DIMMED),
+                    );
+                    ui.add_space(12.0);
+                });
+            } else {
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        // item_spacing.y = 0 让行严格紧贴，分隔线贴在行底 = 下一行顶，
+                        // 否则默认 item_spacing 会让分隔线悬在两行间隙里、视觉错位。
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        let del_width = 28.0;
+                        // 在循环外取一次列宽，避免每行 available_width() 随
+                        // min_rect 增长而变大，导致删除按钮越往下越靠右。
+                        let col_width = ui.available_width();
+                        let text_width = (col_width - del_width).max(60.0);
+                        let galley_width = (text_width - 16.0).max(20.0);
+                        let count = entries.len();
+                        // 历史条目用稍大字体，便于阅读。
+                        let font_id = egui::FontId::proportional(
+                            ui.style()
+                                .text_styles
+                                .get(&egui::TextStyle::Body)
+                                .map(|f| f.size)
+                                .map(|s| s.max(15.0))
+                                .unwrap_or(15.0),
+                        );
+                        let min_row_height: f32 = 28.0;
+                        let row_padding = 8.0; // 上下各 4px
+
+                        for (idx, item) in entries.iter().enumerate() {
+                            // 按 \n 拆成多段，每段独立 Truncate（超宽截断加 …），
+                            // 然后垂直拼接。实现 \n 换行 + 每行截断两种效果。
+                            let segments: Vec<std::sync::Arc<egui::Galley>> = item
+                                .split('\n')
+                                .map(|seg| {
+                                    egui::WidgetText::from(seg)
+                                        .color(theme::TEXT_PRIMARY)
+                                        .into_galley(
+                                            ui,
+                                            Some(egui::TextWrapMode::Truncate),
+                                            galley_width,
+                                            font_id.clone(),
+                                        )
+                                })
+                                .collect();
+                            let total_text_h: f32 =
+                                segments.iter().map(|g| g.size().y).sum();
+                            let row_height =
+                                min_row_height.max(total_text_h + row_padding);
+
+                            let row_resp = ui.allocate_ui_with_layout(
+                                egui::vec2(col_width, row_height),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    // 文字区：固定宽 + click 命中
+                                    let text_resp = ui.allocate_exact_size(
+                                        egui::vec2(text_width, row_height),
+                                        egui::Sense::click(),
+                                    )
+                                    .1;
+                                    let trect = text_resp.rect;
+                                    if text_resp.hovered() {
+                                        ui.painter()
+                                            .rect_filled(trect, 3.0, theme::BG_HOVER);
+                                    }
+                                    // 逐个绘制每段 galley（按 \n 拆分的），垂直排列
+                                    let mut y = trect.center().y - total_text_h / 2.0;
+                                    for g in &segments {
+                                        ui.painter().galley(
+                                            egui::pos2(trect.left() + 8.0, y),
+                                            g.clone(),
+                                            theme::TEXT_PRIMARY,
+                                        );
+                                        y += g.size().y;
+                                    }
+                                    if text_resp.clicked() {
+                                        pending = Some(PendingHistory::Send(item.clone()));
+                                    }
+                                    text_resp
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        .on_hover_text("点击填入发送框");
+
+                                    // 删除区：固定宽 + click 命中，手绘 × 不用 Button
+                                    let del_resp = ui.allocate_exact_size(
+                                        egui::vec2(del_width, row_height),
+                                        egui::Sense::click(),
+                                    )
+                                    .1;
+                                    let drect = del_resp.rect;
+                                    if del_resp.hovered() {
+                                        ui.painter()
+                                            .rect_filled(drect, 3.0, theme::BG_HOVER);
+                                    }
+                                    ui.painter().text(
+                                        drect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "×",
+                                        font_id.clone(),
+                                        if del_resp.hovered() {
+                                            theme::TEXT_PRIMARY
+                                        } else {
+                                            theme::TEXT_SECONDARY
+                                        },
+                                    );
+                                    if del_resp.clicked() {
+                                        pending = Some(PendingHistory::Delete(item.clone()));
+                                    }
+                                    del_resp
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        .on_hover_text("删除该条");
+                                },
+                            );
+
+                            // 条目间分隔线：画在该行 rect 的底边，每行位置统一。
+                            if idx + 1 < count {
+                                let rect = row_resp.response.rect;
+                                let y = rect.bottom();
+                                ui.painter().line_segment(
+                                    [
+                                        egui::pos2(rect.left() + 4.0, y),
+                                        egui::pos2(rect.right() - 4.0, y),
+                                    ],
+                                    egui::Stroke::new(1.0, theme::BORDER),
+                                );
+                            }
+                        }
+                    });
             }
 
-            egui::ScrollArea::vertical()
-                .max_height(240.0)
-                .show(ui, |ui| {
-                    for item in &entries {
-                        ui.horizontal(|ui| {
-                            // 点击条目：填入 input 并直接发送
-                            if ui
-                                .add(
-                                    egui::Button::new(shorten_for_ui(item, 40))
-                                        .frame(false)
-                                        .wrap_mode(egui::TextWrapMode::Truncate),
-                                )
-                                .clicked()
-                            {
-                                self.send.input = item.clone();
-                                self.do_send();
-                                egui::Popup::close_id(ui.ctx(), popup_id);
-                            }
-                            // 单条删除
-                            if ui.small_button("×").clicked() {
-                                self.send.send_history.retain(|h| h != item);
-                                if let Err(e) = self.save_config() {
-                                    log::warn!("save_config failed: {e}")
-                                }
-                            }
-                        });
-                    }
-                });
-
+            ui.add_space(2.0);
             ui.separator();
-            if ui.button("清空全部历史").clicked() {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new("清空全部")
+                                .color(theme::RED)
+                                .small(),
+                        )
+                        .frame(true),
+                    )
+                    .on_hover_text("删除所有历史记录")
+                    .clicked()
+                {
+                    pending = Some(PendingHistory::Clear);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new("点击条目填入发送框")
+                            .small()
+                            .color(theme::TEXT_DIMMED),
+                    );
+                });
+            });
+        });
+
+        // 闭包外执行实际状态变更
+        match pending.take() {
+            Some(PendingHistory::Send(text)) => {
+                // 填入发送编辑器并关闭 popup
+                self.send.input = text;
+                egui::Popup::close_id(ui.ctx(), popup_id);
+            }
+            Some(PendingHistory::Delete(text)) => {
+                self.send.send_history.retain(|h| h != &text);
+                if let Err(e) = self.save_config() {
+                    log::warn!("save_config failed: {e}")
+                }
+            }
+            Some(PendingHistory::Clear) => {
                 self.send.send_history.clear();
+                self.send.history_search.clear();
                 if let Err(e) = self.save_config() {
                     log::warn!("save_config failed: {e}")
                 }
                 egui::Popup::close_id(ui.ctx(), popup_id);
             }
-        });
+            None => {}
+        }
     }
 }
 
 use tool_transport::{hex_preview, send_impl_to, translate_error};
 
-fn shorten_for_ui(s: &str, max_chars: usize) -> String {
-    let mut out = s.chars().take(max_chars).collect::<String>();
-    if s.chars().count() > max_chars {
-        out.push('…');
-    }
-    out
-}
 
 #[cfg(test)]
 mod tests {
@@ -575,6 +744,82 @@ mod tests {
                 "输入区底部 {} 超过操作栏顶部 {}，发生重叠",
                 input_bottom,
                 actions_top
+            );
+        });
+    }
+
+    /// 验证历史条目（短文本）行高=最小行高、间距=item_spacing=0、分隔线落在行底。
+    /// 复现 popup 内 ScrollArea 的行布局：allocate_ui_with_layout + item_spacing.y=0。
+    #[test]
+    fn history_rows_uniform_height_and_separator_aligned() {
+        egui::__run_test_ui(|ui| {
+            ui.set_min_size(egui::vec2(360.0, 400.0));
+
+            // 短条目：确保触发最小行高
+            let entries: Vec<String> = (0..5).map(|i| format!("item-{i}")).collect();
+            let row_height = 28.0; // 最小行高
+            let del_width = 28.0;
+            let col_width = ui.available_width();
+            let text_width = (col_width - del_width).max(60.0);
+            let count = entries.len();
+
+            let mut row_rects: Vec<egui::Rect> = Vec::new();
+            let mut sep_ys: Vec<f32> = Vec::new();
+
+            egui::ScrollArea::vertical()
+                .id_salt("test-hist-scroll")
+                .max_height(320.0)
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for (idx, item) in entries.iter().enumerate() {
+                        let row_resp = ui.allocate_ui_with_layout(
+                            egui::vec2(col_width, row_height),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                let _ = ui.allocate_exact_size(
+                                    egui::vec2(text_width, row_height),
+                                    egui::Sense::click(),
+                                );
+                                let _ = ui.allocate_exact_size(
+                                    egui::vec2(del_width, row_height),
+                                    egui::Sense::click(),
+                                );
+                                let _ = item;
+                            },
+                        );
+                        row_rects.push(row_resp.response.rect);
+                        if idx + 1 < count {
+                            let rect = row_resp.response.rect;
+                            sep_ys.push(rect.bottom());
+                        }
+                    }
+                });
+
+            // 短条目每行高度应等于最小行高
+            for (i, r) in row_rects.iter().enumerate() {
+                let h = r.height();
+                assert!(
+                    (h - row_height).abs() < 0.5,
+                    "第 {i} 行高度 {h} != 期望 {row_height}"
+                );
+            }
+
+            // 分隔线 y 应等于对应行底（第 i 条分隔线在第 i 行底）
+            for (i, &sy) in sep_ys.iter().enumerate() {
+                let bottom = row_rects[i].bottom();
+                assert!(
+                    (sy - bottom).abs() < 0.5,
+                    "分隔线 {i} y={sy} 与行底 {bottom} 不对齐"
+                );
+            }
+
+            // 中间行间距应等于 row_height（ScrollArea 底部对最后一行有额外预留，
+            // 所以只检查中间行的连续性，不检查最后一行后的间距）。
+            assert!(row_rects.len() >= 3);
+            let mid_gap = row_rects[2].top() - row_rects[1].top();
+            assert!(
+                (mid_gap - row_height).abs() < 0.5,
+                "中间行间距 {mid_gap} != {row_height}，行高不一致"
             );
         });
     }

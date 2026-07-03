@@ -8,20 +8,29 @@ use tool_core::now_timestamp_ms;
 use tool_transport::{SerialConfig, parse_data_bits, parse_parity, parse_stop_bits};
 
 impl WorkbenchApp {
-    /// 统一状态入口。低级别不能覆盖未过期的高级消息。
+    /// 发布一条通知到状态栏。source 相同的旧通知会被替换（避免刷屏）。
     pub(crate) fn set_status(&mut self, level: StatusLevel, text: impl Into<String>) {
-        self.status.set(level, text);
+        self.notifications.push("general", level, text);
+    }
+
+    /// 来自特定 source 的通知（如 "terminal", "log", "replay" 等）。
+    /// 同 source 的新消息替换旧消息。
+    #[allow(dead_code)]
+    pub(crate) fn set_status_source(
+        &mut self,
+        source: &str,
+        level: StatusLevel,
+        text: impl Into<String>,
+    ) {
+        self.notifications.push(source, level, text);
     }
 
     /// 用户主动操作：总是更新状态（不被旧错误阻塞）。
+    /// 等价于 set_status，因为通知队列不会阻塞。
     pub(crate) fn set_status_force(&mut self, level: StatusLevel, text: impl Into<String>) {
-        self.status.set_force(level, text);
+        self.notifications.push("general", level, text);
     }
 
-    /// 过期后重置为就绪。每帧调用。
-    pub(crate) fn clear_status_if_expired(&mut self) {
-        self.status.clear_if_expired();
-    }
     /// 切换串口时：保存旧端口设置到 profile，从 profile 恢复新端口设置。
     pub(crate) fn switch_port_selection(&mut self, old_port: Option<&str>, new_port: &str) {
         // 保存旧端口配置

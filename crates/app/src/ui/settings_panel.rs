@@ -138,7 +138,7 @@ impl WorkbenchApp {
                     ui.label("终端保留条数");
                     let mut n = self.terminal_panel.max_entries;
                     let resp = ui.add(
-                        egui::Slider::new(&mut n, 500..=50000)
+                        egui::Slider::new(&mut n, 500..=200_000)
                             .step_by(500.0),
                     );
                     if resp.changed() {
@@ -155,7 +155,7 @@ impl WorkbenchApp {
                     ui.label("日志保留条数");
                     let mut n = self.bottom_log_panel.max_entries;
                     let resp = ui.add(
-                        egui::Slider::new(&mut n, 500..=50000)
+                        egui::Slider::new(&mut n, 500..=200_000)
                             .step_by(500.0),
                     );
                     if resp.changed() {
@@ -209,8 +209,8 @@ impl WorkbenchApp {
                 self.panels.dock = tool_panels::DockLayout::default();
                 self.panels.dock.bottom_visible = true;
                 self.terminal_panel.merge_window_ms = 5;
-                self.terminal_panel.max_entries = 2000;
-                self.bottom_log_panel.max_entries = 2000;
+                self.terminal_panel.max_entries = 50000;
+                self.bottom_log_panel.max_entries = 50000;
                 self.monospace_font_size = 13.0;
                 self.terminal_panel.font_size = 13.0;
                 self.bottom_log_panel.font_size = 13.0;

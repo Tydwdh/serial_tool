@@ -1,4 +1,6 @@
 //! 命令面板（Ctrl+K）：fuzzy 搜索内置 Action + 插件命令 + 最近发送历史。
+//!
+//! 支持鼠标悬浮高亮、点击执行，以及键盘 ↑↓ 选择、Enter 确认。
 
 use crate::app::WorkbenchApp;
 use crate::keymap::Action;
@@ -17,8 +19,6 @@ enum CommandKind {
     Action(Action),
     /// 插件命令。
     PluginCommand(String, String),
-    /// 发送历史条目（执行走 do_send）。
-    History(String),
 }
 
 impl WorkbenchApp {
@@ -27,17 +27,16 @@ impl WorkbenchApp {
             return;
         }
 
-        // Esc 关闭（独立于 keymap 录制，且不依赖 Action::Send 路径）。
+        // Esc 关闭
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.command_palette_open = false;
             return;
         }
 
-        // 构建候选列表：内置 Action + 插件命令 + 最近发送历史。
+        // 构建候选列表
         let mut entries: Vec<CommandEntry> = Vec::new();
 
         for action in Action::ALL {
-            // CommandPalette 自身不列入（避免递归打开）。
             if matches!(action, Action::CommandPalette) {
                 continue;
             }
@@ -64,38 +63,80 @@ impl WorkbenchApp {
             }
         }
 
-        // 最近发送历史（最多 10 条）。
-        for item in self.send.send_history.iter().take(10) {
-            entries.push(CommandEntry {
-                label: format!("发送: {}", truncate_for_display(item, 40)),
-                shortcut: String::new(),
-                kind: CommandKind::History(item.clone()),
-            });
-        }
-
-        // 过滤：query 为空时全部显示；否则子串匹配（大小写不敏感）。
+        // 过滤
         let query = self.command_palette_query.to_lowercase();
         if !query.is_empty() {
             entries.retain(|e| e.label.to_lowercase().contains(&query));
         }
 
-        let mut action_to_run: Option<CommandKind> = None;
-        let mut close_after = false;
+        // 按最近使用排序：usage_order 中 position 越小的排越前面。
+        // 未使用的条目排最后。
+        entries.sort_by_key(|e| {
+            self.command_usage_order
+                .iter()
+                .position(|u| u == &e.label)
+                .map(|p| p as i32)
+                .unwrap_or(i32::MAX)
+        });
 
-        egui::Window::new("命令面板")
+        // 键盘导航：搜索文字变化时重置选中到第一项
+        // 用 UI memory 追踪上次 query，检测变化
+        {
+            let last_query = ctx.memory_mut(|m| {
+                let key = egui::Id::new("cp_last_query");
+                let prev: String = m.data.get_temp(key).unwrap_or_default();
+                m.data.insert_temp(key, self.command_palette_query.clone());
+                prev
+            });
+            if last_query != self.command_palette_query && !entries.is_empty() {
+                self.command_palette_selected = Some(0);
+            }
+        }
+
+        // 确保 selected 在有效范围
+        if let Some(idx) = self.command_palette_selected {
+            if entries.is_empty() {
+                self.command_palette_selected = None;
+            } else if idx >= entries.len() {
+                self.command_palette_selected = Some(entries.len() - 1);
+            }
+        } else if !entries.is_empty() {
+            // 刚打开时默认选中第一项
+            self.command_palette_selected = Some(0);
+        }
+
+        // 处理键盘 ↑↓
+        if !entries.is_empty() {
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                let cur = self.command_palette_selected.unwrap_or(0);
+                self.command_palette_selected =
+                    Some(if cur + 1 >= entries.len() { 0 } else { cur + 1 });
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                let cur = self.command_palette_selected.unwrap_or(0);
+                self.command_palette_selected = Some(if cur == 0 {
+                    entries.len() - 1
+                } else {
+                    cur - 1
+                });
+            }
+        }
+
+        let mut action_to_run: Option<(CommandKind, String)> = None;
+        let mut close_after = false;
+        let mut hovered_idx: Option<usize> = None;
+
+        let window_resp = egui::Window::new("命令面板")
             .open(&mut self.command_palette_open)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, -100.0])
-            .default_width(480.0)
+            .min_width(340.0)
             .show(ctx, |ui| {
-                ui.set_min_width(460.0);
-                ui.set_max_width(520.0);
-
-                // 搜索框：自动获取焦点。
+                // 搜索框
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut self.command_palette_query)
-                        .hint_text("搜索命令或历史…")
+                        .hint_text("搜索命令…")
                         .desired_width(f32::INFINITY),
                 );
                 if !resp.has_focus() {
@@ -104,35 +145,107 @@ impl WorkbenchApp {
 
                 ui.separator();
 
+                let font_size = ui
+                    .style()
+                    .text_styles
+                    .get(&egui::TextStyle::Body)
+                    .map(|f| f.size)
+                    .unwrap_or(14.0);
+                let row_height = font_size + 6.0;
+                // 鼠标是否在移动（用于判断是否跟随 hover）
+                let mouse_moving = ctx.input(|i| i.pointer.delta().length_sq() > 0.01);
+
                 egui::ScrollArea::vertical()
                     .max_height(300.0)
                     .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        let col_width = ui.available_width();
+
                         if entries.is_empty() {
-                            ui.label(
-                                egui::RichText::new("无匹配命令").color(theme::TEXT_SECONDARY),
-                            );
+                            ui.add_space(20.0);
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    egui::RichText::new("无匹配命令")
+                                        .color(theme::TEXT_SECONDARY),
+                                );
+                            });
+                            ui.add_space(20.0);
                         }
-                        for entry in &entries {
-                            let resp = ui.horizontal(|ui| {
-                                ui.label(&entry.label);
-                                if !entry.shortcut.is_empty() {
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            ui.label(
-                                                egui::RichText::new(&entry.shortcut)
+
+                        for (i, entry) in entries.iter().enumerate() {
+                            let is_selected =
+                                self.command_palette_selected == Some(i);
+
+                            let row_id = ui.id().with(("cp_row", i));
+                            let row_resp = ui.allocate_ui_with_layout(
+                                egui::vec2(col_width, row_height),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    let rect = ui.max_rect();
+                                    let resp = ui.interact(
+                                        rect,
+                                        row_id,
+                                        egui::Sense::click(),
+                                    );
+                                    // 仅鼠标移动时才让 hover 跟随选中，
+                                    // 否则保持键盘选中优先。
+                                    if resp.hovered() && mouse_moving {
+                                        hovered_idx = Some(i);
+                                    }
+                                    if resp.hovered() || is_selected {
+                                        let color = if is_selected {
+                                            theme::BG_SELECTION
+                                        } else {
+                                            theme::BG_HOVER
+                                        };
+                                        ui.painter()
+                                            .rect_filled(rect, 3.0, color);
+                                    }
+                                    if resp.clicked() {
+                                        action_to_run =
+                                            Some((clone_kind(&entry.kind), entry.label.clone()));
+                                        close_after = true;
+                                    }
+
+                                    ui.add_space(4.0);
+
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(&entry.label)
+                                                .color(theme::TEXT_PRIMARY),
+                                        )
+                                        .selectable(false),
+                                    );
+
+                                    if !entry.shortcut.is_empty() {
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(
+                                                egui::Align::Center,
+                                            ),
+                                            |ui| {
+                                                ui.add_space(4.0);
+                                                ui.label(
+                                                    egui::RichText::new(
+                                                        &entry.shortcut,
+                                                    )
                                                     .small()
                                                     .color(theme::TEXT_SECONDARY),
-                                            );
-                                        },
-                                    );
-                                }
-                            });
-                            if resp.response.clicked() {
-                                action_to_run = Some(clone_kind(&entry.kind));
-                            }
+                                                );
+                                            },
+                                        );
+                                    }
+                                },
+                            );
+                            let _ = row_resp;
                         }
                     });
+
+                // 鼠标移动时 hover 跟随更新键盘选中
+                if let Some(hi) = hovered_idx {
+                    if mouse_moving {
+                        self.command_palette_selected = Some(hi);
+                    }
+                }
 
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -144,33 +257,60 @@ impl WorkbenchApp {
                 });
             });
 
-        // Enter 执行第一个候选。
-        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) && !entries.is_empty() {
-            action_to_run = Some(clone_kind(&entries[0].kind));
+        // 点击窗口外部 → 关闭（VSCode 风格）
+        if let Some(inner) = window_resp {
+            let win_rect = inner.response.rect;
+            if ctx.input(|i| {
+                i.pointer.any_click()
+                    && i.pointer
+                        .hover_pos()
+                        .is_some_and(|pos| !win_rect.contains(pos))
+            }) {
+                close_after = true;
+            }
         }
 
-        if let Some(kind) = action_to_run {
-            self.run_command_kind(kind);
+        // Enter 执行选中项
+        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            if let Some(idx) = self.command_palette_selected {
+                if idx < entries.len() {
+                    action_to_run = Some((
+                        clone_kind(&entries[idx].kind),
+                        entries[idx].label.clone(),
+                    ));
+                    close_after = true;
+                }
+            } else if !entries.is_empty() {
+                action_to_run = Some((
+                    clone_kind(&entries[0].kind),
+                    entries[0].label.clone(),
+                ));
+                close_after = true;
+            }
+        }
+
+        if let Some((kind, key)) = action_to_run {
+            // 记录使用：key 移到最前
+            self.command_usage_order.retain(|u| u != &key);
+            self.command_usage_order.insert(0, key);
             close_after = true;
+
+            self.run_command_kind(kind);
         }
 
         if close_after {
             self.command_palette_open = false;
+            self.command_palette_selected = None;
         }
     }
 
     fn run_command_kind(&mut self, kind: CommandKind) {
         match kind {
             CommandKind::Action(action) => {
-                // 通过 pending_action 走已有 execute_action 路径，避免跨模块调用私有方法。
                 self.pending_action = Some(action);
             }
             CommandKind::PluginCommand(plugin_id, command_id) => {
                 self.publish_plugin_command_action(&plugin_id, &command_id);
-            }
-            CommandKind::History(text) => {
-                self.send.input = text;
-                self.do_send();
             }
         }
     }
@@ -183,14 +323,5 @@ fn clone_kind(kind: &CommandKind) -> CommandKind {
         CommandKind::PluginCommand(p, c) => {
             CommandKind::PluginCommand(p.clone(), c.clone())
         }
-        CommandKind::History(s) => CommandKind::History(s.clone()),
     }
-}
-
-fn truncate_for_display(s: &str, max_chars: usize) -> String {
-    let mut out: String = s.chars().take(max_chars).collect();
-    if s.chars().count() > max_chars {
-        out.push('…');
-    }
-    out
 }

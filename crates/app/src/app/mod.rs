@@ -1,6 +1,6 @@
 use crate::config::default_activity_order;
 use crate::config::{ConfigLoadResult, PersistedConfig, default_recorder_path, load_config};
-use crate::state::{MAX_SEND_HISTORY, SendUiState, SerialUiState, StatusState, UpdateState};
+use crate::state::{MAX_SEND_HISTORY, NotificationQueue, SendUiState, SerialUiState, UpdateState};
 use eframe::egui;
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
@@ -32,7 +32,7 @@ pub(crate) struct WorkbenchApp {
     pub(crate) bottom_log_panel: LogPanel,
     pub(crate) serial: SerialUiState,
     pub(crate) recorder_path: String,
-    pub(crate) status: StatusState,
+    pub(crate) notifications: NotificationQueue,
     pub(crate) recent_workspaces: Vec<String>,
     pub(crate) send: SendUiState,
     pub(crate) terminal_popup_open: bool,
@@ -69,6 +69,10 @@ pub(crate) struct WorkbenchApp {
     pub(crate) command_palette_open: bool,
     /// 命令面板搜索文本
     pub(crate) command_palette_query: String,
+    /// 命令面板键盘选中的条目索引（0-based），None 表示无选中
+    pub(crate) command_palette_selected: Option<usize>,
+    /// 命令面板最近使用顺序（key 列表，最近使用的在前）
+    pub(crate) command_usage_order: Vec<String>,
     /// 自动更新状态
     pub(crate) update_state: UpdateState,
     /// UI contribution 运行时状态（toggle 值、progress 值等）
@@ -258,7 +262,7 @@ impl WorkbenchApp {
                 .map(|c| c.recorder_path.clone())
                 .unwrap_or_else(default_recorder_path),
             panels: rp.clone(),
-            status: StatusState::default(),
+            notifications: NotificationQueue::new(),
             recent_workspaces: config
                 .as_ref()
                 .map(|c| c.recent_workspaces.clone())
@@ -309,6 +313,8 @@ impl WorkbenchApp {
             key_recording: None,
             command_palette_open: false,
             command_palette_query: String::new(),
+            command_palette_selected: None,
+            command_usage_order: Vec::new(),
             update_state: UpdateState::default(),
             contribution_states: std::collections::HashMap::new(),
             plugin_summaries_cache: std::cell::OnceCell::new(),

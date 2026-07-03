@@ -19,7 +19,7 @@ const COL_GAP: f32 = 6.0;
 const LABEL_TO_MSG_GAP: f32 = 3.0;
 const LOG_SCROLL_ID: &str = "log-scroll-v2";
 /// 日志面板最大保留条数（与终端面板一致）。
-const MAX_LOG_ENTRIES: usize = 2_000;
+const MAX_LOG_ENTRIES: usize = 50_000;
 
 pub struct LogPanel {
     subscription: Subscription,
@@ -40,6 +40,8 @@ pub struct LogPanel {
     pub font_size: f32,
     /// 行框选状态
     pub selection: RowSelection,
+    /// 是否发生过截断（用于状态栏提示，显示后清除）
+    pub truncated: bool,
 }
 
 struct LogEntry {
@@ -72,6 +74,7 @@ impl LogPanel {
             source_filter: None,
             font_size: 13.0,
             selection: RowSelection::new(0),
+            truncated: false,
         }
     }
     pub fn ingest_all_pending(&mut self) -> usize {
@@ -159,11 +162,6 @@ impl LogPanel {
             ui.separator();
 
             force_scroll_to_bottom |= crate::theme::auto_scroll_button(ui, &mut self.auto_scroll);
-
-            let dropped = self.subscription.dropped_count();
-            if dropped > 0 {
-                ui.colored_label(theme::YELLOW, format!("已丢弃 {dropped} 条"));
-            }
 
             if ui.button("清空").clicked() {
                 self.clear();
@@ -302,6 +300,7 @@ impl LogPanel {
 
         while self.entries.len() > self.max_entries {
             self.entries.pop_front();
+            self.truncated = true;
         }
     }
 
