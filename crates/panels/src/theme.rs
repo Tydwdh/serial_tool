@@ -114,25 +114,15 @@ pub fn card_accent_bar(ui: &mut egui::Ui, color: Color32) {
 
 /// 自动滚动按钮：暂停/恢复自动滚动。
 /// 返回 `true` 表示需要强制滚动到底部。
-///
-/// 两种状态使用相同文字「跟随」，靠 selected 高亮区分：
-/// 开 = 高亮（滚动跟随最新数据）；关 = 普通（已暂停跟随）。固定文字避免切换时按钮宽度抖动。
 pub fn auto_scroll_button(ui: &mut egui::Ui, auto_scroll: &mut bool) -> bool {
-    let btn = egui::Button::new("跟随").selected(*auto_scroll);
-    let resp = ui.add(btn).on_hover_text(if *auto_scroll {
-        "滚动跟随最新数据 · 点击暂停跟随"
-    } else {
-        "已暂停跟随 · 点击滚动到底并恢复"
-    });
-    if resp.clicked() {
-        // 关→开：恢复跟随并强制滚到底；开→关：仅停止跟随。
-        if !*auto_scroll {
-            *auto_scroll = true;
-            true
-        } else {
+    if *auto_scroll {
+        if ui.button("⏸").on_hover_text("暂停自动滚动").clicked() {
             *auto_scroll = false;
-            false
         }
+        false
+    } else if ui.button("↓").on_hover_text("滚动到底部").clicked() {
+        *auto_scroll = true;
+        true
     } else {
         false
     }

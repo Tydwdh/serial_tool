@@ -298,12 +298,15 @@ impl WorkbenchApp {
     fn render_periodic_controls(&mut self, ui: &mut egui::Ui, width: f32) {
         // 间隔合法性：空串视为未设置（可取消勾选但不能新启用）；非正数或非数字视为非法。
         let trimmed: String = self.send.periodic_interval_ms.trim().to_owned();
-        let interval_valid = trimmed.is_empty()
-            || trimmed.parse::<f64>().map(|v| v > 0.0).unwrap_or(false);
+        let interval_valid =
+            trimmed.is_empty() || trimmed.parse::<f64>().map(|v| v > 0.0).unwrap_or(false);
         // 已启用时即使输入变非法也允许取消勾选；未启用且非法时禁止勾选。
         let can_toggle = interval_valid || self.send.periodic_enabled;
         if ui
-            .add_enabled(can_toggle, egui::Checkbox::new(&mut self.send.periodic_enabled, "周期发送"))
+            .add_enabled(
+                can_toggle,
+                egui::Checkbox::new(&mut self.send.periodic_enabled, "周期发送"),
+            )
             .changed()
         {
             self.send.periodic_send_count = 0;
@@ -468,12 +471,9 @@ impl WorkbenchApp {
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
-                        egui::RichText::new(format!(
-                            "{} 条",
-                            self.send.send_history.len()
-                        ))
-                        .small()
-                        .color(theme::TEXT_DIMMED),
+                        egui::RichText::new(format!("{} 条", self.send.send_history.len()))
+                            .small()
+                            .color(theme::TEXT_DIMMED),
                     );
                 });
             });
@@ -559,25 +559,23 @@ impl WorkbenchApp {
                                         )
                                 })
                                 .collect();
-                            let total_text_h: f32 =
-                                segments.iter().map(|g| g.size().y).sum();
-                            let row_height =
-                                min_row_height.max(total_text_h + row_padding);
+                            let total_text_h: f32 = segments.iter().map(|g| g.size().y).sum();
+                            let row_height = min_row_height.max(total_text_h + row_padding);
 
                             let row_resp = ui.allocate_ui_with_layout(
                                 egui::vec2(col_width, row_height),
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
                                     // 文字区：固定宽 + click 命中
-                                    let text_resp = ui.allocate_exact_size(
-                                        egui::vec2(text_width, row_height),
-                                        egui::Sense::click(),
-                                    )
-                                    .1;
+                                    let text_resp = ui
+                                        .allocate_exact_size(
+                                            egui::vec2(text_width, row_height),
+                                            egui::Sense::click(),
+                                        )
+                                        .1;
                                     let trect = text_resp.rect;
                                     if text_resp.hovered() {
-                                        ui.painter()
-                                            .rect_filled(trect, 3.0, theme::BG_HOVER);
+                                        ui.painter().rect_filled(trect, 3.0, theme::BG_HOVER);
                                     }
                                     // 逐个绘制每段 galley（按 \n 拆分的），垂直排列
                                     let mut y = trect.center().y - total_text_h / 2.0;
@@ -597,15 +595,15 @@ impl WorkbenchApp {
                                         .on_hover_text("点击填入发送框");
 
                                     // 删除区：固定宽 + click 命中，手绘 × 不用 Button
-                                    let del_resp = ui.allocate_exact_size(
-                                        egui::vec2(del_width, row_height),
-                                        egui::Sense::click(),
-                                    )
-                                    .1;
+                                    let del_resp = ui
+                                        .allocate_exact_size(
+                                            egui::vec2(del_width, row_height),
+                                            egui::Sense::click(),
+                                        )
+                                        .1;
                                     let drect = del_resp.rect;
                                     if del_resp.hovered() {
-                                        ui.painter()
-                                            .rect_filled(drect, 3.0, theme::BG_HOVER);
+                                        ui.painter().rect_filled(drect, 3.0, theme::BG_HOVER);
                                     }
                                     ui.painter().text(
                                         drect.center(),
@@ -650,9 +648,7 @@ impl WorkbenchApp {
                 if ui
                     .add(
                         egui::Button::new(
-                            egui::RichText::new("清空全部")
-                                .color(theme::RED)
-                                .small(),
+                            egui::RichText::new("清空全部").color(theme::RED).small(),
                         )
                         .frame(true),
                     )
@@ -698,7 +694,6 @@ impl WorkbenchApp {
 }
 
 use tool_transport::{hex_preview, send_impl_to, translate_error};
-
 
 #[cfg(test)]
 mod tests {
@@ -824,4 +819,3 @@ mod tests {
         });
     }
 }
-

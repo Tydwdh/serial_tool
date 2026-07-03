@@ -173,10 +173,7 @@ impl WorkbenchApp {
                     .on_hover_text("点击 × 取消等待重连");
                 if ui.small_button("×").on_hover_text("取消重连").clicked() {
                     self.serial.pending_reconnect = None;
-                    self.set_status_force(
-                        StatusLevel::Info,
-                        "已取消自动重连".to_owned(),
-                    );
+                    self.set_status_force(StatusLevel::Info, "已取消自动重连".to_owned());
                 }
             }
             ui.separator();

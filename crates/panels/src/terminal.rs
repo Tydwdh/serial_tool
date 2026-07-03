@@ -377,7 +377,9 @@ impl TerminalPanel {
             .input(|input| input.pointer.hover_pos())
             .is_some_and(|pos| panel_rect.contains(pos));
         let wheel_moves_towards_bottom = pointer_inside
-            && crate::scroll_delta_moves_towards_bottom(ui.input(|input| input.smooth_scroll_delta.y));
+            && crate::scroll_delta_moves_towards_bottom(
+                ui.input(|input| input.smooth_scroll_delta.y),
+            );
         let mut force_scroll_to_bottom = self.pending_scroll_to_bottom_keys.remove(&scroll_key);
 
         ui.horizontal_wrapped(|ui| {
@@ -397,10 +399,7 @@ impl TerminalPanel {
                 ("暂停", "暂停接收 · 冻结画面查看")
             };
             if ui
-                .add(
-                    egui::Button::new(pause_label)
-                        .selected(self.paused),
-                )
+                .add(egui::Button::new(pause_label).selected(self.paused))
                 .on_hover_text(pause_hint)
                 .clicked()
             {
@@ -1938,12 +1937,7 @@ mod tests {
         assert_eq!(entries[0].raw_text, "abc\n");
         assert_eq!(entries[1].raw_text, "defghi\n");
         // 尾巴已被下一包消费，无残留
-        assert!(panel
-            .ports
-            .get("COM7")
-            .unwrap()
-            .pending_tail
-            .is_empty());
+        assert!(panel.ports.get("COM7").unwrap().pending_tail.is_empty());
     }
 
     #[test]

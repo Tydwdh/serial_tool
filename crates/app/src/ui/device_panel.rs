@@ -385,9 +385,7 @@ impl WorkbenchApp {
                                     if ui
                                         .add(
                                             egui::Button::new(
-                                                egui::RichText::new(btn_label)
-                                                    .color(color)
-                                                    .small(),
+                                                egui::RichText::new(btn_label).color(color).small(),
                                             )
                                             .frame(false)
                                             .min_size(egui::vec2(36.0, 18.0)),

@@ -59,8 +59,7 @@ impl NotificationQueue {
             }
         }
         // 新 source：推入末尾
-        self.entries
-            .push_back((source.to_owned(), notification));
+        self.entries.push_back((source.to_owned(), notification));
     }
 
     /// 获取当前未过期的所有通知（按插入顺序）。

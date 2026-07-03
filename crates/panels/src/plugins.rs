@@ -557,7 +557,8 @@ impl PluginsPanel {
                     // 否则显示「启用」并执行启用。
                     // 注意：Finished/Failed 视为未启用 —— disable() 对这两个状态是 no-op
                     // （运行时早已移除），因此把它们归入「启用」分支，保留直接重新启用的入口。
-                    let is_active = matches!(summary.state, PluginState::Running | PluginState::Enabled);
+                    let is_active =
+                        matches!(summary.state, PluginState::Running | PluginState::Enabled);
                     if is_active {
                         if ui.button("禁用").clicked() {
                             match manager.disable(&summary.id) {
@@ -565,10 +566,7 @@ impl PluginsPanel {
                                     self.recently_disabled.push(summary.id.clone());
                                 }
                                 Err(error) => {
-                                    return Some(PluginPanelEvent::Status(
-                                        error.to_string(),
-                                        true,
-                                    ));
+                                    return Some(PluginPanelEvent::Status(error.to_string(), true));
                                 }
                             }
                         }
@@ -577,10 +575,7 @@ impl PluginsPanel {
                             match manager.enable(&summary.id) {
                                 Ok(()) => {}
                                 Err(error) => {
-                                    return Some(PluginPanelEvent::Status(
-                                        error.to_string(),
-                                        true,
-                                    ));
+                                    return Some(PluginPanelEvent::Status(error.to_string(), true));
                                 }
                             }
                         }
@@ -597,13 +592,19 @@ impl PluginsPanel {
                         if is_active {
                             // 运行中/已启用：先停再启，走 pending_restart 等线程退出。
                             if let Err(e) = manager.disable(&summary.id) {
-                                return Some(PluginPanelEvent::Status(format!("禁用失败：{e}"), true));
+                                return Some(PluginPanelEvent::Status(
+                                    format!("禁用失败：{e}"),
+                                    true,
+                                ));
                             }
                             self.pending_restart.push(summary.id.clone());
                         } else {
                             // Disabled/Finished/Failed：直接 enable 重新拉起。
                             if let Err(e) = manager.enable(&summary.id) {
-                                return Some(PluginPanelEvent::Status(format!("启用失败：{e}"), true));
+                                return Some(PluginPanelEvent::Status(
+                                    format!("启用失败：{e}"),
+                                    true,
+                                ));
                             }
                         }
                     }

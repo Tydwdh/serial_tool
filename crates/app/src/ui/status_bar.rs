@@ -157,7 +157,10 @@ impl WorkbenchApp {
                 self.notifications.push(
                     "terminal",
                     StatusLevel::Warn,
-                    format!("终端已截断，仅保留最近 {} 条", self.terminal_panel.max_entries),
+                    format!(
+                        "终端已截断，仅保留最近 {} 条",
+                        self.terminal_panel.max_entries
+                    ),
                 );
                 self.terminal_panel.truncated = false;
             }
@@ -165,7 +168,10 @@ impl WorkbenchApp {
                 self.notifications.push(
                     "log",
                     StatusLevel::Warn,
-                    format!("日志已截断，仅保留最近 {} 条", self.bottom_log_panel.max_entries),
+                    format!(
+                        "日志已截断，仅保留最近 {} 条",
+                        self.bottom_log_panel.max_entries
+                    ),
                 );
                 self.bottom_log_panel.truncated = false;
             }

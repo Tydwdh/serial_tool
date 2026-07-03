@@ -127,7 +127,9 @@ impl LogPanel {
             .input(|input| input.pointer.hover_pos())
             .is_some_and(|pos| panel_rect.contains(pos));
         let wheel_moves_towards_bottom = pointer_inside
-            && crate::scroll_delta_moves_towards_bottom(ui.input(|input| input.smooth_scroll_delta.y));
+            && crate::scroll_delta_moves_towards_bottom(
+                ui.input(|input| input.smooth_scroll_delta.y),
+            );
         let mut force_scroll_to_bottom = self.pending_scroll_to_bottom;
         self.pending_scroll_to_bottom = false;
 

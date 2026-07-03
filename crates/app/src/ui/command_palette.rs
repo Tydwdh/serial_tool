@@ -114,11 +114,8 @@ impl WorkbenchApp {
             }
             if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
                 let cur = self.command_palette_selected.unwrap_or(0);
-                self.command_palette_selected = Some(if cur == 0 {
-                    entries.len() - 1
-                } else {
-                    cur - 1
-                });
+                self.command_palette_selected =
+                    Some(if cur == 0 { entries.len() - 1 } else { cur - 1 });
             }
         }
 
@@ -165,16 +162,14 @@ impl WorkbenchApp {
                             ui.add_space(20.0);
                             ui.vertical_centered(|ui| {
                                 ui.label(
-                                    egui::RichText::new("无匹配命令")
-                                        .color(theme::TEXT_SECONDARY),
+                                    egui::RichText::new("无匹配命令").color(theme::TEXT_SECONDARY),
                                 );
                             });
                             ui.add_space(20.0);
                         }
 
                         for (i, entry) in entries.iter().enumerate() {
-                            let is_selected =
-                                self.command_palette_selected == Some(i);
+                            let is_selected = self.command_palette_selected == Some(i);
 
                             let row_id = ui.id().with(("cp_row", i));
                             let row_resp = ui.allocate_ui_with_layout(
@@ -182,11 +177,7 @@ impl WorkbenchApp {
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
                                     let rect = ui.max_rect();
-                                    let resp = ui.interact(
-                                        rect,
-                                        row_id,
-                                        egui::Sense::click(),
-                                    );
+                                    let resp = ui.interact(rect, row_id, egui::Sense::click());
                                     // 仅鼠标移动时才让 hover 跟随选中，
                                     // 否则保持键盘选中优先。
                                     if resp.hovered() && mouse_moving {
@@ -198,8 +189,7 @@ impl WorkbenchApp {
                                         } else {
                                             theme::BG_HOVER
                                         };
-                                        ui.painter()
-                                            .rect_filled(rect, 3.0, color);
+                                        ui.painter().rect_filled(rect, 3.0, color);
                                     }
                                     if resp.clicked() {
                                         action_to_run =
@@ -219,17 +209,13 @@ impl WorkbenchApp {
 
                                     if !entry.shortcut.is_empty() {
                                         ui.with_layout(
-                                            egui::Layout::right_to_left(
-                                                egui::Align::Center,
-                                            ),
+                                            egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
                                                 ui.add_space(4.0);
                                                 ui.label(
-                                                    egui::RichText::new(
-                                                        &entry.shortcut,
-                                                    )
-                                                    .small()
-                                                    .color(theme::TEXT_SECONDARY),
+                                                    egui::RichText::new(&entry.shortcut)
+                                                        .small()
+                                                        .color(theme::TEXT_SECONDARY),
                                                 );
                                             },
                                         );
@@ -241,10 +227,10 @@ impl WorkbenchApp {
                     });
 
                 // 鼠标移动时 hover 跟随更新键盘选中
-                if let Some(hi) = hovered_idx {
-                    if mouse_moving {
-                        self.command_palette_selected = Some(hi);
-                    }
+                if let Some(hi) = hovered_idx
+                    && mouse_moving
+                {
+                    self.command_palette_selected = Some(hi);
                 }
 
                 ui.separator();
@@ -274,17 +260,12 @@ impl WorkbenchApp {
         if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
             if let Some(idx) = self.command_palette_selected {
                 if idx < entries.len() {
-                    action_to_run = Some((
-                        clone_kind(&entries[idx].kind),
-                        entries[idx].label.clone(),
-                    ));
+                    action_to_run =
+                        Some((clone_kind(&entries[idx].kind), entries[idx].label.clone()));
                     close_after = true;
                 }
             } else if !entries.is_empty() {
-                action_to_run = Some((
-                    clone_kind(&entries[0].kind),
-                    entries[0].label.clone(),
-                ));
+                action_to_run = Some((clone_kind(&entries[0].kind), entries[0].label.clone()));
                 close_after = true;
             }
         }
@@ -320,8 +301,6 @@ impl WorkbenchApp {
 fn clone_kind(kind: &CommandKind) -> CommandKind {
     match kind {
         CommandKind::Action(a) => CommandKind::Action(a.clone()),
-        CommandKind::PluginCommand(p, c) => {
-            CommandKind::PluginCommand(p.clone(), c.clone())
-        }
+        CommandKind::PluginCommand(p, c) => CommandKind::PluginCommand(p.clone(), c.clone()),
     }
 }
