@@ -1,6 +1,8 @@
 {
-  "date": "2026-07-04",
   "version": "0.6.1",
-  "changelog": [],
-  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v0.6.1/hardware-workbench-app.zip"
+  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v0.6.1/hardware-workbench-app.zip",
+  "changelog": [
+    "代码整理：cargo fmt + clippy 零 warning"
+  ],
+  "date": "2026-07-04"
 }
