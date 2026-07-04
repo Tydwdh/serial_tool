@@ -13,6 +13,47 @@ fn main() {
     resource.set("ProductName", "Hardware Workbench");
 
     resource.compile().expect("failed to embed Windows icon");
+
+    // 将项目 plugins/ 目录复制到输出目录，确保 exe 旁有最新的插件脚本。
+    sync_plugins();
+}
+
+fn sync_plugins() {
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
+    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap_or_else(|_| ".".into()));
+    // OUT_DIR 在 target/<profile>/build/<crate>-<hash>/out/
+    // ancestor 0=out, 1=<hash>, 2=build, 3=<crate>, 4=target
+    let target_dir = out_dir
+        .ancestors()
+        .nth(4)
+        .unwrap_or_else(|| std::path::Path::new("../../target"));
+    let dest = target_dir.join(&profile).join("plugins");
+    let src = std::path::Path::new("../../plugins");
+    if !src.exists() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(&dest);
+    // 简单递归复制
+    if let Err(e) = copy_dir(src, &dest) {
+        println!("cargo:warning=复制 plugins 目录失败: {e}");
+    } else {
+        println!("cargo:warning=plugins 已同步到 {}", dest.display());
+    }
+}
+
+fn copy_dir(src: &std::path::Path, dest: &std::path::Path) -> Result<(), std::io::Error> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let dest_path = dest.join(path.file_name().unwrap());
+        if path.is_dir() {
+            std::fs::create_dir_all(&dest_path)?;
+            copy_dir(&path, &dest_path)?;
+        } else {
+            std::fs::copy(&path, &dest_path)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(windows)]

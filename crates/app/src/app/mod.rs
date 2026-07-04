@@ -51,6 +51,7 @@ pub(crate) struct WorkbenchApp {
     pub(crate) dialog_receiver: crossbeam_channel::Receiver<DialogRequest>,
     pub(crate) file_browse_subscription: tool_databus::Subscription,
     pub(crate) contribution_set_value_subscription: tool_databus::Subscription,
+    pub(crate) ui_set_status_subscription: tool_databus::Subscription,
     pub(crate) replay_analyzer_job: Option<ReplayAnalyzerJob>,
     pub(crate) replay_analyzer_generation: u64,
     /// 周期发送后台线程的取消信号
@@ -297,6 +298,9 @@ impl WorkbenchApp {
             )),
             contribution_set_value_subscription: bus.subscribe(tool_databus::TopicFilter::exact(
                 tool_core::topics::UI_CONTRIBUTION_SET_VALUE,
+            )),
+            ui_set_status_subscription: bus.subscribe(tool_databus::TopicFilter::exact(
+                tool_core::topics::UI_SET_STATUS,
             )),
             replay_analyzer_job: None,
             replay_analyzer_generation: 0,

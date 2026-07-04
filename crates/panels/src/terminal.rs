@@ -58,6 +58,10 @@ pub struct TerminalPanel {
     pub merge_window_ms: u64,
     /// 框选状态
     pub selection: RowSelection,
+    /// 缓存的上一帧实际 total_height，避免全量 layout 估算带来的累积误差。
+    /// 只在 rows.len() 变化时按比例调整，resize 宽度不变时不重算。
+    cached_total_height: f32,
+    cached_total_height_rows: usize,
 }
 
 #[derive(Default)]
@@ -172,6 +176,8 @@ impl TerminalPanel {
             font_size: 13.0,
             merge_window_ms: 5,
             selection: RowSelection::new(0),
+            cached_total_height: 0.0,
+            cached_total_height_rows: 0,
         }
     }
     pub fn ingest_all_pending(&mut self) -> usize {
@@ -221,6 +227,8 @@ impl TerminalPanel {
         self.show_raw = false;
         self.auto_scroll = true;
         self.selection.clear();
+        self.cached_total_height = 0.0;
+        self.cached_total_height_rows = 0;
     }
 
     pub fn is_bookmarked(&self, entry_id: u64) -> bool {
@@ -518,6 +526,8 @@ impl TerminalPanel {
                 self.font_size,
                 &mut self.selection,
                 empty_hint,
+                &mut self.cached_total_height,
+                &mut self.cached_total_height_rows,
             )
         };
 
@@ -981,6 +991,8 @@ fn render_rows_view(
     font_size: f32,
     selection: &mut RowSelection,
     empty_hint: &str,
+    cached_total_height: &mut f32,
+    cached_total_height_rows: &mut usize,
 ) -> RenderOutcome {
     let height = height.max(40.0);
     let font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
@@ -1023,15 +1035,6 @@ fn render_rows_view(
         label_width += dir_col_width + col_gap;
     }
 
-    // Pre-layout all rows to determine their galley heights
-    struct RowLayout {
-        galley: std::sync::Arc<egui::Galley>,
-        /// Height needed for this entry's content (at least row_height)
-        height: f32,
-        /// Preview galley for HEX mode (UTF8 text)
-        preview_galley: Option<std::sync::Arc<egui::Galley>>,
-    }
-
     const PREVIEW_COL_MIN_WIDTH: f32 = 80.0;
 
     let scroll_output = ScrollArea::vertical()
@@ -1064,59 +1067,21 @@ fn render_rows_view(
                 0.0
             };
 
-            // Layout all rows first to compute actual heights
-            let row_layouts: Vec<RowLayout> = rows
-                .iter()
-                .map(|row| {
-                    let content = visible_row_content(row, show_hex, show_raw);
-                    let content = if content.is_empty() {
-                        " ".to_owned()
-                    } else {
-                        content
-                    };
-
-                    let mut layout_job = egui::text::LayoutJob::simple(
-                        content,
-                        font_id.clone(),
-                        text_color,
-                        galley_width,
-                    );
-                    layout_job.halign = egui::Align::LEFT;
-                    let galley = ui.fonts_mut(|f| f.layout_job(layout_job));
-
-                    // Layout preview text for HEX mode
-                    let preview_galley = if show_hex {
-                        let preview_text = if row.preview_text.is_empty() {
-                            " ".to_owned()
-                        } else {
-                            row.preview_text.to_string()
-                        };
-                        let mut layout_job = egui::text::LayoutJob::simple(
-                            preview_text,
-                            font_id.clone(),
-                            theme::TEXT_DIMMED,
-                            preview_galley_width,
-                        );
-                        layout_job.halign = egui::Align::LEFT;
-                        Some(ui.fonts_mut(|f| f.layout_job(layout_job)))
-                    } else {
-                        None
-                    };
-
-                    let height = if let Some(ref pg) = preview_galley {
-                        galley.size().y.max(pg.size().y).max(row_height)
-                    } else {
-                        galley.size().y.max(row_height)
-                    };
-                    RowLayout {
-                        galley,
-                        height,
-                        preview_galley,
-                    }
-                })
-                .collect();
-
-            let total_height: f32 = row_layouts.iter().map(|r| r.height).sum();
+            // ═══════════════════════════════════════════════════════
+            // total_height 用上一帧缓存的真实高度，避免全量 layout。
+            // rows.len() 变化时按比例调整（新行用 row_height 估计）。
+            // resize 宽度变化时 O(rows) → O(1)，让 50000+ 条目下拖动面板不卡。
+            // 视口内行在绘制循环中按需懒 layout，总 layout 量 ≈ visible_rows。
+            // ═══════════════════════════════════════════════════════
+            let total_height =
+                if rows.len() != *cached_total_height_rows && *cached_total_height > 0.0 {
+                    let avg_h = *cached_total_height / *cached_total_height_rows as f32;
+                    avg_h * rows.len() as f32
+                } else if *cached_total_height > 0.0 {
+                    *cached_total_height
+                } else {
+                    row_height * rows.len() as f32
+                };
 
             let (full_rect, _alloc_response) =
                 ui.allocate_exact_size(egui::vec2(full_width, total_height), Sense::hover());
@@ -1159,11 +1124,12 @@ fn render_rows_view(
             // Draw rows with accumulated Y
             let mut hl = RowHighlight::new(ui, scroll_key);
 
-            // 先记录所有行范围，当前帧的点击/拖拽才能立即命中正确行。
+            // 用 row_height 记录所有行的估计范围，供点击/拖拽命中（不影响实际绘制高度）。
+            // 大部分行是单行，row_height 与真实高度一致；少数多行条目会有微小偏移但不影响交互。
             let mut recorded_y = label_rect.top();
-            for layout in &row_layouts {
-                hl.record_row(recorded_y, layout.height);
-                recorded_y += layout.height;
+            for _ in rows.iter() {
+                hl.record_row(recorded_y, row_height);
+                recorded_y += row_height;
             }
 
             // 整行选择只从元数据区起手；数据区完整保留给字符级文本选择。
@@ -1214,19 +1180,64 @@ fn render_rows_view(
 
             let mut current_y = label_rect.top();
             let mut text_drag_response: Option<egui::Response> = None;
-            // 视口剔除：视口外的行跳过 paint/interact（record_row 已全量记录，点击映射不受影响）。
-            // 行高来自全量 layout（egui galley 缓存已省下排版），此处只省绘制阶段的 shape 构造。
+            // 视口剔除：视口外的行跳过 layout + paint + interact。
+            // 只对视口内行做懒 layout（约 30-60 行），resize 宽度变化时不再 O(rows)。
             // 上下各留 1 行 buffer，避免边界行因浮点误差被误剔。
             let clip_top = viewport_rect.top() - row_height;
             let clip_bottom = viewport_rect.bottom() + row_height;
-            for (row_idx, (row, layout)) in rows.iter().zip(row_layouts.iter()).enumerate() {
-                let entry_height = layout.height;
+            for (row_idx, row) in rows.iter().enumerate() {
+                // 先用 row_height 做视口判断；视口内才懒 layout 得到真实高度。
+                let in_viewport = current_y + row_height >= clip_top && current_y <= clip_bottom;
 
-                // 视口外整行跳过绘制（current_y 是内容坐标系，与 clip_rect 对齐）。
-                let row_bottom = current_y + entry_height;
-                let in_viewport = row_bottom >= clip_top && current_y <= clip_bottom;
+                let (galley, preview_galley, entry_height) = if in_viewport {
+                    let content = visible_row_content(row, show_hex, show_raw);
+                    let content = if content.is_empty() {
+                        " ".to_owned()
+                    } else {
+                        content
+                    };
+
+                    let mut layout_job = egui::text::LayoutJob::simple(
+                        content,
+                        font_id.clone(),
+                        text_color,
+                        galley_width,
+                    );
+                    layout_job.halign = egui::Align::LEFT;
+                    let galley = ui.fonts_mut(|f| f.layout_job(layout_job));
+
+                    let preview_galley = if show_hex {
+                        let preview_text = if row.preview_text.is_empty() {
+                            " ".to_owned()
+                        } else {
+                            row.preview_text.to_string()
+                        };
+                        let mut layout_job = egui::text::LayoutJob::simple(
+                            preview_text,
+                            font_id.clone(),
+                            theme::TEXT_DIMMED,
+                            preview_galley_width,
+                        );
+                        layout_job.halign = egui::Align::LEFT;
+                        Some(ui.fonts_mut(|f| f.layout_job(layout_job)))
+                    } else {
+                        None
+                    };
+
+                    let height = if let Some(ref pg) = preview_galley {
+                        galley.size().y.max(pg.size().y).max(row_height)
+                    } else {
+                        galley.size().y.max(row_height)
+                    };
+                    (Some(galley), preview_galley, height)
+                } else {
+                    (None, None, row_height)
+                };
+                let galley = galley;
+
+                // 视口外只累加 Y，跳过所有 paint/interact/label 绘制
                 if !in_viewport {
-                    current_y = row_bottom;
+                    current_y += entry_height;
                     continue;
                 }
 
@@ -1282,7 +1293,7 @@ fn render_rows_view(
                 }
 
                 // --- Draw selectable content text (HEX / raw / display) ---
-                {
+                if let Some(ref galley) = galley {
                     let galley_pos = egui::pos2(hex_rect.left() + text_padding, current_y);
                     let row_text_rect = egui::Rect::from_min_size(
                         egui::pos2(hex_rect.left(), current_y),
@@ -1300,7 +1311,7 @@ fn render_rows_view(
                     if selection.is_dragging() {
                         ui.painter().add(egui::epaint::TextShape::new(
                             galley_pos,
-                            layout.galley.clone(),
+                            galley.clone(),
                             text_color,
                         ));
                     } else {
@@ -1308,7 +1319,7 @@ fn render_rows_view(
                             ui,
                             &response,
                             galley_pos,
-                            layout.galley.clone(),
+                            galley.clone(),
                             text_color,
                             Stroke::NONE,
                         );
@@ -1316,9 +1327,9 @@ fn render_rows_view(
                 }
 
                 // --- Draw preview text (HEX mode only) ---
-                if let (Some(pr), Some(pg)) = (&preview_rect, &layout.preview_galley) {
+                if let (Some(pr), Some(pg)) = (preview_rect, &preview_galley) {
                     let preview_pos = egui::pos2(pr.left() + text_padding, current_y);
-                    let preview_painter = ui.painter_at(*pr);
+                    let preview_painter = ui.painter_at(pr);
                     preview_painter.add(egui::epaint::TextShape::new(
                         preview_pos,
                         pg.clone(),
@@ -1328,6 +1339,10 @@ fn render_rows_view(
 
                 current_y += entry_height;
             }
+
+            // 缓存本帧实际 total_height，供下帧使用（修复 row_height 估计累积误差）
+            *cached_total_height = current_y - label_rect.top();
+            *cached_total_height_rows = rows.len();
 
             if text_drag_response
                 .as_ref()

@@ -492,6 +492,7 @@ local state = { paused = false, active = false }
 local function start_task(port, entries, use_checksum)
     if task_running() then
         log("warn", "已有 G-code 发送任务在运行")
+        ctx.ui.set_status("[G-code] 已有发送任务在运行，请等待完成或取消")
         return
     end
 

@@ -41,9 +41,22 @@ impl WorkbenchApp {
 
     pub(crate) fn tick_post_ui(&mut self, ctx: &egui::Context) {
         self.bottom_log_panel.ingest_pending();
+        self.process_ui_set_status();
         self.detached_dynamic_panel_viewports(ctx);
         self.send_popup(ctx);
         self.terminal_popup(ctx);
         self.command_palette(ctx);
+    }
+
+    /// 处理 Lua 插件通过 ctx.ui.set_status() 推送的状态栏通知。
+    fn process_ui_set_status(&mut self) {
+        for event in self.ui_set_status_subscription.drain_limited(32) {
+            if let tool_core::Payload::Json(payload) = event.payload
+                && let Some(msg) = payload.get("message").and_then(|v| v.as_str())
+            {
+                self.notifications
+                    .push("plugin", crate::state::StatusLevel::Warn, msg.to_owned());
+            }
+        }
     }
 }

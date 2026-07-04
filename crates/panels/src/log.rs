@@ -42,6 +42,8 @@ pub struct LogPanel {
     pub selection: RowSelection,
     /// 是否发生过截断（用于状态栏提示，显示后清除）
     pub truncated: bool,
+    /// 待推送到状态栏的 warn/error 通知（每帧由 app 层 take 后推给 NotificationQueue）
+    pub pending_notifications: VecDeque<(LogLevel, String)>,
 }
 
 struct LogEntry {
@@ -75,6 +77,7 @@ impl LogPanel {
             font_size: 13.0,
             selection: RowSelection::new(0),
             truncated: false,
+            pending_notifications: VecDeque::new(),
         }
     }
     pub fn ingest_all_pending(&mut self) -> usize {

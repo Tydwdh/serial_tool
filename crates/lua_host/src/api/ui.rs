@@ -166,8 +166,8 @@ pub(crate) fn create_ui_api(
 
     // ctx.ui.set_contribution_value(contribution_id, value)
     // 用于更新 toggle / progress / label 等 UI contribution 的运行时状态。
-    let bus_scv = bus;
-    let src_scv = source;
+    let bus_scv = bus.clone();
+    let src_scv = source.clone();
     table.set(
         "set_contribution_value",
         lua.create_function(move |_lua, (contribution_id, value): (String, Value)| {
@@ -180,6 +180,22 @@ pub(crate) fn create_ui_api(
                     "field_id": contribution_id,
                     "value": lua_value_to_json(value).unwrap_or(serde_json::Value::Null),
                 })),
+            ));
+            Ok(())
+        })?,
+    )?;
+
+    // ctx.ui.set_status(text) — 向状态栏推送一条通知（Info 级别）
+    let bus_status = bus.clone();
+    let src_status = source.clone();
+    table.set(
+        "set_status",
+        lua.create_function(move |_lua, message: String| {
+            bus_status.publish(Event::new(
+                topics::UI_SET_STATUS,
+                src_status.clone(),
+                Direction::Internal,
+                Payload::Json(serde_json::json!({ "message": message })),
             ));
             Ok(())
         })?,
