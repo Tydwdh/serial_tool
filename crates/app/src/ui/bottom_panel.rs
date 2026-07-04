@@ -292,7 +292,11 @@ impl WorkbenchApp {
             // 多行 ↓：光标在末段（后无 \n）且 egui 已顶到文本末尾（after == char_len）才切历史。
             let before_in_first_para = !self.send.input.chars().take(before).any(|c| c == '\n');
             let before_in_last_para = !self.send.input.chars().skip(before).any(|c| c == '\n');
-            let stuck_at_top = if multiline { before_in_first_para && after == 0 } else { true };
+            let stuck_at_top = if multiline {
+                before_in_first_para && after == 0
+            } else {
+                true
+            };
             let stuck_at_bottom = if multiline {
                 before_in_last_para && after == char_len
             } else {

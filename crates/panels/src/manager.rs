@@ -382,7 +382,8 @@ impl PanelManager {
 
     pub fn discard_dynamic_tabs(&mut self) {
         if self.active_tab.dynamic_id().is_some() {
-            self.active_tab = self.dock
+            self.active_tab = self
+                .dock
                 .center
                 .tabs
                 .iter()

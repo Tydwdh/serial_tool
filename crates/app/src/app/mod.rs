@@ -8,8 +8,7 @@ use tool_databus::DataBus;
 use tool_extension::PluginManager;
 use tool_lua_host::{DialogRequest, FileAccessBroker};
 use tool_panels::{
-    DynamicPanels, LogPanel, PanelManager, PluginsPanel, ReplayPanel, TerminalPanel,
-    theme,
+    DynamicPanels, LogPanel, PanelManager, PluginsPanel, ReplayPanel, TerminalPanel, theme,
 };
 use tool_recorder::JsonlRecorder;
 use tool_transport::TransportManager;

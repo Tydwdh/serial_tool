@@ -88,13 +88,7 @@ impl WorkbenchApp {
         {
             // 仅当来源是 center 时做原地重排
             if self.panels.dock.center.contains(&kind) {
-                let source_index = self
-                    .panels
-                    .dock
-                    .center
-                    .tabs
-                    .iter()
-                    .position(|k| k == &kind);
+                let source_index = self.panels.dock.center.tabs.iter().position(|k| k == &kind);
                 if let Some(src) = source_index {
                     let mut ins = insert_index.min(self.panels.dock.center.tabs.len());
                     if ins > src {
@@ -137,15 +131,15 @@ impl WorkbenchApp {
 }
 
 /// 根据指针 y 计算竖排 tab 的插入索引。
-fn vertical_insert_index_from_pointer(
-    rects: &[egui::Rect],
-    pointer: egui::Pos2,
-) -> Option<usize> {
+fn vertical_insert_index_from_pointer(rects: &[egui::Rect], pointer: egui::Pos2) -> Option<usize> {
     if rects.is_empty() {
         return None;
     }
     let left = rects.iter().map(|r| r.left()).fold(f32::INFINITY, f32::min);
-    let right = rects.iter().map(|r| r.right()).fold(f32::NEG_INFINITY, f32::max);
+    let right = rects
+        .iter()
+        .map(|r| r.right())
+        .fold(f32::NEG_INFINITY, f32::max);
     if pointer.x < left - 16.0 || pointer.x > right + 16.0 {
         return None;
     }
@@ -172,7 +166,10 @@ fn paint_vertical_insert_line(ui: &egui::Ui, rects: &[egui::Rect], index: usize)
         rects[index].top() - 3.0
     };
     let left = rects.iter().map(|r| r.left()).fold(f32::INFINITY, f32::min);
-    let right = rects.iter().map(|r| r.right()).fold(f32::NEG_INFINITY, f32::max);
+    let right = rects
+        .iter()
+        .map(|r| r.right())
+        .fold(f32::NEG_INFINITY, f32::max);
     ui.painter().line_segment(
         [egui::pos2(left, y), egui::pos2(right, y)],
         egui::Stroke::new(2.0, theme::BLUE),

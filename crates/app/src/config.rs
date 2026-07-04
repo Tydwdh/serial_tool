@@ -112,7 +112,6 @@ fn default_line_ending() -> LineEnding {
     LineEnding::None
 }
 
-
 /// 配置加载结果：区分"无配置文件"和"配置损坏"两种情况。
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -382,7 +381,6 @@ mod tests {
             "path should end with .jsonl: {path}"
         );
     }
-
 
     // ── default_true ──
 
