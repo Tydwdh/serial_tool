@@ -133,6 +133,10 @@ pub(crate) struct SendUiState {
     pub(crate) send_history: std::collections::VecDeque<String>,
     /// 发送历史 popup 的搜索框文本。
     pub(crate) history_search: String,
+    /// ↑↓ 方向键导航历史时的当前索引（None = 未导航，Some(0)=最新一条）。
+    pub(crate) history_index: Option<usize>,
+    /// 导航开始前保存的原始输入，按 ↓ 到尽头时恢复。
+    pub(crate) saved_input: String,
     pub(crate) hex_strict: bool,
     pub(crate) dtr_high: bool,
     pub(crate) rts_high: bool,
@@ -153,6 +157,8 @@ impl Default for SendUiState {
             target_port: None,
             send_history: std::collections::VecDeque::new(),
             history_search: String::new(),
+            history_index: None,
+            saved_input: String::new(),
             hex_strict: true,
             dtr_high: true,
             rts_high: true,

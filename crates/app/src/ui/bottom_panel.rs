@@ -1,7 +1,18 @@
 use crate::app::WorkbenchApp;
 use crate::state::{LineEnding, MAX_SEND_HISTORY, StatusLevel};
 use eframe::egui;
+use egui::widgets::text_edit::TextEditState;
 use tool_panels::theme;
+
+/// 返回发送输入框的稳定 Id（用于读取光标状态）。
+fn response_id_for_send_input(layout: SendLayout) -> egui::Id {
+    let salt = match layout {
+        SendLayout::Horizontal => "send-input-h",
+        SendLayout::Vertical => "send-input-v",
+        SendLayout::Popup => "send-input-popup",
+    };
+    egui::Id::new(salt)
+}
 
 /// 发送面板布局模式
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -236,20 +247,94 @@ impl WorkbenchApp {
         // 输入区用 add_sized 撑满传入高度（视觉吃满剩余空间）。
         // 配合 send_panel_body 末尾的 take_available_space() + dock 面板 Frame::NONE，
         // content min_rect = panel，打破 egui resizable 面板的正反馈（参见 send_panel_body 注释）。
-        // 显式 id_salt 稳定控件 id（前面有条件渲染的 error 标签、hex_preview、contribution 槽）。
-        let id_salt = match layout {
-            SendLayout::Horizontal => "send-input-h",
-            SendLayout::Vertical => "send-input-v",
-            SendLayout::Popup => "send-input-popup",
-        };
+        // 显式 id 稳定控件 id（前面有条件渲染的 error 标签、hex_preview、contribution 槽）。
         let width = ui.available_width();
-        ui.add_sized(
+
+        // 在 TextEdit 渲染之前读取光标位置，用于 ↑↓ 历史导航判断。
+        // TextEdit 渲染后才处理 key_pressed，所以需要提前捕获「按键前」的光标行号。
+        let edit_id = response_id_for_send_input(layout);
+        let cursor_before = ui.ctx().data_mut(|d| {
+            d.get_persisted::<TextEditState>(edit_id)
+                .and_then(|s| s.cursor.char_range())
+                .map(|r| r.primary.index)
+        });
+
+        let response = ui.add_sized(
             egui::vec2(width, input_height),
             egui::TextEdit::multiline(&mut self.send.input)
                 .desired_width(f32::INFINITY)
-                .id_salt(id_salt)
+                .id(edit_id)
                 .hint_text(hint_text),
-        )
+        );
+
+        // ↑↓ 方向键导航发送历史。
+        // 多行编辑时，方向键优先移动光标；只有当 egui 已无法跨行移动光标
+        // （按键后光标 char index 未变化，说明顶到了首行/末行边界）时才切换历史。
+        // 单行输入（无换行符）保持「按 ↑/↓ 直接切历史」的命令行习惯。
+        if response.has_focus() && !self.send.send_history.is_empty() {
+            let history_len = self.send.send_history.len();
+
+            // TextEdit 已在本帧处理完方向键移动，读取「按键后」的光标位置。
+            let cursor_after = ui.ctx().data_mut(|d| {
+                d.get_persisted::<TextEditState>(edit_id)
+                    .and_then(|s| s.cursor.char_range())
+                    .map(|r| r.primary.index)
+            });
+
+            let multiline = self.send.input.contains('\n');
+            let char_len = self.send.input.chars().count();
+            let before: usize = cursor_before.map(|p| p.into()).unwrap_or(0);
+            let after: usize = cursor_after.map(|p| p.into()).unwrap_or(0);
+
+            // 单行：直接切历史。
+            // 多行 ↑：光标在首段（前无 \n）且 egui 已顶到文本开头（after == 0）才切历史，
+            //         这样首段任意位置按 ↑ 直接切到上一条，不经过「先移到行首」。
+            // 多行 ↓：光标在末段（后无 \n）且 egui 已顶到文本末尾（after == char_len）才切历史。
+            let before_in_first_para = !self.send.input.chars().take(before).any(|c| c == '\n');
+            let before_in_last_para = !self.send.input.chars().skip(before).any(|c| c == '\n');
+            let stuck_at_top = if multiline { before_in_first_para && after == 0 } else { true };
+            let stuck_at_bottom = if multiline {
+                before_in_last_para && after == char_len
+            } else {
+                true
+            };
+
+            let up = ui.input(|i| i.key_pressed(egui::Key::ArrowUp));
+            let down = ui.input(|i| i.key_pressed(egui::Key::ArrowDown));
+
+            if up && stuck_at_top {
+                match self.send.history_index {
+                    None => {
+                        self.send.saved_input = self.send.input.clone();
+                        self.send.history_index = Some(0);
+                        self.send.input = self.send.send_history[0].clone();
+                    }
+                    Some(i) if i + 1 < history_len => {
+                        self.send.history_index = Some(i + 1);
+                        self.send.input = self.send.send_history[i + 1].clone();
+                    }
+                    _ => {}
+                }
+            } else if down && stuck_at_bottom {
+                match self.send.history_index {
+                    None => {}
+                    Some(0) => {
+                        self.send.history_index = None;
+                        self.send.input = std::mem::take(&mut self.send.saved_input);
+                    }
+                    Some(i) => {
+                        self.send.history_index = Some(i - 1);
+                        self.send.input = self.send.send_history[i - 1].clone();
+                    }
+                }
+            }
+        } else if !response.has_focus() {
+            // 失焦重置导航
+            self.send.history_index = None;
+            self.send.saved_input.clear();
+        }
+
+        response
     }
 
     // ── 操作栏 ──
@@ -406,6 +491,8 @@ impl WorkbenchApp {
             let text = self.send.input.clone();
             self.record_send_history(text);
         }
+        self.send.history_index = None;
+        self.send.saved_input.clear();
     }
 
     pub(crate) fn record_send_history(&mut self, text: impl Into<String>) {
