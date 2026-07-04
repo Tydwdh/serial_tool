@@ -1,13 +1,6 @@
 {
-  "version": "0.7.0",
+  "changelog": [],
+  "date": "2026-07-05",
   "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v0.7.0/hardware-workbench-app.zip",
-  "changelog": [
-    "统一标签栏体系：左侧栏 = Center 主工作区标签，三区标签栏完全统一",
-    "面板可自由拖拽/右键移动到任意区域（主工作区/底部/右侧）",
-    "发送器解除 Center 限制，可放入任意停靠区",
-    "删除 Activity 枚举，统一为 PanelKind + icon() 图标体系",
-    "依赖更新 (openssl 安全更新等)",
-    "修复发送输入框方向键切换历史导致多行无法换行"
-  ],
-  "date": "2026-07-05"
+  "version": "0.7.0"
 }
