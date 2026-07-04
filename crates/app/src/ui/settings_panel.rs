@@ -1,5 +1,5 @@
 use crate::app::WorkbenchApp;
-use crate::config::{config_path, default_activity_order, default_recorder_path};
+use crate::config::{config_path, default_recorder_path};
 use crate::state::StatusLevel;
 use eframe::egui;
 use std::path::{Path, PathBuf};
@@ -197,7 +197,6 @@ impl WorkbenchApp {
                 self.serial.stop_bits = "1".to_owned();
                 self.serial.parity = "none".to_owned();
                 self.recorder_path = default_recorder_path();
-                self.activity_order = default_activity_order();
                 self.serial.port_aliases.clear();
                 self.serial.port_groups.clear();
                 self.panels.dock = tool_panels::DockLayout::default();

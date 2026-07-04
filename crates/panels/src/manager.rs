@@ -1,42 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Activity {
-    #[default]
-    Devices,
-    Terminal,
-    Plugins,
-    Logs,
-    Settings,
-    Replay,
-}
-
-impl Activity {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Devices => "设备",
-            Self::Terminal => "终端",
-            Self::Plugins => "插件",
-            Self::Logs => "日志",
-            Self::Settings => "设置",
-            Self::Replay => "回放",
-        }
-    }
-
-    pub fn panel_kind(self) -> Option<PanelKind> {
-        match self {
-            Self::Devices => Some(PanelKind::Devices),
-            Self::Replay => Some(PanelKind::Replay),
-            Self::Plugins => Some(PanelKind::Plugins),
-            Self::Settings => Some(PanelKind::Settings),
-            Self::Terminal => Some(PanelKind::Terminal),
-            Self::Logs => Some(PanelKind::Logs),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+/// 面板种类。左侧栏（= Center 标签栏）、底部、右侧三个停靠区共用同一套 PanelKind。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum PanelKind {
     #[default]
@@ -64,16 +29,17 @@ impl PanelKind {
         }
     }
 
-    pub fn activity(&self) -> Option<Activity> {
+    /// 左侧栏/标签栏显示用的图标（emoji）。
+    pub fn icon(&self) -> &'static str {
         match self {
-            Self::Devices => Some(Activity::Devices),
-            Self::Replay => Some(Activity::Replay),
-            Self::Plugins => Some(Activity::Plugins),
-            Self::Settings => Some(Activity::Settings),
-            Self::Terminal => Some(Activity::Terminal),
-            Self::Sender => None,
-            Self::Logs => Some(Activity::Logs),
-            Self::Dynamic(_) => None,
+            Self::Devices => "📟",
+            Self::Replay => "⏪",
+            Self::Plugins => "🧩",
+            Self::Settings => "⚙",
+            Self::Terminal => "📡",
+            Self::Sender => "📤",
+            Self::Logs => "📝",
+            Self::Dynamic(_) => "🔌",
         }
     }
 
@@ -257,24 +223,6 @@ impl DockLayout {
     }
 
     pub fn move_panel(&mut self, kind: PanelKind, to: DockArea) {
-        // Sender 特殊路径：不允许进入 Center stack
-        if kind == PanelKind::Sender {
-            self.center.remove(&PanelKind::Sender);
-            self.bottom.remove(&PanelKind::Sender);
-            self.right.remove(&PanelKind::Sender);
-            match to {
-                DockArea::Right => {
-                    self.right.open(PanelKind::Sender);
-                    self.right_visible = true;
-                }
-                _ => {
-                    self.bottom.open(PanelKind::Sender);
-                    self.bottom_visible = true;
-                }
-            }
-            return;
-        }
-
         self.center.remove(&kind);
         self.bottom.remove(&kind);
         self.right.remove(&kind);
@@ -345,7 +293,6 @@ impl DockLayout {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PanelManager {
-    pub activity: Activity,
     pub active_tab: PanelKind,
     #[serde(default)]
     pub inspector_visible: bool, // legacy: ignored, kept for old workspace compatibility
@@ -356,7 +303,6 @@ pub struct PanelManager {
 impl Default for PanelManager {
     fn default() -> Self {
         Self {
-            activity: Activity::Devices,
             active_tab: PanelKind::Devices,
             inspector_visible: false,
             dock: DockLayout::default(),
@@ -370,31 +316,23 @@ impl PanelManager {
         self.dock.all_tabs()
     }
 
-    pub fn select_activity(&mut self, activity: Activity) {
-        self.activity = activity;
-        if let Some(kind) = activity.panel_kind() {
-            self.active_tab = kind;
-        } else if self.active_tab.dynamic_id().is_some() {
-            self.active_tab = PanelKind::Replay;
-        }
+    /// 切换 Center 标签栏的激活面板（左侧栏点击）。
+    pub fn select_center_panel(&mut self, kind: PanelKind) {
+        self.active_tab = kind.clone();
+        self.dock.center.active = Some(kind);
     }
 
     pub fn open_tab(&mut self, kind: PanelKind) {
-        if let Some(activity) = kind.activity() {
-            self.activity = activity;
-        }
         self.active_tab = kind.clone();
         self.dock.center.open(kind);
     }
 
+    /// 同步 active_tab 到 Center 当前激活面板（Center 渲染后调用）。
     pub fn sync_active_tab_from_center(&mut self) {
         if let Some(kind) = self.dock.center.active_or_first() {
-            self.active_tab = kind.clone();
-            if let Some(activity) = kind.activity() {
-                self.activity = activity;
-            }
+            self.active_tab = kind;
         } else {
-            self.active_tab = self.activity.panel_kind().unwrap_or_default();
+            self.active_tab = self.dock.all_tabs().first().cloned().unwrap_or_default();
         }
     }
 
@@ -430,11 +368,8 @@ impl PanelManager {
                 .rev()
                 .find(|candidate| *candidate != &kind)
                 .cloned()
-                .or_else(|| self.activity.panel_kind())
+                .or_else(|| self.dock.all_tabs().first().cloned())
                 .unwrap_or_default();
-            if let Some(activity) = self.active_tab.activity() {
-                self.activity = activity;
-            }
         }
         self.dock.center.remove(&kind);
         self.dock.bottom.remove(&kind);
@@ -447,7 +382,13 @@ impl PanelManager {
 
     pub fn discard_dynamic_tabs(&mut self) {
         if self.active_tab.dynamic_id().is_some() {
-            self.active_tab = self.activity.panel_kind().unwrap_or_default();
+            self.active_tab = self.dock
+                .center
+                .tabs
+                .iter()
+                .find(|k| k.dynamic_id().is_none())
+                .cloned()
+                .unwrap_or_default();
         }
         self.dock.discard_dynamic_tabs();
     }
@@ -457,9 +398,6 @@ impl PanelManager {
         let all_tabs = self.dock.all_tabs();
         if !all_tabs.contains(&self.active_tab) {
             self.active_tab = all_tabs.first().cloned().unwrap_or_default();
-            if let Some(activity) = self.active_tab.activity() {
-                self.activity = activity;
-            }
         }
         self.sync_active_tab_from_center();
     }
@@ -470,14 +408,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn selecting_activity_leaves_dynamic_tab() {
+    fn select_center_panel_switches_active() {
         let mut manager = PanelManager::default();
-        manager.open_tab(PanelKind::Dynamic("pid-chart".to_owned()));
+        manager.dock.center.open(PanelKind::Replay);
 
-        manager.select_activity(Activity::Devices);
+        manager.select_center_panel(PanelKind::Replay);
 
-        assert_eq!(manager.activity, Activity::Devices);
-        assert!(manager.active_dynamic_id().is_none());
+        assert_eq!(manager.active_tab, PanelKind::Replay);
+        assert_eq!(manager.dock.center.active, Some(PanelKind::Replay));
     }
 
     #[test]
@@ -500,7 +438,6 @@ mod tests {
 
         manager.discard_dynamic_tabs();
 
-        // 动态 tab 应被清除，但 dock 中的固定 tab（Terminal/Logs）仍保留
         assert!(!manager.tabs().iter().any(|k| k.dynamic_id().is_some()));
         assert!(manager.active_dynamic_id().is_none());
     }
@@ -509,7 +446,6 @@ mod tests {
     fn sync_tabs_from_dock_uses_center_active_panel() {
         let mut manager = PanelManager {
             active_tab: PanelKind::Devices,
-            activity: Activity::Devices,
             ..Default::default()
         };
         manager.dock.center.open(PanelKind::Settings);
@@ -517,7 +453,6 @@ mod tests {
         manager.sync_tabs_from_dock();
 
         assert_eq!(manager.active_tab, PanelKind::Settings);
-        assert_eq!(manager.activity, Activity::Settings);
     }
 
     #[test]

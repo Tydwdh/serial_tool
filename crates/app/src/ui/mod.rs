@@ -19,18 +19,20 @@ impl WorkbenchApp {
     pub(crate) fn draw_shell(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         self.bottom_dock_rect = None;
         self.right_dock_rect = None;
+        self.left_dock_rect = None;
 
         egui::Panel::top("top-bar").show(ui, |ui| {
             self.top_bar(ui);
         });
 
         if self.panels.dock.activity_bar_visible {
-            egui::Panel::left("activity-bar")
+            let bar = egui::Panel::left("activity-bar")
                 .resizable(false)
                 .exact_size(ACTIVITY_BAR_WIDTH)
                 .show(ui, |ui| {
                     self.activity_bar(ui);
                 });
+            self.left_dock_rect = Some(bar.response.rect);
         }
 
         // 固定状态栏：永远贴在窗口最底部，不参与 bottom-dock resize。

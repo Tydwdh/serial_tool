@@ -94,6 +94,14 @@ impl WorkbenchApp {
                 response.context_menu(|ui| {
                     match area {
                         DockArea::Bottom => {
+                            if ui.button("移到主工作区").clicked() {
+                                self.panels.dock.move_panel(kind.clone(), DockArea::Center);
+                                self.panels.sync_tabs_from_dock();
+                                if let Err(e) = self.save_config() {
+                                    log::warn!("save_config failed: {e}")
+                                };
+                                ui.close();
+                            }
                             if ui.button("移到右侧").clicked() {
                                 self.panels.dock.move_panel(kind.clone(), DockArea::Right);
                                 self.panels.dock.right_visible = true;
@@ -105,6 +113,14 @@ impl WorkbenchApp {
                             }
                         }
                         DockArea::Right => {
+                            if ui.button("移到主工作区").clicked() {
+                                self.panels.dock.move_panel(kind.clone(), DockArea::Center);
+                                self.panels.sync_tabs_from_dock();
+                                if let Err(e) = self.save_config() {
+                                    log::warn!("save_config failed: {e}")
+                                };
+                                ui.close();
+                            }
                             if ui.button("移到底部").clicked() {
                                 self.panels.dock.move_panel(kind.clone(), DockArea::Bottom);
                                 self.panels.sync_tabs_from_dock();
@@ -225,16 +241,7 @@ impl WorkbenchApp {
             }
             PanelKind::Sender => match area {
                 DockArea::Right => self.send_panel_vertical(ui),
-                DockArea::Bottom => self.send_panel_horizontal(ui),
-                DockArea::Center => {
-                    ui.colored_label(theme::YELLOW, "发送器不支持放在主工作区，已自动移到底部");
-                    self.panels
-                        .dock
-                        .move_panel(PanelKind::Sender, DockArea::Bottom);
-                    self.panels.dock.bottom_visible = true;
-                    self.set_bottom_visible(true);
-                    self.panels.sync_tabs_from_dock();
-                }
+                DockArea::Bottom | DockArea::Center => self.send_panel_horizontal(ui),
             },
             PanelKind::Logs => self.bottom_log_panel.ui(ui),
             PanelKind::Dynamic(id) => {
@@ -338,11 +345,17 @@ impl WorkbenchApp {
             return;
         };
 
+        let left_hit = self.left_dock_rect.is_some_and(|rect| rect.contains(pos));
+
         let right_hit = self.right_dock_rect.is_some_and(|rect| rect.contains(pos));
 
         let bottom_hit = self.bottom_dock_rect.is_some_and(|rect| rect.contains(pos));
 
-        if right_hit {
+        if left_hit {
+            if let Some(rect) = self.left_dock_rect {
+                paint_real_dock_hover(ctx, rect, "主工作区");
+            }
+        } else if right_hit {
             if let Some(rect) = self.right_dock_rect {
                 paint_real_dock_hover(ctx, rect, "右侧");
             }
@@ -351,7 +364,13 @@ impl WorkbenchApp {
         }
 
         if released {
-            if right_hit {
+            if left_hit {
+                self.panels.dock.move_panel(kind, DockArea::Center);
+                self.panels.sync_tabs_from_dock();
+                if let Err(e) = self.save_config() {
+                    log::warn!("save_config failed: {e}")
+                };
+            } else if right_hit {
                 self.panels.dock.move_panel(kind, DockArea::Right);
                 self.panels.dock.right_visible = true;
                 self.panels.sync_tabs_from_dock();

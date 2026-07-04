@@ -5,7 +5,7 @@ use tool_recorder::RecordMode;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tool_panels::{Activity, PanelManager};
+use tool_panels::PanelManager;
 
 /// 原子写入 JSON 文件：先写临时文件，再 rename 替换目标文件。
 /// 崩溃时不会留下半写的目标文件。旧文件会被备份到 `.backup`。
@@ -47,8 +47,7 @@ pub(crate) struct PersistedConfig {
     pub(crate) stop_bits: String,
     pub(crate) parity: String,
     pub(crate) recorder_path: String,
-    #[serde(default = "default_activity_order")]
-    pub(crate) activity_order: Vec<Activity>,
+
     #[serde(default)]
     pub(crate) enabled_plugins: Vec<String>,
     #[serde(default)]
@@ -113,14 +112,6 @@ fn default_line_ending() -> LineEnding {
     LineEnding::None
 }
 
-pub(crate) fn default_activity_order() -> Vec<Activity> {
-    vec![
-        Activity::Devices,
-        Activity::Replay,
-        Activity::Plugins,
-        Activity::Settings,
-    ]
-}
 
 /// 配置加载结果：区分"无配置文件"和"配置损坏"两种情况。
 #[derive(Debug)]
@@ -247,7 +238,6 @@ impl WorkbenchApp {
             stop_bits: self.serial.stop_bits.clone(),
             parity: self.serial.parity.clone(),
             recorder_path: self.recorder_path.clone(),
-            activity_order: self.activity_order.clone(),
             enabled_plugins: self
                 .plugin_manager
                 .summaries()
@@ -294,7 +284,6 @@ impl WorkbenchApp {
         self.serial.stop_bits = cfg.stop_bits.clone();
         self.serial.parity = cfg.parity.clone();
         self.recorder_path = cfg.recorder_path.clone();
-        self.activity_order = cfg.activity_order.clone();
         self.terminal_popup_always_on_top = cfg.terminal_popup_always_on_top;
         self.send_popup_always_on_top = cfg.send_popup_always_on_top;
         self.serial.port_aliases = cfg.port_aliases.clone();
@@ -394,24 +383,6 @@ mod tests {
         );
     }
 
-    // ── default_activity_order ──
-
-    #[test]
-    fn default_activity_order_non_empty() {
-        let order = default_activity_order();
-        assert!(!order.is_empty(), "activity order should not be empty");
-    }
-
-    #[test]
-    fn default_activity_order_contains_expected_activities() {
-        let order = default_activity_order();
-        // 顺序必须匹配
-        assert_eq!(order[0], Activity::Devices);
-        assert_eq!(order[1], Activity::Replay);
-        assert_eq!(order[2], Activity::Plugins);
-        assert_eq!(order[3], Activity::Settings);
-        assert_eq!(order.len(), 4);
-    }
 
     // ── default_true ──
 

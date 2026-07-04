@@ -1,4 +1,3 @@
-use crate::config::default_activity_order;
 use crate::config::{ConfigLoadResult, PersistedConfig, default_recorder_path, load_config};
 use crate::state::{MAX_SEND_HISTORY, NotificationQueue, SendUiState, SerialUiState, UpdateState};
 use eframe::egui;
@@ -9,7 +8,7 @@ use tool_databus::DataBus;
 use tool_extension::PluginManager;
 use tool_lua_host::{DialogRequest, FileAccessBroker};
 use tool_panels::{
-    Activity, DynamicPanels, LogPanel, PanelManager, PluginsPanel, ReplayPanel, TerminalPanel,
+    DynamicPanels, LogPanel, PanelManager, PluginsPanel, ReplayPanel, TerminalPanel,
     theme,
 };
 use tool_recorder::JsonlRecorder;
@@ -39,14 +38,11 @@ pub(crate) struct WorkbenchApp {
     pub(crate) terminal_popup_always_on_top: bool,
     pub(crate) send_popup_always_on_top: bool,
     pub(crate) detached_dynamic_panels: BTreeSet<String>,
-    pub(crate) activity_order: Vec<Activity>,
-    pub(crate) activity_drag_source: Option<usize>,
-    pub(crate) activity_rects_cache: Vec<egui::Rect>,
     pub(crate) dock_dragging_panel: Option<tool_panels::PanelKind>,
     pub(crate) bottom_dock_rect: Option<egui::Rect>,
     pub(crate) right_dock_rect: Option<egui::Rect>,
+    pub(crate) left_dock_rect: Option<egui::Rect>,
     pub(crate) last_auto_save_time: f64,
-    pub(crate) dynamic_drag_source: Option<usize>,
     pub(crate) file_broker: Arc<FileAccessBroker>,
     pub(crate) dialog_receiver: crossbeam_channel::Receiver<DialogRequest>,
     pub(crate) file_browse_subscription: tool_databus::Subscription,
@@ -279,18 +275,11 @@ impl WorkbenchApp {
                 .map(|c| c.send_popup_always_on_top)
                 .unwrap_or(false),
             detached_dynamic_panels: BTreeSet::new(),
-            activity_order: config
-                .as_ref()
-                .map(|c| c.activity_order.clone())
-                .unwrap_or_else(default_activity_order),
-            activity_drag_source: None,
-            activity_rects_cache: Vec::new(),
             last_auto_save_time: 0.0,
             bus: bus.clone(),
             transport,
             plugin_manager: pm,
             recorder,
-            dynamic_drag_source: None,
             file_broker,
             dialog_receiver,
             file_browse_subscription: bus.subscribe(tool_databus::TopicFilter::exact(
@@ -309,6 +298,7 @@ impl WorkbenchApp {
             dock_dragging_panel: None,
             bottom_dock_rect: None,
             right_dock_rect: None,
+            left_dock_rect: None,
             keymap: config
                 .as_ref()
                 .map(|c| c.keymap.clone())

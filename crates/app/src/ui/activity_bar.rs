@@ -1,118 +1,128 @@
 use crate::app::WorkbenchApp;
 use eframe::egui;
 use egui::Color32;
-use tool_panels::{PanelKind, theme};
+use tool_panels::theme;
 
 impl WorkbenchApp {
+    /// 左侧栏 = Center 主工作区的标签栏。
+    /// 与底部/右侧停靠区共用同一套 PanelKind + dock_dragging_panel 拖拽体系。
     pub(super) fn activity_bar(&mut self, ui: &mut egui::Ui) {
         let pointer = ui.ctx().pointer_latest_pos();
-        let mut activity_rects = Vec::with_capacity(self.activity_order.len());
+        let tabs = self.panels.dock.center.tabs.clone();
+
+        let mut tab_rects: Vec<egui::Rect> = Vec::with_capacity(tabs.len());
 
         ui.vertical_centered(|ui| {
-            for (idx, &act) in self.activity_order.iter().enumerate() {
-                let selected =
-                    self.panels.active_dynamic_id().is_none() && self.panels.activity == act;
-                let label = format!("{} {}", aicon(act), act.label());
-                let shortcut = ashortcut(act);
-
-                let hover = if shortcut.is_empty() {
-                    act.label().to_owned()
-                } else {
-                    format!("{} ({})", act.label(), shortcut)
-                };
+            for kind in &tabs {
+                let active = self.panels.dock.center.active.as_ref() == Some(kind);
+                let dragging = self.dock_dragging_panel.as_ref() == Some(kind);
+                let title = self.panel_title(kind);
+                let label = format!("{} {}", kind.icon(), title);
 
                 let (rect, response) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), 28.0),
                     egui::Sense::click_and_drag(),
                 );
 
+                if response.clicked() && self.dock_dragging_panel.is_none() {
+                    self.panels.select_center_panel(kind.clone());
+                }
+
                 if response.drag_started() {
-                    self.activity_drag_source = Some(idx);
+                    self.dock_dragging_panel = Some(kind.clone());
                 }
 
-                if response.clicked() && self.activity_drag_source.is_none() {
-                    self.panels.select_activity(act);
-                    if let Some(kind) = act.panel_kind() {
-                        self.panels
-                            .dock
-                            .move_panel(kind, tool_panels::DockArea::Center);
-                        self.panels.sync_tabs_from_dock();
-                    }
+                if response.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                    ui.ctx().request_repaint();
                 }
 
-                let is_source = self.activity_drag_source == Some(idx);
+                tab_rects.push(rect);
 
-                let bg = if is_source {
+                let bg = if dragging {
                     theme::BG_TERTIARY
-                } else if selected || response.hovered() {
-                    if selected {
-                        theme::BG_SELECTION
-                    } else {
-                        theme::BG_HOVER
-                    }
+                } else if active {
+                    theme::BG_SELECTION
+                } else if response.hovered() {
+                    theme::BG_HOVER
                 } else {
                     Color32::TRANSPARENT
+                };
+                response.on_hover_text(&title);
+
+                let fg = if active || dragging {
+                    theme::TEXT_WHITE
+                } else {
+                    theme::TEXT_PRIMARY
                 };
 
                 let painter = ui.painter_at(rect);
                 painter.rect_filled(rect, 4.0, bg);
-
                 painter.text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
                     &label,
                     egui::FontId::proportional(12.0),
-                    if is_source {
-                        theme::TEXT_SECONDARY
-                    } else {
-                        theme::TEXT_PRIMARY
-                    },
+                    fg,
                 );
-
-                response.on_hover_text(hover);
-
-                activity_rects.push(rect);
             }
         });
 
-        let drag_insert_index = if self.activity_drag_source.is_some() {
-            pointer.and_then(|pos| activity_insert_index_from_pointer(&activity_rects, pos))
+        // 拖拽排序：在左侧栏内拖动 center tab 重排顺序
+        let drag_insert_index = if self.dock_dragging_panel.is_some() {
+            pointer.and_then(|pos| vertical_insert_index_from_pointer(&tab_rects, pos))
         } else {
             None
         };
 
         if let Some(insert_index) = drag_insert_index {
-            paint_activity_insert_line(ui, &activity_rects, insert_index);
+            paint_vertical_insert_line(ui, &tab_rects, insert_index);
         }
 
-        if self.activity_drag_source.is_some()
+        // 拖拽释放在左侧栏区域内：重排 center.tabs（若来源也是 center）
+        // 跨区拖入（从 bottom/right 拖回左侧）由 paint_dock_drop_overlay 处理。
+        if self.dock_dragging_panel.is_some()
             && ui.input(|i| i.pointer.any_released())
-            && let Some(source_index) = self.activity_drag_source.take()
-            && let Some(mut insert_index) = drag_insert_index
+            && let Some(kind) = self.dock_dragging_panel.clone()
+            && let Some(insert_index) = drag_insert_index
         {
-            insert_index = insert_index.min(self.activity_order.len());
-
-            if insert_index > source_index {
-                insert_index -= 1;
+            // 仅当来源是 center 时做原地重排
+            if self.panels.dock.center.contains(&kind) {
+                let source_index = self
+                    .panels
+                    .dock
+                    .center
+                    .tabs
+                    .iter()
+                    .position(|k| k == &kind);
+                if let Some(src) = source_index {
+                    let mut ins = insert_index.min(self.panels.dock.center.tabs.len());
+                    if ins > src {
+                        ins -= 1;
+                    }
+                    if ins != src {
+                        let item = self.panels.dock.center.tabs.remove(src);
+                        let ins = ins.min(self.panels.dock.center.tabs.len());
+                        self.panels.dock.center.tabs.insert(ins, item);
+                        if let Err(e) = self.save_config() {
+                            log::warn!("save_config failed: {e}")
+                        };
+                    }
+                }
             }
-
-            if insert_index != source_index {
-                let item = self.activity_order.remove(source_index);
-                let insert_index = insert_index.min(self.activity_order.len());
-                self.activity_order.insert(insert_index, item);
-                if let Err(e) = self.save_config() {
-                    log::warn!("save_config failed: {e}")
-                };
-            }
+            self.dock_dragging_panel = None;
         }
 
-        if self.activity_drag_source.is_some() && !ui.input(|i| i.pointer.primary_down()) {
-            self.activity_drag_source = None;
+        // 释放但未命中任何区域：清除拖拽（跨区移动由 overlay 处理）
+        if self.dock_dragging_panel.is_some() && ui.input(|i| i.pointer.any_released()) {
+            // 若释放在左侧栏外且不在 bottom/right，paint_dock_drop_overlay 会处理跨区；
+            // 这里仅兜底：若释放时仍在拖拽状态，清除之。
+            // 注意：paint_dock_drop_overlay 在本函数之后运行，会先处理跨区命中。
         }
-
-        self.activity_rects_cache = activity_rects;
-
-        self.dynamic_panel_shortcuts(ui);
+        if self.dock_dragging_panel.is_some() && !ui.input(|i| i.pointer.primary_down()) {
+            // 鼠标已松开但 dragging 仍在 → 留给 overlay 处理；overlay 未处理则清除
+            // overlay 在 paint_dock_drop_overlay 末尾会清除，这里不重复清除以免抢夺
+        }
 
         ui.separator();
 
@@ -124,259 +134,47 @@ impl WorkbenchApp {
             self.toggle_bottom_panel();
         }
     }
-    pub(super) fn dynamic_panel_shortcuts(&mut self, ui: &mut egui::Ui) {
-        let items: Vec<(String, String)> = self
-            .panels
-            .tabs()
-            .iter()
-            .filter_map(|kind| kind.dynamic_id().map(|id| id.to_owned()))
-            .filter(|id| self.dynamic_panels.contains(id))
-            .map(|id| {
-                let title = self.dynamic_panels.title(&id).unwrap_or(&id).to_owned();
-                (id, title)
-            })
-            .collect();
-
-        if items.is_empty() {
-            return;
-        }
-
-        ui.separator();
-
-        let pointer = ui.ctx().pointer_latest_pos();
-        let mut rects = Vec::with_capacity(items.len());
-
-        for (index, (id, title)) in items.iter().enumerate() {
-            let active = self.panels.active_dynamic_id() == Some(id);
-            let is_source = self.dynamic_drag_source == Some(index);
-
-            let (rect, response) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width(), 24.0),
-                egui::Sense::click_and_drag(),
-            );
-
-            if response.drag_started() {
-                self.dynamic_drag_source = Some(index);
-            }
-
-            if response.clicked() && self.dynamic_drag_source.is_none() {
-                self.panels.open_tab(PanelKind::Dynamic(id.to_owned()));
-            }
-
-            let bg = if is_source {
-                theme::BG_TERTIARY
-            } else if active || response.hovered() {
-                if active {
-                    theme::BG_SELECTION
-                } else {
-                    theme::WIDGET_HOVER
-                }
-            } else {
-                Color32::TRANSPARENT
-            };
-
-            let painter = ui.painter_at(rect);
-
-            if bg != Color32::TRANSPARENT {
-                painter.rect_filled(rect, 4.0, bg);
-            }
-
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                format!("  {title}"),
-                egui::FontId::proportional(12.0),
-                if is_source {
-                    theme::TEXT_SECONDARY
-                } else {
-                    theme::TEXT_PRIMARY
-                },
-            );
-
-            response.on_hover_text("拖动调整插件标签顺序");
-
-            rects.push(rect);
-        }
-
-        let insert_index = if self.dynamic_drag_source.is_some() {
-            pointer.and_then(|pos| vertical_insert_index_from_pointer(&rects, pos))
-        } else {
-            None
-        };
-
-        if let Some(insert_index) = insert_index {
-            paint_vertical_insert_line(ui, &rects, insert_index);
-        }
-
-        if self.dynamic_drag_source.is_some()
-            && ui.input(|input| input.pointer.any_released())
-            && let Some(source_index) = self.dynamic_drag_source.take()
-            && let Some(insert_index) = insert_index
-        {
-            self.reorder_dynamic_tabs(source_index, insert_index);
-        }
-
-        if self.dynamic_drag_source.is_some() && !ui.input(|input| input.pointer.primary_down()) {
-            self.dynamic_drag_source = None;
-        }
-    }
-    pub(super) fn reorder_dynamic_tabs(&mut self, source_index: usize, mut insert_index: usize) {
-        let mut dynamic_tabs: Vec<PanelKind> = self
-            .panels
-            .dock
-            .center
-            .tabs
-            .iter()
-            .filter(|kind| kind.dynamic_id().is_some())
-            .cloned()
-            .collect();
-
-        if source_index >= dynamic_tabs.len() {
-            return;
-        }
-
-        insert_index = insert_index.min(dynamic_tabs.len());
-
-        if insert_index > source_index {
-            insert_index -= 1;
-        }
-
-        if insert_index == source_index {
-            return;
-        }
-
-        let item = dynamic_tabs.remove(source_index);
-        let insert_index = insert_index.min(dynamic_tabs.len());
-        dynamic_tabs.insert(insert_index, item);
-
-        // 将重排后的动态面板顺序写回 dock.center.tabs
-        let all_tabs = self.panels.dock.all_tabs();
-        let mut dynamic_iter = dynamic_tabs.into_iter();
-        let mut new_center: Vec<PanelKind> = Vec::with_capacity(self.panels.dock.center.tabs.len());
-        for kind in &all_tabs {
-            if kind.dynamic_id().is_some()
-                && let Some(next) = dynamic_iter.next()
-            {
-                new_center.push(next);
-            } else if kind.dynamic_id().is_none() {
-                new_center.push(kind.clone());
-            }
-        }
-        self.panels.dock.center.tabs = new_center;
-
-        if let Err(e) = self.save_config() {
-            log::warn!("save_config failed: {e}")
-        };
-    }
 }
 
-use tool_panels::Activity;
-
-pub(super) fn aicon(a: Activity) -> &'static str {
-    match a {
-        Activity::Devices => "📟",
-        Activity::Replay => "⏪",
-        Activity::Plugins => "🧩",
-        Activity::Settings => "⚙",
-        _ => "",
-    }
-}
-pub(super) fn ashortcut(_a: Activity) -> &'static str {
-    ""
-}
-
-/// 通用：根据指针位置计算插入索引。
-fn insert_index_from_pointer(
+/// 根据指针 y 计算竖排 tab 的插入索引。
+fn vertical_insert_index_from_pointer(
     rects: &[egui::Rect],
     pointer: egui::Pos2,
-    margin: f32,
 ) -> Option<usize> {
     if rects.is_empty() {
         return None;
     }
-
-    let left = rects
-        .iter()
-        .map(|rect| rect.left())
-        .fold(f32::INFINITY, f32::min);
-
-    let right = rects
-        .iter()
-        .map(|rect| rect.right())
-        .fold(f32::NEG_INFINITY, f32::max);
-
-    let top = rects.first()?.top() - margin;
-    let bottom = rects.last()?.bottom() + margin;
-
-    if pointer.x < left - 16.0 || pointer.x > right + 16.0 || pointer.y < top || pointer.y > bottom
-    {
+    let left = rects.iter().map(|r| r.left()).fold(f32::INFINITY, f32::min);
+    let right = rects.iter().map(|r| r.right()).fold(f32::NEG_INFINITY, f32::max);
+    if pointer.x < left - 16.0 || pointer.x > right + 16.0 {
         return None;
     }
-
+    let top = rects.first()?.top() - 8.0;
+    let bottom = rects.last()?.bottom() + 8.0;
+    if pointer.y < top || pointer.y > bottom {
+        return None;
+    }
     for (index, rect) in rects.iter().enumerate() {
         if pointer.y < rect.center().y {
             return Some(index);
         }
     }
-
     Some(rects.len())
 }
 
-/// 通用：绘制插入指示线。
-fn paint_insert_line(ui: &egui::Ui, rects: &[egui::Rect], insert_index: usize) {
+fn paint_vertical_insert_line(ui: &egui::Ui, rects: &[egui::Rect], index: usize) {
     if rects.is_empty() {
         return;
     }
-
-    let left = rects
-        .iter()
-        .map(|rect| rect.left())
-        .fold(f32::INFINITY, f32::min);
-
-    let right = rects
-        .iter()
-        .map(|rect| rect.right())
-        .fold(f32::NEG_INFINITY, f32::max);
-
-    let y = if insert_index == 0 {
-        rects[0].top() - 3.0
-    } else if insert_index >= rects.len() {
-        rects[rects.len() - 1].bottom() + 3.0
+    let y = if index >= rects.len() {
+        rects.last().expect("non-empty").bottom() + 3.0
     } else {
-        let above = rects[insert_index - 1];
-        let below = rects[insert_index];
-        (above.bottom() + below.top()) * 0.5
+        rects[index].top() - 3.0
     };
-
-    let painter = ui.painter();
-
-    painter.line_segment(
-        [egui::pos2(left + 6.0, y), egui::pos2(right - 6.0, y)],
+    let left = rects.iter().map(|r| r.left()).fold(f32::INFINITY, f32::min);
+    let right = rects.iter().map(|r| r.right()).fold(f32::NEG_INFINITY, f32::max);
+    ui.painter().line_segment(
+        [egui::pos2(left, y), egui::pos2(right, y)],
         egui::Stroke::new(2.0, theme::BLUE),
     );
-
-    painter.circle_filled(egui::pos2(left + 6.0, y), 3.0, theme::BLUE);
-    painter.circle_filled(egui::pos2(right - 6.0, y), 3.0, theme::BLUE);
-}
-
-pub(super) fn activity_insert_index_from_pointer(
-    rects: &[egui::Rect],
-    pointer: egui::Pos2,
-) -> Option<usize> {
-    insert_index_from_pointer(rects, pointer, 14.0)
-}
-
-pub(super) fn paint_activity_insert_line(ui: &egui::Ui, rects: &[egui::Rect], insert_index: usize) {
-    paint_insert_line(ui, rects, insert_index);
-}
-
-pub(super) fn vertical_insert_index_from_pointer(
-    rects: &[egui::Rect],
-    pointer: egui::Pos2,
-) -> Option<usize> {
-    insert_index_from_pointer(rects, pointer, 10.0)
-}
-
-pub(super) fn paint_vertical_insert_line(ui: &egui::Ui, rects: &[egui::Rect], insert_index: usize) {
-    paint_insert_line(ui, rects, insert_index);
 }
