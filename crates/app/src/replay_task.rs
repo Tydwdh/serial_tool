@@ -7,11 +7,19 @@ use crate::app::{ReplayAnalyzerJob, ReplayAnalyzerResult, WorkbenchApp};
 use crate::state::StatusLevel;
 
 /// 回放 analyzer 后台任务的运行时状态。
-#[derive(Default)]
 pub(crate) struct ReplayAnalyzerState {
-    #[default]
     pub(crate) job: Option<ReplayAnalyzerJob>,
     pub(crate) generation: u64,
+}
+
+#[allow(clippy::derivable_impls)]
+impl Default for ReplayAnalyzerState {
+    fn default() -> Self {
+        Self {
+            job: None,
+            generation: 0,
+        }
+    }
 }
 
 impl WorkbenchApp {

@@ -1176,7 +1176,7 @@ pub fn translate_error(err: &TransportError) -> String {
             let msg = e.to_string();
             let msg_lower = msg.to_ascii_lowercase();
             if msg_lower.contains("access is denied") || msg_lower.contains("access denied") {
-                format!("串口被占用或无权限访问，请检查是否已被其他程序打开")
+                "串口被占用或无权限访问，请检查是否已被其他程序打开".to_owned()
             } else if msg_lower.contains("device not found") || msg_lower.contains("not found") || msg_lower.contains("does not exist") {
                 format!("串口设备不存在：{msg}")
             } else if msg_lower.contains("timeout") {
