@@ -776,17 +776,33 @@ impl WorkbenchApp {
             ui.separator();
             ui.add_space(2.0);
             ui.horizontal(|ui| {
+                // 两步确认：避免误触一次性删除所有发送历史。
+                let confirm_id = ui.id().with("clear_history_armed");
+                let now = ui.input(|i| i.time);
+                let armed_ts: Option<f64> = ui.ctx().memory(|m| m.data.get_temp(confirm_id));
+                let armed = armed_ts.is_some_and(|t| now - t < 3.0);
+                let label = if armed { "确认清空?" } else { "清空全部" };
                 if ui
                     .add(
                         egui::Button::new(
-                            egui::RichText::new("清空全部").color(theme::RED).small(),
+                            egui::RichText::new(label).color(theme::RED).small(),
                         )
                         .frame(true),
                     )
-                    .on_hover_text("删除所有历史记录")
+                    .on_hover_text(if armed { "再次点击确认清空" } else { "删除所有历史记录" })
                     .clicked()
                 {
-                    pending = Some(PendingHistory::Clear);
+                    if armed {
+                        pending = Some(PendingHistory::Clear);
+                        ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(confirm_id));
+                    } else {
+                        ui.ctx().memory_mut(|m| m.data.insert_temp(confirm_id, now));
+                    }
+                }
+                if armed {
+                    if ui.small_button("取消").clicked() {
+                        ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(confirm_id));
+                    }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
