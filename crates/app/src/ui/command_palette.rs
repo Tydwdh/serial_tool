@@ -7,6 +7,15 @@ use crate::keymap::Action;
 use eframe::egui;
 use tool_panels::theme;
 
+/// 命令面板运行时状态。
+#[derive(Default)]
+pub(crate) struct CommandPaletteState {
+    pub(crate) open: bool,
+    pub(crate) query: String,
+    pub(crate) selected: Option<usize>,
+    pub(crate) usage_order: Vec<String>,
+}
+
 /// 命令面板的一条候选。
 struct CommandEntry {
     label: String,
@@ -23,13 +32,13 @@ enum CommandKind {
 
 impl WorkbenchApp {
     pub(crate) fn command_palette(&mut self, ctx: &egui::Context) {
-        if !self.command_palette_open {
+        if !self.command_palette.open {
             return;
         }
 
         // Esc 关闭
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.command_palette_open = false;
+            self.command_palette.open = false;
             return;
         }
 
@@ -64,7 +73,7 @@ impl WorkbenchApp {
         }
 
         // 过滤
-        let query = self.command_palette_query.to_lowercase();
+        let query = self.command_palette.query.to_lowercase();
         if !query.is_empty() {
             entries.retain(|e| e.label.to_lowercase().contains(&query));
         }
@@ -72,7 +81,7 @@ impl WorkbenchApp {
         // 按最近使用排序：usage_order 中 position 越小的排越前面。
         // 未使用的条目排最后。
         entries.sort_by_key(|e| {
-            self.command_usage_order
+            self.command_palette.usage_order
                 .iter()
                 .position(|u| u == &e.label)
                 .map(|p| p as i32)
@@ -85,36 +94,36 @@ impl WorkbenchApp {
             let last_query = ctx.memory_mut(|m| {
                 let key = egui::Id::new("cp_last_query");
                 let prev: String = m.data.get_temp(key).unwrap_or_default();
-                m.data.insert_temp(key, self.command_palette_query.clone());
+                m.data.insert_temp(key, self.command_palette.query.clone());
                 prev
             });
-            if last_query != self.command_palette_query && !entries.is_empty() {
-                self.command_palette_selected = Some(0);
+            if last_query != self.command_palette.query && !entries.is_empty() {
+                self.command_palette.selected = Some(0);
             }
         }
 
         // 确保 selected 在有效范围
-        if let Some(idx) = self.command_palette_selected {
+        if let Some(idx) = self.command_palette.selected {
             if entries.is_empty() {
-                self.command_palette_selected = None;
+                self.command_palette.selected = None;
             } else if idx >= entries.len() {
-                self.command_palette_selected = Some(entries.len() - 1);
+                self.command_palette.selected = Some(entries.len() - 1);
             }
         } else if !entries.is_empty() {
             // 刚打开时默认选中第一项
-            self.command_palette_selected = Some(0);
+            self.command_palette.selected = Some(0);
         }
 
         // 处理键盘 ↑↓
         if !entries.is_empty() {
             if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-                let cur = self.command_palette_selected.unwrap_or(0);
-                self.command_palette_selected =
+                let cur = self.command_palette.selected.unwrap_or(0);
+                self.command_palette.selected =
                     Some(if cur + 1 >= entries.len() { 0 } else { cur + 1 });
             }
             if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-                let cur = self.command_palette_selected.unwrap_or(0);
-                self.command_palette_selected =
+                let cur = self.command_palette.selected.unwrap_or(0);
+                self.command_palette.selected =
                     Some(if cur == 0 { entries.len() - 1 } else { cur - 1 });
             }
         }
@@ -124,7 +133,7 @@ impl WorkbenchApp {
         let mut hovered_idx: Option<usize> = None;
 
         let window_resp = egui::Window::new("命令面板")
-            .open(&mut self.command_palette_open)
+            .open(&mut self.command_palette.open)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, -100.0])
@@ -132,7 +141,7 @@ impl WorkbenchApp {
             .show(ctx, |ui| {
                 // 搜索框
                 let resp = ui.add(
-                    egui::TextEdit::singleline(&mut self.command_palette_query)
+                    egui::TextEdit::singleline(&mut self.command_palette.query)
                         .hint_text("搜索命令…")
                         .desired_width(f32::INFINITY),
                 );
@@ -175,7 +184,7 @@ impl WorkbenchApp {
                         }
 
                         for (i, entry) in entries.iter().enumerate() {
-                            let is_selected = self.command_palette_selected == Some(i);
+                            let is_selected = self.command_palette.selected == Some(i);
 
                             let row_id = ui.id().with(("cp_row", i));
                             let row_resp = ui.allocate_ui_with_layout(
@@ -236,7 +245,7 @@ impl WorkbenchApp {
                 if let Some(hi) = hovered_idx
                     && mouse_moving
                 {
-                    self.command_palette_selected = Some(hi);
+                    self.command_palette.selected = Some(hi);
                 }
 
                 ui.separator();
@@ -265,9 +274,9 @@ impl WorkbenchApp {
         // Enter 执行选中项。
         // 注意：查询为空且用户未用方向键选中任何条目时，Enter 不应执行——
         // 否则误开面板后随手回车会触发最近使用的命令。
-        let query_empty = self.command_palette_query.trim().is_empty();
+        let query_empty = self.command_palette.query.trim().is_empty();
         if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-            if let Some(idx) = self.command_palette_selected {
+            if let Some(idx) = self.command_palette.selected {
                 if idx < entries.len() {
                     action_to_run =
                         Some((clone_kind(&entries[idx].kind), entries[idx].label.clone()));
@@ -281,16 +290,16 @@ impl WorkbenchApp {
 
         if let Some((kind, key)) = action_to_run {
             // 记录使用：key 移到最前
-            self.command_usage_order.retain(|u| u != &key);
-            self.command_usage_order.insert(0, key);
+            self.command_palette.usage_order.retain(|u| u != &key);
+            self.command_palette.usage_order.insert(0, key);
             close_after = true;
 
             self.run_command_kind(kind);
         }
 
         if close_after {
-            self.command_palette_open = false;
-            self.command_palette_selected = None;
+            self.command_palette.open = false;
+            self.command_palette.selected = None;
         }
     }
 

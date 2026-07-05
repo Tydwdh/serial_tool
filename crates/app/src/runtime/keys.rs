@@ -71,9 +71,9 @@ impl WorkbenchApp {
                 }
             }
             Action::CommandPalette => {
-                self.command_palette_open = !self.command_palette_open;
-                self.command_palette_query.clear();
-                self.command_palette_selected = None;
+                self.command_palette.open = !self.command_palette.open;
+                self.command_palette.query.clear();
+                self.command_palette.selected = None;
             }
             Action::PluginCommand(plugin_id, command_id) => {
                 self.publish_plugin_command_action(&plugin_id, &command_id);

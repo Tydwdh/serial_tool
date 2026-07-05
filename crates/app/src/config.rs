@@ -263,7 +263,7 @@ impl WorkbenchApp {
             terminal_merge_window_ms: self.terminal_panel.merge_window_ms,
             terminal_max_entries: self.terminal_panel.max_entries,
             log_max_entries: self.bottom_log_panel.max_entries,
-            command_usage_order: self.command_usage_order.clone(),
+            command_usage_order: self.command_palette.usage_order.clone(),
         }
     }
 
@@ -294,7 +294,7 @@ impl WorkbenchApp {
         self.terminal_panel.merge_window_ms = cfg.terminal_merge_window_ms;
         self.terminal_panel.max_entries = cfg.terminal_max_entries.max(100);
         self.bottom_log_panel.max_entries = cfg.log_max_entries.max(100);
-        self.command_usage_order = cfg.command_usage_order;
+        self.command_palette.usage_order = cfg.command_usage_order;
         self.send.send_history = cfg
             .send_history
             .iter()

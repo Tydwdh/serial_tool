@@ -1,6 +1,6 @@
 mod activity_bar;
 mod bottom_panel;
-mod command_palette;
+pub(crate) mod command_palette;
 mod contributions;
 mod device_panel;
 mod dock;
