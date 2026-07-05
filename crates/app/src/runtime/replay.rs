@@ -35,13 +35,14 @@ impl WorkbenchApp {
         }
         if self.replay_panel.want_cancel_analyzers {
             self.replay_panel.want_cancel_analyzers = false;
-            if let Some(ref job) = self.replay_analyzer_job {
+            if let Some(ref job) = self.replay_analyzer.job {
                 job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                 self.set_status(StatusLevel::Warn, "回放：正在取消 analyzer...");
             }
         }
         self.replay_panel.analyzer_busy = self
-            .replay_analyzer_job
+            .replay_analyzer
+            .job
             .as_ref()
             .and_then(|job| job.handle.as_ref())
             .is_some_and(|h| !h.is_finished());

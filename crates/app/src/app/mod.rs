@@ -43,8 +43,7 @@ pub(crate) struct WorkbenchApp {
     pub(crate) file_browse_subscription: tool_databus::Subscription,
     pub(crate) contribution_set_value_subscription: tool_databus::Subscription,
     pub(crate) ui_set_status_subscription: tool_databus::Subscription,
-    pub(crate) replay_analyzer_job: Option<ReplayAnalyzerJob>,
-    pub(crate) replay_analyzer_generation: u64,
+    pub(crate) replay_analyzer: crate::replay_task::ReplayAnalyzerState,
     /// 周期发送后台线程控制状态。
     pub(crate) periodic_send: crate::runtime::periodic_send::PeriodicSendState,
     /// 可配置快捷键映射
@@ -278,8 +277,7 @@ impl WorkbenchApp {
             ui_set_status_subscription: bus.subscribe(tool_databus::TopicFilter::exact(
                 tool_core::topics::UI_SET_STATUS,
             )),
-            replay_analyzer_job: None,
-            replay_analyzer_generation: 0,
+            replay_analyzer: Default::default(),
             periodic_send: Default::default(),
             dock_drag: Default::default(),
             keymap: config
