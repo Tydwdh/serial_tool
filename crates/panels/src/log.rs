@@ -190,11 +190,10 @@ impl LogPanel {
                         .memory_mut(|m| m.data.insert_temp(clear_id, now));
                 }
             }
-            if armed {
-                if ui.small_button("取消").clicked() {
+            if armed
+                && ui.small_button("取消").clicked() {
                     ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(clear_id));
                 }
-            }
         });
 
         // ── 第二行：搜索 + 来源过滤 ──
