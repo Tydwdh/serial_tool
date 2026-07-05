@@ -82,9 +82,12 @@ impl WorkbenchApp {
         // 拖拽释放在左侧栏区域内：
         // - 来源是 center → 同区重排
         // - 来源是 bottom/right → 跨区拖入 center，支持按位置插入
+        // 必须 drag_insert_index 非空（指针在 activity bar 内）才处理，
+        // 否则留给 paint_dock_drop_overlay 处理跨区拖到底部/右侧。
         if self.dock_drag.dragging_panel.is_some()
             && ui.input(|i| i.pointer.any_released())
             && let Some(kind) = self.dock_drag.dragging_panel.clone()
+            && let Some(_insert_index) = drag_insert_index
         {
             let src_is_center = self.panels.dock.center.contains(&kind);
             let insert_index = drag_insert_index.unwrap_or(self.panels.dock.center.tabs.len());
