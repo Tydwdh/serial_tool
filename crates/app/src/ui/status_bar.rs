@@ -296,7 +296,7 @@ impl WorkbenchApp {
                     .on_hover_text(err);
             }
             let label =
-                ui.label(egui::RichText::new(format!("🔄 v{version_str} 可用")).color(theme::CYAN));
+                ui.label(egui::RichText::new(format!("⬇ v{version_str} 可用")).color(theme::CYAN));
 
             // hover 显示 changelog
             if !us.changelog.is_empty() {
