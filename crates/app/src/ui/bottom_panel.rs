@@ -397,10 +397,11 @@ impl WorkbenchApp {
 
     /// 周期发送控件
     fn render_periodic_controls(&mut self, ui: &mut egui::Ui, width: f32) {
-        // 间隔合法性：空串视为未设置（可取消勾选但不能新启用）；非正数或非数字视为非法。
+        // 间隔合法性：空串视为未设置（仅允许取消勾选，不允许新启用）；
+        // 非正数或非数字视为非法。
         let trimmed: String = self.send.periodic_interval_ms.trim().to_owned();
         let interval_valid =
-            trimmed.is_empty() || trimmed.parse::<f64>().map(|v| v > 0.0).unwrap_or(false);
+            !trimmed.is_empty() && trimmed.parse::<f64>().map(|v| v > 0.0).unwrap_or(false);
         // 已启用时即使输入变非法也允许取消勾选；未启用且非法时禁止勾选。
         let can_toggle = interval_valid || self.send.periodic_enabled;
         if ui
@@ -408,6 +409,7 @@ impl WorkbenchApp {
                 can_toggle,
                 egui::Checkbox::new(&mut self.send.periodic_enabled, "周期发送"),
             )
+            .on_disabled_hover_text("请设置有效的发送间隔（> 0 ms）")
             .changed()
         {
             self.send.periodic_send_count = 0;
@@ -432,6 +434,9 @@ impl WorkbenchApp {
                 }
                 _ => {}
             }
+        } else if self.send.periodic_enabled {
+            // 不应出现（空串已禁止启用），但防御性提示
+            ui.colored_label(theme::YELLOW, "请设置间隔");
         }
     }
 
