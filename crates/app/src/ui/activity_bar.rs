@@ -15,7 +15,7 @@ impl WorkbenchApp {
         ui.vertical_centered(|ui| {
             for kind in &tabs {
                 let active = self.panels.dock.center.active.as_ref() == Some(kind);
-                let dragging = self.dock_dragging_panel.as_ref() == Some(kind);
+                let dragging = self.dock_drag.dragging_panel.as_ref() == Some(kind);
                 let title = self.panel_title(kind);
                 let label = format!("{} {}", kind.icon(), title);
 
@@ -24,12 +24,12 @@ impl WorkbenchApp {
                     egui::Sense::click_and_drag(),
                 );
 
-                if response.clicked() && self.dock_dragging_panel.is_none() {
+                if response.clicked() && self.dock_drag.dragging_panel.is_none() {
                     self.panels.select_center_panel(kind.clone());
                 }
 
                 if response.drag_started() {
-                    self.dock_dragging_panel = Some(kind.clone());
+                    self.dock_drag.dragging_panel = Some(kind.clone());
                 }
 
                 if response.dragged() {
@@ -69,7 +69,7 @@ impl WorkbenchApp {
         });
 
         // 拖拽排序：在左侧栏内拖动 center tab 重排顺序
-        let drag_insert_index = if self.dock_dragging_panel.is_some() {
+        let drag_insert_index = if self.dock_drag.dragging_panel.is_some() {
             pointer.and_then(|pos| vertical_insert_index_from_pointer(&tab_rects, pos))
         } else {
             None
@@ -81,9 +81,9 @@ impl WorkbenchApp {
 
         // 拖拽释放在左侧栏区域内：重排 center.tabs（若来源也是 center）
         // 跨区拖入（从 bottom/right 拖回左侧）由 paint_dock_drop_overlay 处理。
-        if self.dock_dragging_panel.is_some()
+        if self.dock_drag.dragging_panel.is_some()
             && ui.input(|i| i.pointer.any_released())
-            && let Some(kind) = self.dock_dragging_panel.clone()
+            && let Some(kind) = self.dock_drag.dragging_panel.clone()
             && let Some(insert_index) = drag_insert_index
         {
             // 仅当来源是 center 时做原地重排
@@ -104,16 +104,16 @@ impl WorkbenchApp {
                     }
                 }
             }
-            self.dock_dragging_panel = None;
+            self.dock_drag.dragging_panel = None;
         }
 
         // 释放但未命中任何区域：清除拖拽（跨区移动由 overlay 处理）
-        if self.dock_dragging_panel.is_some() && ui.input(|i| i.pointer.any_released()) {
+        if self.dock_drag.dragging_panel.is_some() && ui.input(|i| i.pointer.any_released()) {
             // 若释放在左侧栏外且不在 bottom/right，paint_dock_drop_overlay 会处理跨区；
             // 这里仅兜底：若释放时仍在拖拽状态，清除之。
             // 注意：paint_dock_drop_overlay 在本函数之后运行，会先处理跨区命中。
         }
-        if self.dock_dragging_panel.is_some() && !ui.input(|i| i.pointer.primary_down()) {
+        if self.dock_drag.dragging_panel.is_some() && !ui.input(|i| i.pointer.primary_down()) {
             // 鼠标已松开但 dragging 仍在 → 留给 overlay 处理；overlay 未处理则清除
             // overlay 在 paint_dock_drop_overlay 末尾会清除，这里不重复清除以免抢夺
         }

@@ -3,7 +3,7 @@ mod bottom_panel;
 pub(crate) mod command_palette;
 mod contributions;
 mod device_panel;
-mod dock;
+pub(crate) mod dock;
 mod layout_buttons;
 mod popups;
 mod settings_panel;
@@ -17,9 +17,9 @@ use tool_panels::{DockArea, theme};
 
 impl WorkbenchApp {
     pub(crate) fn draw_shell(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        self.bottom_dock_rect = None;
-        self.right_dock_rect = None;
-        self.left_dock_rect = None;
+        self.dock_drag.bottom_rect = None;
+        self.dock_drag.right_rect = None;
+        self.dock_drag.left_rect = None;
 
         egui::Panel::top("top-bar").show(ui, |ui| {
             self.top_bar(ui);
@@ -32,7 +32,7 @@ impl WorkbenchApp {
                 .show(ui, |ui| {
                     self.activity_bar(ui);
                 });
-            self.left_dock_rect = Some(bar.response.rect);
+            self.dock_drag.left_rect = Some(bar.response.rect);
         }
 
         // 固定状态栏：永远贴在窗口最底部，不参与 bottom-dock resize。
@@ -55,7 +55,7 @@ impl WorkbenchApp {
                     self.dock_stack_ui(ui, DockArea::Right);
                 });
 
-            self.right_dock_rect = Some(shown.response.rect);
+            self.dock_drag.right_rect = Some(shown.response.rect);
             self.panels.dock.right_size = shown.response.rect.width().max(220.0);
         }
 
@@ -68,7 +68,7 @@ impl WorkbenchApp {
                 .show(ui, |ui| {
                     self.dock_stack_ui(ui, DockArea::Bottom);
                 });
-            self.bottom_dock_rect = Some(shown.response.rect);
+            self.dock_drag.bottom_rect = Some(shown.response.rect);
         }
 
         self.paint_dock_drop_overlay(ctx);
