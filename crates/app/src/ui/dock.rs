@@ -83,6 +83,16 @@ impl WorkbenchApp {
                     egui::Stroke::new(1.0, theme::BORDER_LIGHT),
                     egui::StrokeKind::Inside,
                 );
+                // 活动标签顶部绘制 2px 强调线：让 active/inactive 不止依赖背景色、
+                // 对色觉障碍用户也更友好。
+                if active {
+                    let accent_rect = egui::Rect::from_min_size(
+                        rect.left_top(),
+                        egui::vec2(rect.width(), 2.0),
+                    );
+                    ui.painter()
+                        .rect_filled(accent_rect, 0.0, theme::BLUE);
+                }
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
