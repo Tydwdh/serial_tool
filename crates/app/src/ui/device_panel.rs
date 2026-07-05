@@ -226,12 +226,17 @@ impl WorkbenchApp {
                                 // 5 秒后自动解除武装。
                                 let confirm_id = ui.id().with(("force_close_confirm", *port));
                                 let now = ui.input(|i| i.time);
-                                let armed_ts: Option<f64> = ui.ctx().memory(|m| m.data.get_temp(confirm_id));
+                                let armed_ts: Option<f64> =
+                                    ui.ctx().memory(|m| m.data.get_temp(confirm_id));
                                 let armed = armed_ts.is_some_and(|t| now - t < 5.0);
                                 let label = if armed { "确认?" } else { "强制关闭" };
-                                let btn = egui::Button::new(
-                                    egui::RichText::new(label).color(if armed { theme::RED } else { theme::ORANGE }),
-                                ).small();
+                                let btn =
+                                    egui::Button::new(egui::RichText::new(label).color(if armed {
+                                        theme::RED
+                                    } else {
+                                        theme::ORANGE
+                                    }))
+                                    .small();
                                 if ui.add(btn).clicked() {
                                     if armed {
                                         self.transport.close_port(port);
@@ -239,15 +244,17 @@ impl WorkbenchApp {
                                             StatusLevel::Info,
                                             format!("{port} 已强制关闭"),
                                         );
-                                        ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(confirm_id));
+                                        ui.ctx()
+                                            .memory_mut(|m| m.data.remove_temp::<f64>(confirm_id));
                                     } else {
-                                        ui.ctx().memory_mut(|m| m.data.insert_temp(confirm_id, now));
+                                        ui.ctx()
+                                            .memory_mut(|m| m.data.insert_temp(confirm_id, now));
                                     }
                                 }
-                                if armed
-                                    && ui.small_button("取消").clicked() {
-                                        ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(confirm_id));
-                                    }
+                                if armed && ui.small_button("取消").clicked() {
+                                    ui.ctx()
+                                        .memory_mut(|m| m.data.remove_temp::<f64>(confirm_id));
+                                }
                             });
                         }
                         ui.separator();
@@ -348,16 +355,16 @@ impl WorkbenchApp {
                                                 ui.data_mut(|d| d.insert_persisted(menu_id, false));
                                             } else {
                                                 let mut rename_input = group_name.clone();
-                                                let text_edit = egui::TextEdit::singleline(
-                                                    &mut rename_input,
-                                                )
-                                                .desired_width(100.0);
+                                                let text_edit =
+                                                    egui::TextEdit::singleline(&mut rename_input)
+                                                        .desired_width(100.0);
                                                 let resp = ui.add(text_edit);
                                                 // Enter 确认改名
-                                                let enter_pressed =
-                                                    ui.input(|i| i.key_pressed(egui::Key::Enter))
-                                                        && resp.has_focus();
-                                                if (ui.small_button("改名").clicked() || enter_pressed)
+                                                let enter_pressed = ui
+                                                    .input(|i| i.key_pressed(egui::Key::Enter))
+                                                    && resp.has_focus();
+                                                if (ui.small_button("改名").clicked()
+                                                    || enter_pressed)
                                                     && !rename_input.trim().is_empty()
                                                     && rename_input.trim() != group_name.as_str()
                                                 {

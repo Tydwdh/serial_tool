@@ -55,10 +55,7 @@ impl WorkbenchApp {
                 StatusLevel::Info,
                 format!(
                     "已恢复 {new_port} 的串口配置: {} {}{}{}",
-                    profile.baud_rate,
-                    profile.data_bits,
-                    profile.parity,
-                    profile.stop_bits,
+                    profile.baud_rate, profile.data_bits, profile.parity, profile.stop_bits,
                 ),
             );
         }

@@ -1,16 +1,16 @@
--- demo.gcode-sender / main.lua
+-- gcode-sender / main.lua
 -- G-code sender driven by host UI contributions.
 
 local codec = require("hw.codec")
 
 local PLUGIN_ID = ctx.plugin.id
-local TASK_ID = "demo.gcode-sender.print"
+local TASK_ID = "gcode-sender.print"
 
 local COMMAND = {
-    SEND_FILE = "demo.gcode-sender.send_file",
-    SEND_SINGLE = "demo.gcode-sender.send_single",
-    PAUSE = "demo.gcode-sender.pause",
-    CANCEL = "demo.gcode-sender.cancel",
+    SEND_FILE = "gcode-sender.send_file",
+    SEND_SINGLE = "gcode-sender.send_single",
+    PAUSE = "gcode-sender.pause",
+    CANCEL = "gcode-sender.cancel",
 }
 
 local DEFAULTS = {
@@ -400,12 +400,12 @@ local function run_entries(port, entries, use_checksum, task)
     local max_done = 0
     task:set_progress(0, total)
     -- 初始化 contribution 进度
-    ctx.ui.set_contribution_value("demo.gcode-sender.progress", { value = 0, text = "0/" .. total })
+    ctx.ui.set_contribution_value("gcode-sender.progress", { value = 0, text = "0/" .. total })
 
     while pos <= total do
         if task:is_cancelled() then
             task:set_status("已取消")
-            ctx.ui.set_contribution_value("demo.gcode-sender.progress", { value = 0, text = "" })
+            ctx.ui.set_contribution_value("gcode-sender.progress", { value = 0, text = "" })
             return
         end
         task:wait_if_paused()
@@ -420,7 +420,7 @@ local function run_entries(port, entries, use_checksum, task)
             pos = pos + 1
             max_done = pos - 1
             task:set_progress(max_done, total)
-            ctx.ui.set_contribution_value("demo.gcode-sender.progress", {
+            ctx.ui.set_contribution_value("gcode-sender.progress", {
                 value = max_done / total,
                 text = string.format("%d/%d", max_done, total)
             })
@@ -469,7 +469,7 @@ local function run_entries(port, entries, use_checksum, task)
 
     task:set_progress(total, total)
     task:set_status("发送完成")
-    ctx.ui.set_contribution_value("demo.gcode-sender.progress", {
+    ctx.ui.set_contribution_value("gcode-sender.progress", {
         value = 1,
         text = string.format("%d/%d", total, total)
     })
@@ -515,7 +515,7 @@ local function start_task(port, entries, use_checksum)
         -- 清理 UI 属于 best-effort，不能再次覆盖 run_entries 的原始异常。
         if ctx.ui and ctx.ui.set_contribution_value then
             pcall(ctx.ui.set_contribution_value,
-                "demo.gcode-sender.progress", { value = 0, text = "" })
+                "gcode-sender.progress", { value = 0, text = "" })
         end
     end)
 end

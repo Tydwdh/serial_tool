@@ -378,9 +378,7 @@ impl WorkbenchApp {
         } else {
             None
         };
-        let can_send = send_port_open
-            && !input_trim.is_empty()
-            && hex_error.is_none();
+        let can_send = send_port_open && !input_trim.is_empty() && hex_error.is_none();
 
         let mut send_btn = ui.add_enabled(can_send, egui::Button::new("发送"));
         if let Some(ref err) = hex_error {
@@ -783,28 +781,35 @@ impl WorkbenchApp {
                 let now = ui.input(|i| i.time);
                 let armed_ts: Option<f64> = ui.ctx().memory(|m| m.data.get_temp(confirm_id));
                 let armed = armed_ts.is_some_and(|t| now - t < 3.0);
-                let label = if armed { "确认清空?" } else { "清空全部" };
+                let label = if armed {
+                    "确认清空?"
+                } else {
+                    "清空全部"
+                };
                 if ui
                     .add(
-                        egui::Button::new(
-                            egui::RichText::new(label).color(theme::RED).small(),
-                        )
-                        .frame(true),
+                        egui::Button::new(egui::RichText::new(label).color(theme::RED).small())
+                            .frame(true),
                     )
-                    .on_hover_text(if armed { "再次点击确认清空" } else { "删除所有历史记录" })
+                    .on_hover_text(if armed {
+                        "再次点击确认清空"
+                    } else {
+                        "删除所有历史记录"
+                    })
                     .clicked()
                 {
                     if armed {
                         pending = Some(PendingHistory::Clear);
-                        ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(confirm_id));
+                        ui.ctx()
+                            .memory_mut(|m| m.data.remove_temp::<f64>(confirm_id));
                     } else {
                         ui.ctx().memory_mut(|m| m.data.insert_temp(confirm_id, now));
                     }
                 }
-                if armed
-                    && ui.small_button("取消").clicked() {
-                        ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(confirm_id));
-                    }
+                if armed && ui.small_button("取消").clicked() {
+                    ui.ctx()
+                        .memory_mut(|m| m.data.remove_temp::<f64>(confirm_id));
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         egui::RichText::new("点击条目填入发送框")
