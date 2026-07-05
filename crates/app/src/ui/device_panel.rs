@@ -324,24 +324,38 @@ impl WorkbenchApp {
                                         ui.data_mut(|d| d.insert_persisted(menu_id, show_menu));
 
                                         if show_menu {
-                                            let mut rename_input = group_name.clone();
-                                            ui.add(
-                                                egui::TextEdit::singleline(&mut rename_input)
-                                                    .desired_width(100.0),
-                                            );
-                                            if ui.small_button("改名").clicked()
-                                                && !rename_input.trim().is_empty()
-                                                && rename_input.trim() != group_name.as_str()
-                                            {
-                                                rename_group = Some((
-                                                    group_name.clone(),
-                                                    rename_input.trim().to_owned(),
-                                                ));
+                                            // Escape 关闭菜单（与"新建分组"弹窗一致）
+                                            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                                                 ui.data_mut(|d| d.insert_persisted(menu_id, false));
-                                            }
-                                            if ui.small_button("删除").clicked() {
-                                                delete_group = Some(group_name.clone());
-                                                ui.data_mut(|d| d.insert_persisted(menu_id, false));
+                                            } else {
+                                                let mut rename_input = group_name.clone();
+                                                let text_edit = egui::TextEdit::singleline(
+                                                    &mut rename_input,
+                                                )
+                                                .desired_width(100.0);
+                                                let resp = ui.add(text_edit);
+                                                // Enter 确认改名
+                                                let enter_pressed =
+                                                    ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                                        && resp.has_focus();
+                                                if (ui.small_button("改名").clicked() || enter_pressed)
+                                                    && !rename_input.trim().is_empty()
+                                                    && rename_input.trim() != group_name.as_str()
+                                                {
+                                                    rename_group = Some((
+                                                        group_name.clone(),
+                                                        rename_input.trim().to_owned(),
+                                                    ));
+                                                    ui.data_mut(|d| {
+                                                        d.insert_persisted(menu_id, false)
+                                                    });
+                                                }
+                                                if ui.small_button("删除").clicked() {
+                                                    delete_group = Some(group_name.clone());
+                                                    ui.data_mut(|d| {
+                                                        d.insert_persisted(menu_id, false)
+                                                    });
+                                                }
                                             }
                                         }
                                     },
