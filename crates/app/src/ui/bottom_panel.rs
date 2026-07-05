@@ -466,8 +466,10 @@ impl WorkbenchApp {
 
     fn send_signal_controls(&mut self, ui: &mut egui::Ui) {
         if self.send.target_port.is_none() {
-            ui.add_enabled(false, egui::Checkbox::new(&mut self.send.dtr_high, "DTR"));
-            ui.add_enabled(false, egui::Checkbox::new(&mut self.send.rts_high, "RTS"));
+            ui.add_enabled(false, egui::Checkbox::new(&mut self.send.dtr_high, "DTR"))
+                .on_disabled_hover_text("请先选择发送目标串口");
+            ui.add_enabled(false, egui::Checkbox::new(&mut self.send.rts_high, "RTS"))
+                .on_disabled_hover_text("请先选择发送目标串口");
             return;
         }
 
