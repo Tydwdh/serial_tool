@@ -561,6 +561,19 @@ impl PluginManager {
         self.records.len()
     }
 
+    /// 仅返回所有已发现插件的 id（按 BTreeMap 顺序）。
+    /// 比 `summaries()` 便宜得多——不做 manifest clone 也不做命令对账。
+    /// 供每帧调用、只需要 id 集合的场景（如市场「已安装」标记）。
+    pub fn plugin_ids(&self) -> Vec<String> {
+        self.records.keys().cloned().collect()
+    }
+
+    /// 返回指定插件当前的状态，不存在返回 None。
+    /// 比 `summaries()` 便宜得多——只读一个字段。
+    pub fn plugin_state(&self, plugin_id: &str) -> Option<PluginState> {
+        self.records.get(plugin_id).map(|r| r.state)
+    }
+
     pub fn process_pending(&mut self) -> usize {
         self.reap_stopping_plugins();
 

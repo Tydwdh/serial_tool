@@ -51,9 +51,7 @@ impl WorkbenchApp {
 
         // 帧级缓存：summaries() 全量 clone manifest + 命令对账，每帧被 5+ slot 调用，
         // 缓存到 OnceCell，同帧只算一次。tick_pre_ui 开头已重置。
-        let summaries: &Vec<tool_extension::PluginSummary> = self
-            .plugin_summaries_cache
-            .get_or_init(|| self.plugin_manager.summaries());
+        let summaries: &[tool_extension::PluginSummary] = self.plugin_summaries();
 
         for summary in summaries {
             // 注意：遍历缓存（不可变借用 summaries），后续需要 &mut self 的调用必须延后到循环外。

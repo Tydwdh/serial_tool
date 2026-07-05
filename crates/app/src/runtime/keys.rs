@@ -123,7 +123,7 @@ impl WorkbenchApp {
                 StatusLevel::Info,
                 format!(
                     "{} 快捷键已更新",
-                    action.label_with_plugins(&self.plugin_manager.summaries())
+                    action.label_with_plugins(self.plugin_summaries())
                 ),
             );
         }

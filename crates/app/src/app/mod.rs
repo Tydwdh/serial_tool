@@ -345,6 +345,21 @@ impl WorkbenchApp {
     pub(crate) fn log(&self, lv: LogLevel, m: impl Into<String>) {
         self.bus.publish(Event::system_log(lv, "app", m.into()));
     }
+
+    /// 帧级缓存的插件 summaries。
+    ///
+    /// `summaries()` 会全量 clone 所有 manifest + 做命令对账；同帧内会被
+    /// `ui_contribution_slot`（每 slot 一次）、命令面板、插件面板、设置面板、
+    /// 快捷键标签等多处调用。这里用一个 `OnceCell` 做帧内缓存：每帧首次调用
+    /// 计算一次，同帧后续调用复用同一份 `Vec`。`tick_pre_ui` 开头会重置缓存。
+    ///
+    /// 注意：返回的是 `&[PluginSummary]` 借用，调用方不能在此引用存活期间
+    /// 再 `&mut self`。需要 `&mut self` 的逻辑应先把需要的字段 clone 出来
+    /// 或在循环外处理。
+    pub(crate) fn plugin_summaries(&self) -> &[tool_extension::PluginSummary] {
+        self.plugin_summaries_cache
+            .get_or_init(|| self.plugin_manager.summaries())
+    }
 }
 
 impl Drop for WorkbenchApp {

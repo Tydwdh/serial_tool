@@ -53,7 +53,7 @@ impl WorkbenchApp {
             });
         }
 
-        for summary in self.plugin_manager.summaries() {
+        for summary in self.plugin_summaries() {
             for cmd in &summary.contributes.commands {
                 entries.push(CommandEntry {
                     label: format!("{}: {}", summary.name, cmd.title),
