@@ -122,7 +122,10 @@ impl WorkbenchApp {
 
         if ui
             .selectable_label(self.panels.dock.bottom_visible, "▽ 终端区")
-            .on_hover_text("Ctrl+B")
+            .on_hover_text(format!(
+                "切换终端区（{}）",
+                self.keymap.shortcut_display(&crate::keymap::Action::ToggleBottomPanel)
+            ))
             .clicked()
         {
             self.toggle_bottom_panel();

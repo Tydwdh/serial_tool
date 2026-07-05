@@ -99,7 +99,7 @@ impl WorkbenchApp {
                 ui.separator();
                 let port = self.send.target_port.clone();
                 let target_open = self.send_target_port_open();
-                let tag = |ui: &mut egui::Ui, label: &str, high: bool, color: Color32| -> bool {
+                let tag = |ui: &mut egui::Ui, label: &str, high: bool, color: Color32, tooltip: &str| -> bool {
                     let size = egui::vec2(42.0, 16.0);
                     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
                     let bg = if high {
@@ -123,19 +123,31 @@ impl WorkbenchApp {
                         egui::FontId::proportional(10.0),
                         color,
                     );
-                    resp.clicked()
+                    resp.on_hover_text(tooltip).clicked()
                 };
                 // 仅当 target_port 打开时才允许点击切换；否则仅展示。
                 if target_open && port.is_some() {
                     let port = port.clone().expect("checked Some above");
-                    if tag(ui, "DTR⬆", self.send.dtr_high, theme::GREEN) {
+                    if tag(
+                        ui,
+                        "DTR⬆",
+                        self.send.dtr_high,
+                        theme::GREEN,
+                        "数据终端就绪 (DTR)。点击切换会立即驱动该线路，部分设备会用它触发复位/进入 bootload，请谨慎。",
+                    ) {
                         let new_dtr = !self.send.dtr_high;
                         match self.transport.set_dtr(&port, new_dtr) {
                             Ok(()) => self.send.dtr_high = new_dtr,
                             Err(e) => self.set_status_force(StatusLevel::Error, e.to_string()),
                         }
                     }
-                    if tag(ui, "RTS⬆", self.send.rts_high, theme::BLUE) {
+                    if tag(
+                        ui,
+                        "RTS⬆",
+                        self.send.rts_high,
+                        theme::BLUE,
+                        "请求发送 (RTS)。点击切换会立即驱动该线路，部分设备会用它触发复位/进入 bootload，请谨慎。",
+                    ) {
                         let new_rts = !self.send.rts_high;
                         match self.transport.set_rts(&port, new_rts) {
                             Ok(()) => self.send.rts_high = new_rts,
@@ -143,8 +155,20 @@ impl WorkbenchApp {
                         }
                     }
                 } else {
-                    tag(ui, "DTR⬆", self.send.dtr_high, theme::GREEN);
-                    tag(ui, "RTS⬆", self.send.rts_high, theme::BLUE);
+                    tag(
+                        ui,
+                        "DTR⬆",
+                        self.send.dtr_high,
+                        theme::GREEN,
+                        "数据终端就绪 (DTR)。打开串口后可切换电平。",
+                    );
+                    tag(
+                        ui,
+                        "RTS⬆",
+                        self.send.rts_high,
+                        theme::BLUE,
+                        "请求发送 (RTS)。打开串口后可切换电平。",
+                    );
                 }
             }
 

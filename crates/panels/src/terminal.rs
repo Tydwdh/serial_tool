@@ -414,8 +414,35 @@ impl TerminalPanel {
                 self.paused = !self.paused;
             }
 
-            if ui.button("清空").clicked() {
-                self.clear();
+            // 清空：两步确认，避免误触丢失刚出现的故障数据。
+            // 「清空」首次点击 → 变红「确认清空?」→ 再次点击才真正清空；
+            // 3 秒内未点则自动解除武装。
+            let clear_id = ui.id().with("clear_armed_ts");
+            let now = ui.input(|i| i.time);
+            let armed_ts: Option<f64> = ui.ctx().memory(|m| m.data.get_temp(clear_id));
+            let armed = armed_ts.is_some_and(|t| now - t < 3.0);
+            let clear_label = if armed { "确认清空?" } else { "清空" };
+            let clear_btn = egui::Button::new(
+                egui::RichText::new(clear_label).color(if armed {
+                    crate::theme::RED
+                } else {
+                    crate::theme::TEXT_PRIMARY
+                }),
+            );
+            if ui.add(clear_btn).clicked() {
+                if armed {
+                    self.clear();
+                    ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(clear_id));
+                } else {
+                    ui.ctx()
+                        .memory_mut(|m| m.data.insert_temp(clear_id, now));
+                }
+            }
+            if armed {
+                // 解除武装的可点击提示（点此取消）
+                if ui.small_button("取消").clicked() {
+                    ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(clear_id));
+                }
             }
 
             if ui.button("⛶").on_hover_text("放大查看").clicked() {

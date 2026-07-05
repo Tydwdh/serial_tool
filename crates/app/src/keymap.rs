@@ -202,7 +202,6 @@ impl Default for Keymap {
 
 impl Keymap {
     /// 获取某个动作的快捷键显示字符串（取第一个绑定）。
-    #[allow(dead_code)]
     pub(crate) fn shortcut_display(&self, action: &Action) -> String {
         self.bindings
             .get(&action.key())
