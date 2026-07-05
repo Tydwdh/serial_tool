@@ -185,6 +185,9 @@ impl Default for DockLayout {
     fn default() -> Self {
         let mut center = DockStack::default();
         center.open(PanelKind::Devices);
+        center.open(PanelKind::Replay);
+        center.open(PanelKind::Plugins);
+        center.open(PanelKind::Settings);
 
         let mut bottom = DockStack::default();
         bottom.open(PanelKind::Terminal);
@@ -268,6 +271,17 @@ impl DockLayout {
         // Sender 如果没有在任何区域，默认放到底部
         if !self.bottom.contains(&PanelKind::Sender) && !self.right.contains(&PanelKind::Sender) {
             self.bottom.open(PanelKind::Sender);
+        }
+
+        // 确保功能面板（回放、插件、设置）至少在一个停靠区中存在。
+        // 避免旧版配置文件或异常重置后用户看不到这些核心功能入口。
+        for kind in [PanelKind::Replay, PanelKind::Plugins, PanelKind::Settings] {
+            if !self.center.contains(&kind)
+                && !self.bottom.contains(&kind)
+                && !self.right.contains(&kind)
+            {
+                self.center.open(kind);
+            }
         }
 
         if self.bottom.active.is_none()
