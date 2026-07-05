@@ -1171,7 +1171,20 @@ pub fn translate_error(err: &TransportError) -> String {
         TransportError::WorkerClosed => "串口工作线程已关闭（可能已断开，请重连）".into(),
         TransportError::QueueFull => "发送队列已满：发送过快，请降低频率".into(),
         TransportError::InvalidHex(msg) => format!("无效HEX：{msg}"),
-        TransportError::Serial(e) => format!("串口错误：{e}"),
+        TransportError::Serial(e) => {
+            // 将常见的英文 serialport 错误转为中文，方便用户排查。
+            let msg = e.to_string();
+            let msg_lower = msg.to_ascii_lowercase();
+            if msg_lower.contains("access is denied") || msg_lower.contains("access denied") {
+                format!("串口被占用或无权限访问，请检查是否已被其他程序打开")
+            } else if msg_lower.contains("device not found") || msg_lower.contains("not found") || msg_lower.contains("does not exist") {
+                format!("串口设备不存在：{msg}")
+            } else if msg_lower.contains("timeout") {
+                format!("串口操作超时：{msg}")
+            } else {
+                format!("串口错误：{msg}")
+            }
+        },
         TransportError::Io(e) => match e.kind() {
             std::io::ErrorKind::WouldBlock => e.to_string(), // "正在关闭中" 等业务状态文案已含中文
             std::io::ErrorKind::TimedOut => format!("操作超时：{e}"),
