@@ -273,6 +273,7 @@ impl LogPanel {
         let outcome = render_log_rows(
             ui,
             &rows,
+            !self.entries.is_empty(),
             self.auto_scroll,
             force_scroll_to_bottom,
             self.font_size,
@@ -392,6 +393,7 @@ struct RowLayout {
 fn render_log_rows(
     ui: &mut egui::Ui,
     rows: &[&LogEntry],
+    has_any_entries: bool,
     stick_to_bottom: bool,
     force_scroll_to_bottom: bool,
     font_size: f32,
@@ -415,7 +417,12 @@ fn render_log_rows(
             .auto_shrink([false, false])
             .id_salt(LOG_SCROLL_ID)
             .show(ui, |ui| {
-                ui.label(RichText::new("应用日志会显示在这里").color(theme::TEXT_SECONDARY));
+                let hint = if has_any_entries {
+                    "无匹配日志 · 试着清除搜索或来源过滤"
+                } else {
+                    "应用日志会显示在这里"
+                };
+                ui.label(RichText::new(hint).color(theme::TEXT_SECONDARY));
             });
 
         return LogRenderOutcome {
