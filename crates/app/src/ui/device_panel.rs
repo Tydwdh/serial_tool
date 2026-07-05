@@ -109,6 +109,10 @@ impl WorkbenchApp {
                     }
 
                     let stopping = self.recorder.is_stopping();
+                    if stopping {
+                        ui.ctx().request_repaint();
+                        ui.spinner();
+                    }
                     if ui
                         .add_enabled(
                             !stopping,
