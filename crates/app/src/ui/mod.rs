@@ -5,7 +5,7 @@ mod contributions;
 mod device_panel;
 pub(crate) mod dock;
 mod layout_buttons;
-mod popups;
+pub(crate) mod popups;
 mod settings_panel;
 mod status_bar;
 mod top_bar;

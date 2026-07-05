@@ -14,6 +14,7 @@ use tool_recorder::JsonlRecorder;
 use tool_transport::TransportManager;
 
 use crate::bootstrap::{app_dir, apply_theme, setup_fonts};
+use crate::ui::popups::PopupsState;
 
 // ── 数据结构 ──
 
@@ -33,9 +34,7 @@ pub(crate) struct WorkbenchApp {
     pub(crate) notifications: NotificationQueue,
     pub(crate) recent_workspaces: Vec<String>,
     pub(crate) send: SendUiState,
-    pub(crate) terminal_popup_open: bool,
-    pub(crate) terminal_popup_always_on_top: bool,
-    pub(crate) send_popup_always_on_top: bool,
+    pub(crate) popups: crate::ui::popups::PopupsState,
     pub(crate) detached_dynamic_panels: BTreeSet<String>,
     pub(crate) dock_drag: crate::ui::dock::DockDragState,
     pub(crate) last_auto_save_time: f64,
@@ -251,15 +250,17 @@ impl WorkbenchApp {
                 .map(|c| c.recent_workspaces.clone())
                 .unwrap_or_default(),
             send,
-            terminal_popup_open: false,
-            terminal_popup_always_on_top: config
-                .as_ref()
-                .map(|c| c.terminal_popup_always_on_top)
-                .unwrap_or(false),
-            send_popup_always_on_top: config
-                .as_ref()
-                .map(|c| c.send_popup_always_on_top)
-                .unwrap_or(false),
+            popups: PopupsState {
+                terminal_always_on_top: config
+                    .as_ref()
+                    .map(|c| c.terminal_popup_always_on_top)
+                    .unwrap_or(false),
+                send_always_on_top: config
+                    .as_ref()
+                    .map(|c| c.send_popup_always_on_top)
+                    .unwrap_or(false),
+                ..Default::default()
+            },
             detached_dynamic_panels: BTreeSet::new(),
             last_auto_save_time: 0.0,
             bus: bus.clone(),

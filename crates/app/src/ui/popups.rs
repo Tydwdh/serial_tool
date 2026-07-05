@@ -5,6 +5,14 @@ use serde_json::Value;
 use tool_core::{Direction, Event, LogLevel, Payload};
 use tool_panels::{PanelKind, theme};
 
+/// 悬浮窗口（弹出窗口）运行时状态。
+#[derive(Default)]
+pub(crate) struct PopupsState {
+    pub(crate) terminal_open: bool,
+    pub(crate) terminal_always_on_top: bool,
+    pub(crate) send_always_on_top: bool,
+}
+
 fn floating_viewport_builder(
     title: impl Into<String>,
     size: [f32; 2],
@@ -24,7 +32,7 @@ fn floating_viewport_builder(
 
 impl WorkbenchApp {
     pub(crate) fn terminal_popup(&mut self, ctx: &egui::Context) {
-        if !self.terminal_popup_open {
+        if !self.popups.terminal_open {
             return;
         }
 
@@ -33,7 +41,7 @@ impl WorkbenchApp {
             "接收区 - 硬件调试工作台",
             [800.0, 600.0],
             [360.0, 240.0],
-            self.terminal_popup_always_on_top,
+            self.popups.terminal_always_on_top,
         );
 
         let should_close = ctx.show_viewport_immediate(vid, builder, |ui, _| {
@@ -48,18 +56,18 @@ impl WorkbenchApp {
                     ui.horizontal(|ui| {
                         ui.heading("接收区");
 
-                        let pin_label = if self.terminal_popup_always_on_top {
+                        let pin_label = if self.popups.terminal_always_on_top {
                             "\u{1f4cc} 置顶"
                         } else {
                             "置顶"
                         };
 
                         if ui
-                            .selectable_label(self.terminal_popup_always_on_top, pin_label)
+                            .selectable_label(self.popups.terminal_always_on_top, pin_label)
                             .on_hover_text("让该窗口保持在其他窗口上方")
                             .clicked()
                         {
-                            self.terminal_popup_always_on_top = !self.terminal_popup_always_on_top;
+                            self.popups.terminal_always_on_top = !self.popups.terminal_always_on_top;
                             if let Err(e) = self.save_config() {
                                 log::warn!("save_config failed: {e}")
                             };
@@ -84,7 +92,7 @@ impl WorkbenchApp {
         });
 
         if should_close {
-            self.terminal_popup_open = false;
+            self.popups.terminal_open = false;
         }
     }
     pub(crate) fn send_popup(&mut self, ctx: &egui::Context) {
@@ -96,7 +104,7 @@ impl WorkbenchApp {
             "发送 - 硬件调试工作台",
             [640.0, 480.0],
             [360.0, 260.0],
-            self.send_popup_always_on_top,
+            self.popups.send_always_on_top,
         );
         let should_close = ctx.show_viewport_immediate(vid, builder, |ui, _| {
             if ui.ctx().input(|i| i.viewport().close_requested()) {

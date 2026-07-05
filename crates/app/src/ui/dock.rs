@@ -248,12 +248,12 @@ impl WorkbenchApp {
                     .show(ui, |ui| self.settings_panel(ui));
             }
             PanelKind::Terminal => {
-                if self.terminal_popup_open {
+                if self.popups.terminal_open {
                     ui.vertical_centered(|ui| {
                         ui.add_space(24.0);
                         ui.label("接收区已在悬浮窗口中打开");
                         if ui.button("关闭悬浮窗口并回到底部").clicked() {
-                            self.terminal_popup_open = false;
+                            self.popups.terminal_open = false;
                         }
                     });
                 } else {

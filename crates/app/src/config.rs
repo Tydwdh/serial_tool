@@ -249,8 +249,8 @@ impl WorkbenchApp {
                 })
                 .map(|s| s.id)
                 .collect(),
-            terminal_popup_always_on_top: self.terminal_popup_always_on_top,
-            send_popup_always_on_top: self.send_popup_always_on_top,
+            terminal_popup_always_on_top: self.popups.terminal_always_on_top,
+            send_popup_always_on_top: self.popups.send_always_on_top,
             port_aliases: self.serial.port_aliases.clone(),
             port_groups: self.serial.port_groups.clone(),
             send_history: self.send.send_history.iter().cloned().collect(),
@@ -283,8 +283,8 @@ impl WorkbenchApp {
         self.serial.stop_bits = cfg.stop_bits.clone();
         self.serial.parity = cfg.parity.clone();
         self.recorder_path = cfg.recorder_path.clone();
-        self.terminal_popup_always_on_top = cfg.terminal_popup_always_on_top;
-        self.send_popup_always_on_top = cfg.send_popup_always_on_top;
+        self.popups.terminal_always_on_top = cfg.terminal_popup_always_on_top;
+        self.popups.send_always_on_top = cfg.send_popup_always_on_top;
         self.serial.port_aliases = cfg.port_aliases.clone();
         self.serial.port_groups = cfg.port_groups.clone();
         self.serial.port_profiles = cfg.port_profiles.clone();
