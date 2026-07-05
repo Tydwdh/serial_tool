@@ -51,6 +51,16 @@ impl WorkbenchApp {
             self.serial.data_bits = profile.data_bits.clone();
             self.serial.stop_bits = profile.stop_bits.clone();
             self.serial.parity = profile.parity.clone();
+            self.set_status(
+                StatusLevel::Info,
+                format!(
+                    "已恢复 {new_port} 的串口配置: {} {}{}{}",
+                    profile.baud_rate,
+                    profile.data_bits,
+                    profile.parity,
+                    profile.stop_bits,
+                ),
+            );
         }
         self.serial.selected_port = Some(new_port.to_owned());
     }
