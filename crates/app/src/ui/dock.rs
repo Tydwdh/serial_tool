@@ -320,62 +320,12 @@ impl WorkbenchApp {
             match area {
                 DockArea::Center => {
                     ui.label("主工作区为空");
-                    if ui.button("打开回放").clicked() {
-                        self.panels
-                            .dock
-                            .move_panel(PanelKind::Replay, DockArea::Center);
-                        self.panels.sync_tabs_from_dock();
-                    }
                 }
                 DockArea::Bottom => {
-                    // 可操作的空白状态：为常见面板提供一键添加到停靠区，
-                    // 避免用户必须从侧栏拖动标签或层层点击活动栏。
                     ui.label("底部面板为空");
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("添加接收区").clicked() {
-                            self.panels
-                                .dock
-                                .move_panel(PanelKind::Terminal, DockArea::Bottom);
-                            self.panels.sync_tabs_from_dock();
-                        }
-                        if ui.button("添加日志").clicked() {
-                            self.panels
-                                .dock
-                                .move_panel(PanelKind::Logs, DockArea::Bottom);
-                            self.panels.sync_tabs_from_dock();
-                        }
-                        if ui.button("添加发送器").clicked() {
-                            self.panels
-                                .dock
-                                .move_panel(PanelKind::Sender, DockArea::Bottom);
-                            self.panels.sync_tabs_from_dock();
-                        }
-                    });
-                    ui.add_space(2.0);
-                    ui.label(
-                        egui::RichText::new("或拖动标签到此 · 点击左侧活动栏")
-                            .small()
-                            .color(theme::TEXT_DIMMED),
-                    );
                 }
                 DockArea::Right => {
                     ui.label("右侧停靠区为空");
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("添加插件面板").clicked() {
-                            self.panels
-                                .dock
-                                .move_panel(PanelKind::Plugins, DockArea::Right);
-                            self.panels.sync_tabs_from_dock();
-                        }
-                    });
-                    ui.add_space(2.0);
-                    ui.label(
-                        egui::RichText::new("或拖动标签到此 · 点击左侧活动栏")
-                            .small()
-                            .color(theme::TEXT_DIMMED),
-                    );
                 }
             }
         });

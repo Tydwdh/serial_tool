@@ -131,6 +131,7 @@ impl<'a> VisibleRow<'a> {
 
 #[derive(Clone)]
 struct EntryDetail {
+    id: u64,
     port: String,
     timestamp_label: String,
     direction: Direction,
@@ -835,6 +836,7 @@ impl TerminalPanel {
             for entry in &data.entries {
                 if entry.id == entry_id {
                     return Some(EntryDetail {
+                        id: entry.id,
                         port: port.clone(),
                         timestamp_label: entry.timestamp_label.clone(),
                         direction: entry.direction,
@@ -875,7 +877,7 @@ impl TerminalPanel {
                     ui.label(RichText::new(&detail.port).monospace().color(theme::YELLOW));
                     ui.label(RichText::new(dir_label).strong().color(dir_color));
                     ui.label(
-                        RichText::new(format!("{}B", detail.raw_text.len()))
+                        RichText::new(format!("#{} · {}B", detail.id, detail.raw_text.len()))
                             .color(theme::TEXT_DIMMED)
                             .small(),
                     );
