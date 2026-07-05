@@ -65,12 +65,7 @@ pub(crate) struct WorkbenchApp {
     /// 等宽字体大小（终端/日志区），默认 13.0
     pub(crate) monospace_font_size: f32,
     /// 市场索引 URL（None 表示用默认）。
-    pub(crate) marketplace_url: Option<String>,
-    /// 市场索引刷新后台线程句柄。
-    pub(crate) marketplace_refresh_job:
-        Option<std::thread::JoinHandle<Result<tool_marketplace::Registry, String>>>,
-    /// 市场插件安装后台任务句柄。
-    pub(crate) marketplace_install_job: Option<crate::runtime::marketplace::MarketplaceInstallJob>,
+    pub(crate) marketplace: crate::runtime::marketplace::MarketplaceState,
 }
 
 pub(crate) struct ReplayAnalyzerJob {
@@ -294,9 +289,7 @@ impl WorkbenchApp {
                 .as_ref()
                 .map(|c| c.monospace_font_size.clamp(10.0, 24.0))
                 .unwrap_or(13.0),
-            marketplace_url: None,
-            marketplace_refresh_job: None,
-            marketplace_install_job: None,
+            marketplace: Default::default(),
         };
         // 从配置恢复等宽字体大小
         app.terminal_panel.font_size = app.monospace_font_size;
