@@ -366,13 +366,25 @@ impl WorkbenchApp {
 
     /// 发送 + 清空 按钮
     fn render_send_and_clear_buttons(&mut self, ui: &mut egui::Ui, send_port_open: bool) {
-        if ui
-            .add_enabled(
-                send_port_open && !self.send.input.trim().is_empty(),
-                egui::Button::new("发送"),
-            )
-            .clicked()
-        {
+        // HEX 模式下实时检查输入是否可解析（严格模式 vs 宽松模式）。
+        let input_trim = self.send.input.trim();
+        let hex_error = if self.send.hex_mode && !input_trim.is_empty() {
+            match tool_transport::parse_hex(input_trim) {
+                Ok(_) => None,
+                Err(e) => Some(e.to_string()),
+            }
+        } else {
+            None
+        };
+        let can_send = send_port_open
+            && !input_trim.is_empty()
+            && hex_error.is_none();
+
+        let mut send_btn = ui.add_enabled(can_send, egui::Button::new("发送"));
+        if let Some(ref err) = hex_error {
+            send_btn = send_btn.on_disabled_hover_text(format!("HEX 解析失败: {err}"));
+        }
+        if send_btn.clicked() {
             self.do_send();
         }
 
@@ -428,12 +440,25 @@ impl WorkbenchApp {
     fn render_hex_preview(&mut self, ui: &mut egui::Ui) {
         if self.send.hex_mode && !self.send.input.trim().is_empty() {
             let preview = hex_preview(&self.send.input);
+            let is_err = preview.starts_with("解析失败");
             ui.label(
                 egui::RichText::new(format!("HEX: {preview}"))
-                    .color(theme::TEXT_SECONDARY)
+                    .color(if is_err {
+                        theme::RED
+                    } else {
+                        theme::TEXT_SECONDARY
+                    })
                     .monospace()
                     .small(),
-            );
+            )
+            .on_hover_text(if is_err {
+                match tool_transport::parse_hex(self.send.input.trim()) {
+                    Ok(_) => String::new(),
+                    Err(e) => format!("HEX 解析失败: {e}"),
+                }
+            } else {
+                String::new()
+            });
         }
     }
 
