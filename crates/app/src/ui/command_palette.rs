@@ -164,6 +164,12 @@ impl WorkbenchApp {
                                 ui.label(
                                     egui::RichText::new("无匹配命令").color(theme::TEXT_SECONDARY),
                                 );
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new("按 Esc 关闭")
+                                        .small()
+                                        .color(theme::TEXT_DIMMED),
+                                );
                             });
                             ui.add_space(20.0);
                         }
@@ -256,7 +262,10 @@ impl WorkbenchApp {
             }
         }
 
-        // Enter 执行选中项
+        // Enter 执行选中项。
+        // 注意：查询为空且用户未用方向键选中任何条目时，Enter 不应执行——
+        // 否则误开面板后随手回车会触发最近使用的命令。
+        let query_empty = self.command_palette_query.trim().is_empty();
         if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
             if let Some(idx) = self.command_palette_selected {
                 if idx < entries.len() {
@@ -264,7 +273,7 @@ impl WorkbenchApp {
                         Some((clone_kind(&entries[idx].kind), entries[idx].label.clone()));
                     close_after = true;
                 }
-            } else if !entries.is_empty() {
+            } else if !query_empty && !entries.is_empty() {
                 action_to_run = Some((clone_kind(&entries[0].kind), entries[0].label.clone()));
                 close_after = true;
             }
