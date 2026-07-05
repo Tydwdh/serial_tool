@@ -43,11 +43,7 @@ impl WorkbenchApp {
             self.send.periodic_enabled = false;
             self.send.periodic_send_count = 0;
             // 读取后台线程写入的结束原因（失败/完成），回写状态栏。
-            let outcome_msg = ps
-                .outcome
-                .lock()
-                .ok()
-                .and_then(|mut slot| slot.take());
+            let outcome_msg = ps.outcome.lock().ok().and_then(|mut slot| slot.take());
             if let Some((level, msg)) = outcome_msg {
                 self.set_status_force(level, msg);
             }

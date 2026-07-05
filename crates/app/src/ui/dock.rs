@@ -100,12 +100,9 @@ impl WorkbenchApp {
                 // 活动标签顶部绘制 2px 强调线：让 active/inactive 不止依赖背景色、
                 // 对色觉障碍用户也更友好。
                 if active {
-                    let accent_rect = egui::Rect::from_min_size(
-                        rect.left_top(),
-                        egui::vec2(rect.width(), 2.0),
-                    );
-                    ui.painter()
-                        .rect_filled(accent_rect, 0.0, theme::BLUE);
+                    let accent_rect =
+                        egui::Rect::from_min_size(rect.left_top(), egui::vec2(rect.width(), 2.0));
+                    ui.painter().rect_filled(accent_rect, 0.0, theme::BLUE);
                 }
                 ui.painter().text(
                     rect.center(),
@@ -370,11 +367,20 @@ impl WorkbenchApp {
             return;
         };
 
-        let left_hit = self.dock_drag.left_rect.is_some_and(|rect| rect.contains(pos));
+        let left_hit = self
+            .dock_drag
+            .left_rect
+            .is_some_and(|rect| rect.contains(pos));
 
-        let right_hit = self.dock_drag.right_rect.is_some_and(|rect| rect.contains(pos));
+        let right_hit = self
+            .dock_drag
+            .right_rect
+            .is_some_and(|rect| rect.contains(pos));
 
-        let bottom_hit = self.dock_drag.bottom_rect.is_some_and(|rect| rect.contains(pos));
+        let bottom_hit = self
+            .dock_drag
+            .bottom_rect
+            .is_some_and(|rect| rect.contains(pos));
 
         if left_hit {
             if let Some(rect) = self.dock_drag.left_rect {
@@ -408,9 +414,10 @@ impl WorkbenchApp {
             } else if right_hit {
                 // 根据指针在目标标签栏中的位置计算插入索引（非末尾追加）
                 let rects = &self.dock_drag.right_tab_rects;
-                let index = horizontal_insert_index_from_pointer(rects, pos)
-                    .unwrap_or(rects.len());
-                self.panels.dock.insert_panel_at(kind, DockArea::Right, index);
+                let index = horizontal_insert_index_from_pointer(rects, pos).unwrap_or(rects.len());
+                self.panels
+                    .dock
+                    .insert_panel_at(kind, DockArea::Right, index);
                 self.panels.dock.right_visible = true;
                 self.panels.sync_tabs_from_dock();
                 if let Err(e) = self.save_config() {
@@ -419,9 +426,10 @@ impl WorkbenchApp {
             } else if bottom_hit {
                 // 根据指针在目标标签栏中的位置计算插入索引（非末尾追加）
                 let rects = &self.dock_drag.bottom_tab_rects;
-                let index = horizontal_insert_index_from_pointer(rects, pos)
-                    .unwrap_or(rects.len());
-                self.panels.dock.insert_panel_at(kind, DockArea::Bottom, index);
+                let index = horizontal_insert_index_from_pointer(rects, pos).unwrap_or(rects.len());
+                self.panels
+                    .dock
+                    .insert_panel_at(kind, DockArea::Bottom, index);
                 self.panels.sync_tabs_from_dock();
                 self.set_bottom_visible(true);
                 if let Err(e) = self.save_config() {
@@ -483,8 +491,14 @@ fn paint_dock_insert_line_at(
         } else {
             rects[index].1.top() - 3.0
         };
-        let left = rects.iter().map(|(_, r)| r.left()).fold(f32::INFINITY, f32::min);
-        let right = rects.iter().map(|(_, r)| r.right()).fold(f32::NEG_INFINITY, f32::max);
+        let left = rects
+            .iter()
+            .map(|(_, r)| r.left())
+            .fold(f32::INFINITY, f32::min);
+        let right = rects
+            .iter()
+            .map(|(_, r)| r.right())
+            .fold(f32::NEG_INFINITY, f32::max);
         (left, y, right)
     } else {
         let x = if index >= rects.len() {
@@ -492,8 +506,14 @@ fn paint_dock_insert_line_at(
         } else {
             rects[index].1.left() - 3.0
         };
-        let top = rects.iter().map(|(_, r)| r.top()).fold(f32::INFINITY, f32::min);
-        let bottom = rects.iter().map(|(_, r)| r.bottom()).fold(f32::NEG_INFINITY, f32::max);
+        let top = rects
+            .iter()
+            .map(|(_, r)| r.top())
+            .fold(f32::INFINITY, f32::min);
+        let bottom = rects
+            .iter()
+            .map(|(_, r)| r.bottom())
+            .fold(f32::NEG_INFINITY, f32::max);
         (x, top, bottom)
     };
 

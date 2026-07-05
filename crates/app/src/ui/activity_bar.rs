@@ -110,7 +110,9 @@ impl WorkbenchApp {
                 }
             } else {
                 // 跨区拖入 center：使用 insert_panel_at 按位置插入
-                self.panels.dock.insert_panel_at(kind, tool_panels::DockArea::Center, insert_index);
+                self.panels
+                    .dock
+                    .insert_panel_at(kind, tool_panels::DockArea::Center, insert_index);
                 self.panels.sync_tabs_from_dock();
                 if let Err(e) = self.save_config() {
                     log::warn!("save_config failed: {e}")
@@ -136,7 +138,8 @@ impl WorkbenchApp {
             .selectable_label(self.panels.dock.bottom_visible, "▽ 终端区")
             .on_hover_text(format!(
                 "切换终端区（{}）",
-                self.keymap.shortcut_display(&crate::keymap::Action::ToggleBottomPanel)
+                self.keymap
+                    .shortcut_display(&crate::keymap::Action::ToggleBottomPanel)
             ))
             .clicked()
         {

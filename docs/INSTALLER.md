@@ -30,7 +30,7 @@ dist\hardware-workbench-app.zip
 - `examples\plugins\` 中的模板插件。
 - 空的 `logs\` 目录。
 
-便携包不会默认带上个人脚本、测试脚本或 `demo.gcode-sender`。
+便携包不会默认带上个人脚本、测试脚本或 `gcode-sender`。
 
 ## 生成 Windows 安装器
 

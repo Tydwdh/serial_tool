@@ -1,6 +1,6 @@
 {
   "$schema": "../plugin.schema.json",
-  "id": "demo.gcode-sender",
+  "id": "gcode-sender",
   "name": "G-code Sender",
   "version": "0.2.0",
   "api_version": "0.1",
@@ -25,19 +25,19 @@
   "contributes": {
     "commands": [
       {
-        "id": "demo.gcode-sender.send_file",
+        "id": "gcode-sender.send_file",
         "title": "G文件"
       },
       {
-        "id": "demo.gcode-sender.send_single",
+        "id": "gcode-sender.send_single",
         "title": "G单条"
       },
       {
-        "id": "demo.gcode-sender.pause",
+        "id": "gcode-sender.pause",
         "title": "暂停/恢复"
       },
       {
-        "id": "demo.gcode-sender.cancel",
+        "id": "gcode-sender.cancel",
         "title": "取消"
       }
     ],
@@ -102,7 +102,7 @@
     ],
     "ui": [
       {
-        "id": "demo.gcode-sender.progress",
+        "id": "gcode-sender.progress",
         "slot": "status_bar.left",
         "kind": "progress",
         "title": "",
@@ -110,36 +110,36 @@
         "order": 10
       },
       {
-        "id": "demo.gcode-sender.send_file.button",
+        "id": "gcode-sender.send_file.button",
         "slot": "send.toolbar",
         "kind": "button",
-        "command": "demo.gcode-sender.send_file",
+        "command": "gcode-sender.send_file",
         "tooltip": "发送区为空时选择 G-code 文件；否则把发送区内容当作文件路径",
         "record_send_input": true,
         "order": 20
       },
       {
-        "id": "demo.gcode-sender.send_single.button",
+        "id": "gcode-sender.send_single.button",
         "slot": "send.toolbar",
         "kind": "button",
-        "command": "demo.gcode-sender.send_single",
+        "command": "gcode-sender.send_single",
         "tooltip": "按脚本 singlegcode 模式发送：M92 + 当前输入 + M2，并带行号和校验",
         "record_send_input": true,
         "order": 21
       },
       {
-        "id": "demo.gcode-sender.pause.button",
+        "id": "gcode-sender.pause.button",
         "slot": "send.toolbar",
         "kind": "button",
-        "command": "demo.gcode-sender.pause",
+        "command": "gcode-sender.pause",
         "tooltip": "暂停或恢复当前 G-code 发送任务",
         "order": 23
       },
       {
-        "id": "demo.gcode-sender.cancel.button",
+        "id": "gcode-sender.cancel.button",
         "slot": "send.toolbar",
         "kind": "button",
-        "command": "demo.gcode-sender.cancel",
+        "command": "gcode-sender.cancel",
         "tooltip": "取消当前 G-code 发送任务",
         "order": 24
       }

@@ -81,7 +81,8 @@ impl WorkbenchApp {
         // 按最近使用排序：usage_order 中 position 越小的排越前面。
         // 未使用的条目排最后。
         entries.sort_by_key(|e| {
-            self.command_palette.usage_order
+            self.command_palette
+                .usage_order
                 .iter()
                 .position(|u| u == &e.label)
                 .map(|p| p as i32)

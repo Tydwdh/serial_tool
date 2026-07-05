@@ -174,26 +174,22 @@ impl LogPanel {
             let armed_ts: Option<f64> = ui.ctx().memory(|m| m.data.get_temp(clear_id));
             let armed = armed_ts.is_some_and(|t| now - t < 3.0);
             let clear_label = if armed { "确认清空?" } else { "清空" };
-            let clear_btn = egui::Button::new(
-                egui::RichText::new(clear_label).color(if armed {
-                    crate::theme::RED
-                } else {
-                    crate::theme::TEXT_PRIMARY
-                }),
-            );
+            let clear_btn = egui::Button::new(egui::RichText::new(clear_label).color(if armed {
+                crate::theme::RED
+            } else {
+                crate::theme::TEXT_PRIMARY
+            }));
             if ui.add(clear_btn).clicked() {
                 if armed {
                     self.clear();
                     ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(clear_id));
                 } else {
-                    ui.ctx()
-                        .memory_mut(|m| m.data.insert_temp(clear_id, now));
+                    ui.ctx().memory_mut(|m| m.data.insert_temp(clear_id, now));
                 }
             }
-            if armed
-                && ui.small_button("取消").clicked() {
-                    ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(clear_id));
-                }
+            if armed && ui.small_button("取消").clicked() {
+                ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(clear_id));
+            }
         });
 
         // ── 第二行：搜索 + 来源过滤 ──

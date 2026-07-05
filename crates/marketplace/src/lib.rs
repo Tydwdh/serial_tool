@@ -81,7 +81,7 @@ pub async fn fetch_registry(url: &str) -> Result<Registry, String> {
 /// 校验插件 id 是否可作为安全的文件系统路径片段。
 ///
 /// id 直接拼进 `install_dir/<id>/` 等路径，必须禁止路径穿越（`/`、`\`、`..`、
-/// 绝对路径前缀、以 `.` 开头等）。合法 id 形如 `demo.gcode-sender`。
+/// 绝对路径前缀、以 `.` 开头等）。合法 id 形如 `gcode-sender`。
 pub fn validate_plugin_id(id: &str) -> Result<(), String> {
     if id.is_empty() {
         return Err("插件 id 不能为空".to_owned());
@@ -305,7 +305,7 @@ mod tests {
         "updated": "2026-07-02T04:47:12Z",
         "plugins": [
             {
-                "id": "demo.gcode-sender",
+                "id": "gcode-sender",
                 "name": "G-code Sender",
                 "version": "0.1.0",
                 "api_version": "0.1",
@@ -317,7 +317,7 @@ mod tests {
                 "category": "gcode",
                 "icon": null,
                 "permissions": ["bus", "log", "serial"],
-                "download_url": "https://raw.githubusercontent.com/Tydwdh/serial_tool-plugins/main/plugins/demo.gcode-sender/0.1.0/demo.gcode-sender-0.1.0.zip",
+                "download_url": "https://raw.githubusercontent.com/Tydwdh/serial_tool-plugins/main/plugins/gcode-sender/0.1.0/gcode-sender-0.1.0.zip",
                 "sha256": "c05822f7ae52f42b5e0f2b55c51d0b9203fa355a49cd5a9b5b0cd3df5f27bc66",
                 "size": 7940,
                 "published": "2026-07-02T04:45:26Z"
@@ -331,7 +331,7 @@ mod tests {
         assert_eq!(reg.version, 1);
         assert_eq!(reg.plugins.len(), 1);
         let p = &reg.plugins[0];
-        assert_eq!(p.id, "demo.gcode-sender");
+        assert_eq!(p.id, "gcode-sender");
         assert_eq!(p.name, "G-code Sender");
         assert_eq!(p.permissions, vec!["bus", "log", "serial"]);
         assert_eq!(p.size, 7940);
@@ -359,20 +359,20 @@ mod tests {
     #[test]
     fn find_plugin_root_direct() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("demo.gcode-sender");
+        let root = dir.path().join("gcode-sender");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("plugin.json"), b"{}").unwrap();
-        let found = find_plugin_root_in_extracted(dir.path(), "demo.gcode-sender").unwrap();
+        let found = find_plugin_root_in_extracted(dir.path(), "gcode-sender").unwrap();
         assert_eq!(found, root);
     }
 
     #[test]
     fn find_plugin_root_wrapped() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("wrapper").join("demo.gcode-sender");
+        let root = dir.path().join("wrapper").join("gcode-sender");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("plugin.json"), b"{}").unwrap();
-        let found = find_plugin_root_in_extracted(dir.path(), "demo.gcode-sender").unwrap();
+        let found = find_plugin_root_in_extracted(dir.path(), "gcode-sender").unwrap();
         assert_eq!(found, root);
     }
 
@@ -380,7 +380,7 @@ mod tests {
     fn find_plugin_root_missing() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("other")).unwrap();
-        assert!(find_plugin_root_in_extracted(dir.path(), "demo.gcode-sender").is_none());
+        assert!(find_plugin_root_in_extracted(dir.path(), "gcode-sender").is_none());
     }
 
     #[test]
@@ -398,7 +398,7 @@ mod tests {
 
     #[test]
     fn validate_plugin_id_accepts_normal() {
-        assert!(validate_plugin_id("demo.gcode-sender").is_ok());
+        assert!(validate_plugin_id("gcode-sender").is_ok());
         assert!(validate_plugin_id("template.hello").is_ok());
         assert!(validate_plugin_id("a_b-c.d").is_ok());
     }

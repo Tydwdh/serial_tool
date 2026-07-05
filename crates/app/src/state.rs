@@ -76,11 +76,7 @@ impl NotificationQueue {
     pub(crate) fn current(&mut self) -> Vec<Notification> {
         let now = tool_core::now_timestamp_ms();
         // 清理头部过期的（非 Error）
-        while self
-            .entries
-            .front()
-            .is_some_and(|(_, n)| n.is_expired(now))
-        {
+        while self.entries.front().is_some_and(|(_, n)| n.is_expired(now)) {
             self.entries.pop_front();
         }
         // 也清理中间过期的（保留顺序，但保留 Error）
