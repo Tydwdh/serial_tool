@@ -46,7 +46,7 @@ impl WorkbenchApp {
                                     Err(e) => self.set_status_force(StatusLevel::Error, e),
                                 }
                             }
-                            let display = truncate_path(&path_str, 60);
+                            let display = tool_panels::compact_middle(&path_str, 60);
                             ui.label(&display).on_hover_text(&path_str);
                             if ui.small_button("× 移除").clicked() {
                                 to_remove = Some(*i);
@@ -461,14 +461,4 @@ fn open_config_location(path: &Path, open_self: bool) -> Result<PathBuf, String>
     open::that(&target)
         .map_err(|e| format!("打开目录失败：{e}"))
         .map(|()| target)
-}
-
-/// 截断过长路径，保留首尾、中间用 ... 替代
-fn truncate_path(path: &str, max_len: usize) -> String {
-    if path.len() <= max_len {
-        return path.to_string();
-    }
-    let head = &path[..max_len / 2 - 2];
-    let tail = &path[path.len() - max_len / 2 + 1..];
-    format!("{head}...{tail}")
 }

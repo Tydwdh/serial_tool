@@ -456,20 +456,28 @@ impl WorkbenchApp {
 
         ui.add_enabled_ui(open, |ui| {
             let mut dtr = self.send.dtr_high;
-            if ui.checkbox(&mut dtr, "DTR").changed() {
+            let dtr_resp = ui.checkbox(&mut dtr, "DTR");
+            if dtr_resp.changed() {
                 match self.transport.set_dtr(&port, dtr) {
                     Ok(()) => self.send.dtr_high = dtr,
                     Err(e) => self.set_status_force(StatusLevel::Error, e.to_string()),
                 }
             }
+            dtr_resp.on_hover_text(
+                "数据终端就绪 (DTR) 电平。点击会立即驱动该线路，部分设备会用它触发复位/进入 bootload，请谨慎切换。",
+            );
 
             let mut rts = self.send.rts_high;
-            if ui.checkbox(&mut rts, "RTS").changed() {
+            let rts_resp = ui.checkbox(&mut rts, "RTS");
+            if rts_resp.changed() {
                 match self.transport.set_rts(&port, rts) {
                     Ok(()) => self.send.rts_high = rts,
                     Err(e) => self.set_status_force(StatusLevel::Error, e.to_string()),
                 }
             }
+            rts_resp.on_hover_text(
+                "请求发送 (RTS) 电平。点击会立即驱动该线路，部分设备会用它触发复位/进入 bootload，请谨慎切换。",
+            );
         });
     }
 

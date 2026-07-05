@@ -237,13 +237,36 @@ impl WorkbenchApp {
                     };
                 }
 
-                if layout_icon_button(ui, LayoutButtonKind::Menu, false, "重置布局").clicked() {
-                    self.panels.dock = tool_panels::DockLayout::default();
-                    self.set_bottom_visible(self.panels.dock.bottom_visible);
-                    if let Err(e) = self.save_config() {
-                        log::warn!("save_config failed: {e}")
-                    };
+                let reset_resp = layout_icon_button(ui, LayoutButtonKind::Menu, false, "重置布局");
+                let reset_popup_id = ui.id().with("reset_layout_confirm");
+                let mut reset_popup = egui::Popup::from_response(&reset_resp)
+                    .id(reset_popup_id)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .layout(egui::Layout::top_down(egui::Align::LEFT));
+                if reset_resp.clicked() {
+                    reset_popup = reset_popup.open_memory(Some(egui::SetOpenCommand::Toggle));
                 }
+                reset_popup.show(|ui| {
+                    ui.set_min_width(240.0);
+                    ui.label(
+                        egui::RichText::new("重置布局将丢失当前面板排布，确定？")
+                            .color(tool_panels::theme::YELLOW),
+                    );
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("重置").clicked() {
+                            self.panels.dock = tool_panels::DockLayout::default();
+                            self.set_bottom_visible(self.panels.dock.bottom_visible);
+                            if let Err(e) = self.save_config() {
+                                log::warn!("save_config failed: {e}")
+                            };
+                            egui::Popup::close_id(ui.ctx(), reset_popup_id);
+                        }
+                        if ui.button("取消").clicked() {
+                            egui::Popup::close_id(ui.ctx(), reset_popup_id);
+                        }
+                    });
+                });
             });
         });
     }
