@@ -20,6 +20,8 @@ impl WorkbenchApp {
         self.dock_drag.bottom_rect = None;
         self.dock_drag.right_rect = None;
         self.dock_drag.left_rect = None;
+        self.dock_drag.bottom_tab_rects.clear();
+        self.dock_drag.right_tab_rects.clear();
 
         egui::Panel::top("top-bar").show(ui, |ui| {
             self.top_bar(ui);

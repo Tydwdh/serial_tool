@@ -79,15 +79,17 @@ impl WorkbenchApp {
             paint_vertical_insert_line(ui, &tab_rects, insert_index);
         }
 
-        // 拖拽释放在左侧栏区域内：重排 center.tabs（若来源也是 center）
-        // 跨区拖入（从 bottom/right 拖回左侧）由 paint_dock_drop_overlay 处理。
+        // 拖拽释放在左侧栏区域内：
+        // - 来源是 center → 同区重排
+        // - 来源是 bottom/right → 跨区拖入 center，支持按位置插入
         if self.dock_drag.dragging_panel.is_some()
             && ui.input(|i| i.pointer.any_released())
             && let Some(kind) = self.dock_drag.dragging_panel.clone()
-            && let Some(insert_index) = drag_insert_index
         {
-            // 仅当来源是 center 时做原地重排
-            if self.panels.dock.center.contains(&kind) {
+            let src_is_center = self.panels.dock.center.contains(&kind);
+            let insert_index = drag_insert_index.unwrap_or(self.panels.dock.center.tabs.len());
+
+            if src_is_center {
                 let source_index = self.panels.dock.center.tabs.iter().position(|k| k == &kind);
                 if let Some(src) = source_index {
                     let mut ins = insert_index.min(self.panels.dock.center.tabs.len());
@@ -103,6 +105,13 @@ impl WorkbenchApp {
                         };
                     }
                 }
+            } else {
+                // 跨区拖入 center：使用 insert_panel_at 按位置插入
+                self.panels.dock.insert_panel_at(kind, tool_panels::DockArea::Center, insert_index);
+                self.panels.sync_tabs_from_dock();
+                if let Err(e) = self.save_config() {
+                    log::warn!("save_config failed: {e}")
+                };
             }
             self.dock_drag.dragging_panel = None;
         }
