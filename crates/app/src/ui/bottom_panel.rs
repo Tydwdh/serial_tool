@@ -151,17 +151,17 @@ impl WorkbenchApp {
             ui.horizontal(|ui| {
                 ui.heading("发送");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let pin_label = if self.send_popup_always_on_top {
+                    let pin_label = if self.popups.send_always_on_top {
                         "\u{1f4cc} 置顶"
                     } else {
                         "置顶"
                     };
                     if ui
-                        .selectable_label(self.send_popup_always_on_top, pin_label)
+                        .selectable_label(self.popups.send_always_on_top, pin_label)
                         .on_hover_text("让该窗口保持在其他窗口上方")
                         .clicked()
                     {
-                        self.send_popup_always_on_top = !self.send_popup_always_on_top;
+                        self.popups.send_always_on_top = !self.popups.send_always_on_top;
                         if let Err(e) = self.save_config() {
                             log::warn!("save_config failed: {e}")
                         };

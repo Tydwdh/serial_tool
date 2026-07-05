@@ -32,7 +32,7 @@ impl WorkbenchApp {
     pub(super) fn tick_terminal_maximize(&mut self) {
         if self.terminal_panel.maximize_clicked {
             self.terminal_panel.maximize_clicked = false;
-            self.terminal_popup_open = true;
+            self.popups.terminal_open = true;
             if matches!(
                 self.panels.dock.bottom.active_or_first(),
                 Some(tool_panels::PanelKind::Terminal)
