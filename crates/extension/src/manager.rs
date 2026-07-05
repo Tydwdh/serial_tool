@@ -79,17 +79,6 @@ impl PluginManager {
         }
     }
 
-    pub fn set_workspace(&self, workspace: &Path) {
-        // ConfigStore 在构造时已设置 root，后续可通过此方法通知。
-        // 当前版本 ConfigStore 不动态迁移，新路径仅用于日志。
-        let config_root = workspace.join("plugin-config");
-        self.bus.publish(Event::system_log(
-            LogLevel::Info,
-            "extension",
-            format!("配置工作区：{}", config_root.display()),
-        ));
-    }
-
     pub fn config_root(&self) -> &Path {
         self.config_store.root()
     }
