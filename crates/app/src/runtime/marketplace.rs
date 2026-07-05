@@ -6,6 +6,24 @@ use std::sync::Arc;
 use tool_core::LogLevel;
 use tool_marketplace::{Registry, RegistryPlugin};
 
+/// 市场索引 + 安装任务的运行时状态。
+pub(crate) struct MarketplaceState {
+    pub(crate) url: Option<String>,
+    pub(crate) refresh_job: Option<std::thread::JoinHandle<Result<Registry, String>>>,
+    pub(crate) install_job: Option<MarketplaceInstallJob>,
+}
+
+#[allow(clippy::derivable_impls)]
+impl Default for MarketplaceState {
+    fn default() -> Self {
+        Self {
+            url: None,
+            refresh_job: None,
+            install_job: None,
+        }
+    }
+}
+
 /// 市场插件安装后台任务句柄。
 ///
 /// 参考 `ReplayAnalyzerJob`：generation 用于区分并发任务，cancel 当前未使用
@@ -39,7 +57,7 @@ impl WorkbenchApp {
     /// 市场调度：每帧回收刷新/安装线程结果，回填 UI 状态。
     pub(super) fn tick_marketplace(&mut self) {
         // ── 回收刷新线程 ──
-        if let Some(handle) = self.marketplace_refresh_job.take() {
+        if let Some(handle) = self.marketplace.refresh_job.take() {
             if handle.is_finished() {
                 match handle.join() {
                     Ok(Ok(registry)) => {
@@ -57,12 +75,12 @@ impl WorkbenchApp {
                     }
                 }
             } else {
-                self.marketplace_refresh_job = Some(handle);
+                self.marketplace.refresh_job = Some(handle);
             }
         }
 
         // ── 回收安装线程 ──
-        if let Some(mut job) = self.marketplace_install_job.take() {
+        if let Some(mut job) = self.marketplace.install_job.take() {
             // 实时回填进度（0..1000 → 0.0..1.0）
             let raw = job.progress.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0;
             self.plugins_panel.set_install_progress(&job.plugin_id, raw);
@@ -92,7 +110,7 @@ impl WorkbenchApp {
                 } else {
                     // 仍在运行：放回 job，下帧继续轮询。
                     job.handle = Some(handle);
-                    self.marketplace_install_job = Some(job);
+                    self.marketplace.install_job = Some(job);
                     // 安装中持续请求重绘以刷新进度条。
                 }
             }
@@ -101,16 +119,17 @@ impl WorkbenchApp {
 
     /// 启动后台刷新市场索引线程。
     pub(crate) fn start_marketplace_refresh(&mut self) {
-        if self.marketplace_refresh_job.is_some() {
+        if self.marketplace.refresh_job.is_some() {
             return; // 已有刷新在进行
         }
         self.plugins_panel.set_market_refreshing(true);
         let url = self
-            .marketplace_url
+            .marketplace
+            .url
             .clone()
             .unwrap_or_else(|| tool_marketplace::DEFAULT_REGISTRY_URL.to_owned());
 
-        self.marketplace_refresh_job = Some(std::thread::spawn(move || {
+        self.marketplace.refresh_job = Some(std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -121,7 +140,7 @@ impl WorkbenchApp {
 
     /// 启动后台安装一个市场插件。
     pub(crate) fn start_marketplace_install(&mut self, entry: RegistryPlugin) {
-        if self.marketplace_install_job.is_some() {
+        if self.marketplace.install_job.is_some() {
             self.set_status(StatusLevel::Warn, "已有插件正在安装，请稍候");
             return;
         }
@@ -165,7 +184,7 @@ impl WorkbenchApp {
             })
         });
 
-        self.marketplace_install_job = Some(MarketplaceInstallJob {
+        self.marketplace.install_job = Some(MarketplaceInstallJob {
             plugin_id: id,
             progress,
             handle: Some(handle),
