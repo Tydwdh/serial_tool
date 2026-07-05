@@ -288,16 +288,17 @@ impl WorkbenchApp {
         use crate::keymap::{Action, Keymap};
 
         // 收集所有可配置的动作：内置 + 插件命令
+        // 用帧级缓存避免重复全量 clone manifest + 命令对账（命令面板/插件面板可能同帧也读了）。
         let plugin_summaries: Vec<tool_extension::PluginSummary> = self
-            .plugin_manager
-            .summaries()
-            .into_iter()
+            .plugin_summaries()
+            .iter()
             .filter(|s| {
                 matches!(
                     s.state,
                     tool_extension::PluginState::Enabled | tool_extension::PluginState::Running
                 )
             })
+            .cloned()
             .collect();
         let all_actions = Action::all_with_plugins(&plugin_summaries);
 

@@ -31,12 +31,8 @@ impl Drop for MarketplaceInstallJob {
 impl WorkbenchApp {
     /// 每帧把已发现的插件 id 集合回填给市场 UI，用于显示「已安装」标记。
     pub(super) fn sync_marketplace_installed_ids(&mut self) {
-        let ids: std::collections::BTreeSet<String> = self
-            .plugin_manager
-            .summaries()
-            .iter()
-            .map(|s| s.id.clone())
-            .collect();
+        let ids: std::collections::BTreeSet<String> =
+            self.plugin_manager.plugin_ids().into_iter().collect();
         self.plugins_panel.set_installed_ids(ids);
     }
 
@@ -133,20 +129,12 @@ impl WorkbenchApp {
 
         // 重装场景：若该插件已启用/运行，先 disable，避免 Windows 下旧文件被占用
         // 导致替换失败，也保证重装后用户重新启用才加载新代码。
-        let was_active = self
-            .plugin_manager
-            .summaries()
-            .iter()
-            .find(|s| s.id == id)
-            .map(|s| {
-                matches!(
-                    s.state,
-                    tool_extension::PluginState::Running
-                        | tool_extension::PluginState::Enabled
-                        | tool_extension::PluginState::Finished
-                )
-            })
-            .unwrap_or(false);
+        let was_active = matches!(
+            self.plugin_manager.plugin_state(&id),
+            Some(tool_extension::PluginState::Running)
+                | Some(tool_extension::PluginState::Enabled)
+                | Some(tool_extension::PluginState::Finished)
+        );
         if was_active && let Err(e) = self.plugin_manager.disable(&id) {
             log::warn!("marketplace: 重装前禁用 {id} 失败（继续安装）：{e}");
         }
@@ -204,21 +192,13 @@ impl WorkbenchApp {
         let plugin_dir = app_dir().join("plugins");
 
         // 1. 先 disable（若活跃）
-        let was_active = self
-            .plugin_manager
-            .summaries()
-            .iter()
-            .find(|s| s.id == plugin_id)
-            .map(|s| {
-                matches!(
-                    s.state,
-                    tool_extension::PluginState::Running
-                        | tool_extension::PluginState::Enabled
-                        | tool_extension::PluginState::Finished
-                        | tool_extension::PluginState::Failed
-                )
-            })
-            .unwrap_or(false);
+        let was_active = matches!(
+            self.plugin_manager.plugin_state(plugin_id),
+            Some(tool_extension::PluginState::Running)
+                | Some(tool_extension::PluginState::Enabled)
+                | Some(tool_extension::PluginState::Finished)
+                | Some(tool_extension::PluginState::Failed)
+        );
         if was_active {
             if let Err(e) = self.plugin_manager.disable(plugin_id) {
                 log::warn!("marketplace: 卸载前禁用 {plugin_id} 失败（继续卸载）：{e}");
