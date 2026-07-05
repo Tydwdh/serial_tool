@@ -9,11 +9,12 @@ pub(crate) enum StatusLevel {
 }
 
 impl StatusLevel {
-    pub(crate) fn ttl_ms(self) -> u64 {
+    /// 通知自动过期时间（毫秒）。Error 在用户主动关闭前不自动过期。
+    pub(crate) fn ttl_ms(self) -> Option<u64> {
         match self {
-            Self::Info => 5_000,
-            Self::Warn => 8_000,
-            Self::Error => 15_000,
+            Self::Info => Some(5_000),
+            Self::Warn => Some(8_000),
+            Self::Error => None, // 错误不自动过期
         }
     }
 }
@@ -23,8 +24,14 @@ impl StatusLevel {
 pub(crate) struct Notification {
     pub(crate) level: StatusLevel,
     pub(crate) text: String,
-    /// 过期时间戳（ms），过期后自动从队列移除。
-    pub(crate) deadline_ms: u64,
+    /// 过期时间戳（ms）。None 表示永不过期（Error 级别）。
+    pub(crate) deadline_ms: Option<u64>,
+}
+
+impl Notification {
+    fn is_expired(&self, now: u64) -> bool {
+        self.deadline_ms.is_some_and(|dl| now > dl)
+    }
 }
 
 /// 通知队列：多条消息按时间排列，互不覆盖。
@@ -43,12 +50,14 @@ impl NotificationQueue {
     }
 
     /// 推送一条通知。同 source 的旧消息被替换（去重但不丢失历史位置）。
+    /// Error 级别的通知不自动过期，必须手动 dismiss。
     pub(crate) fn push(&mut self, source: &str, level: StatusLevel, text: impl Into<String>) {
         let now = tool_core::now_timestamp_ms();
+        let deadline_ms = level.ttl_ms().map(|ttl| now + ttl);
         let notification = Notification {
             level,
             text: text.into(),
-            deadline_ms: now + level.ttl_ms(),
+            deadline_ms,
         };
 
         // 同 source 替换旧消息，保持队列位置不变
@@ -63,18 +72,26 @@ impl NotificationQueue {
     }
 
     /// 获取当前未过期的所有通知（按插入顺序）。
+    /// Error 级别永不自动过期。
     pub(crate) fn current(&mut self) -> Vec<Notification> {
         let now = tool_core::now_timestamp_ms();
+        // 清理头部过期的（非 Error）
         while self
             .entries
             .front()
-            .is_some_and(|(_, n)| now > n.deadline_ms)
+            .is_some_and(|(_, n)| n.is_expired(now))
         {
             self.entries.pop_front();
         }
-        // 也清理中间过期的（保留顺序）
-        self.entries.retain(|(_, n)| now <= n.deadline_ms);
+        // 也清理中间过期的（保留顺序，但保留 Error）
+        self.entries.retain(|(_, n)| !n.is_expired(now));
         self.entries.iter().map(|(_, n)| n.clone()).collect()
+    }
+
+    /// 手动移除一个通知（按 source）。用于用户交互关闭。
+    #[allow(dead_code)]
+    pub(crate) fn dismiss(&mut self, source: &str) {
+        self.entries.retain(|(s, _)| s != source);
     }
 }
 

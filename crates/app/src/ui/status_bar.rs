@@ -204,7 +204,7 @@ impl WorkbenchApp {
 
             if !notifications.is_empty() {
                 ui.separator();
-                // 最多显示 3 条，超出显示 "…及 N 条消息"
+                // 最多显示 3 条，超出显示可点击的 "…及 N 条消息" 弹出全部。
                 let max_show = 3;
                 let total = notifications.len();
                 let shown: Vec<_> = notifications.iter().take(max_show).collect();
@@ -219,11 +219,46 @@ impl WorkbenchApp {
                         .on_hover_text(&n.text);
                 }
                 if total > max_show {
-                    ui.label(
+                    let overflow_id = ui.id().with("notification_overflow");
+                    let overflow_text =
                         egui::RichText::new(format!("…及 {} 条消息", total - max_show))
                             .small()
-                            .color(theme::TEXT_SECONDARY),
-                    );
+                            .color(theme::TEXT_SECONDARY);
+                    let overflow_resp =
+                        ui.selectable_label(false, overflow_text);
+                    let mut popup = egui::Popup::from_response(&overflow_resp)
+                        .id(overflow_id)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+                    if overflow_resp.clicked() {
+                        popup = popup.open_memory(Some(egui::SetOpenCommand::Toggle));
+                    }
+                    popup.show(|ui| {
+                        ui.set_min_width(320.0);
+                        ui.set_max_height(200.0);
+                        ui.style_mut().spacing.item_spacing.y = 2.0;
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for n in &notifications {
+                                let color = match n.level {
+                                    StatusLevel::Info => theme::TEXT_SECONDARY,
+                                    StatusLevel::Warn => theme::YELLOW,
+                                    StatusLevel::Error => theme::RED,
+                                };
+                                let level_mark = match n.level {
+                                    StatusLevel::Error => "✕ ",
+                                    StatusLevel::Warn => "⚠ ",
+                                    StatusLevel::Info => "",
+                                };
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{level_mark}{}",
+                                        &n.text
+                                    ))
+                                    .color(color)
+                                    .small(),
+                                );
+                            }
+                        });
+                    });
                 }
             }
 
