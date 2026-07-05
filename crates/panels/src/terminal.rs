@@ -29,7 +29,7 @@ pub struct TerminalPanel {
     auto_scroll: bool,
     /// 暂停接收：置位后 ingest 直接 drain subscription，不 push 新事件，
     /// 已显示内容冻结。用于高速数据流下停下来仔细看一段数据。
-    paused: bool,
+    pub paused: bool,
     /// 暂停期间被丢弃的事件计数（drain 掉的）。恢复后用于在画面顶部
     /// 显示一条 "已暂停 · 丢弃 N 条数据" 的提示，提醒用户此处有数据缺口。
     paused_dropped_count: u64,
