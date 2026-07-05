@@ -30,6 +30,11 @@ pub struct TerminalPanel {
     /// 暂停接收：置位后 ingest 直接 drain subscription，不 push 新事件，
     /// 已显示内容冻结。用于高速数据流下停下来仔细看一段数据。
     paused: bool,
+    /// 暂停期间被丢弃的事件计数（drain 掉的）。恢复后用于在画面顶部
+    /// 显示一条 "已暂停 · 丢弃 N 条数据" 的提示，提醒用户此处有数据缺口。
+    paused_dropped_count: u64,
+    /// 暂停提示的剩余显示时间（秒）。恢复后置位，归零后不再绘制提示。
+    paused_banner_remain: f64,
 
     search_text: String,
     /// 搜索是否大小写敏感（false=不敏感，默认；true=敏感）。
@@ -155,6 +160,8 @@ impl TerminalPanel {
             show_lines: false,
             auto_scroll: true,
             paused: false,
+            paused_dropped_count: 0,
+            paused_banner_remain: 0.0,
 
             search_text: String::new(),
             search_case_sensitive: false,
@@ -187,7 +194,9 @@ impl TerminalPanel {
 
         // 暂停接收：drain subscription 避免积压，但不 push 新事件，视图冻结。
         if self.paused {
-            while self.subscription.try_recv().is_some() {}
+            while self.subscription.try_recv().is_some() {
+                self.paused_dropped_count = self.paused_dropped_count.saturating_add(1);
+            }
             return 0;
         }
 
@@ -412,6 +421,11 @@ impl TerminalPanel {
                 .clicked()
             {
                 self.paused = !self.paused;
+                // 恢复接收时，若期间丢弃过数据，在画面顶部留一条提示 5 秒，
+                // 让用户知道此处有数据缺口（高速流下恢复后容易看不出暂停过）。
+                if !self.paused && self.paused_dropped_count > 0 {
+                    self.paused_banner_remain = 5.0;
+                }
             }
 
             // 清空：两步确认，避免误触丢失刚出现的故障数据。
@@ -489,6 +503,45 @@ impl TerminalPanel {
         });
 
         ui.separator();
+
+        // 暂停提示：暂停中实时显示已丢弃条数；恢复后保留提示数秒再消失。
+        if self.paused {
+            // 暂停中：每帧都刷（数据仍在 drain），请求重绘以保持计数新鲜。
+            ui.ctx().request_repaint();
+            let dropped = self.paused_dropped_count;
+            egui::Frame::group(ui.style())
+                .inner_margin(egui::Margin::symmetric(8, 3))
+                .fill(crate::theme::YELLOW_BG)
+                .stroke(egui::Stroke::new(1.0, crate::theme::YELLOW))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "已暂停接收 · 丢弃 {dropped} 条数据（点击「继续」恢复）"
+                        ))
+                        .color(crate::theme::YELLOW),
+                    );
+                });
+        } else if self.paused_banner_remain > 0.0 {
+            // 恢复后：保留提示数秒，按 dt 递减。
+            let dt = ui.input(|i| i.unstable_dt) as f64;
+            self.paused_banner_remain = (self.paused_banner_remain - dt).max(0.0);
+            let dropped = self.paused_dropped_count;
+            egui::Frame::group(ui.style())
+                .inner_margin(egui::Margin::symmetric(8, 3))
+                .fill(crate::theme::YELLOW_BG)
+                .stroke(egui::Stroke::new(1.0, crate::theme::YELLOW))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "已恢复接收 · 暂停期间丢弃了 {dropped} 条数据"
+                        ))
+                        .color(crate::theme::YELLOW),
+                    );
+                });
+        } else if self.paused_dropped_count > 0 {
+            // 提示期结束且未再次暂停：清零计数，下一次暂停重新累计。
+            self.paused_dropped_count = 0;
+        }
 
         let render_outcome = {
             // 预计算搜索查询：大小写敏感时保留原样，否则转小写（避免渲染循环中重复分配）。
@@ -629,7 +682,9 @@ impl TerminalPanel {
 
         // 暂停接收：drain subscription 避免积压，但不 push 新事件，视图冻结。
         if self.paused {
-            while self.subscription.try_recv().is_some() {}
+            while self.subscription.try_recv().is_some() {
+                self.paused_dropped_count = self.paused_dropped_count.saturating_add(1);
+            }
             return 0;
         }
 
