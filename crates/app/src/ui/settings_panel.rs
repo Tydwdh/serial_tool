@@ -143,7 +143,7 @@ impl WorkbenchApp {
                             .speed(500),
                     );
                     if resp.changed() {
-                        n = n.max(500).min(200_000);
+                        n = n.clamp(500, 200_000);
                         self.terminal_panel.max_entries = n as usize;
                         if let Err(e) = self.save_config() {
                             log::warn!("save_config failed: {e}")
