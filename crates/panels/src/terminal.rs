@@ -469,11 +469,16 @@ impl TerminalPanel {
 
         ui.horizontal(|ui| {
             ui.label("搜索");
-            ui.add(
+            let search_resp = ui.add(
                 egui::TextEdit::singleline(&mut self.search_text)
                     .desired_width(140.0)
                     .hint_text("文本 / HEX"),
             );
+            // Escape 清空搜索（聚焦时），与 VSCode/Chrome 查找栏行为一致
+            if search_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.search_text.clear();
+                search_resp.surrender_focus();
+            }
             // 大小写敏感切换：选中时 "Aa" 高亮，匹配区分大小写。
             let case_btn = egui::Button::new("Aa")
                 .selected(self.search_case_sensitive)

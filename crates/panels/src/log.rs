@@ -199,11 +199,15 @@ impl LogPanel {
         // ── 第二行：搜索 + 来源过滤 ──
         ui.horizontal(|ui| {
             ui.label("搜索");
-            ui.add(
+            let search_resp = ui.add(
                 TextEdit::singleline(&mut self.search_text)
                     .desired_width(120.0)
                     .hint_text("关键词"),
             );
+            if search_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.search_text.clear();
+                search_resp.surrender_focus();
+            }
             let case_btn = egui::Button::new("Aa")
                 .selected(self.search_case_sensitive)
                 .small();
