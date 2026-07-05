@@ -27,16 +27,6 @@ pub mod topics {
     pub const TEST_RESULT: &str = "test.result";
 }
 
-// #[derive(Debug, Error)]
-// pub enum CoreError {
-//     #[error("invalid topic")]
-//     InvalidTopic,
-//     #[error("time moved backwards")]
-//     TimeMovedBackwards,
-// }
-
-// pub type CoreResult<T> = Result<T, CoreError>;
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
@@ -291,7 +281,7 @@ impl Clock for SystemClock {
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
             .unwrap_or_else(|e| {
-                eprintln!("[tool-core] WARNING: system clock before UNIX_EPOCH: {e}");
+                log::warn!("system clock before UNIX_EPOCH: {e}");
                 1
             })
     }
