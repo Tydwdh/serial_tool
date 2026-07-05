@@ -939,6 +939,10 @@ impl TerminalPanel {
                     });
             });
 
+        // Escape 关闭详情窗口（在 show() 闭包外处理，避免 open 的借用冲突）
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            open = false;
+        }
         if !open {
             self.detail_entry_id = None;
         }
