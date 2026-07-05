@@ -7,7 +7,7 @@ mod commands;
 mod config;
 mod keymap;
 mod panels_ops;
-mod replay_task;
+pub(crate) mod replay_task;
 mod runtime;
 mod state;
 mod ui;

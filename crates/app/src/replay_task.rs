@@ -6,11 +6,19 @@ use tool_lua_host::{LuaReplayConfig, run_replay_analyzer_with_cancel};
 use crate::app::{ReplayAnalyzerJob, ReplayAnalyzerResult, WorkbenchApp};
 use crate::state::StatusLevel;
 
+/// 回放 analyzer 后台任务的运行时状态。
+#[derive(Default)]
+pub(crate) struct ReplayAnalyzerState {
+    #[default]
+    pub(crate) job: Option<ReplayAnalyzerJob>,
+    pub(crate) generation: u64,
+}
+
 impl WorkbenchApp {
     pub(crate) fn launch_replay_analyzer_background(&mut self) {
         self.replay_panel.want_run_analyzers = false;
 
-        if let Some(ref job) = self.replay_analyzer_job
+        if let Some(ref job) = self.replay_analyzer.job
             && !job.handle.as_ref().map(|h| h.is_finished()).unwrap_or(true)
         {
             self.set_status(StatusLevel::Warn, "回放：analyzer 正在运行中，请等待完成");
@@ -34,8 +42,8 @@ impl WorkbenchApp {
         }
 
         let total_entries = entries.len();
-        let generation = self.replay_analyzer_generation.wrapping_add(1);
-        self.replay_analyzer_generation = generation;
+        let generation = self.replay_analyzer.generation.wrapping_add(1);
+        self.replay_analyzer.generation = generation;
         let source_path = self.replay_panel.path.clone();
         self.replay_panel.analyzer_logs.clear();
         self.replay_panel
@@ -125,7 +133,7 @@ impl WorkbenchApp {
             }
         });
 
-        self.replay_analyzer_job = Some(ReplayAnalyzerJob {
+        self.replay_analyzer.job = Some(ReplayAnalyzerJob {
             generation,
             source_path,
             cancel,
@@ -134,11 +142,11 @@ impl WorkbenchApp {
     }
 
     pub(crate) fn poll_replay_analyzer_result(&mut self) {
-        let Some(mut job) = self.replay_analyzer_job.take() else {
+        let Some(mut job) = self.replay_analyzer.job.take() else {
             return;
         };
         if !job.handle.as_ref().map(|h| h.is_finished()).unwrap_or(true) {
-            self.replay_analyzer_job = Some(job);
+            self.replay_analyzer.job = Some(job);
             return;
         }
         // 取出 handle 进行 join（用 take 而非 unwrap，因 ReplayAnalyzerJob 实现了 Drop，
@@ -164,7 +172,7 @@ impl WorkbenchApp {
         };
 
         // 忽略过期 generation 的结果（用户已重新触发）
-        if job.generation < self.replay_analyzer_generation {
+        if job.generation < self.replay_analyzer.generation {
             return;
         }
         // 忽略回放文件已改变的结果
