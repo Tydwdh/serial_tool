@@ -412,7 +412,7 @@ impl WorkbenchApp {
         {
             self.send.periodic_send_count = 0;
             if !self.send.periodic_enabled
-                && let Some(cancel) = self.periodic_send_cancel.take()
+                && let Some(cancel) = self.periodic_send.cancel.take()
             {
                 cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             }

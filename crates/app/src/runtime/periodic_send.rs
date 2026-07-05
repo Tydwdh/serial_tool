@@ -2,30 +2,49 @@ use crate::app::WorkbenchApp;
 use crate::runtime::timing::wait_until_deadline;
 use crate::state::StatusLevel;
 use eframe::egui;
+use std::sync::{Arc, Mutex};
 use tool_transport::send_impl_to;
+
+/// 周期发送后台线程的控制状态。
+pub(crate) struct PeriodicSendState {
+    /// 取消信号：true 时后台线程应尽快退出。
+    pub(crate) cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// 后台线程结束原因（失败/完成），主线程 tick 读取后回写状态栏。
+    /// 后台线程无 &mut self，只能通过共享通道传递用户可见反馈。
+    pub(crate) outcome: Arc<Mutex<Option<(StatusLevel, String)>>>,
+}
+
+impl Default for PeriodicSendState {
+    fn default() -> Self {
+        Self {
+            cancel: None,
+            outcome: Arc::new(Mutex::new(None)),
+        }
+    }
+}
 
 impl WorkbenchApp {
     pub(super) fn tick_periodic_send(&mut self, _ctx: &egui::Context) {
+        let ps = &mut self.periodic_send;
         // 检查是否被外部关闭，或线程已自然结束（cancel flag 被线程设为 true）
-        if self.periodic_send_cancel.is_some() && !self.send.periodic_enabled {
-            if let Some(cancel) = self.periodic_send_cancel.take() {
+        if ps.cancel.is_some() && !self.send.periodic_enabled {
+            if let Some(cancel) = ps.cancel.take() {
                 cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             return;
         }
         // 线程已结束（cancel flag 为 true），清理状态并回写用户可见反馈
-        if self
-            .periodic_send_cancel
+        if ps
+            .cancel
             .as_ref()
             .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
         {
-            self.periodic_send_cancel = None;
+            ps.cancel = None;
             self.send.periodic_enabled = false;
             self.send.periodic_send_count = 0;
             // 读取后台线程写入的结束原因（失败/完成），回写状态栏。
-            // 先 take 出值释放锁，再调 set_status_force（避免 &self 与 &mut self 借用冲突）。
-            let outcome_msg = self
-                .periodic_send_outcome
+            let outcome_msg = ps
+                .outcome
                 .lock()
                 .ok()
                 .and_then(|mut slot| slot.take());
@@ -34,7 +53,7 @@ impl WorkbenchApp {
             }
             return;
         }
-        if self.periodic_send_cancel.is_some() {
+        if ps.cancel.is_some() {
             return;
         }
         if !self.send.periodic_enabled {
@@ -60,9 +79,8 @@ impl WorkbenchApp {
             return;
         }
 
-        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        self.periodic_send_cancel = Some(cancel.clone());
-
+        // 克隆 spawn 线程需要的所有数据，然后才能通过 ps 写入 cancel。
+        // 读取 self 必须在 ps (&mut self.periodic_send) 写入之前完成。
         let port = self.send.target_port.clone().unwrap_or_default();
         let input = self.send.input.clone();
         let hex_mode = self.send.hex_mode;
@@ -71,8 +89,11 @@ impl WorkbenchApp {
         let transport = self.transport.clone();
         let max_count = self.send.periodic_max_count;
         let bus = self.bus.clone();
-        let outcome = self.periodic_send_outcome.clone();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let outcome = self.periodic_send.outcome.clone();
         let interval = std::time::Duration::from_secs_f64(interval_ms / 1000.0);
+
+        self.periodic_send.cancel = Some(cancel.clone());
 
         std::thread::spawn(move || {
             let start = std::time::Instant::now();
