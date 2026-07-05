@@ -136,31 +136,43 @@ impl WorkbenchApp {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.label("终端保留条数");
-                    let mut n = self.terminal_panel.max_entries;
-                    let resp = ui.add(egui::Slider::new(&mut n, 500..=200_000).step_by(500.0));
+                    let mut n = self.terminal_panel.max_entries as u32;
+                    let resp = ui.add(
+                        egui::DragValue::new(&mut n)
+                            .range(500..=200_000)
+                            .speed(500),
+                    );
                     if resp.changed() {
-                        self.terminal_panel.max_entries = n;
+                        n = n.max(500).min(200_000);
+                        self.terminal_panel.max_entries = n as usize;
                         if let Err(e) = self.save_config() {
                             log::warn!("save_config failed: {e}")
                         };
                     }
+                    ui.add(egui::Slider::new(&mut self.terminal_panel.max_entries, 500..=200_000).step_by(500.0));
                 })
                 .response
-                .on_hover_text("接收区保留的最近条数上限，超出后丢弃最旧条目。");
+                .on_hover_text("接收区保留的最近条数上限，超出后丢弃最旧条目。可拖拽滑块或直接输入数字。");
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.label("日志保留条数");
-                    let mut n = self.bottom_log_panel.max_entries;
-                    let resp = ui.add(egui::Slider::new(&mut n, 500..=200_000).step_by(500.0));
+                    let mut n = self.bottom_log_panel.max_entries as u32;
+                    let resp = ui.add(
+                        egui::DragValue::new(&mut n)
+                            .range(500..=200_000)
+                            .speed(500),
+                    );
                     if resp.changed() {
-                        self.bottom_log_panel.max_entries = n;
+                        n = n.max(500).min(200_000);
+                        self.bottom_log_panel.max_entries = n as usize;
                         if let Err(e) = self.save_config() {
                             log::warn!("save_config failed: {e}")
                         };
                     }
+                    ui.add(egui::Slider::new(&mut self.bottom_log_panel.max_entries, 500..=200_000).step_by(500.0));
                 })
                 .response
-                .on_hover_text("日志面板保留的最近条数上限。");
+                .on_hover_text("日志面板保留的最近条数上限。可拖拽滑块或直接输入数字。");
             });
 
         ui.add_space(8.0);
