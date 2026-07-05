@@ -244,11 +244,10 @@ impl WorkbenchApp {
                                         ui.ctx().memory_mut(|m| m.data.insert_temp(confirm_id, now));
                                     }
                                 }
-                                if armed {
-                                    if ui.small_button("取消").clicked() {
+                                if armed
+                                    && ui.small_button("取消").clicked() {
                                         ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(confirm_id));
                                     }
-                                }
                             });
                         }
                         ui.separator();
