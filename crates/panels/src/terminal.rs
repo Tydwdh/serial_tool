@@ -874,6 +874,11 @@ impl TerminalPanel {
                     ui.label(RichText::new(&detail.timestamp_label).monospace());
                     ui.label(RichText::new(&detail.port).monospace().color(theme::YELLOW));
                     ui.label(RichText::new(dir_label).strong().color(dir_color));
+                    ui.label(
+                        RichText::new(format!("{}B", detail.raw_text.len()))
+                            .color(theme::TEXT_DIMMED)
+                            .small(),
+                    );
 
                     if ui.button("复制内容").clicked() {
                         ui.ctx().copy_text(detail.raw_text.clone());
