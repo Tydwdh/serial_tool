@@ -6,7 +6,6 @@ mod log;
 mod manager;
 mod plugins;
 mod replay;
-mod sender;
 mod table;
 mod terminal;
 pub mod theme;
@@ -25,7 +24,6 @@ pub use log::LogPanel;
 pub use manager::{DockArea, DockLayout, DockStack, PanelKind, PanelManager};
 pub use plugins::{MarketplaceState, PluginPanelEvent, PluginTab, PluginsPanel};
 pub use replay::ReplayPanel;
-pub use sender::SenderPanel;
 pub use table::RowSelection;
 pub use terminal::TerminalPanel;
 

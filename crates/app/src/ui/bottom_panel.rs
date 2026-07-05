@@ -62,7 +62,7 @@ impl WorkbenchApp {
                     .target_port
                     .as_deref()
                     .map(|p| self.serial.port_label(p))
-                    .unwrap_or_else(|| "无端口".to_owned()),
+                    .unwrap_or_else(|| "请选择串口".to_owned()),
             )
             .show_ui(ui, |ui| {
                 if open_ports.is_empty() {

@@ -319,7 +319,7 @@ pub fn dynamic_form_ui(
                                 .map(|p| format!("{}  {}", p.port_name, p.port_type))
                                 .unwrap_or_else(|| {
                                     if ports.is_empty() {
-                                        "无端口".to_owned()
+                                        "无可用串口".to_owned()
                                     } else {
                                         "请选择串口".to_owned()
                                     }
