@@ -222,12 +222,32 @@ impl WorkbenchApp {
                                 ui.label(
                                     egui::RichText::new(*port).monospace().color(theme::ORANGE),
                                 );
-                                if ui.small_button("强制关闭").clicked() {
-                                    self.transport.close_port(port);
-                                    self.set_status_force(
-                                        StatusLevel::Info,
-                                        format!("{port} 已强制关闭"),
-                                    );
+                                // 两步确认：首次点击 → 变红"确认?" → 再次点击才执行。
+                                // 5 秒后自动解除武装。
+                                let confirm_id = ui.id().with(("force_close_confirm", *port));
+                                let now = ui.input(|i| i.time);
+                                let armed_ts: Option<f64> = ui.ctx().memory(|m| m.data.get_temp(confirm_id));
+                                let armed = armed_ts.is_some_and(|t| now - t < 5.0);
+                                let label = if armed { "确认?" } else { "强制关闭" };
+                                let btn = egui::Button::new(
+                                    egui::RichText::new(label).color(if armed { theme::RED } else { theme::ORANGE }),
+                                ).small();
+                                if ui.add(btn).clicked() {
+                                    if armed {
+                                        self.transport.close_port(port);
+                                        self.set_status_force(
+                                            StatusLevel::Info,
+                                            format!("{port} 已强制关闭"),
+                                        );
+                                        ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(confirm_id));
+                                    } else {
+                                        ui.ctx().memory_mut(|m| m.data.insert_temp(confirm_id, now));
+                                    }
+                                }
+                                if armed {
+                                    if ui.small_button("取消").clicked() {
+                                        ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(confirm_id));
+                                    }
                                 }
                             });
                         }
