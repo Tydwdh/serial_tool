@@ -226,39 +226,53 @@ impl WorkbenchApp {
                             .color(theme::TEXT_SECONDARY);
                     let overflow_resp =
                         ui.selectable_label(false, overflow_text);
-                    let mut popup = egui::Popup::from_response(&overflow_resp)
-                        .id(overflow_id)
-                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-                    if overflow_resp.clicked() {
-                        popup = popup.open_memory(Some(egui::SetOpenCommand::Toggle));
-                    }
-                    popup.show(|ui| {
-                        ui.set_min_width(320.0);
-                        ui.set_max_height(200.0);
-                        ui.style_mut().spacing.item_spacing.y = 2.0;
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            for n in &notifications {
-                                let color = match n.level {
-                                    StatusLevel::Info => theme::TEXT_SECONDARY,
-                                    StatusLevel::Warn => theme::YELLOW,
-                                    StatusLevel::Error => theme::RED,
-                                };
-                                let level_mark = match n.level {
-                                    StatusLevel::Error => "✕ ",
-                                    StatusLevel::Warn => "⚠ ",
-                                    StatusLevel::Info => "",
-                                };
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "{level_mark}{}",
-                                        &n.text
-                                    ))
-                                    .color(color)
-                                    .small(),
-                                );
-                            }
-                        });
+                    let mut overflow_open = ui.ctx().memory_mut(|m| {
+                        m.data
+                            .get_persisted::<bool>(overflow_id)
+                            .unwrap_or(false)
                     });
+                    if overflow_resp.clicked() {
+                        overflow_open = !overflow_open;
+                        ui.ctx().memory_mut(|m| m.data.insert_persisted(overflow_id, overflow_open));
+                    }
+                    if overflow_open {
+                        egui::Window::new("通知列表")
+                            .id(overflow_id)
+                            .collapsible(false)
+                            .resizable(false)
+                            .anchor(egui::Align2::CENTER_CENTER, [0.0, 100.0])
+                            .auto_sized()
+                            .show(ui.ctx(), |ui| {
+                                ui.set_min_width(320.0);
+                                ui.set_max_height(300.0);
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                egui::ScrollArea::vertical().show(ui, |ui| {
+                                    for n in &notifications {
+                                        let color = match n.level {
+                                            StatusLevel::Info => theme::TEXT_SECONDARY,
+                                            StatusLevel::Warn => theme::YELLOW,
+                                            StatusLevel::Error => theme::RED,
+                                        };
+                                        let level_mark = match n.level {
+                                            StatusLevel::Error => "✕ ",
+                                            StatusLevel::Warn => "⚠ ",
+                                            StatusLevel::Info => "",
+                                        };
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "{level_mark}{}",
+                                                &n.text
+                                            ))
+                                            .color(color)
+                                            .small(),
+                                        );
+                                    }
+                                });
+                            });
+                        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            ui.ctx().memory_mut(|m| m.data.insert_persisted(overflow_id, false));
+                        }
+                    }
                 }
             }
 
