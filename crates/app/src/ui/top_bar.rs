@@ -24,7 +24,7 @@ pub(super) fn serial_combo(
         })
         .unwrap_or_else(|| {
             if ports.is_empty() {
-                "无端口".to_owned()
+                "无可用串口".to_owned()
             } else {
                 "请选择串口".to_owned()
             }
@@ -133,7 +133,11 @@ impl WorkbenchApp {
                     self.open_selected_port();
                 }
 
-                if serial_action_button_enabled(ui, selected_open, "关闭").clicked()
+                let mut close_btn = serial_action_button_enabled(ui, selected_open, "关闭");
+                if !selected_open {
+                    close_btn = close_btn.on_disabled_hover_text("端口未打开");
+                }
+                if close_btn.clicked()
                     && let Some(ref port) = self.serial.selected_port
                 {
                     self.transport.close_port(port);
