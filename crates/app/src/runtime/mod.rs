@@ -7,7 +7,7 @@
 mod autosave;
 mod keys;
 pub(crate) mod marketplace;
-mod periodic_send;
+pub(crate) mod periodic_send;
 mod plugin;
 mod port_refresh;
 mod replay;

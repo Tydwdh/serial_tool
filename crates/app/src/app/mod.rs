@@ -49,12 +49,8 @@ pub(crate) struct WorkbenchApp {
     pub(crate) ui_set_status_subscription: tool_databus::Subscription,
     pub(crate) replay_analyzer_job: Option<ReplayAnalyzerJob>,
     pub(crate) replay_analyzer_generation: u64,
-    /// 周期发送后台线程的取消信号
-    pub(crate) periodic_send_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    /// 周期发送后台线程的结束原因（失败/完成），主线程 tick 读取后回写状态栏。
-    /// 后台线程无 &mut self，只能通过共享通道传递用户可见反馈。
-    pub(crate) periodic_send_outcome:
-        std::sync::Arc<std::sync::Mutex<Option<(crate::state::StatusLevel, String)>>>,
+    /// 周期发送后台线程控制状态。
+    pub(crate) periodic_send: crate::runtime::periodic_send::PeriodicSendState,
     /// 可配置快捷键映射
     pub(crate) keymap: crate::keymap::Keymap,
     /// 当前帧触发的快捷键动作（handle_keys 设置，tick 执行）
@@ -286,8 +282,7 @@ impl WorkbenchApp {
             )),
             replay_analyzer_job: None,
             replay_analyzer_generation: 0,
-            periodic_send_cancel: None,
-            periodic_send_outcome: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            periodic_send: Default::default(),
             dock_dragging_panel: None,
             bottom_dock_rect: None,
             right_dock_rect: None,
