@@ -100,7 +100,7 @@ impl WorkbenchApp {
                 let port = self.send.target_port.clone();
                 let target_open = self.send_target_port_open();
                 let tag = |ui: &mut egui::Ui, label: &str, high: bool, color: Color32, tooltip: &str| -> bool {
-                    let size = egui::vec2(42.0, 16.0);
+                    let size = egui::vec2(46.0, 20.0); // 最小触控目标约 24px，此处为视觉标签适度增大
                     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
                     let bg = if high {
                         color.linear_multiply(0.25)
