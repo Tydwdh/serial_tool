@@ -13,6 +13,9 @@ pub(crate) struct DockDragState {
     pub(crate) bottom_rect: Option<egui::Rect>,
     pub(crate) right_rect: Option<egui::Rect>,
     pub(crate) left_rect: Option<egui::Rect>,
+    /// 本帧各停靠区标签栏中每个标签的屏幕矩形（用于计算插入位置）。
+    pub(crate) bottom_tab_rects: Vec<(PanelKind, egui::Rect)>,
+    pub(crate) right_tab_rects: Vec<(PanelKind, egui::Rect)>,
 }
 
 impl WorkbenchApp {
@@ -222,6 +225,13 @@ impl WorkbenchApp {
                 log::warn!("save_config failed: {e}")
             };
         }
+
+        // 保存本帧的标签矩形，供 paint_dock_drop_overlay 跨区拖拽时计算插入位置。
+        match area {
+            DockArea::Bottom => self.dock_drag.bottom_tab_rects = tab_rects,
+            DockArea::Right => self.dock_drag.right_tab_rects = tab_rects,
+            DockArea::Center => {}
+        }
     }
     fn dock_panel_body(&mut self, ui: &mut egui::Ui, area: DockArea, kind: PanelKind) {
         match kind {
@@ -374,8 +384,18 @@ impl WorkbenchApp {
             if let Some(rect) = self.dock_drag.right_rect {
                 paint_real_dock_hover(ctx, rect, "右侧");
             }
+            // 在标签栏中绘制插入线
+            let rects = &self.dock_drag.right_tab_rects;
+            if let Some(insert_idx) = horizontal_insert_index_from_pointer(rects, pos) {
+                paint_dock_insert_line_at(ctx, rects, insert_idx, false);
+            }
         } else if bottom_hit && let Some(rect) = self.dock_drag.bottom_rect {
             paint_real_dock_hover(ctx, rect, "底部");
+            // 在标签栏中绘制插入线
+            let rects = &self.dock_drag.bottom_tab_rects;
+            if let Some(insert_idx) = horizontal_insert_index_from_pointer(rects, pos) {
+                paint_dock_insert_line_at(ctx, rects, insert_idx, false);
+            }
         }
 
         if released {
@@ -386,14 +406,22 @@ impl WorkbenchApp {
                     log::warn!("save_config failed: {e}")
                 };
             } else if right_hit {
-                self.panels.dock.move_panel(kind, DockArea::Right);
+                // 根据指针在目标标签栏中的位置计算插入索引（非末尾追加）
+                let rects = &self.dock_drag.right_tab_rects;
+                let index = horizontal_insert_index_from_pointer(rects, pos)
+                    .unwrap_or(rects.len());
+                self.panels.dock.insert_panel_at(kind, DockArea::Right, index);
                 self.panels.dock.right_visible = true;
                 self.panels.sync_tabs_from_dock();
                 if let Err(e) = self.save_config() {
                     log::warn!("save_config failed: {e}")
                 };
             } else if bottom_hit {
-                self.panels.dock.move_panel(kind, DockArea::Bottom);
+                // 根据指针在目标标签栏中的位置计算插入索引（非末尾追加）
+                let rects = &self.dock_drag.bottom_tab_rects;
+                let index = horizontal_insert_index_from_pointer(rects, pos)
+                    .unwrap_or(rects.len());
+                self.panels.dock.insert_panel_at(kind, DockArea::Bottom, index);
                 self.panels.sync_tabs_from_dock();
                 self.set_bottom_visible(true);
                 if let Err(e) = self.save_config() {
@@ -437,6 +465,47 @@ fn horizontal_insert_index_from_pointer(
     }
 
     Some(rects.len())
+}
+
+fn paint_dock_insert_line_at(
+    ctx: &egui::Context,
+    rects: &[(PanelKind, egui::Rect)],
+    index: usize,
+    is_vertical: bool,
+) {
+    if rects.is_empty() {
+        return;
+    }
+
+    let (x, top, bottom) = if is_vertical {
+        let y = if index >= rects.len() {
+            rects.last().expect("rects is non-empty").1.bottom() + 3.0
+        } else {
+            rects[index].1.top() - 3.0
+        };
+        let left = rects.iter().map(|(_, r)| r.left()).fold(f32::INFINITY, f32::min);
+        let right = rects.iter().map(|(_, r)| r.right()).fold(f32::NEG_INFINITY, f32::max);
+        (left, y, right)
+    } else {
+        let x = if index >= rects.len() {
+            rects.last().expect("rects is non-empty").1.right() + 3.0
+        } else {
+            rects[index].1.left() - 3.0
+        };
+        let top = rects.iter().map(|(_, r)| r.top()).fold(f32::INFINITY, f32::min);
+        let bottom = rects.iter().map(|(_, r)| r.bottom()).fold(f32::NEG_INFINITY, f32::max);
+        (x, top, bottom)
+    };
+
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new(("dock-insert-line", index)),
+    ));
+
+    painter.line_segment(
+        [egui::pos2(x, top), egui::pos2(x, bottom)],
+        egui::Stroke::new(2.0, theme::BLUE),
+    );
 }
 
 fn paint_dock_insert_line(ui: &egui::Ui, rects: &[(PanelKind, egui::Rect)], index: usize) {

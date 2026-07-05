@@ -238,6 +238,23 @@ impl DockLayout {
         }
     }
 
+    /// 移动面板到目标停靠区的指定位置。
+    pub fn insert_panel_at(&mut self, kind: PanelKind, to: DockArea, index: usize) {
+        self.center.remove(&kind);
+        self.bottom.remove(&kind);
+        self.right.remove(&kind);
+        let stack = self.stack_mut(to);
+        let idx = index.min(stack.tabs.len());
+        stack.tabs.insert(idx, kind.clone());
+        stack.active = Some(kind);
+
+        match to {
+            DockArea::Bottom => self.bottom_visible = true,
+            DockArea::Right => self.right_visible = true,
+            DockArea::Center => {}
+        }
+    }
+
     pub fn all_tabs(&self) -> Vec<PanelKind> {
         self.center
             .tabs
