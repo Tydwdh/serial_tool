@@ -4,6 +4,17 @@ use tool_panels::{DockArea, PanelKind, theme};
 use crate::app::WorkbenchApp;
 use crate::state::StatusLevel;
 
+/// 停靠区标签拖拽状态：跨区域移动面板时的临时拖拽数据。
+#[derive(Default)]
+pub(crate) struct DockDragState {
+    /// 当前正在拖拽的面板种类。None 表示没有拖拽进行中。
+    pub(crate) dragging_panel: Option<PanelKind>,
+    /// 本帧各停靠区的屏幕矩形（用于碰撞检测拖拽落点）。
+    pub(crate) bottom_rect: Option<egui::Rect>,
+    pub(crate) right_rect: Option<egui::Rect>,
+    pub(crate) left_rect: Option<egui::Rect>,
+}
+
 impl WorkbenchApp {
     pub(super) fn dock_stack_ui(&mut self, ui: &mut egui::Ui, area: DockArea) {
         let tabs = self.panels.dock.stack(area).tabs.clone();
@@ -35,7 +46,7 @@ impl WorkbenchApp {
         ui.horizontal(|ui| {
             for kind in tabs {
                 let active = self.panels.dock.stack(area).active.as_ref() == Some(kind);
-                let dragging = self.dock_dragging_panel.as_ref() == Some(kind);
+                let dragging = self.dock_drag.dragging_panel.as_ref() == Some(kind);
                 let title = self.panel_title(kind);
 
                 let width = (title.chars().count() as f32 * 14.0 + 28.0).clamp(64.0, 180.0);
@@ -52,7 +63,7 @@ impl WorkbenchApp {
                 }
 
                 if response.drag_started() {
-                    self.dock_dragging_panel = Some(kind.clone());
+                    self.dock_drag.dragging_panel = Some(kind.clone());
                 }
 
                 if response.dragged() {
@@ -182,7 +193,7 @@ impl WorkbenchApp {
             );
         });
 
-        let insert_index = if self.dock_dragging_panel.is_some() {
+        let insert_index = if self.dock_drag.dragging_panel.is_some() {
             pointer.and_then(|pos| horizontal_insert_index_from_pointer(&tab_rects, pos))
         } else {
             None
@@ -195,11 +206,11 @@ impl WorkbenchApp {
         // 只在"释放在当前 tab bar 上"时处理同区域重排。
         // 不要无条件 take()，否则跨区域 drop overlay 没机会处理。
         if ui.input(|i| i.pointer.any_released())
-            && let Some(kind) = self.dock_dragging_panel.clone()
+            && let Some(kind) = self.dock_drag.dragging_panel.clone()
             && self.panels.dock.stack(area).contains(&kind)
             && let Some(insert_index) = insert_index
         {
-            self.dock_dragging_panel = None;
+            self.dock_drag.dragging_panel = None;
 
             if self
                 .panels
@@ -378,7 +389,7 @@ impl WorkbenchApp {
     }
 
     pub(super) fn paint_dock_drop_overlay(&mut self, ctx: &egui::Context) {
-        let Some(kind) = self.dock_dragging_panel.clone() else {
+        let Some(kind) = self.dock_drag.dragging_panel.clone() else {
             return;
         };
 
@@ -388,32 +399,32 @@ impl WorkbenchApp {
 
         // ESC 取消拖拽
         if esc_pressed {
-            self.dock_dragging_panel = None;
+            self.dock_drag.dragging_panel = None;
             return;
         }
 
         let Some(pos) = ctx.pointer_latest_pos() else {
             if !primary_down {
-                self.dock_dragging_panel = None;
+                self.dock_drag.dragging_panel = None;
             }
             return;
         };
 
-        let left_hit = self.left_dock_rect.is_some_and(|rect| rect.contains(pos));
+        let left_hit = self.dock_drag.left_rect.is_some_and(|rect| rect.contains(pos));
 
-        let right_hit = self.right_dock_rect.is_some_and(|rect| rect.contains(pos));
+        let right_hit = self.dock_drag.right_rect.is_some_and(|rect| rect.contains(pos));
 
-        let bottom_hit = self.bottom_dock_rect.is_some_and(|rect| rect.contains(pos));
+        let bottom_hit = self.dock_drag.bottom_rect.is_some_and(|rect| rect.contains(pos));
 
         if left_hit {
-            if let Some(rect) = self.left_dock_rect {
+            if let Some(rect) = self.dock_drag.left_rect {
                 paint_real_dock_hover(ctx, rect, "主工作区");
             }
         } else if right_hit {
-            if let Some(rect) = self.right_dock_rect {
+            if let Some(rect) = self.dock_drag.right_rect {
                 paint_real_dock_hover(ctx, rect, "右侧");
             }
-        } else if bottom_hit && let Some(rect) = self.bottom_dock_rect {
+        } else if bottom_hit && let Some(rect) = self.dock_drag.bottom_rect {
             paint_real_dock_hover(ctx, rect, "底部");
         }
 
@@ -440,9 +451,9 @@ impl WorkbenchApp {
                 };
             }
 
-            self.dock_dragging_panel = None;
+            self.dock_drag.dragging_panel = None;
         } else if !primary_down {
-            self.dock_dragging_panel = None;
+            self.dock_drag.dragging_panel = None;
         }
     }
 }

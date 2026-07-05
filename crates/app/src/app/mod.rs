@@ -37,10 +37,7 @@ pub(crate) struct WorkbenchApp {
     pub(crate) terminal_popup_always_on_top: bool,
     pub(crate) send_popup_always_on_top: bool,
     pub(crate) detached_dynamic_panels: BTreeSet<String>,
-    pub(crate) dock_dragging_panel: Option<tool_panels::PanelKind>,
-    pub(crate) bottom_dock_rect: Option<egui::Rect>,
-    pub(crate) right_dock_rect: Option<egui::Rect>,
-    pub(crate) left_dock_rect: Option<egui::Rect>,
+    pub(crate) dock_drag: crate::ui::dock::DockDragState,
     pub(crate) last_auto_save_time: f64,
     pub(crate) file_broker: Arc<FileAccessBroker>,
     pub(crate) dialog_receiver: crossbeam_channel::Receiver<DialogRequest>,
@@ -283,10 +280,7 @@ impl WorkbenchApp {
             replay_analyzer_job: None,
             replay_analyzer_generation: 0,
             periodic_send: Default::default(),
-            dock_dragging_panel: None,
-            bottom_dock_rect: None,
-            right_dock_rect: None,
-            left_dock_rect: None,
+            dock_drag: Default::default(),
             keymap: config
                 .as_ref()
                 .map(|c| c.keymap.clone())
