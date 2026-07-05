@@ -61,14 +61,8 @@ pub(crate) struct WorkbenchApp {
     pub(crate) pending_action: Option<crate::keymap::Action>,
     /// 快捷键录制状态：点击"录制"后等待用户按键
     pub(crate) key_recording: Option<crate::keymap::Action>,
-    /// 命令面板是否打开
-    pub(crate) command_palette_open: bool,
-    /// 命令面板搜索文本
-    pub(crate) command_palette_query: String,
-    /// 命令面板键盘选中的条目索引（0-based），None 表示无选中
-    pub(crate) command_palette_selected: Option<usize>,
-    /// 命令面板最近使用顺序（key 列表，最近使用的在前）
-    pub(crate) command_usage_order: Vec<String>,
+    /// 命令面板状态（搜索、选中、使用顺序）
+    pub(crate) command_palette: crate::ui::command_palette::CommandPaletteState,
     /// 自动更新状态
     pub(crate) update_state: UpdateState,
     /// UI contribution 运行时状态（toggle 值、progress 值等）
@@ -304,10 +298,7 @@ impl WorkbenchApp {
                 .unwrap_or_default(),
             pending_action: None,
             key_recording: None,
-            command_palette_open: false,
-            command_palette_query: String::new(),
-            command_palette_selected: None,
-            command_usage_order: Vec::new(),
+            command_palette: Default::default(),
             update_state: UpdateState::default(),
             contribution_states: std::collections::HashMap::new(),
             plugin_summaries_cache: std::cell::OnceCell::new(),
