@@ -168,8 +168,32 @@ impl LogPanel {
 
             force_scroll_to_bottom |= crate::theme::auto_scroll_button(ui, &mut self.auto_scroll);
 
-            if ui.button("清空").clicked() {
-                self.clear();
+            // 清空：两步确认（与终端面板一致），避免误触丢失系统日志。
+            let clear_id = ui.id().with("log_clear_armed_ts");
+            let now = ui.input(|i| i.time);
+            let armed_ts: Option<f64> = ui.ctx().memory(|m| m.data.get_temp(clear_id));
+            let armed = armed_ts.is_some_and(|t| now - t < 3.0);
+            let clear_label = if armed { "确认清空?" } else { "清空" };
+            let clear_btn = egui::Button::new(
+                egui::RichText::new(clear_label).color(if armed {
+                    crate::theme::RED
+                } else {
+                    crate::theme::TEXT_PRIMARY
+                }),
+            );
+            if ui.add(clear_btn).clicked() {
+                if armed {
+                    self.clear();
+                    ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(clear_id));
+                } else {
+                    ui.ctx()
+                        .memory_mut(|m| m.data.insert_temp(clear_id, now));
+                }
+            }
+            if armed {
+                if ui.small_button("取消").clicked() {
+                    ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(clear_id));
+                }
             }
         });
 
