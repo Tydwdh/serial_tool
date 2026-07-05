@@ -209,7 +209,7 @@ impl WorkbenchApp {
         }
     }
 
-    /// 换行符下拉框
+    /// 换行符下拉框（HEX 模式下不附加换行符，因此禁用）
     fn render_line_ending_combo(&mut self, ui: &mut egui::Ui, id_salt: &'static str, width: f32) {
         ui.add_enabled_ui(!self.send.hex_mode, |ui| {
             egui::ComboBox::from_id_salt(id_salt)
@@ -220,7 +220,9 @@ impl WorkbenchApp {
                         ui.selectable_value(&mut self.send.line_ending, le, le.label());
                     }
                 });
-        });
+        })
+        .response
+        .on_disabled_hover_text("HEX 模式下不附加换行符");
     }
 
     // ── 输入区 ──
