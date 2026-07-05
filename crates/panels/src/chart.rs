@@ -63,8 +63,10 @@ impl ChartPanel {
         self.rebuild_cache();
 
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.paused, "暂停");
-            ui.checkbox(&mut self.auto_scale, "自动");
+            ui.checkbox(&mut self.paused, "暂停")
+                .on_hover_text("暂停采集：冻结图表，暂停期间到达的新样本会被丢弃。与终端的「暂停接收」行为一致。");
+            ui.checkbox(&mut self.auto_scale, "自动")
+                .on_hover_text("自动缩放 Y 轴以完整显示所有可见样本。关闭后可手动设 min/max。");
             if !self.auto_scale {
                 ui.label("Y 轴");
                 ui.add(
@@ -78,8 +80,9 @@ impl ChartPanel {
                         .prefix("max "),
                 );
             }
-            ui.add(egui::Slider::new(&mut self.sample_window, 60..=2_000).text("窗口"));
-            if ui.button("清空").clicked() {
+            ui.add(egui::Slider::new(&mut self.sample_window, 60..=2_000).text("窗口"))
+                .on_hover_text("X 轴显示的最近样本数。值越小，曲线刷新越频繁。");
+            if ui.button("清空").on_hover_text("清除图表中的所有样本数据").clicked() {
                 self.series.clear();
             }
             if self.dropped_while_paused > 0 {
