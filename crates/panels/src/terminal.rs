@@ -1842,7 +1842,7 @@ fn build_selected_text<'a>(
 }
 
 fn row_matches_search(
-    port_key: &str,
+    _port_key: &str,
     row: &VisibleRow<'_>,
     search_key: &str,
     case_sensitive: bool,
@@ -1857,10 +1857,10 @@ fn row_matches_search(
             haystack.to_ascii_lowercase().contains(search_key)
         }
     };
-    contains(port_key)
-        || contains(row.raw_text.as_ref())
-        || contains(row.display_text.as_ref())
-        || contains(row.hex_text.as_ref())
+    // 不搜索 port_key（端口名如 "COM2" 含数字会误匹配）
+    // 也不搜索 hex_text（HEX 如 "32" 含 "2" 也会误匹配）
+    // 端口过滤用专门的 port_filter 下拉框。
+    contains(row.raw_text.as_ref()) || contains(row.display_text.as_ref())
 }
 
 fn csv_cell(s: &str) -> String {
@@ -2322,5 +2322,34 @@ mod tests {
         assert_eq!(entries[1].raw_text, "111111");
         assert_eq!(entries[2].raw_text, "111111");
         assert_eq!(entries[3].raw_text, "111");
+    }
+
+    /// 搜索应该能过滤出包含关键字的 entry。
+    #[test]
+    fn search_finds_matching_entry() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+
+        for (ts, data) in [(1_000u64, "1"), (2_000, "2"), (3_000, "3")] {
+            bus.publish(Event::with_timestamp(
+                ts,
+                serial_topics::SERIAL_TX,
+                "serial:COM2",
+                Direction::Tx,
+                Payload::Bytes(data.as_bytes().to_vec()),
+            ));
+        }
+
+        assert_eq!(panel.ingest_all_pending(), 3);
+
+        panel.search_text = "2".to_owned();
+        let rows = panel.collect_visible_rows(false);
+        assert_eq!(rows.len(), 1, "search '2' should match exactly 1 entry");
+        assert_eq!(rows[0].raw_text, "2");
+
+        panel.search_text = "3".to_owned();
+        let rows = panel.collect_visible_rows(false);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].raw_text, "3");
     }
 }
