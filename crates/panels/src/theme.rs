@@ -63,7 +63,7 @@ pub const WIDGET_ACTIVE_STRONG: Color32 = Color32::from_rgb(44, 88, 132);
 pub const WIDGET_OPEN: Color32 = Color32::from_rgb(40, 47, 58);
 
 // 滚动条
-pub const SCROLLBAR: Color32 = Color32::from_rgb(55, 62, 75);
+pub const SCROLLBAR: Color32 = Color32::from_rgb(55, 60, 71); // #373C47
 pub const SCROLLBAR_HOVER: Color32 = Color32::from_rgb(70, 78, 92);
 
 // 边框

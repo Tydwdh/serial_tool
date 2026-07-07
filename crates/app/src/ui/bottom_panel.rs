@@ -246,12 +246,21 @@ impl WorkbenchApp {
             SendLayout::Popup => "Ctrl+Enter 发送",
         };
 
-        // 输入区用 add_sized 撑满传入高度（视觉吃满剩余空间）。
+        // 输入区视觉占满传入高度，但严格限制在该高度内——文本超出时在框内滚动，
+        // 不再向上撑大 resizable 面板。
+        //
+        // 根因：egui 0.35 的 `TextEdit::multiline` 在 `add_sized(h, ..)` 下 `size = galley.size()`
+        // （= 全部文本行总高，builder.rs:644 无 y 方向裁剪），经 `atom_grow(true)` 突破分配高度，
+        // 使 content min_rect > panel → PanelState.outer_rect 被改大 → 下一帧面板更高 → 正反馈
+        // 向上撑大（见 memory `egui-resizable-panel-content-feedback`）。
+        //
+        // 修复：用 `ScrollArea::vertical().max_height(input_height)` 包裹 TextEdit。ScrollArea 的
+        // outer 尺寸 = min(可用, max_size)（scroll_area.rs:765），不被内部 content 撑大；文本超出
+        // 时在 ScrollArea 内部滚动，面板稳定在用户拖动高度。仍保留 `add_sized` 让 TextEdit 视觉
+        // 吃满 ScrollArea 宽度。
         // 配合 send_panel_body 末尾的 take_available_space() + dock 面板 Frame::NONE，
         // content min_rect = panel，打破 egui resizable 面板的正反馈（参见 send_panel_body 注释）。
         // 显式 id 稳定控件 id（前面有条件渲染的 error 标签、hex_preview、contribution 槽）。
-        let width = ui.available_width();
-
         // 在 TextEdit 渲染之前读取光标位置，用于 ↑↓ 历史导航判断。
         // TextEdit 渲染后才处理 key_pressed，所以需要提前捕获「按键前」的光标行号。
         let edit_id = response_id_for_send_input(layout);
@@ -261,13 +270,29 @@ impl WorkbenchApp {
                 .map(|r| r.primary.index)
         });
 
-        let response = ui.add_sized(
-            egui::vec2(width, input_height),
-            egui::TextEdit::multiline(&mut self.send.input)
-                .desired_width(f32::INFINITY)
-                .id(edit_id)
-                .hint_text(hint_text),
-        );
+        // ScrollArea id 与 TextEdit id 区分（避免共享/冲突滚动状态），但同 layout 下稳定。
+        let scroll_id_salt = match layout {
+            SendLayout::Horizontal => "send-input-scroll-h",
+            SendLayout::Vertical => "send-input-scroll-v",
+            SendLayout::Popup => "send-input-scroll-popup",
+        };
+        let input = &mut self.send.input;
+        let response = egui::ScrollArea::vertical()
+            .max_height(input_height)
+            .id_salt(scroll_id_salt)
+            .show(ui, |ui| {
+                // 宽度在 ScrollArea 内部取：自动扣除竖直滚动条预留宽（current_bar_use），
+                // 否则 TextEdit 横向溢出会盖住滚动条区域、滚动条被裁看不见。
+                let inner_width = ui.available_width();
+                ui.add_sized(
+                    egui::vec2(inner_width, input_height),
+                    egui::TextEdit::multiline(input)
+                        .desired_width(f32::INFINITY)
+                        .id(edit_id)
+                        .hint_text(hint_text),
+                )
+            })
+            .inner;
 
         // ↑↓ 方向键导航发送历史。
         // 多行编辑时，方向键优先移动光标；只有当 egui 已无法跨行移动光标
@@ -970,5 +995,109 @@ mod tests {
                 "中间行间距 {mid_gap} != {row_height}，行高不一致"
             );
         });
+    }
+
+    /// 复现「发送区文本过多时向上撑大布局」的根因。
+    ///
+    /// egui 0.35 的 `TextEdit::multiline` 在 `add_sized(h, ..)` 下，其 `size = galley.size()`
+    /// （= 全部文本行总高，builder.rs:644 无 y 方向裁剪），经 `atom_grow(true)` 突破分配高度，
+    /// 使 resizable 面板的 content min_rect 超过面板 → `PanelState.outer_rect = content min_rect`
+    /// （panel.rs:828）被改写变大 → 下一帧面板更高 → 正反馈向上撑大（见 memory
+    /// `egui-resizable-panel-content-feedback`）。
+    ///
+    /// 用带默认字体的 ctx 跑多帧（resizable 面板的撑大是跨帧 PanelState 累积，单帧测不出），
+    /// 断言第 3 帧面板高度被撑到远超 default_size。
+    #[test]
+    fn send_input_add_sized_grows_panel_when_text_long() {
+        let ctx = egui::Context::default(); // 带默认字体，galley 行高真实
+
+        let mut text = std::iter::repeat_n("line\n", 40).collect::<String>();
+        let default_h = 120.0_f32;
+        let input_h = 80.0_f32;
+
+        let mut panel_heights: Vec<f32> = Vec::new();
+        for _frame in 0..3 {
+            let mut out_rect: Option<egui::Rect> = None;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.set_max_size(egui::vec2(600.0, 600.0));
+                let resp = egui::Panel::bottom("test-bottom-dock")
+                    .resizable(true)
+                    .default_size(default_h)
+                    .min_size(60.0)
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| {
+                        let w = ui.available_width();
+                        ui.add_sized(
+                            egui::vec2(w, input_h),
+                            egui::TextEdit::multiline(&mut text)
+                                .desired_width(f32::INFINITY)
+                                .id(egui::Id::new("repro-add-sized")),
+                        );
+                        ui.take_available_space();
+                    });
+                out_rect = Some(resp.response.rect);
+            });
+            panel_heights.push(out_rect.map(|r| r.height()).unwrap_or(0.0));
+        }
+
+        // 复现：文本 40 行远超 input_h，面板被正反馈撑大，第 3 帧高度应显著超过 default_h。
+        assert!(
+            panel_heights[2] > default_h + 20.0,
+            "预期 add_sized 方案下 resizable 面板会被撑到超过 default_h={default_h}，\
+             实际第3帧高度 {} — 若已不再撑大，说明 egui 行为已变，需重新评估根因",
+            panel_heights[2]
+        );
+    }
+
+    /// 验证修复方案：用固定高度的 `ScrollArea::vertical().max_height(h)` 包裹
+    /// `TextEdit::multiline`，ScrollArea 的 outer 尺寸 = min(可用, max_size)
+    /// （egui scroll_area.rs:765 `outer_size = available.at_most(max_size)`），不被内部
+    /// content 撑大。文本超出时在 ScrollArea 内部滚动，面板高度稳定在 default_h。
+    #[test]
+    fn send_input_scroll_area_keeps_panel_stable_when_text_long() {
+        let ctx = egui::Context::default();
+
+        let mut text = std::iter::repeat_n("line\n", 40).collect::<String>();
+        let default_h = 120.0_f32;
+        let input_h = 80.0_f32;
+
+        let mut panel_heights: Vec<f32> = Vec::new();
+        for _frame in 0..3 {
+            let mut out_rect: Option<egui::Rect> = None;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.set_max_size(egui::vec2(600.0, 600.0));
+                let resp = egui::Panel::bottom("test-bottom-dock-fix")
+                    .resizable(true)
+                    .default_size(default_h)
+                    .min_size(60.0)
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| {
+                        let w = ui.available_width();
+                        egui::ScrollArea::vertical()
+                            .max_height(input_h)
+                            .id_salt("fix-scroll")
+                            .show(ui, |ui| {
+                                ui.add_sized(
+                                    egui::vec2(w, input_h),
+                                    egui::TextEdit::multiline(&mut text)
+                                        .desired_width(f32::INFINITY)
+                                        .desired_rows(4)
+                                        .id(egui::Id::new("fix-textedit")),
+                                );
+                            });
+                        ui.take_available_space();
+                    });
+                out_rect = Some(resp.response.rect);
+            });
+            panel_heights.push(out_rect.map(|r| r.height()).unwrap_or(0.0));
+        }
+
+        // 修复后：面板高度稳定在 default_h 附近，不被文本撑大。
+        let last = panel_heights[2];
+        assert!(
+            (last - default_h).abs() < 20.0,
+            "ScrollArea 方案下面板应稳定在 default_h={default_h}，第3帧实际 {}",
+            last
+        );
     }
 }

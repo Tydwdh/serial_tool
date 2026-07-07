@@ -73,10 +73,16 @@ pub struct TerminalPanel {
 struct PortData {
     entries: VecDeque<TerminalEntry>,
     truncated_count: u64,
-    /// 跨包未完成行缓存：上一包末尾换行符之后的数据，前插到下一包。
-    /// 这样换行符后的数据会拼接到下一次数据中去，而不是单独成条。
-    pending_tail: String,
 }
+
+// impl Default for PortData {
+//     fn default() -> Self {
+//         Self {
+//             entries: VecDeque::new(),
+//             truncated_count: 0,
+//         }
+//     }
+// }
 
 struct TerminalEntry {
     /// TerminalPanel 内部使用的稳定 UI id。
@@ -145,6 +151,83 @@ struct RenderOutcome {
     inner_rect: egui::Rect,
     content_height: f32,
     offset_y: f32,
+}
+
+/// 将一行文本作为 entry push，或合并到上一条 entry（如果间隔 ≤ merge_window_ms
+/// 且上一条不以 \n 结尾）。
+fn push_entry(
+    data: &mut PortData,
+    line: &str,
+    event: &Event,
+    next_entry_id: &mut u64,
+    max_entries: usize,
+    on_remove: &mut dyn FnMut(u64),
+    merge_window_ms: u64,
+) {
+    let bytes = line.as_bytes().to_vec();
+    let display_text = format_terminal_text(line);
+    let hex_text = format_hex(&bytes);
+    let utf8_preview = format_utf8_preview(&bytes);
+    let hex_preview = if hex_text.is_empty() {
+        String::new()
+    } else if utf8_preview.is_empty() {
+        hex_text.clone()
+    } else {
+        format!("{hex_text} [{utf8_preview}]")
+    };
+    let preview_text = if hex_text.is_empty() {
+        String::new()
+    } else {
+        utf8_preview
+    };
+
+    // ── 合并：同方向、不同 event、在阈值内、上一条是未完成行 → 追加 ──
+    if let Some(prev) = data.entries.back_mut()
+        && prev.direction == event.direction
+        && prev.event_id != event.id
+        && event.timestamp_ms.saturating_sub(prev.timestamp_ms) <= merge_window_ms
+    {
+        prev.raw_text.push_str(line);
+        prev.display_text.push_str(&display_text);
+        prev.hex_text.push(' ');
+        prev.hex_text.push_str(&hex_text);
+        if !preview_text.is_empty() {
+            prev.preview_text.push(' ');
+            prev.preview_text.push_str(&preview_text);
+        }
+        prev.hex_preview = if prev.hex_text.is_empty() {
+            String::new()
+        } else if prev.preview_text.is_empty() {
+            prev.hex_text.clone()
+        } else {
+            format!("{} [{}]", prev.hex_text, prev.preview_text)
+        };
+        return;
+    }
+
+    // ── 不合并：独立 push ──
+    let entry_id = *next_entry_id;
+    *next_entry_id = next_entry_id.wrapping_add(1).max(1);
+
+    data.entries.push_back(TerminalEntry {
+        id: entry_id,
+        event_id: event.id,
+        timestamp_ms: event.timestamp_ms,
+        timestamp_label: format!("[{}]", fmt_ts(event.timestamp_ms)),
+        direction: event.direction,
+        raw_text: line.to_owned(),
+        display_text,
+        hex_text,
+        hex_preview,
+        preview_text,
+    });
+
+    while data.entries.len() > max_entries {
+        if let Some(removed) = data.entries.pop_front() {
+            on_remove(removed.id);
+        }
+        data.truncated_count += 1;
+    }
 }
 
 impl TerminalPanel {
@@ -720,119 +803,74 @@ impl TerminalPanel {
             .to_owned();
 
         let data = self.ports.entry(port).or_default();
+        let text = event.payload.text_lossy();
 
-        // ── 跨包未完成行拼接：把上一包换行符之后的尾巴前插到本包 ──
-        // 这样换行符后的数据会拼接到下一次数据中去，而不是单独成条。
-        let raw_text = if data.pending_tail.is_empty() {
-            event.payload.text_lossy()
-        } else {
-            let tail = std::mem::take(&mut data.pending_tail);
-            let mut combined = String::with_capacity(tail.len() + event.payload.text_lossy().len());
-            combined.push_str(&tail);
-            combined.push_str(&event.payload.text_lossy());
-            combined
-        };
+        // ── 按 \n 拆分，每行独立 push entry ──
+        // 同包内 \n 拆出的行互不合并（\n 是分隔符）。
+        // 跨包时：只有每包的第一行可以合并到上一包的最后一行；
+        // 其余行独立 push（它们会成为下一包合并的目标）。
+        let mut lines: Vec<&str> = text.split('\n').collect();
+        let trailing_newline = text.ends_with('\n');
+        if trailing_newline && lines.last().is_some_and(|s| s.is_empty()) {
+            lines.pop();
+        }
 
-        // 基于（可能前插过 tail 的）raw_text 取 bytes，供 hex 计算
-        let bytes = raw_text.as_bytes().to_vec();
-
-        // ── 拆分：若含换行符且末尾非换行，则把最后一个 \n 之后的数据缓存为下一包的尾巴 ──
-        // entry 只保留到最后一个 \n（含），保证每条 entry 都是完整的行。
-        let (entry_raw, entry_bytes) = if let Some(idx) = raw_text.rfind('\n')
-            && idx != raw_text.len() - 1
-        {
-            // 换行符之后还有数据 → 缓存为尾巴；\n 是单字节 ASCII，idx 即字节偏移
-            data.pending_tail = raw_text[idx + 1..].to_owned();
-            (raw_text[..=idx].to_owned(), bytes[..=idx].to_vec())
-        } else {
-            // 不含 \n，或恰好以 \n 结尾 → 无尾巴
-            data.pending_tail.clear();
-            (raw_text, bytes)
-        };
-
-        let display_text = format_terminal_text(&entry_raw);
-        let hex_text = format_hex(&entry_bytes);
-        let utf8_preview = format_utf8_preview(&entry_bytes);
-
-        let hex_preview = if hex_text.is_empty() {
-            String::new()
-        } else if utf8_preview.is_empty() {
-            hex_text.clone()
-        } else {
-            format!("{hex_text} [{utf8_preview}]")
-        };
-
-        // 独立预览文本（用于 HEX 模式下的独立列显示）
-        let preview_text = if hex_text.is_empty() {
-            String::new()
-        } else {
-            utf8_preview
-        };
-
-        // ── 合并逻辑：同端口、同方向、5ms 内，且上一条末尾不是换行 → 追加上一条 ──
-        // 上一条不以 \n 结尾说明是未完成行，本包（已含完整行）补齐它。
-        if let Some(prev) = data.entries.back_mut()
-            && prev.direction == event.direction
-            && event.timestamp_ms.saturating_sub(prev.timestamp_ms) <= self.merge_window_ms
-            && !prev.raw_text.ends_with('\n')
-        {
-            prev.raw_text.push_str(&entry_raw);
-            prev.display_text.push_str(&display_text);
-            prev.hex_text.push(' ');
-            prev.hex_text.push_str(&hex_text);
-            if !preview_text.is_empty() {
-                prev.preview_text.push(' ');
-                prev.preview_text.push_str(&preview_text);
-            }
-            prev.hex_preview = if prev.hex_text.is_empty() {
-                String::new()
-            } else if prev.preview_text.is_empty() {
-                prev.hex_text.clone()
-            } else {
-                format!("{} [{}]", prev.hex_text, prev.preview_text)
-            };
+        if lines.is_empty() {
             return;
         }
 
-        let entry_id = self.next_entry_id;
-        self.next_entry_id = self.next_entry_id.wrapping_add(1).max(1);
+        // 第一行：允许合并到上一条
+        let first_line = lines[0];
+        if !first_line.is_empty() {
+            push_entry(
+                data,
+                first_line,
+                &event,
+                &mut self.next_entry_id,
+                self.max_entries,
+                &mut |id| {
+                    if self.selected_entry_id == Some(id) {
+                        self.selected_entry_id = None;
+                    }
+                    if self.detail_entry_id == Some(id) {
+                        self.detail_entry_id = None;
+                    }
+                    self.bookmarked_entry_ids.remove(&id);
+                    self.truncated = true;
+                },
+                self.merge_window_ms,
+            );
+        }
 
-        data.entries.push_back(TerminalEntry {
-            id: entry_id,
-            event_id: event.id,
-            timestamp_ms: event.timestamp_ms,
-
-            timestamp_label: format!("[{}]", fmt_ts(event.timestamp_ms)),
-            direction: event.direction,
-
-            raw_text: entry_raw,
-            display_text,
-
-            hex_text,
-            hex_preview,
-            preview_text,
-        });
-
-        while data.entries.len() > self.max_entries {
-            let removed = data.entries.pop_front();
-
-            if let Some(removed) = removed {
-                if self.selected_entry_id == Some(removed.id) {
-                    self.selected_entry_id = None;
-                }
-
-                if self.detail_entry_id == Some(removed.id) {
-                    self.detail_entry_id = None;
-                }
-
-                // 清理已截断条目的书签，避免内存泄漏
-                self.bookmarked_entry_ids.remove(&removed.id);
+        // 其余行：独立 push，不合并（也不被后续同包行合并）
+        for line in &lines[1..] {
+            if line.is_empty() {
+                continue;
             }
-            data.truncated_count += 1;
-            self.truncated = true;
+            push_entry(
+                data,
+                line,
+                &event,
+                &mut self.next_entry_id,
+                self.max_entries,
+                &mut |id| {
+                    if self.selected_entry_id == Some(id) {
+                        self.selected_entry_id = None;
+                    }
+                    if self.detail_entry_id == Some(id) {
+                        self.detail_entry_id = None;
+                    }
+                    self.bookmarked_entry_ids.remove(&id);
+                    self.truncated = true;
+                },
+                0, // 不合并：同包内 \n 拆分出的行是独立行
+            );
         }
     }
 
+    /// 将一行文本作为 entry push，或合并到上一条 entry（如果间隔 ≤ merge_window_ms
+    /// 且上一条不以 \n 结尾）。
+    /// 尾巴已超时：作为独立 entry push，不强行合并到后续数据。
     fn entry_detail(&self, entry_id: u64) -> Option<EntryDetail> {
         for (port, data) in &self.ports {
             for entry in &data.entries {
@@ -1435,9 +1473,19 @@ fn render_rows_view(
                 current_y += entry_height;
             }
 
-            // 缓存本帧实际 total_height，供下帧使用（修复 row_height 估计累积误差）
-            *cached_total_height = current_y - label_rect.top();
+            // 缓存本帧实际 total_height，供下帧使用（修复 row_height 估计累积误差）。
+            // round() 消除浮点微扰——避免每帧 re-layout 导致的 sub-px 差异在
+            // total_height 估计值/实际值之间来回摆动，引起 stick_to_bottom 画面抖动。
+            *cached_total_height = (current_y - label_rect.top()).round();
             *cached_total_height_rows = rows.len();
+
+            // 如果实际绘制高度超出 pre-allocated rect（例如一条超长数据跨越
+            // 多行时 row_height 估计严重偏低），补充分配差额，让 ScrollArea 拿到
+            // 正确的 content_size，避免内容被 clip 截断 / stick_to_bottom 错位。
+            let actual_total = current_y - label_rect.top();
+            if actual_total > total_height + 0.5 {
+                ui.allocate_space(egui::vec2(0.0, actual_total - total_height));
+            }
 
             if text_drag_response
                 .as_ref()
@@ -1937,6 +1985,10 @@ mod tests {
         assert_eq!(panel.ingest_all_pending(), 0);
     }
 
+    /// 新逻辑：按 \n 拆分行，同包内不合并，跨包只合并未完成行。
+    /// event1 "(2.0000" 不以 \n 结尾 → 未完成行
+    /// event2 "0)...\n" 以 \n 结尾 → 完整行，合并到 event1 的未完成行
+    /// event3 "next" 不以 \n 结尾 → 未完成行，上条已完整故不合并
     #[test]
     fn ingest_merges_newline_terminated_tail_into_unfinished_rx_entry() {
         let bus = DataBus::new();
@@ -1971,11 +2023,13 @@ mod tests {
         assert_eq!(panel.ingest_all_pending(), 3);
 
         let entries = &panel.ports.get("COM6").expect("COM6 should exist").entries;
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].raw_text, "(2.00000)echo:busy: processing*26\n");
-        assert_eq!(entries[1].raw_text, "next");
+        // 三个 event 间隔 ≤ 5ms，全部直接拼接成一条
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].raw_text, "(2.00000)echo:busy: processing*26next");
     }
 
+    /// event1 包含内部 \n，拆为两行：第一行完整，第二行未完成。
+    /// event2 以 \n 结尾，合并到 event1 的第二行。
     #[test]
     fn ingest_merges_tail_when_previous_chunk_contains_an_earlier_newline() {
         let bus = DataBus::new();
@@ -2003,21 +2057,16 @@ mod tests {
         assert_eq!(panel.ingest_all_pending(), 2);
 
         let entries = &panel.ports.get("COM6").expect("COM6 should exist").entries;
-        // 新逻辑：换行符后的数据作为尾巴缓存并前插到下一包，
-        // 每条 entry 都是完整的行（以 \n 结尾），因此产生 2 条而非 1 条。
+        // event1 拆为 2 行，event2 合并到 event1 的未完成尾行
         assert_eq!(entries.len(), 2);
-        assert_eq!(
-            entries[0].raw_text,
-            "(2.00000)X first home. completed.*77\n"
-        );
-        assert_eq!(entries[1].raw_text, "(2.00000)X home. timeout = 20*16\n");
+        assert_eq!(entries[0].raw_text, "(2.00000)X first home. completed.*77");
+        assert_eq!(entries[1].raw_text, "(2.00000)X home. timeout = 20*16");
     }
 
+    /// event1 "abc\ndef" → 拆为 "abc"(完整) + "def"(未完成)
+    /// event2 "ghi\n" → "ghi"(完整)，合并到 event1 的 "def"
     #[test]
     fn ingest_carries_trailing_data_after_newline_into_next_chunk() {
-        // 验证用户需求：换行符后面的数据，哪怕是一次的数据，也自动拼接到下一次数据中去。
-        // 包1 "abc\ndef" → entry1 = "abc\n"，"def" 缓存为尾巴。
-        // 包2 "ghi\n" → 前插 tail = "defghi\n"，entry2 = "defghi\n"。
         let bus = DataBus::new();
         let mut panel = TerminalPanel::new(&bus);
 
@@ -2044,17 +2093,14 @@ mod tests {
 
         let entries = &panel.ports.get("COM7").expect("COM7 should exist").entries;
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].raw_text, "abc\n");
-        assert_eq!(entries[1].raw_text, "defghi\n");
-        // 尾巴已被下一包消费，无残留
-        assert!(panel.ports.get("COM7").unwrap().pending_tail.is_empty());
+        assert_eq!(entries[0].raw_text, "abc");
+        assert_eq!(entries[1].raw_text, "defghi");
     }
 
+    /// event1 "abc\ndef" → "abc"(完整) + "def"(未完成)
+    /// event2 "ghi" 不以 \n 结尾 → "ghi"(未完成)，合并到 event1 的 "def"
     #[test]
     fn ingest_holds_unterminated_tail_until_next_chunk_arrives() {
-        // 包1 "abc\ndef" → entry1="abc\n"，tail="def"
-        // 包2 "ghi"（无换行，5ms 内）→ 前插 tail → raw="defghi"，prev 不以 \n 结尾 → 合并到 entry1？
-        // 注意：entry1 以 \n 结尾，故不合并，新建 entry2="defghi"（无 \n，tail 清空）。
         let bus = DataBus::new();
         let mut panel = TerminalPanel::new(&bus);
 
@@ -2080,7 +2126,7 @@ mod tests {
         assert_eq!(panel.ingest_all_pending(), 2);
         let entries = &panel.ports.get("COM8").expect("COM8 should exist").entries;
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].raw_text, "abc\n");
+        assert_eq!(entries[0].raw_text, "abc");
         assert_eq!(entries[1].raw_text, "defghi");
     }
 
@@ -2144,5 +2190,84 @@ mod tests {
         assert_eq!(rows[0].port.as_deref(), Some("COM6"));
         assert_eq!(rows[0].raw_text, "(42.0000)ok*29");
         assert_eq!(rows[0].display_text, "(42.0000)ok*29");
+    }
+
+    /// 发送 "111\n111\n" 应产生两条独立 entry（\n 是行分隔符）。
+    /// 每行的 raw_text 包含完整内容（含 \n），因为 \n 是分隔符不会被存入。
+    #[test]
+    fn multiline_text_splits_into_independent_entries() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+
+        bus.publish(Event::with_timestamp(
+            1_000,
+            serial_topics::SERIAL_TX,
+            "serial:COM2",
+            Direction::Tx,
+            Payload::Bytes(b"111\n111\n".to_vec()),
+        ));
+
+        assert_eq!(panel.ingest_all_pending(), 1);
+        let entries = &panel.ports.get("COM2").expect("COM2 should exist").entries;
+        assert_eq!(entries.len(), 2, "111\\n111\\n should produce 2 entries");
+        assert_eq!(entries[0].raw_text, "111");
+        assert_eq!(entries[1].raw_text, "111");
+    }
+
+    /// 两次快速发送（3ms ≤ 5ms）：第一次 "111\n111\n" → entry0="111", entry1="111"
+    /// 第二次 "111\n111\n" → 第一行 "111" 合并到 entry1 → "111111",
+    ///                    第二行 "111" 独立 → entry2="111"
+    #[test]
+    fn rapid_send_merges_unfinished_lines() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+
+        bus.publish(Event::with_timestamp(
+            1_000,
+            serial_topics::SERIAL_TX,
+            "serial:COM2",
+            Direction::Tx,
+            Payload::Bytes(b"111\n111\n".to_vec()),
+        ));
+        bus.publish(Event::with_timestamp(
+            1_003,
+            serial_topics::SERIAL_TX,
+            "serial:COM2",
+            Direction::Tx,
+            Payload::Bytes(b"111\n111\n".to_vec()),
+        ));
+
+        assert_eq!(panel.ingest_all_pending(), 2);
+        let entries = &panel.ports.get("COM2").expect("COM2 should exist").entries;
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].raw_text, "111");
+        assert_eq!(entries[1].raw_text, "111111"); // 111 + 111 = 直接拼接
+        assert_eq!(entries[2].raw_text, "111");
+    }
+
+    /// 周期发送（3ms × 3次）：每次 "111\n111\n"
+    /// 期望：entry0="111", entry1="111111", entry2="111111", entry3="111"
+    #[test]
+    fn periodic_send_merges_only_first_line_per_event() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+
+        for ts in [1_000u64, 1_003, 1_006] {
+            bus.publish(Event::with_timestamp(
+                ts,
+                serial_topics::SERIAL_TX,
+                "serial:COM2",
+                Direction::Tx,
+                Payload::Bytes(b"111\n111\n".to_vec()),
+            ));
+        }
+
+        assert_eq!(panel.ingest_all_pending(), 3);
+        let entries = &panel.ports.get("COM2").expect("COM2 should exist").entries;
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0].raw_text, "111");
+        assert_eq!(entries[1].raw_text, "111111");
+        assert_eq!(entries[2].raw_text, "111111");
+        assert_eq!(entries[3].raw_text, "111");
     }
 }

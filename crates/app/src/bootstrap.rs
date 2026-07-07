@@ -109,7 +109,7 @@ pub fn apply_theme(ctx: &egui::Context) {
     s.spacing.text_edit_width = 220.0;
     s.spacing.indent = 14.0;
     s.spacing.scroll = egui::style::ScrollStyle {
-        bar_width: 6.0,
+        bar_width: 10.0,
         handle_min_length: 30.0,
         ..egui::style::ScrollStyle::solid()
     };
@@ -204,7 +204,9 @@ pub fn apply_theme(ctx: &egui::Context) {
 
     // inactive（按钮、输入框等未交互状态）
     w.inactive.corner_radius = 6.into();
-    w.inactive.bg_fill = theme::BG_TERTIARY;
+    // 滚动条 handle（solid 模式，scroll_area.rs:1457-1466 走 &visuals.widgets.inactive.bg_fill）、
+    // 也作为按钮/输入框等未交互状态的默认填充色。#373C47 中灰对两者都合适。
+    w.inactive.bg_fill = theme::SCROLLBAR;
     w.inactive.weak_bg_fill = theme::BG_INPUT;
     w.inactive.bg_stroke = egui::Stroke::new(1.0, theme::BORDER);
     w.inactive.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_PRIMARY);
