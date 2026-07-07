@@ -52,6 +52,8 @@ pub struct TerminalPanel {
 
     last_scroll_offsets: BTreeMap<String, f32>,
     pending_scroll_to_bottom_keys: BTreeSet<String>,
+    /// 双击搜索匹配行时设置：下帧清除搜索并滚动到该行。
+    pending_navigate_to_id: Option<u64>,
 
     next_entry_id: u64,
     selected_entry_id: Option<u64>,
@@ -151,6 +153,8 @@ struct RenderOutcome {
     inner_rect: egui::Rect,
     content_height: f32,
     offset_y: f32,
+    /// 双击搜索匹配行时设置：该行的 entry id，供调用方清除搜索并跳转。
+    pending_navigate_to_id: Option<u64>,
 }
 
 /// 将一行文本作为 entry push，或合并到上一条 entry（如果间隔 ≤ merge_window_ms
@@ -260,6 +264,7 @@ impl TerminalPanel {
 
             last_scroll_offsets: BTreeMap::new(),
             pending_scroll_to_bottom_keys: BTreeSet::new(),
+            pending_navigate_to_id: None,
 
             next_entry_id: 1,
             selected_entry_id: None,
@@ -629,9 +634,20 @@ impl TerminalPanel {
             self.paused_dropped_count = 0;
         }
 
+        // 跳转到目标 entry 的 row 索引（用于"搜索时双击 → 跳转上下文"）
+        let mut scroll_to_row: Option<usize> = None;
+
+        // 双击搜索结果 → 下一帧清除搜索、关闭自动追踪、显示全部、跳转到对应行
+        if self.pending_navigate_to_id.is_some() && !self.search_text.trim().is_empty() {
+            self.search_text.clear();
+            self.port_filter = None;
+            self.auto_scroll = false;
+        }
+
         let render_outcome = {
             // 预计算搜索查询：大小写敏感时保留原样，否则转小写（避免渲染循环中重复分配）。
             let search_key = self.search_query();
+
             let mut rows: Vec<VisibleRow<'_>> = Vec::new();
 
             for (port, data) in &self.ports {
@@ -669,6 +685,11 @@ impl TerminalPanel {
             // 所以只按 timestamp_ms 或 (timestamp_ms, local_id) 都可能看起来像 COM 分组。
             rows.sort_by_key(|row| row.event_id);
 
+            // 获取下帧跳转目标的 row 索引（现在是完整列表）
+            if let Some(target_id) = self.pending_navigate_to_id.take() {
+                scroll_to_row = rows.iter().position(|r| r.id == target_id);
+            }
+
             let scroll_height = ui.available_height().max(40.0);
             let show_metadata = !self.show_lines;
             // 空状态引导：从未收到任何数据 vs 有数据但被筛选/搜索过滤光。
@@ -682,6 +703,7 @@ impl TerminalPanel {
                 &scroll_key,
                 scroll_height,
                 &rows,
+                scroll_to_row,
                 self.show_hex,
                 self.show_raw,
                 show_metadata,
@@ -702,6 +724,9 @@ impl TerminalPanel {
     }
 
     fn apply_render_outcome(&mut self, scroll_key: &str, outcome: RenderOutcome, ui: &egui::Ui) {
+        if let Some(id) = outcome.pending_navigate_to_id {
+            self.pending_navigate_to_id = Some(id);
+        }
         self.update_auto_scroll(
             ui,
             scroll_key,
@@ -1114,6 +1139,7 @@ fn render_rows_view(
     scroll_key: &str,
     height: f32,
     rows: &[VisibleRow<'_>],
+    scroll_to_row: Option<usize>,
     show_hex: bool,
     show_raw: bool,
     show_timestamp: bool,
@@ -1153,6 +1179,7 @@ fn render_rows_view(
             inner_rect: scroll_output.inner_rect,
             content_height: scroll_output.content_size.y,
             offset_y: scroll_output.state.offset.y,
+            pending_navigate_to_id: None,
         };
     }
 
@@ -1169,6 +1196,8 @@ fn render_rows_view(
     }
 
     const PREVIEW_COL_MIN_WIDTH: f32 = 80.0;
+
+    let mut navigate_id: Option<u64> = None;
 
     let scroll_output = ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -1507,6 +1536,29 @@ fn render_rows_view(
                 &ctx_response,
                 ui.make_persistent_id(("term-frozen-row", scroll_key)),
             );
+            // 双击搜索结果 → 离开搜索进入上下文：设置导航目标让下帧跳转
+            let double_clicked = ctx_response.double_clicked();
+            let mut pending_navigate: Option<u64> = None;
+            if double_clicked {
+                if let Some(idx) = frozen_row_idx.or_else(|| hl.hover_index(ui))
+                    && let Some(row) = rows.get(idx)
+                {
+                    pending_navigate = Some(row.id);
+                }
+            }
+            // 捕获到外层变量
+            if pending_navigate.is_some() {
+                navigate_id = pending_navigate;
+            }
+
+            // 跳转到目标行（搜索时双击 → 离开搜索进入上下文）
+            if let Some(target_row) = scroll_to_row
+                && let Some((y_top, _y_bottom)) = hl.row_y_range(target_row)
+            {
+                let target_rect =
+                    egui::Rect::from_min_size(egui::pos2(0.0, y_top), egui::vec2(1.0, 1.0));
+                ui.scroll_to_rect(target_rect, Some(egui::Align::Center));
+            }
             let hovered_row: Option<(String, String)> = if ctx_response.context_menu_opened()
                 || ctx_response.clicked_by(egui::PointerButton::Secondary)
             {
@@ -1622,6 +1674,7 @@ fn render_rows_view(
         inner_rect: scroll_output.inner_rect,
         content_height: scroll_output.content_size.y,
         offset_y: scroll_output.state.offset.y,
+        pending_navigate_to_id: navigate_id,
     }
 }
 

@@ -129,6 +129,11 @@ impl RowHighlight {
             .position(|(top, bottom)| y >= *top && y < *bottom)
     }
 
+    /// 获取指定行索引的 Y 范围。
+    pub(crate) fn row_y_range(&self, index: usize) -> Option<(f32, f32)> {
+        self.row_y_ranges.get(index).copied()
+    }
+
     /// 根据 Y 坐标查找行；拖拽越过首尾时钳制到第一/最后一行。
     pub(crate) fn row_index_at_y_clamped(&self, y: f32) -> Option<usize> {
         let first = self.row_y_ranges.first()?;

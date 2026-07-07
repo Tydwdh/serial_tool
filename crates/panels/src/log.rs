@@ -30,6 +30,8 @@ pub struct LogPanel {
     pub max_entries: usize,
     last_scroll_offset_y: f32,
     pending_scroll_to_bottom: bool,
+    /// 双击搜索匹配行时设置：下帧清除搜索并跳转到该行。
+    pending_navigate_to_id: Option<u64>,
     /// 搜索文本（默认大小写不敏感，同时匹配 source 和 message）。
     search_text: String,
     /// 搜索是否大小写敏感。
@@ -71,6 +73,7 @@ impl LogPanel {
             max_entries: MAX_LOG_ENTRIES,
             last_scroll_offset_y: 0.0,
             pending_scroll_to_bottom: false,
+            pending_navigate_to_id: None,
             search_text: String::new(),
             search_case_sensitive: false,
             source_filter: None,
@@ -101,6 +104,7 @@ impl LogPanel {
         self.last_scroll_offset_y = 0.0;
         self.auto_scroll = true;
         self.pending_scroll_to_bottom = false;
+        self.pending_navigate_to_id = None;
         self.search_text.clear();
         self.source_filter = None;
         self.selection.clear();
@@ -235,6 +239,13 @@ impl LogPanel {
         ui.separator();
 
         // ── 构建可见行列表 ──
+        // 双击搜索结果 → 下一帧清除搜索、关闭自动追踪、显示全部、跳转到对应行
+        if self.pending_navigate_to_id.is_some() && !self.search_text.trim().is_empty() {
+            self.search_text.clear();
+            self.source_filter = None;
+            self.auto_scroll = false;
+        }
+
         let search_key = if self.search_case_sensitive {
             self.search_text.trim().to_owned()
         } else {
@@ -266,16 +277,29 @@ impl LogPanel {
             })
             .collect();
 
+        // 获取跳转目标的 row 索引
+        let scroll_to_row: Option<usize> = self
+            .pending_navigate_to_id
+            .take()
+            .and_then(|target_id| rows.iter().position(|entry| entry.id == target_id));
+
+        let mut navigate_id: Option<u64> = None;
+
         let outcome = render_log_rows(
             ui,
             &rows,
             !self.entries.is_empty(),
+            scroll_to_row,
+            &mut navigate_id,
             self.auto_scroll,
             force_scroll_to_bottom,
             self.font_size,
             &mut self.selection,
         );
 
+        if navigate_id.is_some() {
+            self.pending_navigate_to_id = navigate_id;
+        }
         self.update_auto_scroll(
             ui,
             outcome.inner_rect,
@@ -390,6 +414,8 @@ fn render_log_rows(
     ui: &mut egui::Ui,
     rows: &[&LogEntry],
     has_any_entries: bool,
+    scroll_to_row: Option<usize>,
+    pending_navigate: &mut Option<u64>,
     stick_to_bottom: bool,
     force_scroll_to_bottom: bool,
     font_size: f32,
@@ -673,6 +699,23 @@ fn render_log_rows(
                 &ctx_response,
                 ui.make_persistent_id(("log-frozen-row", LOG_SCROLL_ID)),
             );
+            // 双击搜索结果 → 离开搜索进入上下文
+            let double_clicked = ctx_response.double_clicked();
+            if double_clicked {
+                if let Some(idx) = frozen_row_idx.or_else(|| hl.hover_index(ui))
+                    && let Some(entry) = rows.get(idx)
+                {
+                    *pending_navigate = Some(entry.id);
+                }
+            }
+            // 跳转到目标行
+            if let Some(target_row) = scroll_to_row
+                && let Some((y_top, _)) = hl.row_y_range(target_row)
+            {
+                let target_rect =
+                    egui::Rect::from_min_size(egui::pos2(0.0, y_top), egui::vec2(1.0, 1.0));
+                ui.scroll_to_rect(target_rect, Some(egui::Align::Center));
+            }
             let hovered_row = if ctx_response.context_menu_opened()
                 || ctx_response.clicked_by(egui::PointerButton::Secondary)
             {
