@@ -160,24 +160,15 @@ struct RenderOutcome {
 /// 且上一条不以 \n 结尾）。
 fn push_entry(
     data: &mut PortData,
-    line: &str,
-    ends_with_newline: bool,
+    text: &str,
     event: &Event,
     next_entry_id: &mut u64,
     max_entries: usize,
     on_remove: &mut dyn FnMut(u64),
     merge_window_ms: u64,
 ) {
-    let raw_text = if ends_with_newline {
-        let mut s = String::with_capacity(line.len() + 1);
-        s.push_str(line);
-        s.push('\n');
-        s
-    } else {
-        line.to_owned()
-    };
-    let bytes = raw_text.as_bytes().to_vec();
-    let display_text = format_terminal_text(&raw_text);
+    let bytes = text.as_bytes().to_vec();
+    let display_text = format_terminal_text(text);
     let hex_text = format_hex(&bytes);
     let utf8_preview = format_utf8_preview(&bytes);
     let hex_preview = if hex_text.is_empty() {
@@ -193,13 +184,14 @@ fn push_entry(
         utf8_preview
     };
 
-    // ── 合并：同方向、不同 event、在阈值内 → 直接拼接 ──
+    // ── 合并：同方向、不同 event、在阈值内、上一条不是完整行 → 直接拼接 ──
     if let Some(prev) = data.entries.back_mut()
         && prev.direction == event.direction
         && prev.event_id != event.id
         && event.timestamp_ms.saturating_sub(prev.timestamp_ms) <= merge_window_ms
+        && !prev.raw_text.ends_with('\n')
     {
-        prev.raw_text.push_str(&raw_text);
+        prev.raw_text.push_str(text);
         prev.display_text.push_str(&display_text);
         prev.hex_text.push(' ');
         prev.hex_text.push_str(&hex_text);
@@ -227,7 +219,7 @@ fn push_entry(
         timestamp_ms: event.timestamp_ms,
         timestamp_label: format!("[{}]", fmt_ts(event.timestamp_ms)),
         direction: event.direction,
-        raw_text,
+        raw_text: text.to_owned(),
         display_text,
         hex_text,
         hex_preview,
@@ -833,6 +825,10 @@ impl TerminalPanel {
         count
     }
 
+    /// 按最后一个 \n 拆分包数据：
+    /// - 如果 text 以 \n 结尾 → 一整条 entry（所有 \n 保留在 raw_text）
+    /// - 如果 text 不以 \n 结尾 → 最后一个 \n 之前的内容作为第一条 entry
+    ///   （可被跨包合并），之后的内容作为第二条 entry（跨包合并的目标）
     fn push_event(&mut self, event: Event) {
         let port = event
             .metadata
@@ -844,31 +840,20 @@ impl TerminalPanel {
 
         let data = self.ports.entry(port).or_default();
         let text = event.payload.text_lossy();
-
-        // ── 按 \n 拆分，每行独立 push entry ──
-        // 同包内 \n 拆出的行互不合并（\n 是分隔符）。
-        // 跨包时：只有每包的第一行可以合并到上一包的最后一行；
-        // 其余行独立 push（它们会成为下一包合并的目标）。
-        let mut lines: Vec<&str> = text.split('\n').collect();
-        let trailing_newline = text.ends_with('\n');
-        if trailing_newline && lines.last().is_some_and(|s| s.is_empty()) {
-            lines.pop();
-        }
-
-        if lines.is_empty() {
+        if text.is_empty() {
             return;
         }
 
-        let total = lines.len();
-
-        // 第一行：允许合并到上一条。以 \n 结尾（除非这是唯一行且 text 不以 \n 结尾）。
-        let first_line = lines[0];
-        let first_ends_with_nl = trailing_newline || total > 1;
-        if !first_line.is_empty() || first_ends_with_nl {
+        // 按最后一个 \n 拆分
+        if let Some(idx) = text.rfind('\n')
+            && idx != text.len() - 1
+        {
+            // 最后一个 \n 之后有内容 → 拆成两条
+            // 第一条（含 \n）：可以合并到上一条 entry
+            let first = &text[..=idx]; // 包含 \n
             push_entry(
                 data,
-                first_line,
-                first_ends_with_nl,
+                first,
                 &event,
                 &mut self.next_entry_id,
                 self.max_entries,
@@ -884,20 +869,33 @@ impl TerminalPanel {
                 },
                 self.merge_window_ms,
             );
-        }
-
-        // 其余行：独立 push，不合并。
-        // 每行都以 \n 结尾（被 \n 分隔的行是完整行），除非是最后一行且 text 不以 \n 结尾。
-        for (i, line) in lines[1..].iter().enumerate() {
-            let is_last = i + 1 == total - 1; // i 是 lines[1..] 的索引
-            let ends_with_nl = !is_last || trailing_newline;
-            if line.is_empty() && !ends_with_nl {
-                continue;
+            // 第二条（无 \n 结尾）：独立 push，不合并
+            let second = &text[idx + 1..];
+            if !second.is_empty() {
+                push_entry(
+                    data,
+                    second,
+                    &event,
+                    &mut self.next_entry_id,
+                    self.max_entries,
+                    &mut |id| {
+                        if self.selected_entry_id == Some(id) {
+                            self.selected_entry_id = None;
+                        }
+                        if self.detail_entry_id == Some(id) {
+                            self.detail_entry_id = None;
+                        }
+                        self.bookmarked_entry_ids.remove(&id);
+                        self.truncated = true;
+                    },
+                    0, // 不合并：同包内拆出的未完成行
+                );
             }
+        } else {
+            // 不含 \n 或以 \n 结尾 → 一整条 entry
             push_entry(
                 data,
-                line,
-                ends_with_nl,
+                &text,
                 &event,
                 &mut self.next_entry_id,
                 self.max_entries,
@@ -911,7 +909,7 @@ impl TerminalPanel {
                     self.bookmarked_entry_ids.remove(&id);
                     self.truncated = true;
                 },
-                0, // 不合并：同包内 \n 拆分出的行是独立行
+                self.merge_window_ms,
             );
         }
     }
@@ -1993,9 +1991,11 @@ mod tests {
         assert_eq!(panel.ingest_all_pending(), 3);
 
         let entries = &panel.ports.get("COM6").expect("COM6 should exist").entries;
-        // 三个 event 间隔 ≤ 5ms，全部直接拼接成一条
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].raw_text, "(2.00000)echo:busy: processing*26next");
+        // 三条数据间隔 ≤ 5ms，全部直接拼接；
+        // 第二条以 \n 结尾（保留在 raw_text），第三条 "next" 无 \n → 合并成一整行。
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].raw_text, "(2.00000)echo:busy: processing*26\n");
+        assert_eq!(entries[1].raw_text, "next");
     }
 
     /// event1 包含内部 \n，拆为两行：第一行完整，第二行未完成。
@@ -2029,8 +2029,11 @@ mod tests {
         let entries = &panel.ports.get("COM6").expect("COM6 should exist").entries;
         // event1 拆为 2 行，event2 合并到 event1 的未完成尾行
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].raw_text, "(2.00000)X first home. completed.*77");
-        assert_eq!(entries[1].raw_text, "(2.00000)X home. timeout = 20*16");
+        assert_eq!(
+            entries[0].raw_text,
+            "(2.00000)X first home. completed.*77\n"
+        );
+        assert_eq!(entries[1].raw_text, "(2.00000)X home. timeout = 20*16\n");
     }
 
     /// event1 "abc\ndef" → 拆为 "abc"(完整) + "def"(未完成)
@@ -2063,8 +2066,8 @@ mod tests {
 
         let entries = &panel.ports.get("COM7").expect("COM7 should exist").entries;
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].raw_text, "abc");
-        assert_eq!(entries[1].raw_text, "defghi");
+        assert_eq!(entries[0].raw_text, "abc\n");
+        assert_eq!(entries[1].raw_text, "defghi\n");
     }
 
     /// event1 "abc\ndef" → "abc"(完整) + "def"(未完成)
@@ -2096,7 +2099,7 @@ mod tests {
         assert_eq!(panel.ingest_all_pending(), 2);
         let entries = &panel.ports.get("COM8").expect("COM8 should exist").entries;
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].raw_text, "abc");
+        assert_eq!(entries[0].raw_text, "abc\n");
         assert_eq!(entries[1].raw_text, "defghi");
     }
 
@@ -2129,41 +2132,28 @@ mod tests {
 
     #[test]
     fn entries_map_one_to_one_visible_rows() {
-        let first = TerminalEntry {
+        // push_event 已将间隔 ≤5ms 的未完成行合并，entry 已是完整行 → 1:1 映射
+        let entry = TerminalEntry {
             id: 1,
             event_id: 1,
             timestamp_ms: 0,
             timestamp_label: "[12:00:00.000]".to_owned(),
             direction: Direction::Rx,
-            raw_text: "(42".to_owned(),
-            display_text: "(42".to_owned(),
-            hex_text: format_hex(b"(42"),
+            raw_text: "(42.0000)ok*29\n".to_owned(),
+            display_text: "(42.0000)ok*29\n".to_owned(),
+            hex_text: format_hex(b"(42.0000)ok*29\n"),
             hex_preview: String::new(),
-            preview_text: "(42".to_owned(),
-        };
-        let second = TerminalEntry {
-            id: 2,
-            event_id: 2,
-            timestamp_ms: 1,
-            timestamp_label: "[12:00:00.001]".to_owned(),
-            direction: Direction::Rx,
-            raw_text: ".0000)ok*29\n".to_owned(),
-            display_text: ".0000)ok*29\n".to_owned(),
-            hex_text: format_hex(b".0000)ok*29\n"),
-            hex_preview: String::new(),
-            preview_text: ".0000)ok*29\n".to_owned(),
+            preview_text: "(42.0000)ok*29\n".to_owned(),
         };
 
-        // push_event 已按 \n 拆分，entry 1:1 映射为 VisibleRow
-        let rows = build_visible_rows_for_port(Some("COM6"), [&first, &second]);
+        let rows = build_visible_rows_for_port(Some("COM6"), [&entry]);
 
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].port.as_deref(), Some("COM6"));
-        assert_eq!(rows[0].raw_text, "(42");
-        assert_eq!(rows[1].raw_text, ".0000)ok*29\n");
+        assert_eq!(rows[0].raw_text, "(42.0000)ok*29\n");
     }
 
-    /// 发送 "111\n111\n" 应产生两条独立 entry（\n 是行分隔符，保留在 raw_text 中）。
+    /// 发送 "111\n111\n"（以 \n 结尾）→ 一整条 entry，同包内不拆分。
     #[test]
     fn multiline_text_splits_into_independent_entries() {
         let bus = DataBus::new();
@@ -2179,9 +2169,12 @@ mod tests {
 
         assert_eq!(panel.ingest_all_pending(), 1);
         let entries = &panel.ports.get("COM2").expect("COM2 should exist").entries;
-        assert_eq!(entries.len(), 2, "111\\n111\\n should produce 2 entries");
-        assert_eq!(entries[0].raw_text, "111\n");
-        assert_eq!(entries[1].raw_text, "111\n");
+        assert_eq!(
+            entries.len(),
+            1,
+            "111\\n111\\n should produce 1 entry (trailing \\n)"
+        );
+        assert_eq!(entries[0].raw_text, "111\n111\n");
     }
 
     /// 发送 "1\n" → raw_text="1\n"（保留 \n 供原始模式转义）
@@ -2204,9 +2197,8 @@ mod tests {
         assert_eq!(entries[0].raw_text, "1\n");
     }
 
-    /// 两次快速发送（3ms ≤ 5ms）：第一次 "111\n111\n" → entry0="111", entry1="111"
-    /// 第二次 "111\n111\n" → 第一行 "111" 合并到 entry1 → "111111",
-    ///                    第二行 "111" 独立 → entry2="111"
+    /// 两次快速发送（3ms ≤ 5ms）：第一次 "111\n111\n"（以 \n 结尾）→ 1 条
+    /// 第二次 "111\n111\n"（3ms）→ 合并到上一条 → 1 条
     #[test]
     fn rapid_send_merges_unfinished_lines() {
         let bus = DataBus::new();
@@ -2229,14 +2221,12 @@ mod tests {
 
         assert_eq!(panel.ingest_all_pending(), 2);
         let entries = &panel.ports.get("COM2").expect("COM2 should exist").entries;
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].raw_text, "111");
-        assert_eq!(entries[1].raw_text, "111111"); // 111 + 111 = 直接拼接
-        assert_eq!(entries[2].raw_text, "111");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].raw_text, "111\n111\n");
+        assert_eq!(entries[1].raw_text, "111\n111\n");
     }
 
-    /// 周期发送（3ms × 3次）：每次 "111\n111\n"
-    /// 期望：entry0="111", entry1="111111", entry2="111111", entry3="111"
+    /// 周期发送（3ms × 3次）：每次 "111\n111\n"，全部合并
     #[test]
     fn periodic_send_merges_only_first_line_per_event() {
         let bus = DataBus::new();
@@ -2254,11 +2244,55 @@ mod tests {
 
         assert_eq!(panel.ingest_all_pending(), 3);
         let entries = &panel.ports.get("COM2").expect("COM2 should exist").entries;
-        assert_eq!(entries.len(), 4);
-        assert_eq!(entries[0].raw_text, "111");
-        assert_eq!(entries[1].raw_text, "111111");
-        assert_eq!(entries[2].raw_text, "111111");
-        assert_eq!(entries[3].raw_text, "111");
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].raw_text, "111\n111\n");
+        assert_eq!(entries[1].raw_text, "111\n111\n");
+        assert_eq!(entries[2].raw_text, "111\n111\n");
+    }
+
+    /// 发送三行 "111\n111\n111\n"（以 \n 结尾）：
+    /// 最后一个 \n 在末尾 → 没有未完成行 → 一整条 entry。
+    #[test]
+    fn three_line_send_all_complete() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+
+        bus.publish(Event::with_timestamp(
+            1_000,
+            serial_topics::SERIAL_TX,
+            "serial:COM2",
+            Direction::Tx,
+            Payload::Bytes(b"111\n111\n111\n".to_vec()),
+        ));
+
+        assert_eq!(panel.ingest_all_pending(), 1);
+        let entries = &panel.ports.get("COM2").expect("COM2 should exist").entries;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].raw_text, "111\n111\n111\n");
+    }
+
+    /// 发送三行 "111\n111\n111"（末尾没有 \n）：
+    /// 最后一个 \n 不在末尾 → 拆成两条 entry。
+    /// entry0 包含最后一个 \n 之前的所有内容（含 \n）："111\n111\n"
+    /// entry1 是最后一个 \n 之后的内容（无 \n 结尾）："111"
+    #[test]
+    fn three_line_send_last_incomplete() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+
+        bus.publish(Event::with_timestamp(
+            1_000,
+            serial_topics::SERIAL_TX,
+            "serial:COM2",
+            Direction::Tx,
+            Payload::Bytes(b"111\n111\n111".to_vec()),
+        ));
+
+        assert_eq!(panel.ingest_all_pending(), 1);
+        let entries = &panel.ports.get("COM2").expect("COM2 should exist").entries;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].raw_text, "111\n111\n");
+        assert_eq!(entries[1].raw_text, "111");
     }
 
     /// 搜索应该能过滤出包含关键字的 entry。
