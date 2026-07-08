@@ -373,7 +373,13 @@ impl TerminalPanel {
             );
             if !search_key.is_empty() {
                 port_rows.retain(|row| {
-                    row_matches_search(&port_key, row, &search_key, self.search_case_sensitive)
+                    row_matches_search(
+                        row,
+                        &search_key,
+                        self.search_case_sensitive,
+                        self.show_hex,
+                        self.show_raw,
+                    )
                 });
             }
             rows.extend(port_rows);
@@ -671,7 +677,13 @@ impl TerminalPanel {
                 );
                 if !search_key.is_empty() {
                     port_rows.retain(|row| {
-                        row_matches_search(&port_key, row, &search_key, self.search_case_sensitive)
+                        row_matches_search(
+                            row,
+                            &search_key,
+                            self.search_case_sensitive,
+                            self.show_hex,
+                            self.show_raw,
+                        )
                     });
                 }
                 rows.extend(port_rows);
@@ -1842,10 +1854,11 @@ fn build_selected_text<'a>(
 }
 
 fn row_matches_search(
-    _port_key: &str,
     row: &VisibleRow<'_>,
     search_key: &str,
     case_sensitive: bool,
+    show_hex: bool,
+    show_raw: bool,
 ) -> bool {
     if search_key.is_empty() {
         return true;
@@ -1857,10 +1870,17 @@ fn row_matches_search(
             haystack.to_ascii_lowercase().contains(search_key)
         }
     };
-    // 不搜索 port_key（端口名如 "COM2" 含数字会误匹配）
-    // 也不搜索 hex_text（HEX 如 "32" 含 "2" 也会误匹配）
-    // 端口过滤用专门的 port_filter 下拉框。
-    contains(row.raw_text.as_ref()) || contains(row.display_text.as_ref())
+    // 根据显示模式搜索对应字段：
+    // - HEX 模式：搜索 hex_text
+    // - 原始模式：搜索 raw_text
+    // - 文本模式：搜索 raw_text 和 display_text
+    if show_hex {
+        contains(row.hex_text.as_ref())
+    } else if show_raw {
+        contains(row.raw_text.as_ref())
+    } else {
+        contains(row.raw_text.as_ref()) || contains(row.display_text.as_ref())
+    }
 }
 
 fn csv_cell(s: &str) -> String {
