@@ -161,14 +161,23 @@ struct RenderOutcome {
 fn push_entry(
     data: &mut PortData,
     line: &str,
+    ends_with_newline: bool,
     event: &Event,
     next_entry_id: &mut u64,
     max_entries: usize,
     on_remove: &mut dyn FnMut(u64),
     merge_window_ms: u64,
 ) {
-    let bytes = line.as_bytes().to_vec();
-    let display_text = format_terminal_text(line);
+    let raw_text = if ends_with_newline {
+        let mut s = String::with_capacity(line.len() + 1);
+        s.push_str(line);
+        s.push('\n');
+        s
+    } else {
+        line.to_owned()
+    };
+    let bytes = raw_text.as_bytes().to_vec();
+    let display_text = format_terminal_text(&raw_text);
     let hex_text = format_hex(&bytes);
     let utf8_preview = format_utf8_preview(&bytes);
     let hex_preview = if hex_text.is_empty() {
@@ -184,13 +193,13 @@ fn push_entry(
         utf8_preview
     };
 
-    // ── 合并：同方向、不同 event、在阈值内、上一条是未完成行 → 追加 ──
+    // ── 合并：同方向、不同 event、在阈值内 → 直接拼接 ──
     if let Some(prev) = data.entries.back_mut()
         && prev.direction == event.direction
         && prev.event_id != event.id
         && event.timestamp_ms.saturating_sub(prev.timestamp_ms) <= merge_window_ms
     {
-        prev.raw_text.push_str(line);
+        prev.raw_text.push_str(&raw_text);
         prev.display_text.push_str(&display_text);
         prev.hex_text.push(' ');
         prev.hex_text.push_str(&hex_text);
@@ -218,7 +227,7 @@ fn push_entry(
         timestamp_ms: event.timestamp_ms,
         timestamp_label: format!("[{}]", fmt_ts(event.timestamp_ms)),
         direction: event.direction,
-        raw_text: line.to_owned(),
+        raw_text,
         display_text,
         hex_text,
         hex_preview,
@@ -850,12 +859,16 @@ impl TerminalPanel {
             return;
         }
 
-        // 第一行：允许合并到上一条
+        let total = lines.len();
+
+        // 第一行：允许合并到上一条。以 \n 结尾（除非这是唯一行且 text 不以 \n 结尾）。
         let first_line = lines[0];
-        if !first_line.is_empty() {
+        let first_ends_with_nl = trailing_newline || total > 1;
+        if !first_line.is_empty() || first_ends_with_nl {
             push_entry(
                 data,
                 first_line,
+                first_ends_with_nl,
                 &event,
                 &mut self.next_entry_id,
                 self.max_entries,
@@ -873,14 +886,18 @@ impl TerminalPanel {
             );
         }
 
-        // 其余行：独立 push，不合并（也不被后续同包行合并）
-        for line in &lines[1..] {
-            if line.is_empty() {
+        // 其余行：独立 push，不合并。
+        // 每行都以 \n 结尾（被 \n 分隔的行是完整行），除非是最后一行且 text 不以 \n 结尾。
+        for (i, line) in lines[1..].iter().enumerate() {
+            let is_last = i + 1 == total - 1; // i 是 lines[1..] 的索引
+            let ends_with_nl = !is_last || trailing_newline;
+            if line.is_empty() && !ends_with_nl {
                 continue;
             }
             push_entry(
                 data,
                 line,
+                ends_with_nl,
                 &event,
                 &mut self.next_entry_id,
                 self.max_entries,
@@ -2146,8 +2163,7 @@ mod tests {
         assert_eq!(rows[1].raw_text, ".0000)ok*29\n");
     }
 
-    /// 发送 "111\n111\n" 应产生两条独立 entry（\n 是行分隔符）。
-    /// 每行的 raw_text 包含完整内容（含 \n），因为 \n 是分隔符不会被存入。
+    /// 发送 "111\n111\n" 应产生两条独立 entry（\n 是行分隔符，保留在 raw_text 中）。
     #[test]
     fn multiline_text_splits_into_independent_entries() {
         let bus = DataBus::new();
@@ -2164,8 +2180,28 @@ mod tests {
         assert_eq!(panel.ingest_all_pending(), 1);
         let entries = &panel.ports.get("COM2").expect("COM2 should exist").entries;
         assert_eq!(entries.len(), 2, "111\\n111\\n should produce 2 entries");
-        assert_eq!(entries[0].raw_text, "111");
-        assert_eq!(entries[1].raw_text, "111");
+        assert_eq!(entries[0].raw_text, "111\n");
+        assert_eq!(entries[1].raw_text, "111\n");
+    }
+
+    /// 发送 "1\n" → raw_text="1\n"（保留 \n 供原始模式转义）
+    #[test]
+    fn single_line_preserves_newline_in_raw_text() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+
+        bus.publish(Event::with_timestamp(
+            1_000,
+            serial_topics::SERIAL_TX,
+            "serial:COM2",
+            Direction::Tx,
+            Payload::Bytes(b"1\n".to_vec()),
+        ));
+
+        assert_eq!(panel.ingest_all_pending(), 1);
+        let entries = &panel.ports.get("COM2").expect("COM2 should exist").entries;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].raw_text, "1\n");
     }
 
     /// 两次快速发送（3ms ≤ 5ms）：第一次 "111\n111\n" → entry0="111", entry1="111"
