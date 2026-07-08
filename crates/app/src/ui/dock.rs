@@ -18,6 +18,7 @@ pub(crate) struct DockLayoutRects {
     /// 右侧 resize 拖拽手柄 rect
     pub(crate) right_resize: egui::Rect,
     /// 左侧 activity_bar rect
+    #[allow(dead_code)]
     pub(crate) left_rect: Option<egui::Rect>,
 }
 

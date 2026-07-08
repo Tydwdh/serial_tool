@@ -143,14 +143,14 @@ impl WorkbenchApp {
                     .on_hover_text("拖动调整底部面板高度");
                 paint_dock_resize_handle(ui, paint_rect, response.hovered() || active, false);
 
-                if response.drag_started() {
-                    if let Some(origin) = response.interact_pointer_pos() {
-                        self.dock_drag.resize = Some(DockResizeState {
-                            target: DockResizeTarget::Bottom,
-                            origin,
-                            start_size: self.panels.dock.bottom_size,
-                        });
-                    }
+                if response.drag_started()
+                    && let Some(origin) = response.interact_pointer_pos()
+                {
+                    self.dock_drag.resize = Some(DockResizeState {
+                        target: DockResizeTarget::Bottom,
+                        origin,
+                        start_size: self.panels.dock.bottom_size,
+                    });
                 }
                 if let Some(state) = self.dock_drag.resize
                     && state.target == DockResizeTarget::Bottom
@@ -202,14 +202,14 @@ impl WorkbenchApp {
                     .on_hover_text("拖动调整右侧面板宽度");
                 paint_dock_resize_handle(ui, paint_rect, response.hovered() || active, true);
 
-                if response.drag_started() {
-                    if let Some(origin) = response.interact_pointer_pos() {
-                        self.dock_drag.resize = Some(DockResizeState {
-                            target: DockResizeTarget::Right,
-                            origin,
-                            start_size: self.panels.dock.right_size,
-                        });
-                    }
+                if response.drag_started()
+                    && let Some(origin) = response.interact_pointer_pos()
+                {
+                    self.dock_drag.resize = Some(DockResizeState {
+                        target: DockResizeTarget::Right,
+                        origin,
+                        start_size: self.panels.dock.right_size,
+                    });
                 }
                 if let Some(state) = self.dock_drag.resize
                     && state.target == DockResizeTarget::Right

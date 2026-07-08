@@ -1314,7 +1314,7 @@ fn render_rows_view(
             let hovered_idx = ui
                 .input(|input| input.pointer.hover_pos().map(|pos| pos.y))
                 .and_then(|y| hl.row_index_at_y_clamped(y));
-            let data_pressed = ui.input(|input| {
+            let _data_pressed = ui.input(|input| {
                 input.pointer.button_pressed(egui::PointerButton::Primary)
                     && input
                         .pointer
@@ -1564,12 +1564,11 @@ fn render_rows_view(
             // 双击搜索结果 → 离开搜索进入上下文：设置导航目标让下帧跳转
             let double_clicked = ctx_response.double_clicked();
             let mut pending_navigate: Option<u64> = None;
-            if double_clicked {
-                if let Some(idx) = frozen_row_idx.or_else(|| hl.hover_index(ui))
-                    && let Some(row) = rows.get(idx)
-                {
-                    pending_navigate = Some(row.id);
-                }
+            if double_clicked
+                && let Some(idx) = frozen_row_idx.or_else(|| hl.hover_index(ui))
+                && let Some(row) = rows.get(idx)
+            {
+                pending_navigate = Some(row.id);
             }
             // 捕获到外层变量
             if pending_navigate.is_some() {

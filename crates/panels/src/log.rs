@@ -719,12 +719,11 @@ fn render_log_rows(
             );
             // 双击搜索结果 → 离开搜索进入上下文
             let double_clicked = ctx_response.double_clicked();
-            if double_clicked {
-                if let Some(idx) = frozen_row_idx.or_else(|| hl.hover_index(ui))
-                    && let Some(entry) = rows.get(idx)
-                {
-                    *pending_navigate = Some(entry.id);
-                }
+            if double_clicked
+                && let Some(idx) = frozen_row_idx.or_else(|| hl.hover_index(ui))
+                && let Some(entry) = rows.get(idx)
+            {
+                *pending_navigate = Some(entry.id);
             }
             // 跳转到目标行
             if let Some(target_row) = scroll_to_row
