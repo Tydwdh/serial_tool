@@ -165,6 +165,8 @@ pub struct RowSelection {
     pointer_origin: Option<u64>,
     pointer_active: bool,
     dragging: bool,
+    /// Ctrl+Shift 拖拽时设为 true，走 add_range 而非 select_range。
+    ctrl_shift_drag: bool,
 }
 
 impl RowSelection {
@@ -176,6 +178,7 @@ impl RowSelection {
             pointer_origin: None,
             pointer_active: false,
             dragging: false,
+            ctrl_shift_drag: false,
         }
     }
 
@@ -295,8 +298,19 @@ impl RowSelection {
         self.pointer_active = true;
         self.pointer_origin = Some(key);
         self.dragging = false;
+        self.ctrl_shift_drag = ctrl && shift;
 
-        if ctrl {
+        if ctrl && shift {
+            // Ctrl+Shift：从 anchor 扩展到当前行（不清空已有选中）
+            let anchor_index = self
+                .anchor
+                .and_then(|anchor| self.index_of(anchor))
+                .unwrap_or(index);
+            if self.anchor.is_none() {
+                self.anchor = Some(key);
+            }
+            self.add_range(anchor_index, index);
+        } else if ctrl {
             if !self.selected.insert(key) {
                 self.selected.remove(&key);
             }
@@ -330,8 +344,13 @@ impl RowSelection {
 
         if self.dragging || index != origin_index {
             self.dragging = true;
-            self.anchor = Some(origin);
-            self.select_range(origin_index, index);
+            if self.ctrl_shift_drag {
+                // Ctrl+Shift 拖拽：追加扩展选区
+                self.add_range(origin_index, index);
+            } else {
+                self.anchor = Some(origin);
+                self.select_range(origin_index, index);
+            }
         }
     }
 
@@ -342,6 +361,17 @@ impl RowSelection {
             (second, first)
         };
         self.selected = self.row_keys[lo..=hi].iter().copied().collect();
+    }
+
+    fn add_range(&mut self, first: usize, second: usize) {
+        let (lo, hi) = if first <= second {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        for &key in &self.row_keys[lo..=hi] {
+            self.selected.insert(key);
+        }
     }
 
     fn index_of(&self, key: u64) -> Option<usize> {
