@@ -424,6 +424,7 @@ fn log_table_widths(full_width: f32, desired_label_width: f32) -> LogTableWidths
     LogTableWidths { label, message }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_log_rows(
     ui: &mut egui::Ui,
     rows: &[&LogEntry],
@@ -554,7 +555,6 @@ fn render_log_rows(
                 recorded_y += layout.height;
             }
 
-            // 整行选择只从元数据区起手；消息区完整保留给字符级文本选择。
             let mut ctx_response = ui.interact(
                 label_rect,
                 ui.make_persistent_id(("log-metadata", LOG_SCROLL_ID)),
@@ -664,10 +664,31 @@ fn render_log_rows(
                 if message_width > 0.0 {
                     // galley 从行顶开始绘制（和终端面板一致）
                     let galley_pos = egui::pos2(message_rect.left() + text_padding, current_y);
-                    let row_text_rect = egui::Rect::from_min_size(
+                    // row_text_rect 只覆盖 galley 实际文本区域。点击文本 → egui 字符级拖选；
+                    // 点击文本外的空白 → 整行选中。
+                    let galley_size = layout.message_galley.size();
+                    let row_text_rect = egui::Rect::from_min_size(galley_pos, galley_size);
+                    let msg_row_rect = egui::Rect::from_min_size(
                         egui::pos2(message_rect.left(), current_y),
                         egui::vec2(message_width, entry_height),
                     );
+                    let (primary_pressed, ctrl, shift) = ui.input(|i| {
+                        (
+                            i.pointer.button_pressed(egui::PointerButton::Primary),
+                            i.modifiers.ctrl || i.modifiers.command,
+                            i.modifiers.shift,
+                        )
+                    });
+                    if primary_pressed
+                        && ui.rect_contains_pointer(msg_row_rect)
+                        && !ui.rect_contains_pointer(row_text_rect)
+                    {
+                        selection.begin_pointer(row_idx, ctrl, shift);
+                        ui.ctx()
+                            .plugin::<LabelSelectionState>()
+                            .lock()
+                            .clear_selection();
+                    }
                     let row_id = ui.make_persistent_id(("log-msg", entry.id));
                     let response = ui.interact(row_text_rect, row_id, Sense::click_and_drag());
                     text_drag_response = Some(match text_drag_response.take() {
@@ -756,9 +777,11 @@ fn render_log_rows(
             // 框选范围文本（移入 context_menu 闭包内按需构造，避免菜单未打开时每帧构造）
             let selected_indices: Vec<usize> = selection.selected_indices().collect();
 
-            // Ctrl+A 全选：无 TextEdit 聚焦时选中所有可见行
-            if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::A))
-                && !ui.ctx().text_edit_focused()
+            // Ctrl+A 全选：无 TextEdit 聚焦时选中所有可见行。
+            // 用 consume_key 消费事件，阻止 egui 的 LabelSelectionState 再对当前 galley
+            // 做字符级 Ctrl+A 全选（会与整行多选冲突）。
+            if !ui.ctx().text_edit_focused()
+                && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::A))
             {
                 selection.select_all();
             }

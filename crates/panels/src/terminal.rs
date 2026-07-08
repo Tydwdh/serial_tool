@@ -1067,6 +1067,7 @@ fn terminal_row_height_signature(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cached_or_estimated_terminal_row_height(
     row: &VisibleRow<'_>,
     signature: TerminalRowHeightSignature,
@@ -1302,7 +1303,6 @@ fn render_rows_view(
                 recorded_y += *height;
             }
 
-            // 整行选择只从元数据区起手；数据区完整保留给字符级文本选择。
             let mut ctx_response = ui.interact(
                 label_rect,
                 ui.make_persistent_id(("terminal-metadata", scroll_key)),
@@ -1484,10 +1484,34 @@ fn render_rows_view(
                     && hex_width > 0.0
                 {
                     let galley_pos = egui::pos2(hex_rect.left() + text_padding, current_y);
-                    let row_text_rect = egui::Rect::from_min_size(
+                    // row_text_rect 只覆盖 galley 实际文本区域。点击文本 → egui 字符级拖选；
+                    // 点击文本外的空白（文本前 padding、行尾、文本上下）→ 整行选中。
+                    let galley_size = galley.size();
+                    let row_text_rect = egui::Rect::from_min_size(galley_pos, galley_size);
+                    let hex_row_rect = egui::Rect::from_min_size(
                         egui::pos2(hex_rect.left(), current_y),
                         egui::vec2(hex_width, entry_height),
                     );
+                    // 文本外空白处按下 → 整行选中（与点元数据区等效）。
+                    // drag/release 由 handle_input 接管（label_rect 入口），这里只触发 begin。
+                    let (primary_pressed, ctrl, shift) = ui.input(|i| {
+                        (
+                            i.pointer.button_pressed(egui::PointerButton::Primary),
+                            i.modifiers.ctrl || i.modifiers.command,
+                            i.modifiers.shift,
+                        )
+                    });
+                    if primary_pressed
+                        && ui.rect_contains_pointer(hex_row_rect)
+                        && !ui.rect_contains_pointer(row_text_rect)
+                    {
+                        selection.begin_pointer(row_idx, ctrl, shift);
+                        // 整行选中与字符级文本选区互斥：清掉 egui 的 label 文本选区。
+                        ui.ctx()
+                            .plugin::<LabelSelectionState>()
+                            .lock()
+                            .clear_selection();
+                    }
                     // Use a separate id salt for hex column to avoid id collision with preview
                     let row_id = ui.make_persistent_id(("hex", row.id));
                     let response = ui.interact(row_text_rect, row_id, Sense::click_and_drag());
@@ -1606,9 +1630,11 @@ fn render_rows_view(
             // 框选范围文本（移入 context_menu 闭包内按需构造，避免菜单未打开时每帧构造）
             let selected_indices: Vec<usize> = selection.selected_indices().collect();
 
-            // Ctrl+A 全选：无 TextEdit 聚焦时选中所有可见行
-            if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::A))
-                && !ui.ctx().text_edit_focused()
+            // Ctrl+A 全选：无 TextEdit 聚焦时选中所有可见行。
+            // 用 consume_key 消费事件，阻止 egui 的 LabelSelectionState 再对当前 galley
+            // 做字符级 Ctrl+A 全选（会与整行多选冲突）。
+            if !ui.ctx().text_edit_focused()
+                && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::A))
             {
                 selection.select_all();
             }

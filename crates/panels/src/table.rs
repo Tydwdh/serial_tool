@@ -296,7 +296,7 @@ impl RowSelection {
         pressed_inside
     }
 
-    fn begin_pointer(&mut self, index: usize, ctrl: bool, shift: bool) {
+    pub fn begin_pointer(&mut self, index: usize, ctrl: bool, shift: bool) {
         let Some(&key) = self.row_keys.get(index) else {
             return;
         };
