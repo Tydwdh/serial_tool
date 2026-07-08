@@ -4,6 +4,78 @@ use tool_panels::{DockArea, PanelKind, theme};
 use crate::app::WorkbenchApp;
 use crate::state::StatusLevel;
 
+/// Dock 布局几何信息，由 shell 层统一计算，子面板只在这个范围内绘制。
+/// 所有分隔线、拖拽手柄、内容区域的 rect 都从这里算出来。
+pub(crate) struct DockLayoutRects {
+    /// 底部 dock 面板的完整 rect
+    pub(crate) bottom_rect: egui::Rect,
+    /// 右侧 dock 面板的完整 rect
+    pub(crate) right_rect: egui::Rect,
+    /// 底部 dock 分隔线 rect（排除 activity_bar 和 right dock 重叠）
+    pub(crate) bottom_separator: egui::Rect,
+    /// 底部 resize 拖拽手柄 rect
+    pub(crate) bottom_resize: egui::Rect,
+    /// 右侧 resize 拖拽手柄 rect
+    pub(crate) right_resize: egui::Rect,
+    /// 左侧 activity_bar rect
+    pub(crate) left_rect: Option<egui::Rect>,
+}
+
+impl DockLayoutRects {
+    /// 从 drag state 收集的 panel rect 计算所有布局几何。
+    pub(crate) fn from_drag(drag: &DockDragState) -> Self {
+        let bottom_rect = drag.bottom_rect.unwrap_or(egui::Rect::NOTHING);
+        let right_rect = drag.right_rect.unwrap_or(egui::Rect::NOTHING);
+        let left_rect = drag.left_rect;
+
+        // 底部 dock 分隔线：排除 activity_bar 和 right dock 的重叠区域
+        let bottom_separator = Self::clip_bottom_rect(bottom_rect, left_rect, right_rect);
+        let bottom_resize = Self::bottom_resize_handle(bottom_separator);
+        let right_resize = Self::right_resize_handle(right_rect);
+
+        Self {
+            bottom_rect,
+            right_rect,
+            bottom_separator,
+            bottom_resize,
+            right_resize,
+            left_rect,
+        }
+    }
+
+    /// 底部 rect 裁剪：排除左侧 activity_bar 和右侧 dock 重叠部分
+    fn clip_bottom_rect(
+        bottom: egui::Rect,
+        left: Option<egui::Rect>,
+        right: egui::Rect,
+    ) -> egui::Rect {
+        let mut rect = bottom;
+        if let Some(l) = left {
+            rect.min.x = rect.min.x.max(l.right());
+        }
+        if right != egui::Rect::NOTHING {
+            rect.max.x = rect.max.x.min(right.left());
+        }
+        rect
+    }
+
+    fn bottom_resize_handle(separator: egui::Rect) -> egui::Rect {
+        let half = 6.0; // DOCK_RESIZE_HANDLE_THICKNESS * 0.5
+        egui::Rect::from_min_max(
+            egui::pos2(separator.left(), separator.top() - half),
+            egui::pos2(separator.right(), separator.top() + half),
+        )
+    }
+
+    fn right_resize_handle(right: egui::Rect) -> egui::Rect {
+        let half = 6.0;
+        egui::Rect::from_min_max(
+            egui::pos2(right.left() - half, right.top()),
+            egui::pos2(right.left() + half, right.bottom()),
+        )
+    }
+}
+
 /// 停靠区标签拖拽状态：跨区域移动面板时的临时拖拽数据。
 #[derive(Default)]
 pub(crate) struct DockDragState {
@@ -611,7 +683,7 @@ fn paint_real_dock_hover(ctx: &egui::Context, rect: egui::Rect, label: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::dock_body_viewport;
+    use super::{DockDragState, DockLayoutRects, dock_body_viewport};
     use eframe::egui;
 
     #[test]
@@ -648,5 +720,61 @@ mod tests {
             "fixed dock viewport should block child content feedback: default_h={default_h}, \
              last={last}, max={max_height}"
         );
+    }
+
+    /// DockLayoutRects 的 bottom_separator 不应该越出相邻 dock 边界。
+    #[test]
+    fn bottom_separator_respects_activity_bar_and_right_dock() {
+        let left = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(48.0, 600.0));
+        let right = egui::Rect::from_min_max(egui::pos2(560.0, 0.0), egui::pos2(800.0, 600.0));
+        let bottom = egui::Rect::from_min_max(egui::pos2(0.0, 440.0), egui::pos2(800.0, 600.0));
+
+        let drag = DockDragState {
+            bottom_rect: Some(bottom),
+            right_rect: Some(right),
+            left_rect: Some(left),
+            ..Default::default()
+        };
+
+        let layout = DockLayoutRects::from_drag(&drag);
+
+        // separator 左边界从 activity_bar 右边开始
+        assert!(
+            layout.bottom_separator.left() >= left.right(),
+            "separator left={} should be >= activity_bar right={}",
+            layout.bottom_separator.left(),
+            left.right()
+        );
+        // separator 右边界到 right dock 左边结束
+        assert!(
+            layout.bottom_separator.right() <= right.left(),
+            "separator right={} should be <= right_dock left={}",
+            layout.bottom_separator.right(),
+            right.left()
+        );
+        // resize handle 和 separator 同宽
+        assert_eq!(
+            layout.bottom_resize.width(),
+            layout.bottom_separator.width(),
+            "resize handle width={} should match separator width={}",
+            layout.bottom_resize.width(),
+            layout.bottom_separator.width()
+        );
+    }
+
+    /// 无 activity_bar 和 right dock 时，separator 应等于 bottom rect 全宽。
+    #[test]
+    fn bottom_separator_full_width_without_adjacent_docks() {
+        let bottom = egui::Rect::from_min_max(egui::pos2(0.0, 440.0), egui::pos2(800.0, 600.0));
+
+        let drag = DockDragState {
+            bottom_rect: Some(bottom),
+            ..Default::default()
+        };
+
+        let layout = DockLayoutRects::from_drag(&drag);
+
+        assert_eq!(layout.bottom_separator.width(), bottom.width());
+        assert_eq!(layout.bottom_resize.width(), bottom.width());
     }
 }

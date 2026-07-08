@@ -17,7 +17,6 @@ use eframe::egui;
 use tool_panels::{DockArea, theme};
 
 const RIGHT_DOCK_MIN: f32 = 220.0;
-const DOCK_RESIZE_HANDLE_THICKNESS: f32 = 12.0;
 
 impl WorkbenchApp {
     pub(crate) fn draw_shell(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -86,36 +85,23 @@ impl WorkbenchApp {
                     });
             });
 
+        let layout = dock::DockLayoutRects::from_drag(&self.dock_drag);
         self.paint_dock_drop_overlay(ctx);
-        self.paint_bottom_dock_separator(ctx);
-        self.dock_resize_overlays(ctx);
+        self.paint_bottom_dock_separator(ctx, &layout);
+        self.dock_resize_overlays(ctx, &layout);
     }
 
-    fn dock_resize_overlays(&mut self, ctx: &egui::Context) {
-        if let Some(rect) = self.dock_drag.bottom_rect {
-            self.bottom_dock_resize_handle(ctx, self.bottom_resize_rect(rect));
+    fn dock_resize_overlays(&mut self, ctx: &egui::Context, layout: &dock::DockLayoutRects) {
+        if layout.bottom_rect != egui::Rect::NOTHING {
+            self.bottom_dock_resize_handle(ctx, layout.bottom_resize);
         }
-        if let Some(rect) = self.dock_drag.right_rect {
-            self.right_dock_resize_handle(ctx, rect);
+        if layout.right_rect != egui::Rect::NOTHING {
+            self.right_dock_resize_handle(ctx, layout.right_resize);
         }
     }
 
-    fn bottom_resize_rect(&self, dock_rect: egui::Rect) -> egui::Rect {
-        let mut rect = dock_rect;
-        if let Some(left) = self.dock_drag.left_rect {
-            rect.min.x = rect.min.x.max(left.right());
-        }
-        if let Some(right) = self.dock_drag.right_rect {
-            rect.max.x = rect.max.x.min(right.left());
-        }
-        rect
-    }
-
-    fn paint_bottom_dock_separator(&self, ctx: &egui::Context) {
-        let Some(rect) = self.dock_drag.bottom_rect else {
-            return;
-        };
-        let rect = self.bottom_resize_rect(rect);
+    fn paint_bottom_dock_separator(&self, ctx: &egui::Context, layout: &dock::DockLayoutRects) {
+        let rect = layout.bottom_separator;
         if rect.width() <= 1.0 {
             return;
         }
@@ -133,16 +119,11 @@ impl WorkbenchApp {
         );
     }
 
-    fn bottom_dock_resize_handle(&mut self, ctx: &egui::Context, dock_rect: egui::Rect) {
-        if dock_rect.width() <= 1.0 {
+    fn bottom_dock_resize_handle(&mut self, ctx: &egui::Context, handle_rect: egui::Rect) {
+        if handle_rect.width() <= 1.0 {
             return;
         }
 
-        let half = DOCK_RESIZE_HANDLE_THICKNESS * 0.5;
-        let handle_rect = egui::Rect::from_min_max(
-            egui::pos2(dock_rect.left(), dock_rect.top() - half),
-            egui::pos2(dock_rect.right(), dock_rect.top() + half),
-        );
         let area_id = egui::Id::new("bottom-dock-resize-overlay");
 
         egui::Area::new(area_id)
@@ -197,16 +178,11 @@ impl WorkbenchApp {
             });
     }
 
-    fn right_dock_resize_handle(&mut self, ctx: &egui::Context, dock_rect: egui::Rect) {
-        if dock_rect.height() <= 1.0 {
+    fn right_dock_resize_handle(&mut self, ctx: &egui::Context, handle_rect: egui::Rect) {
+        if handle_rect.height() <= 1.0 {
             return;
         }
 
-        let half = DOCK_RESIZE_HANDLE_THICKNESS * 0.5;
-        let handle_rect = egui::Rect::from_min_max(
-            egui::pos2(dock_rect.left() - half, dock_rect.top()),
-            egui::pos2(dock_rect.left() + half, dock_rect.bottom()),
-        );
         let area_id = egui::Id::new("right-dock-resize-overlay");
 
         egui::Area::new(area_id)
