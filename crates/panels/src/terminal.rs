@@ -25,7 +25,6 @@ pub struct TerminalPanel {
     show_tx: bool,
     show_hex: bool,
     show_raw: bool,
-    show_lines: bool,
     auto_scroll: bool,
     /// 暂停接收：置位后 ingest 直接 drain subscription，不 push 新事件，
     /// 已显示内容冻结。用于高速数据流下停下来仔细看一段数据。
@@ -245,7 +244,6 @@ impl TerminalPanel {
             show_tx: true,
             show_hex: false,
             show_raw: false,
-            show_lines: false,
             auto_scroll: true,
             paused: false,
             paused_dropped_count: 0,
@@ -321,7 +319,6 @@ impl TerminalPanel {
         self.port_filter = None;
         self.bookmarked_entry_ids.clear();
         // 清空后重置为自动滚动，与 LogPanel::clear() 保持一致
-        self.show_lines = false;
         self.show_raw = false;
         self.auto_scroll = true;
         self.selection.clear();
@@ -349,7 +346,7 @@ impl TerminalPanel {
         }
     }
 
-    fn collect_visible_rows(&self, line_mode: bool) -> Vec<VisibleRow<'_>> {
+    fn collect_visible_rows(&self) -> Vec<VisibleRow<'_>> {
         let search_key = self.search_query();
         let mut rows = Vec::new();
         for (port, data) in &self.ports {
@@ -369,7 +366,6 @@ impl TerminalPanel {
                 data.entries
                     .iter()
                     .filter(|entry| entry_visible(entry.direction, self.show_rx, self.show_tx)),
-                line_mode,
             );
             if !search_key.is_empty() {
                 port_rows.retain(|row| {
@@ -391,8 +387,8 @@ impl TerminalPanel {
 
     pub fn export_visible_csv(&self) -> String {
         let show_hex = self.show_hex;
-        let rows = self.collect_visible_rows(self.show_lines);
-        let show_metadata = !self.show_lines;
+        let rows = self.collect_visible_rows();
+        let show_metadata = true;
 
         let mut headers: Vec<&str> = Vec::new();
         if show_metadata {
@@ -433,8 +429,8 @@ impl TerminalPanel {
 
     pub fn export_visible_jsonl(&self) -> String {
         let show_hex = self.show_hex;
-        let rows = self.collect_visible_rows(self.show_lines);
-        let show_metadata = !self.show_lines;
+        let rows = self.collect_visible_rows();
+        let show_metadata = true;
 
         let mut out = String::new();
         for row in rows {
@@ -499,7 +495,6 @@ impl TerminalPanel {
             ui.checkbox(&mut self.show_tx, "TX");
             ui.checkbox(&mut self.show_hex, "HEX");
             ui.checkbox(&mut self.show_raw, "原始");
-            ui.checkbox(&mut self.show_lines, "按行显示");
 
             force_scroll_to_bottom |= crate::theme::auto_scroll_button(ui, &mut self.auto_scroll);
 
@@ -673,7 +668,6 @@ impl TerminalPanel {
                     data.entries
                         .iter()
                         .filter(|entry| entry_visible(entry.direction, self.show_rx, self.show_tx)),
-                    self.show_lines,
                 );
                 if !search_key.is_empty() {
                     port_rows.retain(|row| {
@@ -703,7 +697,7 @@ impl TerminalPanel {
             }
 
             let scroll_height = ui.available_height().max(40.0);
-            let show_metadata = !self.show_lines;
+            let show_metadata = true;
             // 空状态引导：从未收到任何数据 vs 有数据但被筛选/搜索过滤光。
             let empty_hint = if self.ports.is_empty() {
                 "暂无数据 · 选择并打开串口后开始接收"
@@ -1021,128 +1015,14 @@ impl TerminalPanel {
     }
 }
 
-struct LineAccumulator {
-    id: u64,
-    event_id: u64,
-    timestamp_label: String,
-    direction: Direction,
-    raw_text: String,
-}
-
 fn build_visible_rows_for_port<'a>(
     port: Option<&'a str>,
     entries: impl IntoIterator<Item = &'a TerminalEntry>,
-    line_mode: bool,
 ) -> Vec<VisibleRow<'a>> {
-    if !line_mode {
-        return entries
-            .into_iter()
-            .map(|entry| VisibleRow::from_entry(port, entry))
-            .collect();
-    }
-
-    let mut rows = Vec::new();
-    let mut acc: Option<LineAccumulator> = None;
-    let mut line_seq = 0_u64;
-    let owned_port = port.map(str::to_owned);
-
-    for entry in entries {
-        if acc
-            .as_ref()
-            .is_some_and(|current| current.direction != entry.direction)
-        {
-            flush_line_accumulator(&mut rows, &mut acc, &owned_port, &mut line_seq);
-        }
-
-        if acc.is_none() {
-            acc = Some(LineAccumulator {
-                id: entry.id,
-                event_id: entry.event_id,
-                timestamp_label: entry.timestamp_label.clone(),
-                direction: entry.direction,
-                raw_text: String::new(),
-            });
-        }
-
-        let Some(current_acc) = acc.as_mut() else {
-            // acc was just set to Some above; this shouldn't happen.
-            // Log and skip this entry rather than panicking.
-            eprintln!("[tool-panels] WARNING: line accumulator unexpectedly None, skipping entry");
-            continue;
-        };
-        append_entry_to_line_rows(
-            &mut rows,
-            current_acc,
-            &entry.raw_text,
-            &owned_port,
-            &mut line_seq,
-        );
-    }
-
-    flush_line_accumulator(&mut rows, &mut acc, &owned_port, &mut line_seq);
-    rows
-}
-
-fn append_entry_to_line_rows<'a>(
-    rows: &mut Vec<VisibleRow<'a>>,
-    acc: &mut LineAccumulator,
-    mut text: &str,
-    port: &Option<String>,
-    line_seq: &mut u64,
-) {
-    while let Some(pos) = text.find('\n') {
-        acc.raw_text.push_str(&text[..pos]);
-        emit_line_row(rows, acc, port, line_seq);
-        acc.raw_text.clear();
-        text = &text[pos + 1..];
-    }
-    acc.raw_text.push_str(text);
-}
-
-fn flush_line_accumulator<'a>(
-    rows: &mut Vec<VisibleRow<'a>>,
-    acc: &mut Option<LineAccumulator>,
-    port: &Option<String>,
-    line_seq: &mut u64,
-) {
-    let Some(current) = acc.take() else {
-        return;
-    };
-    if current.raw_text.is_empty() {
-        return;
-    }
-    emit_line_row(rows, &current, port, line_seq);
-}
-
-fn emit_line_row<'a>(
-    rows: &mut Vec<VisibleRow<'a>>,
-    acc: &LineAccumulator,
-    port: &Option<String>,
-    line_seq: &mut u64,
-) {
-    let raw_text = acc.raw_text.trim_end_matches('\r').to_owned();
-    let bytes = raw_text.as_bytes();
-    let display_text = format_terminal_text(&raw_text);
-    let hex_text = format_hex(bytes);
-    let preview_text = format_utf8_preview(bytes);
-    let id = acc
-        .id
-        .wrapping_mul(1_000_003)
-        .wrapping_add(*line_seq)
-        .max(1);
-    *line_seq = line_seq.wrapping_add(1);
-
-    rows.push(VisibleRow {
-        id,
-        event_id: acc.event_id,
-        port: port.clone().map(Cow::Owned),
-        timestamp_label: Cow::Owned(acc.timestamp_label.clone()),
-        direction: acc.direction,
-        raw_text: Cow::Owned(raw_text),
-        display_text: Cow::Owned(display_text),
-        hex_text: Cow::Owned(hex_text),
-        preview_text: Cow::Owned(preview_text),
-    });
+    entries
+        .into_iter()
+        .map(|entry| VisibleRow::from_entry(port, entry))
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1798,8 +1678,8 @@ fn visible_row_content(row: &VisibleRow<'_>, show_hex: bool, show_raw: bool) -> 
     }
 
     if show_raw {
-        // 原始模式：保留末尾换行，转义所有 \n 为字面 \n 以便可见
-        return content.replace('\n', "\\n");
+        // 原始模式：转义所有控制字符为可见字面（\n, \r, \t 等）
+        return format_raw_visible(content);
     }
 
     // 普通显示模式：隐藏末尾一个行结束符，内部换行保留
@@ -2218,10 +2098,10 @@ mod tests {
         };
 
         assert_eq!(visible_row_content(&row, false, false), "first\nsecond");
-        // 原始模式：不剥末尾换行，所有 \n 转义为字面 \n（\r 保留）
+        // 原始模式：转义所有控制字符（\r, \n 等）
         assert_eq!(
             visible_row_content(&row, false, true),
-            "first\r\\nsecond\r\\n"
+            "first\\r\\nsecond\\r\\n"
         );
         assert_eq!(
             visible_row_content(&row, true, false),
@@ -2231,7 +2111,7 @@ mod tests {
     }
 
     #[test]
-    fn line_mode_merges_rx_chunks_until_newline() {
+    fn entries_map_one_to_one_visible_rows() {
         let first = TerminalEntry {
             id: 1,
             event_id: 1,
@@ -2257,12 +2137,13 @@ mod tests {
             preview_text: ".0000)ok*29\n".to_owned(),
         };
 
-        let rows = build_visible_rows_for_port(Some("COM6"), [&first, &second], true);
+        // push_event 已按 \n 拆分，entry 1:1 映射为 VisibleRow
+        let rows = build_visible_rows_for_port(Some("COM6"), [&first, &second]);
 
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].port.as_deref(), Some("COM6"));
-        assert_eq!(rows[0].raw_text, "(42.0000)ok*29");
-        assert_eq!(rows[0].display_text, "(42.0000)ok*29");
+        assert_eq!(rows[0].raw_text, "(42");
+        assert_eq!(rows[1].raw_text, ".0000)ok*29\n");
     }
 
     /// 发送 "111\n111\n" 应产生两条独立 entry（\n 是行分隔符）。
@@ -2363,12 +2244,12 @@ mod tests {
         assert_eq!(panel.ingest_all_pending(), 3);
 
         panel.search_text = "2".to_owned();
-        let rows = panel.collect_visible_rows(false);
+        let rows = panel.collect_visible_rows();
         assert_eq!(rows.len(), 1, "search '2' should match exactly 1 entry");
         assert_eq!(rows[0].raw_text, "2");
 
         panel.search_text = "3".to_owned();
-        let rows = panel.collect_visible_rows(false);
+        let rows = panel.collect_visible_rows();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].raw_text, "3");
     }
