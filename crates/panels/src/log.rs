@@ -410,6 +410,20 @@ struct RowLayout {
     height: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LogTableWidths {
+    label: f32,
+    message: f32,
+}
+
+fn log_table_widths(full_width: f32, desired_label_width: f32) -> LogTableWidths {
+    let full_width = full_width.max(0.0);
+    let label = desired_label_width.min(full_width);
+    let message = (full_width - label).max(0.0);
+
+    LogTableWidths { label, message }
+}
+
 fn render_log_rows(
     ui: &mut egui::Ui,
     rows: &[&LogEntry],
@@ -459,19 +473,21 @@ fn render_log_rows(
         .stick_to_bottom(stick_to_bottom)
         .id_salt(LOG_SCROLL_ID)
         .show(ui, |ui| {
-            let full_width = ui.available_width();
+            let full_width = ui.available_width().max(0.0);
             let font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
             let text_color = ui.style().visuals.text_color();
 
             // 标签列总宽度
-            let label_width = row_left_padding
+            let desired_label_width = row_left_padding
                 + time_col_width
                 + col_gap
                 + level_col_width
                 + col_gap
                 + source_col_width
                 + label_to_msg_gap;
-            let message_width = (full_width - label_width).max(40.0);
+            let widths = log_table_widths(full_width, desired_label_width);
+            let label_width = widths.label;
+            let message_width = widths.message;
             let text_padding = 4.0;
             let galley_width = (message_width - text_padding).max(0.0);
 
@@ -625,25 +641,27 @@ fn render_log_rows(
                 x += level_col_width + col_gap;
 
                 // 来源（裁剪）
-                let source_clip = egui::Rect::from_min_max(
-                    egui::pos2(x, current_y),
-                    egui::pos2(
-                        (x + source_col_width).min(label_rect.right()),
-                        current_y + entry_height,
-                    ),
-                );
-                let source_painter = label_painter.with_clip_rect(source_clip);
-                let source_text = crate::compact_middle(&entry.source, SOURCE_TEXT_MAX_CHARS);
-                source_painter.text(
-                    egui::pos2(x, label_y),
-                    egui::Align2::LEFT_CENTER,
-                    source_text,
-                    font_id.clone(),
-                    theme::CYAN,
-                );
+                if x < label_rect.right() {
+                    let source_clip = egui::Rect::from_min_max(
+                        egui::pos2(x, current_y),
+                        egui::pos2(
+                            (x + source_col_width).min(label_rect.right()),
+                            current_y + entry_height,
+                        ),
+                    );
+                    let source_painter = label_painter.with_clip_rect(source_clip);
+                    let source_text = crate::compact_middle(&entry.source, SOURCE_TEXT_MAX_CHARS);
+                    source_painter.text(
+                        egui::pos2(x, label_y),
+                        egui::Align2::LEFT_CENTER,
+                        source_text,
+                        font_id.clone(),
+                        theme::CYAN,
+                    );
+                }
 
                 // --- 可选择的消息文本 ---
-                {
+                if message_width > 0.0 {
                     // galley 从行顶开始绘制（和终端面板一致）
                     let galley_pos = egui::pos2(message_rect.left() + text_padding, current_y);
                     let row_text_rect = egui::Rect::from_min_size(
@@ -1009,6 +1027,19 @@ mod tests {
         panel.source_filter = None;
         let rows: Vec<&LogEntry> = panel.entries.iter().collect();
         assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn table_widths_do_not_exceed_available_width_when_narrow() {
+        let widths = log_table_widths(96.0, 320.0);
+
+        assert_eq!(widths.label, 96.0);
+        assert_eq!(widths.message, 0.0);
+        assert!(widths.label + widths.message <= 96.0);
+
+        let widths = log_table_widths(360.0, 320.0);
+        assert_eq!(widths.message, 40.0);
+        assert!(widths.label + widths.message <= 360.0);
     }
 
     #[test]

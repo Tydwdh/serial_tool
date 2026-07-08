@@ -16,6 +16,22 @@ pub(crate) struct DockDragState {
     /// 本帧各停靠区标签栏中每个标签的屏幕矩形（用于计算插入位置）。
     pub(crate) bottom_tab_rects: Vec<(PanelKind, egui::Rect)>,
     pub(crate) right_tab_rects: Vec<(PanelKind, egui::Rect)>,
+    /// 当前正在拖动的停靠区分隔线。独立于 egui 的 Response::drag_delta，
+    /// 避免 overlay 手柄跟随面板移动时拖拽增量被抵消。
+    pub(crate) resize: Option<DockResizeState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DockResizeTarget {
+    Bottom,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DockResizeState {
+    pub(crate) target: DockResizeTarget,
+    pub(crate) origin: egui::Pos2,
+    pub(crate) start_size: f32,
 }
 
 impl WorkbenchApp {
@@ -39,7 +55,9 @@ impl WorkbenchApp {
             if area == DockArea::Center {
                 self.panels.sync_active_tab_from_center();
             }
-            self.dock_panel_body(ui, area, kind);
+            dock_body_viewport(ui, |ui| {
+                self.dock_panel_body(ui, area, kind);
+            });
         }
     }
     fn dock_tab_bar(&mut self, ui: &mut egui::Ui, area: DockArea, tabs: &[PanelKind]) {
@@ -444,6 +462,27 @@ impl WorkbenchApp {
     }
 }
 
+fn dock_body_viewport(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
+    let available = ui.available_size();
+    if available.x <= 0.0 || available.y <= 0.0 {
+        return;
+    }
+
+    let (rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+    let clip_rect = rect.intersect(ui.clip_rect());
+
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+        |ui| {
+            ui.set_clip_rect(clip_rect);
+            ui.set_max_size(rect.size());
+            add_contents(ui);
+        },
+    );
+}
+
 fn horizontal_insert_index_from_pointer(
     rects: &[(PanelKind, egui::Rect)],
     pos: egui::Pos2,
@@ -568,4 +607,46 @@ fn paint_real_dock_hover(ctx: &egui::Context, rect: egui::Rect, label: &str) {
         egui::Stroke::new(2.0, theme::BLUE),
         egui::StrokeKind::Inside,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dock_body_viewport;
+    use eframe::egui;
+
+    #[test]
+    fn dock_body_viewport_prevents_child_content_from_growing_bottom_panel() {
+        let ctx = egui::Context::default();
+        let default_h = 160.0_f32;
+        let mut panel_heights = Vec::new();
+
+        for _frame in 0..60 {
+            let mut out_rect: Option<egui::Rect> = None;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.set_max_size(egui::vec2(360.0, 600.0));
+                let resp = egui::Panel::bottom("test-dock-body-viewport")
+                    .resizable(false)
+                    .exact_size(default_h)
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| {
+                        dock_body_viewport(ui, |ui| {
+                            for idx in 0..80 {
+                                ui.label(format!("oversized child row {idx}"));
+                            }
+                        });
+                    });
+                out_rect = Some(resp.response.rect);
+            });
+
+            panel_heights.push(out_rect.map(|rect| rect.height()).unwrap_or(0.0));
+        }
+
+        let last = *panel_heights.last().unwrap_or(&0.0);
+        let max_height = panel_heights.iter().copied().fold(0.0, f32::max);
+        assert!(
+            (last - default_h).abs() < 20.0 && max_height < default_h + 20.0,
+            "fixed dock viewport should block child content feedback: default_h={default_h}, \
+             last={last}, max={max_height}"
+        );
+    }
 }

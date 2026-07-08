@@ -12,8 +12,12 @@ mod top_bar;
 
 use crate::app::WorkbenchApp;
 use crate::bootstrap::{ACTIVITY_BAR_WIDTH, BOTTOM_PANEL_MIN};
+use crate::ui::dock::{DockResizeState, DockResizeTarget};
 use eframe::egui;
 use tool_panels::{DockArea, theme};
+
+const RIGHT_DOCK_MIN: f32 = 220.0;
+const DOCK_RESIZE_HANDLE_THICKNESS: f32 = 12.0;
 
 impl WorkbenchApp {
     pub(crate) fn draw_shell(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -47,10 +51,9 @@ impl WorkbenchApp {
             });
 
         if self.panels.dock.right_visible {
-            let shown = egui::Panel::right("right-dock")
-                .resizable(true)
-                .default_size(self.panels.dock.right_size)
-                .min_size(220.0)
+            let shown = egui::Panel::right("right-dock-v2")
+                .resizable(false)
+                .exact_size(self.panels.dock.right_size.max(RIGHT_DOCK_MIN))
                 .frame(egui::Frame::NONE)
                 .show_separator_line(true)
                 .show(ui, |ui| {
@@ -58,22 +61,19 @@ impl WorkbenchApp {
                 });
 
             self.dock_drag.right_rect = Some(shown.response.rect);
-            self.panels.dock.right_size = shown.response.rect.width().max(220.0);
         }
 
         if self.panels.dock.bottom_visible {
-            let shown = egui::Panel::bottom("bottom-dock")
-                .resizable(true)
-                .default_size(self.panels.dock.bottom_size.max(BOTTOM_PANEL_MIN))
-                .min_size(BOTTOM_PANEL_MIN)
+            let shown = egui::Panel::bottom("bottom-dock-v3")
+                .resizable(false)
+                .exact_size(self.panels.dock.bottom_size.max(BOTTOM_PANEL_MIN))
                 .frame(egui::Frame::NONE)
+                .show_separator_line(false)
                 .show(ui, |ui| {
                     self.dock_stack_ui(ui, DockArea::Bottom);
                 });
             self.dock_drag.bottom_rect = Some(shown.response.rect);
         }
-
-        self.paint_dock_drop_overlay(ctx);
 
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(theme::BG_DEEP))
@@ -85,7 +85,195 @@ impl WorkbenchApp {
                         self.dock_stack_ui(ui, DockArea::Center);
                     });
             });
+
+        self.paint_dock_drop_overlay(ctx);
+        self.paint_bottom_dock_separator(ctx);
+        self.dock_resize_overlays(ctx);
     }
+
+    fn dock_resize_overlays(&mut self, ctx: &egui::Context) {
+        if let Some(rect) = self.dock_drag.bottom_rect {
+            self.bottom_dock_resize_handle(ctx, self.bottom_resize_rect(rect));
+        }
+        if let Some(rect) = self.dock_drag.right_rect {
+            self.right_dock_resize_handle(ctx, rect);
+        }
+    }
+
+    fn bottom_resize_rect(&self, dock_rect: egui::Rect) -> egui::Rect {
+        let mut rect = dock_rect;
+        if let Some(left) = self.dock_drag.left_rect {
+            rect.min.x = rect.min.x.max(left.right());
+        }
+        if let Some(right) = self.dock_drag.right_rect {
+            rect.max.x = rect.max.x.min(right.left());
+        }
+        rect
+    }
+
+    fn paint_bottom_dock_separator(&self, ctx: &egui::Context) {
+        let Some(rect) = self.dock_drag.bottom_rect else {
+            return;
+        };
+        let rect = self.bottom_resize_rect(rect);
+        if rect.width() <= 1.0 {
+            return;
+        }
+
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("bottom-dock-separator"),
+        ));
+        painter.line_segment(
+            [
+                egui::pos2(rect.left(), rect.top()),
+                egui::pos2(rect.right(), rect.top()),
+            ],
+            egui::Stroke::new(1.0, theme::SEPARATOR),
+        );
+    }
+
+    fn bottom_dock_resize_handle(&mut self, ctx: &egui::Context, dock_rect: egui::Rect) {
+        if dock_rect.width() <= 1.0 {
+            return;
+        }
+
+        let half = DOCK_RESIZE_HANDLE_THICKNESS * 0.5;
+        let handle_rect = egui::Rect::from_min_max(
+            egui::pos2(dock_rect.left(), dock_rect.top() - half),
+            egui::pos2(dock_rect.right(), dock_rect.top() + half),
+        );
+        let area_id = egui::Id::new("bottom-dock-resize-overlay");
+
+        egui::Area::new(area_id)
+            .order(egui::Order::Foreground)
+            .fixed_pos(handle_rect.min)
+            .movable(false)
+            .show(ctx, |ui| {
+                let (rect, response) =
+                    ui.allocate_exact_size(handle_rect.size(), egui::Sense::drag());
+                let paint_rect = egui::Rect::from_min_size(rect.min, handle_rect.size());
+                let active = self
+                    .dock_drag
+                    .resize
+                    .is_some_and(|state| state.target == DockResizeTarget::Bottom);
+                let response = response
+                    .on_hover_cursor(egui::CursorIcon::ResizeVertical)
+                    .on_hover_text("拖动调整底部面板高度");
+                paint_dock_resize_handle(ui, paint_rect, response.hovered() || active, false);
+
+                if response.drag_started() {
+                    if let Some(origin) = response.interact_pointer_pos() {
+                        self.dock_drag.resize = Some(DockResizeState {
+                            target: DockResizeTarget::Bottom,
+                            origin,
+                            start_size: self.panels.dock.bottom_size,
+                        });
+                    }
+                }
+                if let Some(state) = self.dock_drag.resize
+                    && state.target == DockResizeTarget::Bottom
+                {
+                    let (primary_down, pointer_pos, viewport_h) = ui.ctx().input(|input| {
+                        (
+                            input.pointer.primary_down(),
+                            input.pointer.interact_pos().or(input.pointer.hover_pos()),
+                            input.viewport_rect().height(),
+                        )
+                    });
+                    if primary_down {
+                        if let Some(pos) = pointer_pos {
+                            let max_h = (viewport_h - 120.0).max(BOTTOM_PANEL_MIN);
+                            self.panels.dock.bottom_size = (state.start_size
+                                - (pos.y - state.origin.y))
+                                .clamp(BOTTOM_PANEL_MIN, max_h);
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                            ui.ctx().request_repaint();
+                        }
+                    } else {
+                        self.dock_drag.resize = None;
+                    }
+                }
+            });
+    }
+
+    fn right_dock_resize_handle(&mut self, ctx: &egui::Context, dock_rect: egui::Rect) {
+        if dock_rect.height() <= 1.0 {
+            return;
+        }
+
+        let half = DOCK_RESIZE_HANDLE_THICKNESS * 0.5;
+        let handle_rect = egui::Rect::from_min_max(
+            egui::pos2(dock_rect.left() - half, dock_rect.top()),
+            egui::pos2(dock_rect.left() + half, dock_rect.bottom()),
+        );
+        let area_id = egui::Id::new("right-dock-resize-overlay");
+
+        egui::Area::new(area_id)
+            .order(egui::Order::Foreground)
+            .fixed_pos(handle_rect.min)
+            .movable(false)
+            .show(ctx, |ui| {
+                let (rect, response) =
+                    ui.allocate_exact_size(handle_rect.size(), egui::Sense::drag());
+                let paint_rect = egui::Rect::from_min_size(rect.min, handle_rect.size());
+                let active = self
+                    .dock_drag
+                    .resize
+                    .is_some_and(|state| state.target == DockResizeTarget::Right);
+                let response = response
+                    .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+                    .on_hover_text("拖动调整右侧面板宽度");
+                paint_dock_resize_handle(ui, paint_rect, response.hovered() || active, true);
+
+                if response.drag_started() {
+                    if let Some(origin) = response.interact_pointer_pos() {
+                        self.dock_drag.resize = Some(DockResizeState {
+                            target: DockResizeTarget::Right,
+                            origin,
+                            start_size: self.panels.dock.right_size,
+                        });
+                    }
+                }
+                if let Some(state) = self.dock_drag.resize
+                    && state.target == DockResizeTarget::Right
+                {
+                    let (primary_down, pointer_pos, viewport_w) = ui.ctx().input(|input| {
+                        (
+                            input.pointer.primary_down(),
+                            input.pointer.interact_pos().or(input.pointer.hover_pos()),
+                            input.viewport_rect().width(),
+                        )
+                    });
+                    if primary_down {
+                        if let Some(pos) = pointer_pos {
+                            let max_w =
+                                (viewport_w - ACTIVITY_BAR_WIDTH - 240.0).max(RIGHT_DOCK_MIN);
+                            self.panels.dock.right_size = (state.start_size
+                                - (pos.x - state.origin.x))
+                                .clamp(RIGHT_DOCK_MIN, max_w);
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                            ui.ctx().request_repaint();
+                        }
+                    } else {
+                        self.dock_drag.resize = None;
+                    }
+                }
+            });
+    }
+}
+
+fn paint_dock_resize_handle(ui: &egui::Ui, rect: egui::Rect, active: bool, vertical: bool) {
+    if !active {
+        return;
+    }
+
+    let line = if vertical {
+        egui::Rect::from_center_size(rect.center(), egui::vec2(1.0, rect.height()))
+    } else {
+        egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width(), 1.0))
+    };
+    ui.painter().rect_filled(line, 0.0, theme::SEPARATOR_STRONG);
 }
 
 pub(crate) fn baud_combo(ui: &mut egui::Ui, id: &'static str, w: f32, baud: &mut String) {

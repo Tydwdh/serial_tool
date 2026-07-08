@@ -16,6 +16,7 @@ const PORT_COL_WIDTH: f32 = 52.0;
 const DIR_COL_WIDTH: f32 = 28.0;
 const ROW_LEFT_PADDING: f32 = 4.0;
 const COL_GAP: f32 = 3.0;
+const PREVIEW_COL_MIN_WIDTH: f32 = 80.0;
 
 pub struct TerminalPanel {
     subscription: Subscription,
@@ -64,8 +65,9 @@ pub struct TerminalPanel {
     pub merge_window_ms: u64,
     /// 框选状态
     pub selection: RowSelection,
-    /// 缓存的上一帧实际 total_height，避免全量 layout 估算带来的累积误差。
-    /// 只在 rows.len() 变化时按比例调整，resize 宽度不变时不重算。
+    /// 每条 entry 的真实渲染高度缓存，避免多行内容在自动追踪时把底部位置算错。
+    row_height_cache: BTreeMap<u64, TerminalRowHeightCacheEntry>,
+    /// 记录上一帧总高度，供高度缓存变更时观察整体偏移。
     cached_total_height: f32,
     cached_total_height_rows: usize,
 }
@@ -156,6 +158,25 @@ struct RenderOutcome {
     pending_navigate_to_id: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TerminalRowHeightSignature {
+    show_hex: bool,
+    show_raw: bool,
+    font_size_milli: i32,
+    raw_len: usize,
+    display_len: usize,
+    hex_len: usize,
+    preview_len: usize,
+}
+
+#[derive(Clone, Copy)]
+struct TerminalRowHeightCacheEntry {
+    signature: TerminalRowHeightSignature,
+    content_width_px: i32,
+    preview_width_px: i32,
+    height: f32,
+}
+
 /// 将一行文本作为 entry push，或合并到上一条 entry（如果间隔 ≤ merge_window_ms
 /// 且上一条不以 \n 结尾）。
 fn push_entry(
@@ -191,6 +212,54 @@ fn push_entry(
         && event.timestamp_ms.saturating_sub(prev.timestamp_ms) <= merge_window_ms
         && !prev.raw_text.ends_with('\n')
     {
+        // 如果上一条包含内部 \n，先把 \n 之前的内容拆出为独立 entry，
+        // \n 之后的内容留在 prev 中继续合并。
+        if let Some(idx) = prev.raw_text.rfind('\n')
+            && idx != prev.raw_text.len() - 1
+        {
+            // 上一条末尾的未完成部分：\n 之后的内容
+            let tail = prev.raw_text[idx + 1..].to_owned();
+            // 上一条截断到 \n（含），变成完整行
+            let complete_part = prev.raw_text[..=idx].to_owned();
+            prev.raw_text.truncate(idx + 1);
+            prev.display_text = format_terminal_text(&complete_part);
+            // 把未完成部分作为新 entry push，然后本包合并到它
+            let new_id = *next_entry_id;
+            *next_entry_id = next_entry_id.wrapping_add(1).max(1);
+            let new_entry = TerminalEntry {
+                id: new_id,
+                event_id: prev.event_id,
+                timestamp_ms: prev.timestamp_ms,
+                timestamp_label: prev.timestamp_label.clone(),
+                direction: prev.direction,
+                raw_text: tail.clone(),
+                display_text: format_terminal_text(&tail),
+                hex_text: format_hex(tail.as_bytes()),
+                hex_preview: String::new(),
+                preview_text: format_utf8_preview(tail.as_bytes()),
+            };
+            data.entries.push_back(new_entry);
+            // 本包合并到刚拆出的未完成行
+            if let Some(new_prev) = data.entries.back_mut() {
+                new_prev.raw_text.push_str(text);
+                new_prev.display_text.push_str(&display_text);
+                new_prev.hex_text.push(' ');
+                new_prev.hex_text.push_str(&hex_text);
+                if !preview_text.is_empty() {
+                    new_prev.preview_text.push(' ');
+                    new_prev.preview_text.push_str(&preview_text);
+                }
+                new_prev.hex_preview = if new_prev.hex_text.is_empty() {
+                    String::new()
+                } else if new_prev.preview_text.is_empty() {
+                    new_prev.hex_text.clone()
+                } else {
+                    format!("{} [{}]", new_prev.hex_text, new_prev.preview_text)
+                };
+            }
+            return;
+        }
+
         prev.raw_text.push_str(text);
         prev.display_text.push_str(&display_text);
         prev.hex_text.push(' ');
@@ -271,6 +340,7 @@ impl TerminalPanel {
             font_size: 13.0,
             merge_window_ms: 5,
             selection: RowSelection::new(0),
+            row_height_cache: BTreeMap::new(),
             cached_total_height: 0.0,
             cached_total_height_rows: 0,
         }
@@ -319,6 +389,7 @@ impl TerminalPanel {
         self.search_text.clear();
         self.port_filter = None;
         self.bookmarked_entry_ids.clear();
+        self.row_height_cache.clear();
         // 清空后重置为自动滚动，与 LogPanel::clear() 保持一致
         self.show_raw = false;
         self.auto_scroll = true;
@@ -357,11 +428,6 @@ impl TerminalPanel {
                 continue;
             }
 
-            let port_key = if self.search_case_sensitive {
-                port.clone()
-            } else {
-                port.to_ascii_lowercase()
-            };
             let mut port_rows = build_visible_rows_for_port(
                 Some(port.as_str()),
                 data.entries
@@ -658,12 +724,6 @@ impl TerminalPanel {
                 {
                     continue;
                 }
-                let port_key = if self.search_case_sensitive {
-                    port.clone()
-                } else {
-                    port.to_ascii_lowercase()
-                };
-
                 let mut port_rows = build_visible_rows_for_port(
                     Some(port.as_str()),
                     data.entries
@@ -721,6 +781,7 @@ impl TerminalPanel {
                 self.font_size,
                 &mut self.selection,
                 empty_hint,
+                &mut self.row_height_cache,
                 &mut self.cached_total_height,
                 &mut self.cached_total_height_rows,
             )
@@ -825,10 +886,8 @@ impl TerminalPanel {
         count
     }
 
-    /// 按最后一个 \n 拆分包数据：
-    /// - 如果 text 以 \n 结尾 → 一整条 entry（所有 \n 保留在 raw_text）
-    /// - 如果 text 不以 \n 结尾 → 最后一个 \n 之前的内容作为第一条 entry
-    ///   （可被跨包合并），之后的内容作为第二条 entry（跨包合并的目标）
+    /// 将 event 的 payload 作为一整条 entry push（同包内不拆行）。
+    /// 跨包时用 merge_window_ms 决定是否合并，但以 \n 结尾的完整行阻断后续合并。
     fn push_event(&mut self, event: Event) {
         let port = event
             .metadata
@@ -844,74 +903,25 @@ impl TerminalPanel {
             return;
         }
 
-        // 按最后一个 \n 拆分
-        if let Some(idx) = text.rfind('\n')
-            && idx != text.len() - 1
-        {
-            // 最后一个 \n 之后有内容 → 拆成两条
-            // 第一条（含 \n）：可以合并到上一条 entry
-            let first = &text[..=idx]; // 包含 \n
-            push_entry(
-                data,
-                first,
-                &event,
-                &mut self.next_entry_id,
-                self.max_entries,
-                &mut |id| {
-                    if self.selected_entry_id == Some(id) {
-                        self.selected_entry_id = None;
-                    }
-                    if self.detail_entry_id == Some(id) {
-                        self.detail_entry_id = None;
-                    }
-                    self.bookmarked_entry_ids.remove(&id);
-                    self.truncated = true;
-                },
-                self.merge_window_ms,
-            );
-            // 第二条（无 \n 结尾）：独立 push，不合并
-            let second = &text[idx + 1..];
-            if !second.is_empty() {
-                push_entry(
-                    data,
-                    second,
-                    &event,
-                    &mut self.next_entry_id,
-                    self.max_entries,
-                    &mut |id| {
-                        if self.selected_entry_id == Some(id) {
-                            self.selected_entry_id = None;
-                        }
-                        if self.detail_entry_id == Some(id) {
-                            self.detail_entry_id = None;
-                        }
-                        self.bookmarked_entry_ids.remove(&id);
-                        self.truncated = true;
-                    },
-                    0, // 不合并：同包内拆出的未完成行
-                );
-            }
-        } else {
-            // 不含 \n 或以 \n 结尾 → 一整条 entry
-            push_entry(
-                data,
-                &text,
-                &event,
-                &mut self.next_entry_id,
-                self.max_entries,
-                &mut |id| {
-                    if self.selected_entry_id == Some(id) {
-                        self.selected_entry_id = None;
-                    }
-                    if self.detail_entry_id == Some(id) {
-                        self.detail_entry_id = None;
-                    }
-                    self.bookmarked_entry_ids.remove(&id);
-                    self.truncated = true;
-                },
-                self.merge_window_ms,
-            );
-        }
+        push_entry(
+            data,
+            &text,
+            &event,
+            &mut self.next_entry_id,
+            self.max_entries,
+            &mut |id| {
+                if self.selected_entry_id == Some(id) {
+                    self.selected_entry_id = None;
+                }
+                if self.detail_entry_id == Some(id) {
+                    self.detail_entry_id = None;
+                }
+                self.bookmarked_entry_ids.remove(&id);
+                self.row_height_cache.remove(&id);
+                self.truncated = true;
+            },
+            self.merge_window_ms,
+        );
     }
 
     /// 将一行文本作为 entry push，或合并到上一条 entry（如果间隔 ≤ merge_window_ms
@@ -1040,6 +1050,102 @@ fn build_visible_rows_for_port<'a>(
         .collect()
 }
 
+fn terminal_row_height_signature(
+    row: &VisibleRow<'_>,
+    show_hex: bool,
+    show_raw: bool,
+    font_size: f32,
+) -> TerminalRowHeightSignature {
+    TerminalRowHeightSignature {
+        show_hex,
+        show_raw,
+        font_size_milli: (font_size * 1000.0).round() as i32,
+        raw_len: row.raw_text.len(),
+        display_len: row.display_text.len(),
+        hex_len: row.hex_text.len(),
+        preview_len: row.preview_text.len(),
+    }
+}
+
+fn cached_or_estimated_terminal_row_height(
+    row: &VisibleRow<'_>,
+    signature: TerminalRowHeightSignature,
+    row_height_cache: &BTreeMap<u64, TerminalRowHeightCacheEntry>,
+    show_hex: bool,
+    show_raw: bool,
+    base_row_height: f32,
+    content_width_px: i32,
+    preview_width_px: i32,
+) -> f32 {
+    let estimated = estimated_terminal_row_height(row, show_hex, show_raw, base_row_height);
+    if let Some(cached) = row_height_cache.get(&row.id)
+        && cached.signature == signature
+    {
+        let width_unchanged = cached.content_width_px == content_width_px
+            && cached.preview_width_px == preview_width_px;
+        let height_is_intrinsic = cached.height <= estimated + 1.0;
+        if width_unchanged || height_is_intrinsic {
+            return cached.height;
+        }
+    }
+
+    estimated
+}
+
+fn estimated_terminal_row_height(
+    row: &VisibleRow<'_>,
+    show_hex: bool,
+    show_raw: bool,
+    base_row_height: f32,
+) -> f32 {
+    let line_count = if show_hex {
+        visible_line_count(row.hex_text.as_ref()).max(visible_line_count(row.preview_text.as_ref()))
+    } else if show_raw {
+        1
+    } else {
+        visible_line_count(strip_terminal_trailing_line_ending(
+            row.display_text.as_ref(),
+        ))
+    };
+
+    (line_count as f32 * base_row_height)
+        .round()
+        .max(base_row_height)
+}
+
+fn visible_line_count(text: &str) -> usize {
+    text.split('\n').count().max(1)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TerminalTableWidths {
+    label: f32,
+    hex: f32,
+    preview: f32,
+}
+
+fn terminal_table_widths(
+    full_width: f32,
+    desired_label_width: f32,
+    show_hex: bool,
+) -> TerminalTableWidths {
+    let full_width = full_width.max(0.0);
+    let label = desired_label_width.min(full_width);
+    let content = (full_width - label).max(0.0);
+    let preview = if show_hex {
+        (content * 0.3).max(PREVIEW_COL_MIN_WIDTH).min(content)
+    } else {
+        0.0
+    };
+    let hex = (content - preview).max(0.0);
+
+    TerminalTableWidths {
+        label,
+        hex,
+        preview,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_rows_view(
     ui: &mut egui::Ui,
@@ -1057,6 +1163,7 @@ fn render_rows_view(
     font_size: f32,
     selection: &mut RowSelection,
     empty_hint: &str,
+    row_height_cache: &mut BTreeMap<u64, TerminalRowHeightCacheEntry>,
     cached_total_height: &mut f32,
     cached_total_height_rows: &mut usize,
 ) -> RenderOutcome {
@@ -1102,8 +1209,6 @@ fn render_rows_view(
         label_width += dir_col_width + col_gap;
     }
 
-    const PREVIEW_COL_MIN_WIDTH: f32 = 80.0;
-
     let mut navigate_id: Option<u64> = None;
 
     let scroll_output = ScrollArea::vertical()
@@ -1111,23 +1216,13 @@ fn render_rows_view(
         .stick_to_bottom(stick_to_bottom)
         .id_salt((scroll_key, "v2"))
         .show(ui, |ui| {
-            let full_width = ui.available_width();
+            let full_width = ui.available_width().max(0.0);
+            let widths = terminal_table_widths(full_width, label_width, show_hex);
+            let label_width = widths.label;
+            let hex_width = widths.hex;
+            let preview_width = widths.preview;
             let text_padding = 4.0;
             let text_color = ui.style().visuals.text_color();
-
-            // In HEX mode, split the content area: hex text | preview text
-            let hex_width: f32;
-            let preview_width: f32;
-            if show_hex {
-                // Split remaining space between hex and preview
-                let content_width = (full_width - label_width).max(0.0);
-                // Preview gets roughly 30% or at least PREVIEW_COL_MIN_WIDTH
-                preview_width = (content_width * 0.3).max(PREVIEW_COL_MIN_WIDTH);
-                hex_width = (content_width - preview_width).max(0.0);
-            } else {
-                hex_width = (full_width - label_width).max(0.0);
-                preview_width = 0.0;
-            }
 
             let galley_width = (hex_width - text_padding).max(0.0);
             let preview_galley_width = if show_hex {
@@ -1135,22 +1230,30 @@ fn render_rows_view(
             } else {
                 0.0
             };
+            let content_width_px = galley_width.max(0.0).round() as i32;
+            let preview_width_px = preview_galley_width.max(0.0).round() as i32;
 
-            // ═══════════════════════════════════════════════════════
-            // total_height 用上一帧缓存的真实高度，避免全量 layout。
-            // rows.len() 变化时按比例调整（新行用 row_height 估计）。
-            // resize 宽度变化时 O(rows) → O(1)，让 50000+ 条目下拖动面板不卡。
-            // 视口内行在绘制循环中按需懒 layout，总 layout 量 ≈ visible_rows。
-            // ═══════════════════════════════════════════════════════
-            let total_height =
-                if rows.len() != *cached_total_height_rows && *cached_total_height > 0.0 {
-                    let avg_h = *cached_total_height / *cached_total_height_rows as f32;
-                    avg_h * rows.len() as f32
-                } else if *cached_total_height > 0.0 {
-                    *cached_total_height
-                } else {
-                    row_height * rows.len() as f32
-                };
+            let row_signatures: Vec<TerminalRowHeightSignature> = rows
+                .iter()
+                .map(|row| terminal_row_height_signature(row, show_hex, show_raw, font_size))
+                .collect();
+            let mut row_heights: Vec<f32> = rows
+                .iter()
+                .zip(row_signatures.iter().copied())
+                .map(|(row, signature)| {
+                    cached_or_estimated_terminal_row_height(
+                        row,
+                        signature,
+                        row_height_cache,
+                        show_hex,
+                        show_raw,
+                        row_height,
+                        content_width_px,
+                        preview_width_px,
+                    )
+                })
+                .collect();
+            let total_height: f32 = row_heights.iter().sum();
 
             let (full_rect, _alloc_response) =
                 ui.allocate_exact_size(egui::vec2(full_width, total_height), Sense::hover());
@@ -1193,12 +1296,10 @@ fn render_rows_view(
             // Draw rows with accumulated Y
             let mut hl = RowHighlight::new(ui, scroll_key);
 
-            // 用 row_height 记录所有行的估计范围，供点击/拖拽命中（不影响实际绘制高度）。
-            // 大部分行是单行，row_height 与真实高度一致；少数多行条目会有微小偏移但不影响交互。
             let mut recorded_y = label_rect.top();
-            for _ in rows.iter() {
-                hl.record_row(recorded_y, row_height);
-                recorded_y += row_height;
+            for height in &row_heights {
+                hl.record_row(recorded_y, *height);
+                recorded_y += *height;
             }
 
             // 整行选择只从元数据区起手；数据区完整保留给字符级文本选择。
@@ -1255,8 +1356,14 @@ fn render_rows_view(
             let clip_top = viewport_rect.top() - row_height;
             let clip_bottom = viewport_rect.bottom() + row_height;
             for (row_idx, row) in rows.iter().enumerate() {
-                // 先用 row_height 做视口判断；视口内才懒 layout 得到真实高度。
-                let in_viewport = current_y + row_height >= clip_top && current_y <= clip_bottom;
+                let estimated_height = row_heights
+                    .get(row_idx)
+                    .copied()
+                    .unwrap_or(row_height)
+                    .max(row_height);
+                // 先用缓存高度做视口判断；视口内才懒 layout 得到真实高度。
+                let in_viewport =
+                    current_y + estimated_height >= clip_top && current_y <= clip_bottom;
 
                 let (galley, preview_galley, entry_height) = if in_viewport {
                     let content = visible_row_content(row, show_hex, show_raw);
@@ -1298,9 +1405,20 @@ fn render_rows_view(
                     } else {
                         galley.size().y.max(row_height)
                     };
+                    let height = height.round().max(row_height);
+                    row_heights[row_idx] = height;
+                    row_height_cache.insert(
+                        row.id,
+                        TerminalRowHeightCacheEntry {
+                            signature: row_signatures[row_idx],
+                            content_width_px,
+                            preview_width_px,
+                            height,
+                        },
+                    );
                     (Some(galley), preview_galley, height)
                 } else {
-                    (None, None, row_height)
+                    (None, None, estimated_height)
                 };
                 let galley = galley;
 
@@ -1362,7 +1480,9 @@ fn render_rows_view(
                 }
 
                 // --- Draw selectable content text (HEX / raw / display) ---
-                if let Some(ref galley) = galley {
+                if let Some(ref galley) = galley
+                    && hex_width > 0.0
+                {
                     let galley_pos = egui::pos2(hex_rect.left() + text_padding, current_y);
                     let row_text_rect = egui::Rect::from_min_size(
                         egui::pos2(hex_rect.left(), current_y),
@@ -1396,7 +1516,9 @@ fn render_rows_view(
                 }
 
                 // --- Draw preview text (HEX mode only) ---
-                if let (Some(pr), Some(pg)) = (preview_rect, &preview_galley) {
+                if let (Some(pr), Some(pg)) = (preview_rect, &preview_galley)
+                    && preview_width > 0.0
+                {
                     let preview_pos = egui::pos2(pr.left() + text_padding, current_y);
                     let preview_painter = ui.painter_at(pr);
                     preview_painter.add(egui::epaint::TextShape::new(
@@ -1409,16 +1531,12 @@ fn render_rows_view(
                 current_y += entry_height;
             }
 
-            // 缓存本帧实际 total_height，供下帧使用（修复 row_height 估计累积误差）。
-            // round() 消除浮点微扰——避免每帧 re-layout 导致的 sub-px 差异在
-            // total_height 估计值/实际值之间来回摆动，引起 stick_to_bottom 画面抖动。
-            *cached_total_height = (current_y - label_rect.top()).round();
+            let actual_total = (current_y - label_rect.top()).round();
+            if (*cached_total_height - actual_total).abs() > 0.5 {
+                ui.ctx().request_repaint();
+            }
+            *cached_total_height = actual_total;
             *cached_total_height_rows = rows.len();
-
-            // 如果实际绘制高度超出 pre-allocated rect（例如一条超长数据跨越
-            // 多行时 row_height 估计严重偏低），补充分配差额，让 ScrollArea 拿到
-            // 正确的 content_size，避免内容被 clip 截断 / stick_to_bottom 错位。
-            let actual_total = current_y - label_rect.top();
             if actual_total > total_height + 0.5 {
                 ui.allocate_space(egui::vec2(0.0, actual_total - total_height));
             }
@@ -1682,6 +1800,14 @@ fn row_content_text<'a>(row: &'a VisibleRow<'a>, show_hex: bool, show_raw: bool)
     }
 }
 
+fn strip_terminal_trailing_line_ending(content: &str) -> &str {
+    content
+        .strip_suffix("\r\n")
+        .or_else(|| content.strip_suffix('\n'))
+        .or_else(|| content.strip_suffix('\r'))
+        .unwrap_or(content)
+}
+
 /// 接收区每个条目已经独占显示行，因此隐藏一个末尾行结束符；内部换行仍保留。
 ///
 /// 原始模式（show_raw）例外：用户开启原始模式正是为了看到原始字节（含末尾换行），
@@ -1698,12 +1824,7 @@ fn visible_row_content(row: &VisibleRow<'_>, show_hex: bool, show_raw: bool) -> 
     }
 
     // 普通显示模式：隐藏末尾一个行结束符，内部换行保留
-    let content = content
-        .strip_suffix("\r\n")
-        .or_else(|| content.strip_suffix('\n'))
-        .or_else(|| content.strip_suffix('\r'))
-        .unwrap_or(content);
-    content.to_owned()
+    strip_terminal_trailing_line_ending(content).to_owned()
 }
 
 fn entry_visible(direction: Direction, show_rx: bool, show_tx: bool) -> bool {
@@ -2131,6 +2252,104 @@ mod tests {
     }
 
     #[test]
+    fn estimated_row_height_counts_internal_newlines_not_final_line_ending() {
+        let row = VisibleRow {
+            id: 1,
+            event_id: 1,
+            port: Some(Cow::Borrowed("COM6")),
+            timestamp_label: Cow::Borrowed("[10:00:39.580]"),
+            direction: Direction::Rx,
+            raw_text: Cow::Borrowed("first\nsecond\n"),
+            display_text: Cow::Borrowed("first\nsecond\n"),
+            hex_text: Cow::Borrowed("66 69"),
+            preview_text: Cow::Borrowed("first\nsecond\n"),
+        };
+
+        assert_eq!(
+            estimated_terminal_row_height(&row, false, false, 10.0),
+            20.0
+        );
+    }
+
+    #[test]
+    fn row_height_signature_changes_when_entry_text_grows() {
+        let short = VisibleRow {
+            id: 1,
+            event_id: 1,
+            port: Some(Cow::Borrowed("COM6")),
+            timestamp_label: Cow::Borrowed("[10:00:39.580]"),
+            direction: Direction::Rx,
+            raw_text: Cow::Borrowed("first"),
+            display_text: Cow::Borrowed("first"),
+            hex_text: Cow::Borrowed("66 69 72 73 74"),
+            preview_text: Cow::Borrowed("first"),
+        };
+        let grown = VisibleRow {
+            id: 1,
+            event_id: 1,
+            port: Some(Cow::Borrowed("COM6")),
+            timestamp_label: Cow::Borrowed("[10:00:39.581]"),
+            direction: Direction::Rx,
+            raw_text: Cow::Borrowed("first\nsecond"),
+            display_text: Cow::Borrowed("first\nsecond"),
+            hex_text: Cow::Borrowed("66 69 72 73 74 0A 73 65 63 6F 6E 64"),
+            preview_text: Cow::Borrowed("first\nsecond"),
+        };
+
+        assert_ne!(
+            terminal_row_height_signature(&short, false, false, 13.0),
+            terminal_row_height_signature(&grown, false, false, 13.0)
+        );
+    }
+
+    #[test]
+    fn unwrapped_row_height_cache_survives_width_changes() {
+        let row = VisibleRow {
+            id: 1,
+            event_id: 1,
+            port: Some(Cow::Borrowed("COM6")),
+            timestamp_label: Cow::Borrowed("[10:00:39.580]"),
+            direction: Direction::Rx,
+            raw_text: Cow::Borrowed("short"),
+            display_text: Cow::Borrowed("short"),
+            hex_text: Cow::Borrowed("73 68 6F 72 74"),
+            preview_text: Cow::Borrowed("short"),
+        };
+        let signature = terminal_row_height_signature(&row, false, false, 13.0);
+        let mut cache = BTreeMap::new();
+        cache.insert(
+            row.id,
+            TerminalRowHeightCacheEntry {
+                signature,
+                content_width_px: 240,
+                preview_width_px: 0,
+                height: 13.0,
+            },
+        );
+
+        assert_eq!(
+            cached_or_estimated_terminal_row_height(
+                &row, signature, &cache, false, false, 13.0, 180, 0
+            ),
+            13.0
+        );
+    }
+
+    #[test]
+    fn table_widths_do_not_exceed_available_width_when_narrow() {
+        let widths = terminal_table_widths(96.0, 220.0, true);
+
+        assert_eq!(widths.label, 96.0);
+        assert_eq!(widths.hex, 0.0);
+        assert_eq!(widths.preview, 0.0);
+        assert!(widths.label + widths.hex + widths.preview <= 96.0);
+
+        let widths = terminal_table_widths(180.0, 120.0, true);
+        assert!(widths.label + widths.hex + widths.preview <= 180.0);
+        assert!(widths.preview <= 60.0);
+    }
+
+    #[test]
     fn entries_map_one_to_one_visible_rows() {
         // push_event 已将间隔 ≤5ms 的未完成行合并，entry 已是完整行 → 1:1 映射
         let entry = TerminalEntry {
@@ -2290,9 +2509,8 @@ mod tests {
 
         assert_eq!(panel.ingest_all_pending(), 1);
         let entries = &panel.ports.get("COM2").expect("COM2 should exist").entries;
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].raw_text, "111\n111\n");
-        assert_eq!(entries[1].raw_text, "111");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].raw_text, "111\n111\n111");
     }
 
     /// 搜索应该能过滤出包含关键字的 entry。

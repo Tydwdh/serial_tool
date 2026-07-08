@@ -4,6 +4,12 @@ use eframe::egui;
 use egui::widgets::text_edit::TextEditState;
 use tool_panels::theme;
 
+const SEND_BOTTOM_TOOL_ROW_MAX_HEIGHT: f32 = 44.0;
+const SEND_BOTTOM_ACTIONS_RESERVED_HEIGHT: f32 = SEND_BOTTOM_TOOL_ROW_MAX_HEIGHT * 2.0 + 8.0;
+const SEND_BOTTOM_ERROR_MAX_HEIGHT: f32 = 24.0;
+const SEND_BOTTOM_ERROR_RESERVED_HEIGHT: f32 = SEND_BOTTOM_ERROR_MAX_HEIGHT + 8.0;
+const SEND_BOTTOM_MIN_INPUT_HEIGHT: f32 = 40.0;
+
 /// 返回发送输入框的稳定 Id（用于读取光标状态）。
 fn response_id_for_send_input(layout: SendLayout) -> egui::Id {
     let salt = match layout {
@@ -95,6 +101,7 @@ impl WorkbenchApp {
     fn send_panel_body(&mut self, ui: &mut egui::Ui, layout: SendLayout) {
         self.ensure_send_target_port();
         let send_port_open = self.send_target_port_open();
+        let constrain_bottom = matches!(layout, SendLayout::Horizontal);
 
         // ── 1. 选项栏（顶部，自然高度）──
         self.render_send_options(ui, layout);
@@ -115,19 +122,32 @@ impl WorkbenchApp {
         // 输入区用 add_sized(available - 预留) 视觉吃满，操作栏在其下方；reserved 是操作栏估算
         // 高度，偏大也无妨（take_available_space 保证 content = panel，留白在操作栏下方）。
         let avail = ui.available_size();
-        let reserved_for_bottom = match layout {
+        let bottom_budget = match layout {
+            SendLayout::Horizontal => {
+                SEND_BOTTOM_ACTIONS_RESERVED_HEIGHT
+                    + self
+                        .send
+                        .error
+                        .as_ref()
+                        .map(|_| SEND_BOTTOM_ERROR_RESERVED_HEIGHT)
+                        .unwrap_or(0.0)
+            }
             SendLayout::Vertical => 150.0,
-            SendLayout::Horizontal | SendLayout::Popup => 84.0,
+            SendLayout::Popup => 84.0,
         };
-        let input_height = (avail.y - reserved_for_bottom).max(80.0);
+        let input_height = if constrain_bottom {
+            let min_input = SEND_BOTTOM_MIN_INPUT_HEIGHT.min(avail.y.max(0.0));
+            let reserved = bottom_budget.min((avail.y - min_input).max(0.0));
+            (avail.y - reserved).max(0.0)
+        } else {
+            (avail.y - bottom_budget).max(80.0)
+        };
 
         let resp = self.render_send_input(ui, layout, send_port_open, input_height);
 
         // 操作栏 + 错误提示（在输入区下方，沉底）
         self.render_send_actions(ui, layout, send_port_open);
-        if let Some(err) = &self.send.error {
-            ui.colored_label(theme::RED, err);
-        }
+        self.render_send_error(ui, layout);
 
         // 撑满 panel 内容区，打破 resizable 面板的正反馈（面板稳定在用户拖动高度）。
         ui.take_available_space();
@@ -186,17 +206,52 @@ impl WorkbenchApp {
             ),
         };
 
-        ui.horizontal_wrapped(|ui| {
-            ui.label("发送到");
-            self.send_target_port_combo(ui, target_id);
-            ui.separator();
-            self.render_hex_toggle(ui);
-            self.render_line_ending_combo(ui, line_ending_id, line_ending_width);
+        if matches!(layout, SendLayout::Horizontal) {
+            egui::ScrollArea::horizontal()
+                .id_salt("send-bottom-options-x")
+                .max_height(SEND_BOTTOM_TOOL_ROW_MAX_HEIGHT)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        self.render_send_target_options_row(
+                            ui,
+                            target_id,
+                            line_ending_id,
+                            line_ending_width,
+                            show_popup_button,
+                        );
+                    });
+                });
+        } else {
+            ui.horizontal_wrapped(|ui| {
+                self.render_send_target_options_row(
+                    ui,
+                    target_id,
+                    line_ending_id,
+                    line_ending_width,
+                    show_popup_button,
+                );
+            });
+        }
+    }
 
-            if show_popup_button && ui.small_button("⛶").on_hover_text("放大编辑").clicked() {
-                self.send.popup_open = true;
-            }
-        });
+    fn render_send_target_options_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        target_id: &'static str,
+        line_ending_id: &'static str,
+        line_ending_width: f32,
+        show_popup_button: bool,
+    ) {
+        ui.label("发送到");
+        self.send_target_port_combo(ui, target_id);
+        ui.separator();
+        self.render_hex_toggle(ui);
+        self.render_line_ending_combo(ui, line_ending_id, line_ending_width);
+
+        if show_popup_button && ui.small_button("⛶").on_hover_text("放大编辑").clicked() {
+            self.send.popup_open = true;
+        }
     }
 
     /// HEX/文本切换 + 严格模式
@@ -377,6 +432,34 @@ impl WorkbenchApp {
             SendLayout::Popup => ("send-popup-history", 54.0),
         };
 
+        if matches!(layout, SendLayout::Horizontal) {
+            egui::ScrollArea::horizontal()
+                .id_salt("send-bottom-actions-main-x")
+                .max_height(SEND_BOTTOM_TOOL_ROW_MAX_HEIGHT)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        self.render_send_and_clear_buttons(ui, send_port_open);
+                        self.send_history_combo(ui, history_id);
+                        self.ui_contribution_slot(ui, "send.toolbar");
+                    });
+                });
+
+            egui::ScrollArea::horizontal()
+                .id_salt("send-bottom-actions-periodic-x")
+                .max_height(SEND_BOTTOM_TOOL_ROW_MAX_HEIGHT)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        self.render_periodic_controls(ui, interval_width);
+                        ui.separator();
+                        self.send_signal_controls(ui);
+                        self.render_hex_preview(ui);
+                    });
+                });
+            return;
+        }
+
         ui.horizontal_wrapped(|ui| {
             self.render_send_and_clear_buttons(ui, send_port_open);
             self.send_history_combo(ui, history_id);
@@ -389,6 +472,24 @@ impl WorkbenchApp {
             self.send_signal_controls(ui);
             self.render_hex_preview(ui);
         });
+    }
+
+    fn render_send_error(&self, ui: &mut egui::Ui, layout: SendLayout) {
+        let Some(err) = self.send.error.as_deref() else {
+            return;
+        };
+
+        if matches!(layout, SendLayout::Horizontal) {
+            egui::ScrollArea::horizontal()
+                .id_salt("send-bottom-error-x")
+                .max_height(SEND_BOTTOM_ERROR_MAX_HEIGHT)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.colored_label(theme::RED, err);
+                });
+        } else {
+            ui.colored_label(theme::RED, err);
+        }
     }
 
     /// 发送 + 清空 按钮
@@ -1016,7 +1117,7 @@ mod tests {
         let input_h = 80.0_f32;
 
         let mut panel_heights: Vec<f32> = Vec::new();
-        for _frame in 0..3 {
+        for _frame in 0..60 {
             let mut out_rect: Option<egui::Rect> = None;
             let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
                 ui.set_max_size(egui::vec2(600.0, 600.0));
@@ -1098,6 +1199,102 @@ mod tests {
             (last - default_h).abs() < 20.0,
             "ScrollArea 方案下面板应稳定在 default_h={default_h}，第3帧实际 {}",
             last
+        );
+    }
+
+    /// 宽度很窄时，底部发送区工具栏改用横向滚动行，而不是纵向换行撑高。
+    /// 这样 resizable bottom panel 不会被按钮布局顶高去吃主工作区。
+    #[test]
+    fn send_toolbar_slots_keep_bottom_panel_stable_when_width_narrow() {
+        let ctx = egui::Context::default();
+        let default_h = 160.0_f32;
+        let panel_w = 170.0_f32;
+        let mut text = String::from("payload");
+
+        let mut panel_heights: Vec<f32> = Vec::new();
+        for _frame in 0..3 {
+            let mut out_rect: Option<egui::Rect> = None;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.set_max_size(egui::vec2(panel_w, 600.0));
+                let resp = egui::Panel::bottom("test-bottom-dock-narrow-send")
+                    .resizable(true)
+                    .default_size(default_h)
+                    .min_size(80.0)
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| {
+                        egui::ScrollArea::horizontal()
+                            .max_height(super::SEND_BOTTOM_TOOL_ROW_MAX_HEIGHT)
+                            .auto_shrink([false, true])
+                            .id_salt("test-send-options-x")
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    for label in
+                                        ["发送到", "COM123456", "文本", "HEX", "严格", "CRLF", "⛶"]
+                                    {
+                                        let _ = ui.button(label);
+                                    }
+                                });
+                            });
+
+                        let avail = ui.available_size();
+                        let min_input = super::SEND_BOTTOM_MIN_INPUT_HEIGHT.min(avail.y.max(0.0));
+                        let reserved = super::SEND_BOTTOM_ACTIONS_RESERVED_HEIGHT
+                            .min((avail.y - min_input).max(0.0));
+                        let input_h = (avail.y - reserved).max(0.0);
+
+                        egui::ScrollArea::vertical()
+                            .max_height(input_h)
+                            .id_salt("test-send-input-slot")
+                            .show(ui, |ui| {
+                                let w = ui.available_width();
+                                ui.add_sized(
+                                    egui::vec2(w, input_h),
+                                    egui::TextEdit::multiline(&mut text)
+                                        .desired_width(f32::INFINITY)
+                                        .id(egui::Id::new("test-send-input-narrow")),
+                                );
+                            });
+
+                        egui::ScrollArea::horizontal()
+                            .max_height(super::SEND_BOTTOM_TOOL_ROW_MAX_HEIGHT)
+                            .auto_shrink([false, true])
+                            .id_salt("test-send-actions-main-x")
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    for label in
+                                        ["发送", "清空", "历史", "插件动作一", "插件动作二"]
+                                    {
+                                        let _ = ui.button(label);
+                                    }
+                                });
+                            });
+
+                        egui::ScrollArea::horizontal()
+                            .max_height(super::SEND_BOTTOM_TOOL_ROW_MAX_HEIGHT)
+                            .auto_shrink([false, true])
+                            .id_salt("test-send-actions-periodic-x")
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    for label in
+                                        ["周期发送", "100", "ms", "DTR", "RTS", "HEX: 00 11 22 33"]
+                                    {
+                                        let _ = ui.button(label);
+                                    }
+                                });
+                            });
+
+                        ui.take_available_space();
+                    });
+                out_rect = Some(resp.response.rect);
+            });
+            panel_heights.push(out_rect.map(|r| r.height()).unwrap_or(0.0));
+        }
+
+        let last = *panel_heights.last().unwrap_or(&0.0);
+        let max_height = panel_heights.iter().copied().fold(0.0, f32::max);
+        assert!(
+            (last - default_h).abs() < 20.0 && max_height < default_h + 20.0,
+            "窄宽度工具栏不应撑大 bottom panel：default_h={default_h}，末帧 {last}，最大 {max_height}"
         );
     }
 }
