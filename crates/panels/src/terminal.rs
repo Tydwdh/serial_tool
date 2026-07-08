@@ -1330,7 +1330,7 @@ fn render_rows_view(
                             .is_some_and(|pos| rect.contains(pos))
                 }) && ui.rect_contains_pointer(rect)
             });
-            if data_pressed || blank_pressed {
+            if blank_pressed {
                 selection.clear();
             }
             let mut scroll_delta: f32 = 0.0;
@@ -1606,6 +1606,13 @@ fn render_rows_view(
 
             // 框选范围文本（移入 context_menu 闭包内按需构造，避免菜单未打开时每帧构造）
             let selected_indices: Vec<usize> = selection.selected_indices().collect();
+
+            // Ctrl+A 全选：无 TextEdit 聚焦时选中所有可见行
+            if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::A))
+                && !ui.ctx().text_edit_focused()
+            {
+                selection.select_all();
+            }
 
             // Ctrl+C 复制选中行：终端有选中、收到 Event::Copy、且无 TextEdit 聚焦时触发。
             // 复制 full（含时间戳/端口/方向前缀），与右键菜单"复制选中行"一致。

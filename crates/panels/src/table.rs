@@ -232,6 +232,12 @@ impl RowSelection {
         self.dragging = false;
     }
 
+    /// Ctrl+A 全选：选中所有可见行。
+    pub fn select_all(&mut self) {
+        self.selected = self.row_keys.iter().copied().collect();
+        self.anchor = self.row_keys.last().copied();
+    }
+
     /// 处理整行选择手势。
     ///
     /// 不依赖覆盖正文的 `Response`，因此可与字符级文本选择共存：在同一逻辑行内拖动
