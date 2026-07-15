@@ -565,7 +565,7 @@ impl WorkbenchApp {
                 // ── 应用变更 ──
                 // 分组重命名
                 if let Some((old_name, new_name)) = rename_group {
-                    for (_port, group) in self.serial.port_groups.iter_mut() {
+                    for group in self.serial.port_groups.values_mut() {
                         if *group == old_name {
                             *group = new_name.clone();
                         }
@@ -576,7 +576,7 @@ impl WorkbenchApp {
                 }
                 // 删除分组（将组内端口移回未分组）
                 if let Some(group_name) = delete_group {
-                    for (_port, group) in self.serial.port_groups.iter_mut() {
+                    for group in self.serial.port_groups.values_mut() {
                         if *group == group_name {
                             *group = String::new(); // will be removed below
                         }

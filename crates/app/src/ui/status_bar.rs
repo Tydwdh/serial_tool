@@ -261,7 +261,7 @@ impl WorkbenchApp {
                                         ui.label(
                                             egui::RichText::new(format!(
                                                 "{level_mark}{}",
-                                                &n.text
+                                                n.text
                                             ))
                                             .color(color)
                                             .small(),
