@@ -286,8 +286,8 @@ impl LogPanel {
 
         // 获取跳转目标的 row 索引
         let taken_id = self.pending_navigate_to_id.take();
-        let scroll_to_row: Option<usize> = taken_id
-            .and_then(|target_id| rows.iter().position(|entry| entry.id == target_id));
+        let scroll_to_row: Option<usize> =
+            taken_id.and_then(|target_id| rows.iter().position(|entry| entry.id == target_id));
         if let Some(target_id) = taken_id {
             // 跳转生效：设置目标行高亮（起始时间用 egui 时钟）。
             self.navigate_highlight = Some((target_id, ui.ctx().input(|i| i.time)));
@@ -798,9 +798,10 @@ fn render_log_rows(
             );
             // 双击任意位置（文字或空白）→ 离开搜索进入上下文。
             // 用全局 button_double_clicked + 整行 rect 命中，不再依赖只覆盖文本列的 ctx_response。
-            let double_clicked = ui
-                .input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary))
-                && ui.rect_contains_pointer(full_rect);
+            let double_clicked = ui.input(|i| {
+                i.pointer
+                    .button_double_clicked(egui::PointerButton::Primary)
+            }) && ui.rect_contains_pointer(full_rect);
             if double_clicked
                 && let Some(idx) = frozen_row_idx.or_else(|| hl.hover_index(ui))
                 && let Some(entry) = rows.get(idx)

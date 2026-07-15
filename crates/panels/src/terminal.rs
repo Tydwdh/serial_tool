@@ -1645,9 +1645,10 @@ fn render_rows_view(
             );
             // 双击任意位置（文字或空白）→ 离开搜索进入上下文：设置导航目标让下帧跳转。
             // 用全局 button_double_clicked + 整行 rect 命中，不再依赖只覆盖文本列的 ctx_response。
-            let double_clicked = ui
-                .input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary))
-                && ui.rect_contains_pointer(full_rect);
+            let double_clicked = ui.input(|i| {
+                i.pointer
+                    .button_double_clicked(egui::PointerButton::Primary)
+            }) && ui.rect_contains_pointer(full_rect);
             let mut pending_navigate: Option<u64> = None;
             if double_clicked
                 && let Some(idx) = frozen_row_idx.or_else(|| hl.hover_index(ui))
