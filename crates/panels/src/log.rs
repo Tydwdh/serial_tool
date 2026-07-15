@@ -672,6 +672,11 @@ fn render_log_rows(
                         egui::pos2(message_rect.left(), current_y),
                         egui::vec2(message_width, entry_height),
                     );
+                    // 先构造 response：文本外空白分支（按下即选）与文本内 clicked 分支
+                    // （松开判定）都要用到它。
+                    let row_id = ui.make_persistent_id(("log-msg", entry.id));
+                    let response = ui.interact(row_text_rect, row_id, Sense::click_and_drag());
+
                     let (primary_pressed, ctrl, shift) = ui.input(|i| {
                         (
                             i.pointer.button_pressed(egui::PointerButton::Primary),
@@ -679,6 +684,7 @@ fn render_log_rows(
                             i.modifiers.shift,
                         )
                     });
+                    // 文本外空白处按下 → 整行选中（即时反馈）。
                     if primary_pressed
                         && ui.rect_contains_pointer(msg_row_rect)
                         && !ui.rect_contains_pointer(row_text_rect)
@@ -689,8 +695,16 @@ fn render_log_rows(
                             .lock()
                             .clear_selection();
                     }
-                    let row_id = ui.make_persistent_id(("log-msg", entry.id));
-                    let response = ui.interact(row_text_rect, row_id, Sense::click_and_drag());
+                    // 文本内：松开且未拖动 → 整行选中。
+                    // response.clicked() 只有"按下→原地松开、未拖动"才为 true
+                    // （拖动超过阈值后松开走 drag，clicked 为 false，字符选区正常）。
+                    if response.clicked() && ui.rect_contains_pointer(row_text_rect) {
+                        selection.begin_pointer(row_idx, ctrl, shift);
+                        ui.ctx()
+                            .plugin::<LabelSelectionState>()
+                            .lock()
+                            .clear_selection();
+                    }
                     text_drag_response = Some(match text_drag_response.take() {
                         Some(accumulated) => accumulated | response.clone(),
                         None => response.clone(),

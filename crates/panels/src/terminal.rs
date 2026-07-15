@@ -1492,8 +1492,12 @@ fn render_rows_view(
                         egui::pos2(hex_rect.left(), current_y),
                         egui::vec2(hex_width, entry_height),
                     );
-                    // 文本外空白处按下 → 整行选中（与点元数据区等效）。
-                    // drag/release 由 handle_input 接管（label_rect 入口），这里只触发 begin。
+                    // 先构造 response：文本外空白分支（按下即选）与文本内 clicked 分支
+                    // （松开判定）都要用到它。
+                    // Use a separate id salt for hex column to avoid id collision with preview
+                    let row_id = ui.make_persistent_id(("hex", row.id));
+                    let response = ui.interact(row_text_rect, row_id, Sense::click_and_drag());
+
                     let (primary_pressed, ctrl, shift) = ui.input(|i| {
                         (
                             i.pointer.button_pressed(egui::PointerButton::Primary),
@@ -1501,6 +1505,8 @@ fn render_rows_view(
                             i.modifiers.shift,
                         )
                     });
+                    // 文本外空白处按下 → 整行选中（即时反馈，与点元数据区等效）。
+                    // drag/release 由 handle_input 接管（label_rect 入口），这里只触发 begin。
                     if primary_pressed
                         && ui.rect_contains_pointer(hex_row_rect)
                         && !ui.rect_contains_pointer(row_text_rect)
@@ -1512,9 +1518,17 @@ fn render_rows_view(
                             .lock()
                             .clear_selection();
                     }
-                    // Use a separate id salt for hex column to avoid id collision with preview
-                    let row_id = ui.make_persistent_id(("hex", row.id));
-                    let response = ui.interact(row_text_rect, row_id, Sense::click_and_drag());
+                    // 文本内：松开且未拖动 → 整行选中。
+                    // response.clicked() 在 egui 中只有"按下→原地松开、未拖动"才为 true
+                    // （拖动超过阈值后松开走 drag，clicked 为 false，字符选区正常进行）。
+                    // Ctrl/Shift/Ctrl+Shift 修饰键在松开时读取，复用 begin_pointer 语义。
+                    if response.clicked() && ui.rect_contains_pointer(row_text_rect) {
+                        selection.begin_pointer(row_idx, ctrl, shift);
+                        ui.ctx()
+                            .plugin::<LabelSelectionState>()
+                            .lock()
+                            .clear_selection();
+                    }
                     text_drag_response = Some(match text_drag_response.take() {
                         Some(accumulated) => accumulated | response.clone(),
                         None => response.clone(),
