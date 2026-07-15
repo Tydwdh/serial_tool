@@ -106,8 +106,10 @@ impl WorkbenchApp {
             return;
         }
 
+        // 用 Order::Middle 而非 Foreground：分隔线只需浮在普通面板之上，
+        // 但必须低于 popup / 窗口等 Foreground 层，否则会盖住历史记录等弹出层。
         let painter = ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Foreground,
+            egui::Order::Middle,
             egui::Id::new("bottom-dock-separator"),
         ));
         painter.line_segment(
@@ -127,7 +129,7 @@ impl WorkbenchApp {
         let area_id = egui::Id::new("bottom-dock-resize-overlay");
 
         egui::Area::new(area_id)
-            .order(egui::Order::Foreground)
+            .order(egui::Order::Middle)
             .fixed_pos(handle_rect.min)
             .movable(false)
             .show(ctx, |ui| {
@@ -186,7 +188,7 @@ impl WorkbenchApp {
         let area_id = egui::Id::new("right-dock-resize-overlay");
 
         egui::Area::new(area_id)
-            .order(egui::Order::Foreground)
+            .order(egui::Order::Middle)
             .fixed_pos(handle_rect.min)
             .movable(false)
             .show(ctx, |ui| {
