@@ -18,6 +18,11 @@ const ROW_LEFT_PADDING: f32 = 4.0;
 const COL_GAP: f32 = 3.0;
 const PREVIEW_COL_MIN_WIDTH: f32 = 80.0;
 
+/// 跳转目标行高亮总时长（秒）。
+const NAV_HIGHLIGHT_DURATION: f64 = 1.5;
+/// 跳转目标行高亮末段淡出时长（秒）。
+const NAV_FADE: f64 = 0.3;
+
 pub struct TerminalPanel {
     subscription: Subscription,
     ports: BTreeMap<String, PortData>,
@@ -54,6 +59,8 @@ pub struct TerminalPanel {
     pending_scroll_to_bottom_keys: BTreeSet<String>,
     /// 双击搜索匹配行时设置：下帧清除搜索并滚动到该行。
     pending_navigate_to_id: Option<u64>,
+    /// 跳转目标行高亮：(目标行 id, 起始时间秒)。渲染时若命中且未超时画强调色并淡出。
+    navigate_highlight: Option<(u64, f64)>,
 
     next_entry_id: u64,
     selected_entry_id: Option<u64>,
@@ -333,6 +340,7 @@ impl TerminalPanel {
             last_scroll_offsets: BTreeMap::new(),
             pending_scroll_to_bottom_keys: BTreeSet::new(),
             pending_navigate_to_id: None,
+            navigate_highlight: None,
 
             next_entry_id: 1,
             selected_entry_id: None,
@@ -755,6 +763,8 @@ impl TerminalPanel {
             // 获取下帧跳转目标的 row 索引（现在是完整列表）
             if let Some(target_id) = self.pending_navigate_to_id.take() {
                 scroll_to_row = rows.iter().position(|r| r.id == target_id);
+                // 跳转生效：设置目标行高亮（起始时间用 egui 时钟）。
+                self.navigate_highlight = Some((target_id, ui.ctx().input(|i| i.time)));
             }
 
             let scroll_height = ui.available_height().max(40.0);
@@ -784,11 +794,20 @@ impl TerminalPanel {
                 &mut self.row_height_cache,
                 &mut self.cached_total_height,
                 &mut self.cached_total_height_rows,
+                self.navigate_highlight,
             )
         };
 
         self.apply_render_outcome(&scroll_key, render_outcome, ui);
         self.detail_popup(ui.ctx());
+
+        // 高亮超时清理
+        if let Some((_, start)) = self.navigate_highlight {
+            let now = ui.ctx().input(|i| i.time);
+            if now - start >= NAV_HIGHLIGHT_DURATION {
+                self.navigate_highlight = None;
+            }
+        }
     }
 
     fn apply_render_outcome(&mut self, scroll_key: &str, outcome: RenderOutcome, ui: &egui::Ui) {
@@ -1167,6 +1186,7 @@ fn render_rows_view(
     row_height_cache: &mut BTreeMap<u64, TerminalRowHeightCacheEntry>,
     cached_total_height: &mut f32,
     cached_total_height_rows: &mut usize,
+    navigate_highlight: Option<(u64, f64)>,
 ) -> RenderOutcome {
     let height = height.max(40.0);
     let font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
@@ -1441,6 +1461,30 @@ fn render_rows_view(
                     selection.paint(ui, full_rect, current_y, entry_height);
                 }
 
+                // 跳转目标行高亮（叠在 selection/hover 之上，按剩余时间淡出）
+                if let Some((target_id, start)) = navigate_highlight
+                    && row.id == target_id
+                {
+                    let now = ui.ctx().input(|i| i.time);
+                    let elapsed = now - start;
+                    if elapsed < NAV_HIGHLIGHT_DURATION {
+                        let alpha = if elapsed > NAV_HIGHLIGHT_DURATION - NAV_FADE {
+                            ((NAV_HIGHLIGHT_DURATION - elapsed) / NAV_FADE).clamp(0.0, 1.0)
+                        } else {
+                            1.0
+                        };
+                        ui.painter_at(full_rect).rect_filled(
+                            egui::Rect::from_min_size(
+                                egui::pos2(full_rect.left(), current_y),
+                                egui::vec2(full_rect.width(), entry_height),
+                            ),
+                            0.0,
+                            theme::NAV_HIGHLIGHT.gamma_multiply(alpha as f32),
+                        );
+                        ui.ctx().request_repaint();
+                    }
+                }
+
                 // --- Draw left labels ---
                 let mut x = label_rect.left() + row_left_padding;
 
@@ -1599,8 +1643,11 @@ fn render_rows_view(
                 &ctx_response,
                 ui.make_persistent_id(("term-frozen-row", scroll_key)),
             );
-            // 双击搜索结果 → 离开搜索进入上下文：设置导航目标让下帧跳转
-            let double_clicked = ctx_response.double_clicked();
+            // 双击任意位置（文字或空白）→ 离开搜索进入上下文：设置导航目标让下帧跳转。
+            // 用全局 button_double_clicked + 整行 rect 命中，不再依赖只覆盖文本列的 ctx_response。
+            let double_clicked = ui
+                .input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary))
+                && ui.rect_contains_pointer(full_rect);
             let mut pending_navigate: Option<u64> = None;
             if double_clicked
                 && let Some(idx) = frozen_row_idx.or_else(|| hl.hover_index(ui))

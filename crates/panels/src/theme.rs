@@ -75,6 +75,9 @@ pub const BORDER_DARK: Color32 = Color32::from_rgb(22, 25, 30);
 pub const SEPARATOR: Color32 = Color32::from_rgb(58, 67, 82);
 pub const SEPARATOR_STRONG: Color32 = Color32::from_rgb(70, 82, 100);
 
+/// 跳转目标行高亮色（半透明蓝，叠在 selection/hover 之上，文字仍可读）。
+pub const NAV_HIGHLIGHT: Color32 = Color32::from_rgba_unmultiplied_const(80, 140, 210, 70);
+
 // ── Chart 调色板 ──
 pub const CHART_COLORS: [Color32; 6] = [GREEN, BLUE, YELLOW, RED, PURPLE, CYAN];
 

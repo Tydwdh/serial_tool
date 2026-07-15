@@ -20,6 +20,10 @@ const LABEL_TO_MSG_GAP: f32 = 3.0;
 const LOG_SCROLL_ID: &str = "log-scroll-v2";
 /// 日志面板最大保留条数（与终端面板一致）。
 const MAX_LOG_ENTRIES: usize = 50_000;
+/// 跳转目标行高亮总时长（秒）。
+const NAV_HIGHLIGHT_DURATION: f64 = 1.5;
+/// 跳转目标行高亮末段淡出时长（秒）。
+const NAV_FADE: f64 = 0.3;
 
 pub struct LogPanel {
     subscription: Subscription,
@@ -32,6 +36,8 @@ pub struct LogPanel {
     pending_scroll_to_bottom: bool,
     /// 双击搜索匹配行时设置：下帧清除搜索并跳转到该行。
     pending_navigate_to_id: Option<u64>,
+    /// 跳转目标行高亮：(目标行 id, 起始时间秒)。渲染时若命中且未超时画强调色并淡出。
+    navigate_highlight: Option<(u64, f64)>,
     /// 搜索文本（默认大小写不敏感，同时匹配 source 和 message）。
     search_text: String,
     /// 搜索是否大小写敏感。
@@ -74,6 +80,7 @@ impl LogPanel {
             last_scroll_offset_y: 0.0,
             pending_scroll_to_bottom: false,
             pending_navigate_to_id: None,
+            navigate_highlight: None,
             search_text: String::new(),
             search_case_sensitive: false,
             source_filter: None,
@@ -278,10 +285,13 @@ impl LogPanel {
             .collect();
 
         // 获取跳转目标的 row 索引
-        let scroll_to_row: Option<usize> = self
-            .pending_navigate_to_id
-            .take()
+        let taken_id = self.pending_navigate_to_id.take();
+        let scroll_to_row: Option<usize> = taken_id
             .and_then(|target_id| rows.iter().position(|entry| entry.id == target_id));
+        if let Some(target_id) = taken_id {
+            // 跳转生效：设置目标行高亮（起始时间用 egui 时钟）。
+            self.navigate_highlight = Some((target_id, ui.ctx().input(|i| i.time)));
+        }
 
         let mut navigate_id: Option<u64> = None;
 
@@ -295,10 +305,19 @@ impl LogPanel {
             force_scroll_to_bottom,
             self.font_size,
             &mut self.selection,
+            self.navigate_highlight,
         );
 
         if navigate_id.is_some() {
             self.pending_navigate_to_id = navigate_id;
+        }
+
+        // 高亮超时清理
+        if let Some((_, start)) = self.navigate_highlight {
+            let now = ui.ctx().input(|i| i.time);
+            if now - start >= NAV_HIGHLIGHT_DURATION {
+                self.navigate_highlight = None;
+            }
         }
         self.update_auto_scroll(
             ui,
@@ -435,6 +454,7 @@ fn render_log_rows(
     force_scroll_to_bottom: bool,
     font_size: f32,
     selection: &mut RowSelection,
+    navigate_highlight: Option<(u64, f64)>,
 ) -> LogRenderOutcome {
     let font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
     let base_row_height = ui.fonts_mut(|f| f.row_height(&font_id));
@@ -617,6 +637,30 @@ fn render_log_rows(
                     selection.paint(ui, full_rect, current_y, entry_height);
                 }
 
+                // 跳转目标行高亮（叠在 selection/hover 之上，按剩余时间淡出）
+                if let Some((target_id, start)) = navigate_highlight
+                    && entry.id == target_id
+                {
+                    let now = ui.ctx().input(|i| i.time);
+                    let elapsed = now - start;
+                    if elapsed < NAV_HIGHLIGHT_DURATION {
+                        let alpha = if elapsed > NAV_HIGHLIGHT_DURATION - NAV_FADE {
+                            ((NAV_HIGHLIGHT_DURATION - elapsed) / NAV_FADE).clamp(0.0, 1.0)
+                        } else {
+                            1.0
+                        };
+                        ui.painter_at(full_rect).rect_filled(
+                            egui::Rect::from_min_size(
+                                egui::pos2(full_rect.left(), current_y),
+                                egui::vec2(full_rect.width(), entry_height),
+                            ),
+                            0.0,
+                            theme::NAV_HIGHLIGHT.gamma_multiply(alpha as f32),
+                        );
+                        ui.ctx().request_repaint();
+                    }
+                }
+
                 // --- 标签列 ---
                 let mut x = label_rect.left() + row_left_padding;
 
@@ -752,8 +796,11 @@ fn render_log_rows(
                 &ctx_response,
                 ui.make_persistent_id(("log-frozen-row", LOG_SCROLL_ID)),
             );
-            // 双击搜索结果 → 离开搜索进入上下文
-            let double_clicked = ctx_response.double_clicked();
+            // 双击任意位置（文字或空白）→ 离开搜索进入上下文。
+            // 用全局 button_double_clicked + 整行 rect 命中，不再依赖只覆盖文本列的 ctx_response。
+            let double_clicked = ui
+                .input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary))
+                && ui.rect_contains_pointer(full_rect);
             if double_clicked
                 && let Some(idx) = frozen_row_idx.or_else(|| hl.hover_index(ui))
                 && let Some(entry) = rows.get(idx)
