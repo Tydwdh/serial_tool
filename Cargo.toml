@@ -7,7 +7,7 @@ members = [
     "crates/lua_host",
     "crates/marketplace",
     "crates/panels",
-    "crates/recorder",
+    "crates/backend",
     "crates/testing",
     "crates/transport",
     "crates/updater",

@@ -4078,7 +4078,19 @@ dependencies = [
  "mio",
  "pin-project-lite",
  "socket2",
+ "tokio-macros",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6328af13490e73a9b4694030fafd93f8c8c6a9dede33e821c3fc63eddf8042ba"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -4141,6 +4153,28 @@ name = "toml_writer"
 version = "1.1.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
+
+[[package]]
+name = "tool-backend"
+version = "0.7.3"
+dependencies = [
+ "crossbeam-channel",
+ "log",
+ "parking_lot",
+ "rfd",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tool-core",
+ "tool-databus",
+ "tool-extension",
+ "tool-lua-host",
+ "tool-marketplace",
+ "tool-recorder",
+ "tool-transport",
+ "tool-updater",
+]
 
 [[package]]
 name = "tool-core"
