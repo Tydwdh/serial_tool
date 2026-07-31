@@ -11,6 +11,7 @@ members = [
     "crates/testing",
     "crates/transport",
     "crates/updater",
+    "vendor/egui_tiles",
 ]
 resolver = "3"
 
@@ -18,10 +19,12 @@ resolver = "3"
 edition = "2024"
 version = "0.7.3"
 license = "MIT"
+rust-version = "1.92"
 
 [workspace.dependencies]
 eframe = { version = "0.35", features = ["persistence", "glow", "inspection"] }
 egui = "0.35"
+egui_tiles = "0.16"
 crossbeam-channel = "0.5"
 dirs-next = "2"
 log = "0.4"
@@ -33,6 +36,10 @@ serialport = "4.8"
 thiserror = "2"
 open = "5"
 windows-sys = "0.61"
+
+[patch.crates-io]
+egui_tiles = { path = "vendor/egui_tiles" }
+
 # ── 发布优化：减小体积、提升性能 ──
 [profile.release]
 opt-level = "s"   # 优化体积

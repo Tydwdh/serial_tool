@@ -121,7 +121,7 @@ impl WorkbenchApp {
                     .and_then(|v| v.as_str())
                     .unwrap_or(&item.title)
                     .to_owned();
-                ui.label(egui::RichText::new(display_text).color(theme::TEXT_SECONDARY));
+                ui.label(egui::RichText::new(display_text).color(theme::text_secondary()));
             }
             "progress" => {
                 let state = self
@@ -167,7 +167,7 @@ impl WorkbenchApp {
                     )
                     .inner;
                 if !text.is_empty() {
-                    ui.label(egui::RichText::new(text).color(theme::TEXT_SECONDARY));
+                    ui.label(egui::RichText::new(text).color(theme::text_secondary()));
                 }
                 if let Some(tooltip) = item.tooltip.as_deref().filter(|t| !t.trim().is_empty()) {
                     response.on_hover_text(tooltip);

@@ -602,9 +602,9 @@ impl TerminalPanel {
             let armed = armed_ts.is_some_and(|t| now - t < 3.0);
             let clear_label = if armed { "确认清空?" } else { "清空" };
             let clear_btn = egui::Button::new(egui::RichText::new(clear_label).color(if armed {
-                crate::theme::RED
+                crate::theme::red()
             } else {
-                crate::theme::TEXT_PRIMARY
+                crate::theme::text_primary()
             }));
             if ui.add(clear_btn).clicked() {
                 if armed {
@@ -641,9 +641,20 @@ impl TerminalPanel {
                 search_resp.surrender_focus();
             }
             // 大小写敏感切换：选中时 "Aa" 高亮，匹配区分大小写。
-            let case_btn = egui::Button::new("Aa")
-                .selected(self.search_case_sensitive)
-                .small();
+            let mut case_btn = egui::Button::new(egui::RichText::new("Aa").color(
+                if self.search_case_sensitive {
+                    theme::toggle_selected_text()
+                } else {
+                    theme::text_primary()
+                },
+            ))
+            .selected(self.search_case_sensitive)
+            .small();
+            if self.search_case_sensitive {
+                case_btn = case_btn
+                    .fill(theme::toggle_selected_bg())
+                    .stroke(egui::Stroke::new(1.0, theme::toggle_selected_border()));
+            }
             if ui
                 .add(case_btn)
                 .on_hover_text("区分大小写（HEX 为大写，默认不区分）")
@@ -678,14 +689,14 @@ impl TerminalPanel {
             let dropped = self.paused_dropped_count;
             egui::Frame::group(ui.style())
                 .inner_margin(egui::Margin::symmetric(8, 3))
-                .fill(crate::theme::YELLOW_BG)
-                .stroke(egui::Stroke::new(1.0, crate::theme::YELLOW))
+                .fill(crate::theme::yellow_bg())
+                .stroke(egui::Stroke::new(1.0, crate::theme::yellow()))
                 .show(ui, |ui| {
                     ui.label(
                         egui::RichText::new(format!(
                             "已暂停接收 · 丢弃 {dropped} 条数据（点击「继续」恢复）"
                         ))
-                        .color(crate::theme::YELLOW),
+                        .color(crate::theme::yellow()),
                     );
                 });
         } else if self.paused_banner_remain > 0.0 {
@@ -695,14 +706,14 @@ impl TerminalPanel {
             let dropped = self.paused_dropped_count;
             egui::Frame::group(ui.style())
                 .inner_margin(egui::Margin::symmetric(8, 3))
-                .fill(crate::theme::YELLOW_BG)
-                .stroke(egui::Stroke::new(1.0, crate::theme::YELLOW))
+                .fill(crate::theme::yellow_bg())
+                .stroke(egui::Stroke::new(1.0, crate::theme::yellow()))
                 .show(ui, |ui| {
                     ui.label(
                         egui::RichText::new(format!(
                             "已恢复接收 · 暂停期间丢弃了 {dropped} 条数据"
                         ))
-                        .color(crate::theme::YELLOW),
+                        .color(crate::theme::yellow()),
                     );
                 });
         } else if self.paused_dropped_count > 0 {
@@ -989,11 +1000,15 @@ impl TerminalPanel {
 
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(&detail.timestamp_label).monospace());
-                    ui.label(RichText::new(&detail.port).monospace().color(theme::YELLOW));
+                    ui.label(
+                        RichText::new(&detail.port)
+                            .monospace()
+                            .color(theme::yellow()),
+                    );
                     ui.label(RichText::new(dir_label).strong().color(dir_color));
                     ui.label(
                         RichText::new(format!("#{} · {}B", detail.id, detail.raw_text.len()))
-                            .color(theme::TEXT_DIMMED)
+                            .color(theme::text_dimmed())
                             .small(),
                     );
 
@@ -1207,7 +1222,7 @@ fn render_rows_view(
             .auto_shrink([false, false])
             .id_salt((scroll_key, "v2"))
             .show(ui, |ui| {
-                ui.label(RichText::new(empty_hint).color(theme::TEXT_SECONDARY));
+                ui.label(RichText::new(empty_hint).color(theme::text_secondary()));
             });
 
         return RenderOutcome {
@@ -1411,7 +1426,7 @@ fn render_rows_view(
                         let mut layout_job = egui::text::LayoutJob::simple(
                             preview_text,
                             font_id.clone(),
-                            theme::TEXT_DIMMED,
+                            theme::text_dimmed(),
                             preview_galley_width,
                         );
                         layout_job.halign = egui::Align::LEFT;
@@ -1479,7 +1494,7 @@ fn render_rows_view(
                                 egui::vec2(full_rect.width(), entry_height),
                             ),
                             0.0,
-                            theme::NAV_HIGHLIGHT.gamma_multiply(alpha as f32),
+                            theme::nav_highlight().gamma_multiply(alpha as f32),
                         );
                         ui.ctx().request_repaint();
                     }
@@ -1494,7 +1509,7 @@ fn render_rows_view(
                         egui::Align2::LEFT_CENTER,
                         row.timestamp_label.as_ref(),
                         font_id.clone(),
-                        theme::TEXT_SECONDARY,
+                        theme::text_secondary(),
                     );
                     x += time_col_width + col_gap;
                 }
@@ -1506,7 +1521,7 @@ fn render_rows_view(
                             egui::Align2::LEFT_CENTER,
                             port,
                             font_id.clone(),
-                            theme::YELLOW,
+                            theme::yellow(),
                         );
                     }
                     x += port_col_width + col_gap;
@@ -1606,7 +1621,7 @@ fn render_rows_view(
                     preview_painter.add(egui::epaint::TextShape::new(
                         preview_pos,
                         pg.clone(),
-                        theme::TEXT_DIMMED,
+                        theme::text_dimmed(),
                     ));
                 }
 
@@ -2054,8 +2069,8 @@ fn format_raw_visible(text: &str) -> String {
 
 fn direction_label(direction: Direction) -> (&'static str, Color32) {
     match direction {
-        Direction::Rx => ("RX", theme::GREEN),
-        Direction::Tx => ("TX", theme::BLUE),
+        Direction::Rx => ("RX", theme::green()),
+        Direction::Tx => ("TX", theme::blue()),
         Direction::Internal => ("IN", Color32::GRAY),
     }
 }

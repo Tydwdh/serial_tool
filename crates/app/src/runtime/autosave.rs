@@ -33,12 +33,8 @@ impl WorkbenchApp {
         if self.terminal_panel.maximize_clicked {
             self.terminal_panel.maximize_clicked = false;
             self.popups.terminal_open = true;
-            if matches!(
-                self.panels.dock.bottom.active_or_first(),
-                Some(tool_panels::PanelKind::Terminal)
-            ) {
-                self.panels.dock.bottom.active = Some(tool_panels::PanelKind::Logs);
-            }
+            self.panels
+                .select_center_panel(tool_panels::PanelKind::Logs);
         }
     }
 }

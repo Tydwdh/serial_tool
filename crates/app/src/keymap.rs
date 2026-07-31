@@ -13,8 +13,6 @@ pub(crate) enum Action {
     RefreshPorts,
     /// 打开/关闭选中串口
     OpenPort,
-    /// 切换左侧活动栏
-    ToggleActivityBar,
     /// 切换底部面板
     ToggleBottomPanel,
     /// 切换右侧边栏
@@ -42,7 +40,6 @@ impl Action {
     pub(crate) const ALL: &[Action] = &[
         Action::RefreshPorts,
         Action::OpenPort,
-        Action::ToggleActivityBar,
         Action::ToggleBottomPanel,
         Action::ToggleRightDock,
         Action::Send,
@@ -72,7 +69,6 @@ impl Action {
         match self {
             Action::RefreshPorts => "$RefreshPorts".into(),
             Action::OpenPort => "$OpenPort".into(),
-            Action::ToggleActivityBar => "$ToggleActivityBar".into(),
             Action::ToggleBottomPanel => "$ToggleBottomPanel".into(),
             Action::ToggleRightDock => "$ToggleRightDock".into(),
             Action::Send => "$Send".into(),
@@ -93,7 +89,6 @@ impl Action {
         match key {
             "$RefreshPorts" => Some(Action::RefreshPorts),
             "$OpenPort" => Some(Action::OpenPort),
-            "$ToggleActivityBar" => Some(Action::ToggleActivityBar),
             "$ToggleBottomPanel" => Some(Action::ToggleBottomPanel),
             "$ToggleRightDock" => Some(Action::ToggleRightDock),
             "$Send" => Some(Action::Send),
@@ -119,7 +114,6 @@ impl Action {
         match self {
             Action::RefreshPorts => "刷新串口".into(),
             Action::OpenPort => "打开/关闭串口".into(),
-            Action::ToggleActivityBar => "切换左侧活动栏".into(),
             Action::ToggleBottomPanel => "切换底部面板".into(),
             Action::ToggleRightDock => "切换右侧边栏".into(),
             Action::Send => "发送".into(),
@@ -213,15 +207,6 @@ impl Default for Keymap {
 }
 
 impl Keymap {
-    /// 获取某个动作的快捷键显示字符串（取第一个绑定）。
-    pub(crate) fn shortcut_display(&self, action: &Action) -> String {
-        self.bindings
-            .get(&action.key())
-            .and_then(|v| v.first())
-            .map(|b| b.display())
-            .unwrap_or_default()
-    }
-
     /// 设置某个动作的绑定列表。
     pub(crate) fn set_bindings(&mut self, action: &Action, bindings: Vec<KeyBinding>) {
         let key = action.key();
@@ -259,10 +244,6 @@ fn default_bindings() -> HashMap<String, Vec<KeyBinding>> {
     m.insert(
         Action::OpenPort.key(),
         vec![KeyBinding::new("O", true, true, false)],
-    );
-    m.insert(
-        Action::ToggleActivityBar.key(),
-        vec![KeyBinding::new("B", true, false, false)],
     );
     m.insert(
         Action::ToggleBottomPanel.key(),

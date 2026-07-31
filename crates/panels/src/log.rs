@@ -186,9 +186,9 @@ impl LogPanel {
             let armed = armed_ts.is_some_and(|t| now - t < 3.0);
             let clear_label = if armed { "确认清空?" } else { "清空" };
             let clear_btn = egui::Button::new(egui::RichText::new(clear_label).color(if armed {
-                crate::theme::RED
+                crate::theme::red()
             } else {
-                crate::theme::TEXT_PRIMARY
+                crate::theme::text_primary()
             }));
             if ui.add(clear_btn).clicked() {
                 if armed {
@@ -215,9 +215,20 @@ impl LogPanel {
                 self.search_text.clear();
                 search_resp.surrender_focus();
             }
-            let case_btn = egui::Button::new("Aa")
-                .selected(self.search_case_sensitive)
-                .small();
+            let mut case_btn = egui::Button::new(egui::RichText::new("Aa").color(
+                if self.search_case_sensitive {
+                    theme::toggle_selected_text()
+                } else {
+                    theme::text_primary()
+                },
+            ))
+            .selected(self.search_case_sensitive)
+            .small();
+            if self.search_case_sensitive {
+                case_btn = case_btn
+                    .fill(theme::toggle_selected_bg())
+                    .stroke(egui::Stroke::new(1.0, theme::toggle_selected_border()));
+            }
             if ui.add(case_btn).on_hover_text("区分大小写").clicked() {
                 self.search_case_sensitive = !self.search_case_sensitive;
             }
@@ -479,7 +490,7 @@ fn render_log_rows(
                 } else {
                     "应用日志会显示在这里"
                 };
-                ui.label(RichText::new(hint).color(theme::TEXT_SECONDARY));
+                ui.label(RichText::new(hint).color(theme::text_secondary()));
             });
 
         return LogRenderOutcome {
@@ -655,7 +666,7 @@ fn render_log_rows(
                                 egui::vec2(full_rect.width(), entry_height),
                             ),
                             0.0,
-                            theme::NAV_HIGHLIGHT.gamma_multiply(alpha as f32),
+                            theme::nav_highlight().gamma_multiply(alpha as f32),
                         );
                         ui.ctx().request_repaint();
                     }
@@ -670,7 +681,7 @@ fn render_log_rows(
                     egui::Align2::LEFT_CENTER,
                     &entry.timestamp_label,
                     font_id.clone(),
-                    theme::TEXT_SECONDARY,
+                    theme::text_secondary(),
                 );
                 x += time_col_width + col_gap;
 
@@ -700,7 +711,7 @@ fn render_log_rows(
                         egui::Align2::LEFT_CENTER,
                         source_text,
                         font_id.clone(),
-                        theme::CYAN,
+                        theme::cyan(),
                     );
                 }
 

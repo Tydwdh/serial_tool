@@ -1,5 +1,5 @@
 use crate::state::LineEnding;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tool_core::now_timestamp_ms;
 use tool_recorder::RecordMode;
 
@@ -74,6 +74,12 @@ pub(crate) struct PersistedConfig {
     /// 等宽字体大小（终端/日志区），默认 13.0。
     #[serde(default = "default_monospace_font_size")]
     pub(crate) monospace_font_size: f32,
+    /// 旧版主题标识，仅用于迁移没有 `theme_path` 的配置。
+    #[serde(default)]
+    pub(crate) ui_theme: tool_panels::theme::AppTheme,
+    /// 当前主题 JSON 路径。内置和用户新增主题都走同一字段。
+    #[serde(default, alias = "custom_theme_path")]
+    pub(crate) theme_path: Option<String>,
     /// 终端合并阈值（ms），同端口同方向间隔 ≤ 此值的连续包合并显示。默认 5。
     #[serde(default = "default_terminal_merge_window_ms")]
     pub(crate) terminal_merge_window_ms: u64,
@@ -167,6 +173,17 @@ pub(crate) fn config_path() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("workspace.json")
 }
+
+/// 主题目录内的文件以相对路径保存，便携包或安装目录改变后仍能恢复主题。
+pub(crate) fn resolve_theme_path(theme_dir: &Path, stored_path: &str) -> PathBuf {
+    let path = PathBuf::from(stored_path);
+    if path.is_absolute() {
+        path
+    } else {
+        theme_dir.join(path)
+    }
+}
+
 pub(crate) fn windows_open_dialog() -> Option<PathBuf> {
     rfd::FileDialog::new()
         .add_filter("JSONL", &["jsonl"])
@@ -260,6 +277,13 @@ impl WorkbenchApp {
             auto_reconnect: self.serial.auto_reconnect,
             keymap: self.keymap.clone(),
             monospace_font_size: self.monospace_font_size,
+            ui_theme: self.ui_theme,
+            theme_path: self.theme_path.as_ref().map(|path| {
+                path.strip_prefix(&self.theme_dir)
+                    .unwrap_or(path)
+                    .display()
+                    .to_string()
+            }),
             terminal_merge_window_ms: self.terminal_panel.merge_window_ms,
             terminal_max_entries: self.terminal_panel.max_entries,
             log_max_entries: self.bottom_log_panel.max_entries,
@@ -291,6 +315,17 @@ impl WorkbenchApp {
         self.serial.auto_reconnect = cfg.auto_reconnect;
         self.keymap = cfg.keymap.clone();
         self.monospace_font_size = cfg.monospace_font_size.clamp(10.0, 24.0);
+        self.theme_path = cfg
+            .theme_path
+            .as_deref()
+            .map(|path| resolve_theme_path(&self.theme_dir, path));
+        if let Some(path) = self.theme_path.as_deref() {
+            tool_panels::theme::load_theme_file(path)?;
+            self.ui_theme = tool_panels::theme::builtin_theme_for_path(path)
+                .unwrap_or(tool_panels::theme::AppTheme::Custom);
+        } else {
+            self.ui_theme = cfg.ui_theme;
+        }
         self.terminal_panel.merge_window_ms = cfg.terminal_merge_window_ms;
         self.terminal_panel.max_entries = cfg.terminal_max_entries.max(100);
         self.bottom_log_panel.max_entries = cfg.log_max_entries.max(100);

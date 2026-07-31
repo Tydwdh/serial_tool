@@ -51,7 +51,7 @@
 
 环境要求：
 
-- Rust 1.85+
+- Rust 1.92+
 - Windows / macOS / Linux
 - Windows 安装器需要 Inno Setup 6
 

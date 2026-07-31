@@ -66,7 +66,7 @@ impl RowHighlight {
                     egui::vec2(full_rect.width(), entry_height),
                 ),
                 0.0,
-                theme::WIDGET_HOVER,
+                theme::widget_hover(),
             );
         }
         should_highlight
@@ -391,7 +391,7 @@ impl RowSelection {
             egui::vec2(full_rect.width(), entry_height),
         );
         ui.painter_at(full_rect)
-            .rect_filled(sel_rect, 0.0, theme::WIDGET_HOVER);
+            .rect_filled(sel_rect, 0.0, theme::widget_hover());
     }
 }
 

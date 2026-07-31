@@ -189,7 +189,7 @@ impl PluginsPanel {
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::CARD_ACCENT_PLUGIN);
+                    theme::card_accent_bar(ui, theme::card_accent_plugin());
                     ui.label(egui::RichText::new("🔧 管理").heading());
                 });
                 ui.separator();
@@ -237,7 +237,7 @@ impl PluginsPanel {
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        theme::card_accent_bar(ui, theme::YELLOW);
+                        theme::card_accent_bar(ui, theme::yellow());
                         ui.label(egui::RichText::new("⚠ 诊断").heading());
                     });
                     ui.separator();
@@ -289,7 +289,7 @@ impl PluginsPanel {
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::CARD_ACCENT_PLUGIN);
+                    theme::card_accent_bar(ui, theme::card_accent_plugin());
                     ui.label(egui::RichText::new("🛒 市场").heading());
                 });
                 ui.separator();
@@ -304,7 +304,7 @@ impl PluginsPanel {
                         events.push(PluginPanelEvent::RefreshMarket);
                     }
                     if let Some(err) = &self.market.error {
-                        ui.colored_label(theme::RED, egui::RichText::new(err).small());
+                        ui.colored_label(theme::red(), egui::RichText::new(err).small());
                     } else if refreshing {
                         ui.label(egui::RichText::new("正在拉取市场索引…").small());
                     } else if let Some(reg) = &self.market.registry {
@@ -366,22 +366,22 @@ impl PluginsPanel {
                     ui.label(
                         egui::RichText::new(&plugin.name)
                             .strong()
-                            .color(theme::TEXT_PRIMARY),
+                            .color(theme::text_primary()),
                     );
                     ui.label(
                         egui::RichText::new(&plugin.id)
                             .monospace()
-                            .color(theme::TEXT_SECONDARY),
+                            .color(theme::text_secondary()),
                     );
                     ui.label(format!("v{}", plugin.version));
                     if is_installed {
-                        ui.colored_label(theme::GREEN, "✓ 已安装");
+                        ui.colored_label(theme::green(), "✓ 已安装");
                     }
                     if let Some(cat) = &plugin.category {
                         ui.label(
                             egui::RichText::new(cat)
                                 .small()
-                                .color(theme::TEXT_SECONDARY),
+                                .color(theme::text_secondary()),
                         );
                     }
                 });
@@ -402,7 +402,7 @@ impl PluginsPanel {
                         ui.label(
                             egui::RichText::new(author)
                                 .monospace()
-                                .color(theme::TEXT_PRIMARY),
+                                .color(theme::text_primary()),
                         );
                     }
                     ui.label(format!("{} 字节", plugin.size));
@@ -414,7 +414,7 @@ impl PluginsPanel {
                             plugin.permissions.join(", ")
                         })
                         .monospace()
-                        .color(theme::TEXT_PRIMARY),
+                        .color(theme::text_primary()),
                     );
                 });
 
@@ -451,12 +451,12 @@ impl PluginsPanel {
                     ui.label(
                         egui::RichText::new(&summary.name)
                             .strong()
-                            .color(theme::TEXT_PRIMARY),
+                            .color(theme::text_primary()),
                     );
                     ui.label(
                         egui::RichText::new(&summary.id)
                             .monospace()
-                            .color(theme::TEXT_SECONDARY),
+                            .color(theme::text_secondary()),
                     );
                     ui.label(format!("v{}", summary.version));
                     ui.label(
@@ -473,7 +473,7 @@ impl PluginsPanel {
                     ui.label(
                         egui::RichText::new(&summary.runtime)
                             .monospace()
-                            .color(theme::TEXT_PRIMARY),
+                            .color(theme::text_primary()),
                     );
                     ui.label("权限");
                     ui.label(
@@ -483,7 +483,7 @@ impl PluginsPanel {
                             summary.permissions.join(", ")
                         })
                         .monospace()
-                        .color(theme::TEXT_PRIMARY),
+                        .color(theme::text_primary()),
                     );
                 });
                 ui.horizontal_wrapped(|ui| {
@@ -491,7 +491,7 @@ impl PluginsPanel {
                     ui.label(
                         egui::RichText::new(summary.path.display().to_string())
                             .monospace()
-                            .color(theme::TEXT_PRIMARY),
+                            .color(theme::text_primary()),
                     );
                 });
 
@@ -502,7 +502,7 @@ impl PluginsPanel {
                             ui.label(
                                 egui::RichText::new(format!("{} ({})", panel.title, panel.kind))
                                     .monospace()
-                                    .color(theme::TEXT_PRIMARY),
+                                    .color(theme::text_primary()),
                             );
                         }
                     });
@@ -521,9 +521,9 @@ impl PluginsPanel {
                         if is_running {
                             for cmd in declared {
                                 if registered.iter().any(|r| r == &cmd.id) {
-                                    ui.colored_label(theme::GREEN, format!("✓ {}", cmd.id));
+                                    ui.colored_label(theme::green(), format!("✓ {}", cmd.id));
                                 } else if missing.iter().any(|m| m == &cmd.id) {
-                                    ui.colored_label(theme::YELLOW, format!("⚠ {}", cmd.id))
+                                    ui.colored_label(theme::yellow(), format!("⚠ {}", cmd.id))
                                         .on_hover_text(
                                             "此命令已在 manifest 声明但尚未注册 handler",
                                         );
@@ -532,7 +532,7 @@ impl PluginsPanel {
                                 }
                             }
                             for cmd in undeclared {
-                                ui.colored_label(theme::TEXT_SECONDARY, format!("ℹ {}", cmd))
+                                ui.colored_label(theme::text_secondary(), format!("ℹ {}", cmd))
                                     .on_hover_text("此命令在运行时动态注册，未在 manifest 声明");
                             }
                         } else {
@@ -540,7 +540,7 @@ impl PluginsPanel {
                                 ui.label(
                                     egui::RichText::new(&cmd.id)
                                         .monospace()
-                                        .color(theme::TEXT_PRIMARY),
+                                        .color(theme::text_primary()),
                                 );
                             }
                         }
@@ -548,7 +548,7 @@ impl PluginsPanel {
                 }
 
                 if let Some(error) = &summary.last_error {
-                    ui.colored_label(theme::RED, error);
+                    ui.colored_label(theme::red(), error);
                 }
 
                 // 按钮行
@@ -570,13 +570,11 @@ impl PluginsPanel {
                                 }
                             }
                         }
-                    } else {
-                        if ui.button("启用").clicked() {
-                            match manager.enable(&summary.id) {
-                                Ok(()) => {}
-                                Err(error) => {
-                                    return Some(PluginPanelEvent::Status(error.to_string(), true));
-                                }
+                    } else if ui.button("启用").clicked() {
+                        match manager.enable(&summary.id) {
+                            Ok(()) => {}
+                            Err(error) => {
+                                return Some(PluginPanelEvent::Status(error.to_string(), true));
                             }
                         }
                     }
@@ -616,7 +614,8 @@ impl PluginsPanel {
                     if confirming {
                         if ui
                             .add(
-                                egui::Button::new("确认卸载?").fill(theme::RED.gamma_multiply(0.3)),
+                                egui::Button::new("确认卸载?")
+                                    .fill(theme::red().gamma_multiply(0.3)),
                             )
                             .clicked()
                         {
@@ -645,18 +644,18 @@ impl Default for PluginsPanel {
 
 fn state_color(state: PluginState) -> Color32 {
     match state {
-        PluginState::Discovered => theme::TEXT_SECONDARY,
-        PluginState::Enabled | PluginState::Finished => theme::GREEN,
-        PluginState::Running => theme::BLUE,
-        PluginState::Failed => theme::RED,
-        PluginState::Disabled => theme::YELLOW,
+        PluginState::Discovered => theme::text_secondary(),
+        PluginState::Enabled | PluginState::Finished => theme::green(),
+        PluginState::Running => theme::blue(),
+        PluginState::Failed => theme::red(),
+        PluginState::Disabled => theme::yellow(),
     }
 }
 
 fn diagnostic_row(ui: &mut egui::Ui, diagnostic: &PluginDiagnostic) {
     let color = match diagnostic.severity {
-        PluginDiagnosticSeverity::Warning => theme::YELLOW,
-        PluginDiagnosticSeverity::Error => theme::RED,
+        PluginDiagnosticSeverity::Warning => theme::yellow(),
+        PluginDiagnosticSeverity::Error => theme::red(),
     };
 
     ui.horizontal_wrapped(|ui| {
@@ -664,13 +663,13 @@ fn diagnostic_row(ui: &mut egui::Ui, diagnostic: &PluginDiagnostic) {
         ui.label(
             egui::RichText::new(&diagnostic.code)
                 .monospace()
-                .color(theme::TEXT_PRIMARY),
+                .color(theme::text_primary()),
         );
         if let Some(plugin_id) = &diagnostic.plugin_id {
             ui.label(
                 egui::RichText::new(plugin_id)
                     .monospace()
-                    .color(theme::TEXT_PRIMARY),
+                    .color(theme::text_primary()),
             );
         }
         ui.label(&diagnostic.message);
@@ -680,7 +679,7 @@ fn diagnostic_row(ui: &mut egui::Ui, diagnostic: &PluginDiagnostic) {
         ui.label(
             egui::RichText::new(diagnostic.path.display().to_string())
                 .monospace()
-                .color(theme::TEXT_PRIMARY),
+                .color(theme::text_primary()),
         );
     });
 }

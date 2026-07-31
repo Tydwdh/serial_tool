@@ -20,14 +20,14 @@ impl WorkbenchApp {
                     let label = self.serial.port_label(&p);
                     (
                         if st.open {
-                            theme::GREEN
+                            theme::green()
                         } else {
-                            theme::TEXT_SECONDARY
+                            theme::text_secondary()
                         },
                         format!("{label} @ {b}"),
                     )
                 } else {
-                    (theme::TEXT_SECONDARY, "串口已关闭".into())
+                    (theme::text_secondary(), "串口已关闭".into())
                 };
             // 发光圆点：外层半透明大圆 + 内层实心小圆
             let dot_rect = egui::Rect::from_center_size(
@@ -54,16 +54,16 @@ impl WorkbenchApp {
                 ui.painter().circle_filled(
                     rec_dot_rect.center(),
                     5.0,
-                    theme::RED.linear_multiply(0.3),
+                    theme::red().linear_multiply(0.3),
                 );
             }
             ui.painter().circle_filled(
                 rec_dot_rect.center(),
                 3.0,
                 if rec {
-                    theme::RED
+                    theme::red()
                 } else {
-                    theme::TEXT_SECONDARY
+                    theme::text_secondary()
                 },
             );
             ui.add_space(12.0);
@@ -88,7 +88,7 @@ impl WorkbenchApp {
             if rec {
                 let stats = self.recorder.stats();
                 if let Some(ref err) = stats.last_error {
-                    ui.colored_label(theme::RED, format!("错误: {err}"));
+                    ui.colored_label(theme::red(), format!("错误: {err}"));
                 }
             }
 
@@ -105,7 +105,7 @@ impl WorkbenchApp {
                     let bg = if high {
                         color.linear_multiply(0.25)
                     } else {
-                        theme::BG_INPUT
+                        theme::bg_input()
                     };
                     ui.painter().rect_filled(rect, 3.0, bg);
                     if resp.hovered() {
@@ -132,7 +132,7 @@ impl WorkbenchApp {
                         ui,
                         "DTR⬆",
                         self.send.dtr_high,
-                        theme::GREEN,
+                        theme::green(),
                         "数据终端就绪 (DTR)。点击切换会立即驱动该线路，部分设备会用它触发复位/进入 bootload，请谨慎。",
                     ) {
                         let new_dtr = !self.send.dtr_high;
@@ -145,7 +145,7 @@ impl WorkbenchApp {
                         ui,
                         "RTS⬆",
                         self.send.rts_high,
-                        theme::BLUE,
+                        theme::blue(),
                         "请求发送 (RTS)。点击切换会立即驱动该线路，部分设备会用它触发复位/进入 bootload，请谨慎。",
                     ) {
                         let new_rts = !self.send.rts_high;
@@ -159,14 +159,14 @@ impl WorkbenchApp {
                         ui,
                         "DTR⬆",
                         self.send.dtr_high,
-                        theme::GREEN,
+                        theme::green(),
                         "数据终端就绪 (DTR)。打开串口后可切换电平。",
                     );
                     tag(
                         ui,
                         "RTS⬆",
                         self.send.rts_high,
-                        theme::BLUE,
+                        theme::blue(),
                         "请求发送 (RTS)。打开串口后可切换电平。",
                     );
                 }
@@ -210,9 +210,9 @@ impl WorkbenchApp {
                 let shown: Vec<_> = notifications.iter().take(max_show).collect();
                 for n in &shown {
                     let color = match n.level {
-                        StatusLevel::Info => theme::TEXT_SECONDARY,
-                        StatusLevel::Warn => theme::YELLOW,
-                        StatusLevel::Error => theme::RED,
+                        StatusLevel::Info => theme::text_secondary(),
+                        StatusLevel::Warn => theme::yellow(),
+                        StatusLevel::Error => theme::red(),
                     };
                     let text = truncate_for_status(&n.text, 60);
                     ui.label(egui::RichText::new(&text).color(color))
@@ -223,7 +223,7 @@ impl WorkbenchApp {
                     let overflow_text =
                         egui::RichText::new(format!("…及 {} 条消息", total - max_show))
                             .small()
-                            .color(theme::TEXT_SECONDARY);
+                            .color(theme::text_secondary());
                     let overflow_resp =
                         ui.selectable_label(false, overflow_text);
                     let mut overflow_open = ui.ctx().memory_mut(|m| {
@@ -249,9 +249,9 @@ impl WorkbenchApp {
                                 egui::ScrollArea::vertical().show(ui, |ui| {
                                     for n in &notifications {
                                         let color = match n.level {
-                                            StatusLevel::Info => theme::TEXT_SECONDARY,
-                                            StatusLevel::Warn => theme::YELLOW,
-                                            StatusLevel::Error => theme::RED,
+                                            StatusLevel::Info => theme::text_secondary(),
+                                            StatusLevel::Warn => theme::yellow(),
+                                            StatusLevel::Error => theme::red(),
                                         };
                                         let level_mark = match n.level {
                                             StatusLevel::Error => "✕ ",
@@ -306,11 +306,11 @@ impl WorkbenchApp {
         if us.update_available {
             let version_str = us.latest_version.as_deref().unwrap_or("?");
             if let Some(ref err) = us.error {
-                ui.label(egui::RichText::new("⚠ 更新失败").color(theme::YELLOW))
+                ui.label(egui::RichText::new("⚠ 更新失败").color(theme::yellow()))
                     .on_hover_text(err);
             }
-            let label =
-                ui.label(egui::RichText::new(format!("⬇ v{version_str} 可用")).color(theme::CYAN));
+            let label = ui
+                .label(egui::RichText::new(format!("⬇ v{version_str} 可用")).color(theme::cyan()));
 
             // hover 显示 changelog
             if !us.changelog.is_empty() {
@@ -330,7 +330,7 @@ impl WorkbenchApp {
                 ui.label(format!("下载中 {pct:.0}%"));
             } else if us.downloaded {
                 if ui
-                    .button(egui::RichText::new("更新并重启").color(theme::GREEN))
+                    .button(egui::RichText::new("更新并重启").color(theme::green()))
                     .clicked()
                 {
                     self.update_state.want_restart = true;
@@ -343,15 +343,15 @@ impl WorkbenchApp {
 
         // 错误时显示 ⚠
         if let Some(ref err) = us.error {
-            ui.label(egui::RichText::new("⚠").color(theme::YELLOW))
+            ui.label(egui::RichText::new("⚠").color(theme::yellow()))
                 .on_hover_text(err);
         }
 
         // 图标：未检查=🔄，已检查无更新=✓
         let (icon, color, hover) = if us.latest_version.is_some() && us.error.is_none() {
-            ("✓", theme::GREEN, "已是最新版本，点击重新检查")
+            ("✓", theme::green(), "已是最新版本，点击重新检查")
         } else {
-            ("🔄", theme::TEXT_SECONDARY, "检查更新")
+            ("🔄", theme::text_secondary(), "检查更新")
         };
         if ui
             .add(

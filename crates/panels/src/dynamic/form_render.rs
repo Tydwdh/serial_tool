@@ -57,7 +57,7 @@ pub fn dynamic_form_ui(
                     .filter(|s| !s.is_empty())
                     .or(field.text.as_deref())
                     .unwrap_or(&field.label);
-                ui.label(RichText::new(text).color(theme::TEXT_SECONDARY));
+                ui.label(RichText::new(text).color(theme::text_secondary()));
             }
             // ── 按钮 ──
             DynamicFieldKind::Button => {
@@ -69,11 +69,11 @@ pub fn dynamic_form_ui(
                     .or(field.text.as_deref().filter(|s| !s.trim().is_empty()))
                     .unwrap_or(&field.label);
                 let fill = match field.variant.as_deref() {
-                    Some("primary") => theme::BLUE,
-                    Some("danger") => theme::RED,
-                    _ => theme::BG_TERTIARY,
+                    Some("primary") => theme::blue(),
+                    Some("danger") => theme::red(),
+                    _ => theme::bg_tertiary(),
                 };
-                let btn = egui::Button::new(RichText::new(text).color(theme::TEXT_WHITE))
+                let btn = egui::Button::new(RichText::new(text).color(theme::text_white()))
                     .fill(fill)
                     .min_size(egui::vec2(80.0, 28.0));
                 if ui.add_enabled(enabled, btn).clicked() {
@@ -371,7 +371,7 @@ pub fn dynamic_form_ui(
 
     if auto_apply {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("变更会立即应用").color(theme::TEXT_SECONDARY));
+            ui.label(RichText::new("变更会立即应用").color(theme::text_secondary()));
         });
 
         if changed {
@@ -413,10 +413,10 @@ pub(super) fn publish_form_changed(bus: &DataBus, panel_id: &str, fields: &[Dyna
 
 pub(super) fn status_color(level: &str) -> Color32 {
     match level {
-        "running" => theme::BLUE,
-        "success" => theme::GREEN,
-        "warn" => theme::YELLOW,
-        "error" => theme::RED,
-        _ => theme::TEXT_SECONDARY, // idle
+        "running" => theme::blue(),
+        "success" => theme::green(),
+        "warn" => theme::yellow(),
+        "error" => theme::red(),
+        _ => theme::text_secondary(), // idle
     }
 }

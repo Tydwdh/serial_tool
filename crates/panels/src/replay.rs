@@ -195,7 +195,7 @@ impl ReplayPanel {
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::CARD_ACCENT_REPLAY);
+                    theme::card_accent_bar(ui, theme::card_accent_replay());
                     ui.label(egui::RichText::new("📁 回放文件").heading());
                 });
                 ui.separator();
@@ -210,7 +210,7 @@ impl ReplayPanel {
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::CARD_ACCENT_REPLAY);
+                    theme::card_accent_bar(ui, theme::card_accent_replay());
                     ui.label(egui::RichText::new("⚙ 回放策略").heading());
                 });
                 ui.separator();
@@ -225,7 +225,7 @@ impl ReplayPanel {
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::CARD_ACCENT_REPLAY);
+                    theme::card_accent_bar(ui, theme::card_accent_replay());
                     ui.label(egui::RichText::new("▶ 播放控制").heading());
                 });
                 ui.separator();
@@ -256,7 +256,7 @@ impl ReplayPanel {
         {
             ui.collapsing("Replay Analyzer", |ui| {
                 if self.analyzer_busy {
-                    ui.colored_label(theme::BLUE, "Analyzer 正在运行");
+                    ui.colored_label(theme::blue(), "Analyzer 正在运行");
 
                     if ui.button("取消").clicked() {
                         self.want_cancel_analyzers = true;
@@ -268,11 +268,11 @@ impl ReplayPanel {
                 let status = self.manager.status();
 
                 if let Some(error) = &status.analyzer_error {
-                    ui.colored_label(theme::RED, error);
+                    ui.colored_label(theme::red(), error);
                 }
 
                 if let Some(warning) = &status.analyzer_warning {
-                    ui.colored_label(theme::YELLOW, warning);
+                    ui.colored_label(theme::yellow(), warning);
                 }
 
                 ui.label(format!(
@@ -365,13 +365,13 @@ impl ReplayPanel {
                 }
             }
         };
-        ui.label(egui::RichText::new(status_text).color(theme::TEXT_SECONDARY));
+        ui.label(egui::RichText::new(status_text).color(theme::text_secondary()));
 
         if let Some(error) = self.manager.analyzer_error() {
-            ui.colored_label(theme::RED, format!("错误: {error}"));
+            ui.colored_label(theme::red(), format!("错误: {error}"));
         }
         if let Some(warning) = self.manager.analyzer_warning() {
-            ui.colored_label(theme::YELLOW, warning.to_string());
+            ui.colored_label(theme::yellow(), warning.to_string());
         }
     }
 
@@ -510,7 +510,7 @@ impl ReplayPanel {
 
             match reason {
                 ReplayBlockReason::NeedAnalyzer => {
-                    ui.colored_label(theme::YELLOW, "重新解析模式需要先运行 Replay Analyzer");
+                    ui.colored_label(theme::yellow(), "重新解析模式需要先运行 Replay Analyzer");
 
                     if ui.button("运行 Analyzer").clicked() {
                         self.want_run_analyzers = true;
@@ -518,7 +518,7 @@ impl ReplayPanel {
                 }
 
                 ReplayBlockReason::AnalyzerFailed(ref error) => {
-                    ui.colored_label(theme::RED, format!("Analyzer 失败：{error}"));
+                    ui.colored_label(theme::red(), format!("Analyzer 失败：{error}"));
 
                     if ui.button("重试 Analyzer").clicked() {
                         self.want_run_analyzers = true;
@@ -632,7 +632,7 @@ impl ReplayPanel {
                             .unwrap_or_else(|| path.display().to_string()),
                     )
                     .monospace()
-                    .color(theme::TEXT_PRIMARY),
+                    .color(theme::text_primary()),
                 );
             }
         });
@@ -642,11 +642,11 @@ impl ReplayPanel {
             && report.skipped > 0
         {
             ui.colored_label(
-                theme::YELLOW,
+                theme::yellow(),
                 format!("加载 {} 条，跳过 {} 条坏行", report.loaded, report.skipped),
             );
             if let Some(first) = report.first_errors.first() {
-                ui.colored_label(theme::TEXT_SECONDARY, first);
+                ui.colored_label(theme::text_secondary(), first);
             }
         }
     }
@@ -694,9 +694,9 @@ fn policy_description(policy: ReplayPolicy) -> &'static str {
 
 fn state_color(state: ReplayState) -> Color32 {
     match state {
-        ReplayState::Empty => theme::TEXT_SECONDARY,
-        ReplayState::Loaded | ReplayState::Paused => theme::YELLOW,
-        ReplayState::Playing => theme::BLUE,
-        ReplayState::Finished => theme::GREEN,
+        ReplayState::Empty => theme::text_secondary(),
+        ReplayState::Loaded | ReplayState::Paused => theme::yellow(),
+        ReplayState::Playing => theme::blue(),
+        ReplayState::Finished => theme::green(),
     }
 }

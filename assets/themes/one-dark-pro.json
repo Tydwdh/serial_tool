@@ -1,0 +1,41 @@
+{
+  "name": "One Dark Pro",
+  "dark_mode": true,
+  "colors": {
+    "bg_primary": "#23272F",
+    "bg_secondary": "#1C2026",
+    "bg_deep": "#21252B",
+    "bg_tertiary": "#2B313C",
+    "bg_card": "#262B35",
+    "bg_input": "#1F242D",
+    "bg_hover": "#313844",
+    "border": "#272D37",
+    "border_light": "#303844",
+    "separator_strong": "#465264",
+    "text_primary": "#CDD3DE",
+    "text_white": "#E8ECF3",
+    "text_secondary": "#919AA8",
+    "text_dimmed": "#78808C",
+    "red": "#ED6C73",
+    "green": "#89B46C",
+    "yellow": "#D2A65A",
+    "blue": "#508CD2",
+    "purple": "#AF6CC8",
+    "cyan": "#489EAA",
+    "orange": "#D28C50"
+  },
+  "ui": {
+    "selection": "#67769660",
+    "active": "#224466",
+    "tab_active_background": "#282C34",
+    "tab_active_border": "#00000000",
+    "tab_active_foreground": "#DCDCDC",
+    "tab_inactive_background": "#21252B",
+    "tab_inactive_foreground": "#9DA5B4",
+    "tab_bar_background": "#21252B",
+    "tab_bar_border": "#00000000",
+    "toggle_selected_background": "#2C5884",
+    "toggle_selected_foreground": "#E8ECF3",
+    "toggle_selected_border": "#508CD2"
+  }
+}

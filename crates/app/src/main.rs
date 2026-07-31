@@ -42,8 +42,6 @@ fn main() -> eframe::Result<()> {
     }
 
     if std::env::args().any(|arg| arg == "--check-update-once") {
-        print_update_network_diagnostics();
-
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -94,36 +92,4 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| Ok(Box::new(WorkbenchApp::new(cc)))),
     )
-}
-
-fn print_update_network_diagnostics() {
-    use std::net::{SocketAddr, TcpStream, ToSocketAddrs as _};
-    use std::time::{Duration, Instant};
-
-    println!("update diagnostic: {}", tool_updater::UPDATE_JSON_URL);
-    for name in [
-        "HW_UPDATER_PROXY",
-        "HTTPS_PROXY",
-        "HTTP_PROXY",
-        "ALL_PROXY",
-        "NO_PROXY",
-    ] {
-        if let Ok(value) = std::env::var(name) {
-            println!("env {name}={value}");
-        }
-    }
-
-    let addrs: Vec<SocketAddr> = ("raw.githubusercontent.com", 443)
-        .to_socket_addrs()
-        .map(|iter| iter.filter(|addr| addr.is_ipv4()).collect())
-        .unwrap_or_default();
-    println!("raw.githubusercontent.com IPv4 addrs: {addrs:?}");
-
-    for addr in addrs {
-        let start = Instant::now();
-        match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
-            Ok(_) => println!("tcp {addr} ok in {:?}", start.elapsed()),
-            Err(err) => println!("tcp {addr} failed in {:?}: {err}", start.elapsed()),
-        }
-    }
 }

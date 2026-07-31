@@ -69,7 +69,6 @@ pub(super) fn serial_action_button_enabled(
 
 use crate::app::WorkbenchApp;
 use crate::state::StatusLevel;
-use crate::ui::layout_buttons::{LayoutButtonKind, layout_icon_button};
 use tool_panels::theme;
 
 impl WorkbenchApp {
@@ -96,7 +95,7 @@ impl WorkbenchApp {
                 .selectable_label(
                     !self.serial.top_bar_serial_collapsed,
                     egui::RichText::new(format!("{} {sl}", if so { "●" } else { "○" }))
-                        .color(if so { theme::GREEN } else { theme::RED }),
+                        .color(if so { theme::green() } else { theme::red() }),
                 )
                 .clicked()
             {
@@ -159,7 +158,7 @@ impl WorkbenchApp {
                         parity_abbr,
                         self.serial.stop_bits,
                     ))
-                    .color(theme::TEXT_SECONDARY),
+                    .color(theme::text_secondary()),
                 );
             }
             // 自动重连进度：拔串口后顶部栏直接可见，无需展开 device_panel。
@@ -173,7 +172,7 @@ impl WorkbenchApp {
                     pending.attempts + 1,
                     10
                 );
-                ui.label(egui::RichText::new(label).color(theme::YELLOW))
+                ui.label(egui::RichText::new(label).color(theme::yellow()))
                     .on_hover_text("点击 × 取消等待重连");
                 if ui.small_button("×").on_hover_text("取消重连").clicked() {
                     self.serial.pending_reconnect = None;
@@ -186,9 +185,9 @@ impl WorkbenchApp {
             let rec = self.recorder.is_running();
             if ui
                 .button(if rec {
-                    egui::RichText::new("⏹ 停止").color(theme::RED)
+                    egui::RichText::new("⏹ 停止").color(theme::red())
                 } else {
-                    egui::RichText::new("⏺ 录制").color(theme::TEXT_SECONDARY)
+                    egui::RichText::new("⏺ 录制").color(theme::text_secondary())
                 })
                 .clicked()
             {
@@ -198,93 +197,6 @@ impl WorkbenchApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // ── 插件贡献：top_bar.right ──
                 self.ui_contribution_slot(ui, "top_bar.right");
-
-                if layout_icon_button(
-                    ui,
-                    LayoutButtonKind::RightDock,
-                    self.panels.dock.right_visible,
-                    "显示/隐藏右侧停靠区",
-                )
-                .clicked()
-                {
-                    self.panels.dock.right_visible = !self.panels.dock.right_visible;
-                    if let Err(e) = self.save_config() {
-                        log::warn!("save_config failed: {e}")
-                    };
-                }
-
-                if layout_icon_button(
-                    ui,
-                    LayoutButtonKind::BottomPanel,
-                    self.panels.dock.bottom_visible,
-                    "显示/隐藏底部面板",
-                )
-                .clicked()
-                {
-                    self.toggle_bottom_panel();
-                    if let Err(e) = self.save_config() {
-                        log::warn!("save_config failed: {e}")
-                    };
-                }
-
-                if layout_icon_button(
-                    ui,
-                    LayoutButtonKind::ActivityBar,
-                    self.panels.dock.activity_bar_visible,
-                    "显示/隐藏左侧活动栏",
-                )
-                .clicked()
-                {
-                    self.panels.dock.activity_bar_visible = !self.panels.dock.activity_bar_visible;
-                    if let Err(e) = self.save_config() {
-                        log::warn!("save_config failed: {e}")
-                    };
-                }
-
-                let reset_resp = layout_icon_button(ui, LayoutButtonKind::Menu, false, "重置布局");
-                let reset_popup_id = ui.id().with("reset_layout_confirm");
-                let mut reset_open = ui.memory_mut(|m| {
-                    m.data
-                        .get_persisted::<bool>(reset_popup_id)
-                        .unwrap_or(false)
-                });
-                if reset_resp.clicked() {
-                    reset_open = !reset_open;
-                    ui.data_mut(|d| d.insert_persisted(reset_popup_id, reset_open));
-                }
-                if reset_open {
-                    egui::Window::new("重置布局")
-                        .id(reset_popup_id)
-                        .collapsible(false)
-                        .resizable(false)
-                        .anchor(egui::Align2::CENTER_CENTER, [0.0, 100.0])
-                        .auto_sized()
-                        .show(ui.ctx(), |ui| {
-                            ui.set_min_width(240.0);
-                            ui.label(
-                                egui::RichText::new("重置布局将丢失当前面板排布，确定？")
-                                    .color(tool_panels::theme::YELLOW),
-                            );
-                            ui.add_space(4.0);
-                            ui.horizontal(|ui| {
-                                if ui.button("重置").clicked() {
-                                    self.panels.dock = tool_panels::DockLayout::default();
-                                    self.set_bottom_visible(self.panels.dock.bottom_visible);
-                                    if let Err(e) = self.save_config() {
-                                        log::warn!("save_config failed: {e}")
-                                    };
-                                    ui.data_mut(|d| d.insert_persisted(reset_popup_id, false));
-                                }
-                                if ui.button("取消").clicked() {
-                                    ui.data_mut(|d| d.insert_persisted(reset_popup_id, false));
-                                }
-                            });
-                        });
-                    // Escape 关闭
-                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        ui.data_mut(|d| d.insert_persisted(reset_popup_id, false));
-                    }
-                }
             });
         });
     }

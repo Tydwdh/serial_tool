@@ -109,7 +109,6 @@ fn apply_github_ipv4_dns_overrides(mut builder: reqwest::ClientBuilder) -> reqwe
         if addrs.is_empty() {
             continue;
         }
-        log::debug!("updater: {host} IPv4 DNS override: {addrs:?}");
         builder = builder.resolve_to_addrs(host, &addrs);
     }
     builder

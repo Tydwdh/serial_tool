@@ -128,7 +128,7 @@ impl DynamicPanels {
 
     pub fn ui_body(&mut self, ui: &mut egui::Ui, id: &str) {
         let Some(panel) = self.panels.get_mut(id) else {
-            ui.colored_label(theme::RED, "面板未找到");
+            ui.colored_label(theme::red(), "面板未找到");
             return;
         };
 

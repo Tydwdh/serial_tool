@@ -1,4 +1,6 @@
-use crate::config::{ConfigLoadResult, PersistedConfig, default_recorder_path, load_config};
+use crate::config::{
+    ConfigLoadResult, PersistedConfig, default_recorder_path, load_config, resolve_theme_path,
+};
 use crate::state::{MAX_SEND_HISTORY, NotificationQueue, SendUiState, SerialUiState, UpdateState};
 use eframe::egui;
 use std::collections::{BTreeSet, VecDeque};
@@ -36,7 +38,8 @@ pub(crate) struct WorkbenchApp {
     pub(crate) send: SendUiState,
     pub(crate) popups: crate::ui::popups::PopupsState,
     pub(crate) detached_dynamic_panels: BTreeSet<String>,
-    pub(crate) dock_drag: crate::ui::dock::DockDragState,
+    /// `egui_tiles` 的拖拽、选中和尺寸变更尚未写入配置。
+    pub(crate) layout_dirty: bool,
     pub(crate) last_auto_save_time: f64,
     pub(crate) file_broker: Arc<FileAccessBroker>,
     pub(crate) dialog_receiver: crossbeam_channel::Receiver<DialogRequest>,
@@ -64,6 +67,12 @@ pub(crate) struct WorkbenchApp {
     pub(crate) plugin_summaries_cache: std::cell::OnceCell<Vec<tool_extension::PluginSummary>>,
     /// 等宽字体大小（终端/日志区），默认 13.0
     pub(crate) monospace_font_size: f32,
+    /// 当前主题的运行时风格（由已选 JSON 文件推导）。
+    pub(crate) ui_theme: theme::AppTheme,
+    /// 当前主题 JSON 的路径（内置和用户新增主题共用）。
+    pub(crate) theme_path: Option<std::path::PathBuf>,
+    /// 主题 JSON 文件目录。
+    pub(crate) theme_dir: std::path::PathBuf,
     /// 市场索引 URL（None 表示用默认）。
     pub(crate) marketplace: crate::runtime::marketplace::MarketplaceState,
 }
@@ -112,7 +121,7 @@ pub(crate) struct ReplayAnalyzerResult {
 impl WorkbenchApp {
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // 主题必须尽早设置，否则 eframe 在 new() 返回前可能已用默认主题渲染了首帧。
-        apply_theme(&cc.egui_ctx);
+        apply_theme(&cc.egui_ctx, theme::AppTheme::default());
         setup_fonts(cc);
         cc.egui_ctx.set_embed_viewports(false);
         let bus = DataBus::new();
@@ -173,12 +182,45 @@ impl WorkbenchApp {
                 None
             }
         };
+        let theme_dir = app_dir().join("themes");
+        if let Err(error) = theme::ensure_theme_directory(&theme_dir) {
+            log::warn!("initialize theme directory failed: {error}");
+        }
+        let default_theme = theme::AppTheme::default();
+        let default_theme_path = theme::builtin_theme_path(default_theme, &theme_dir);
+        let mut loaded_theme = default_theme;
+        let mut loaded_theme_path = default_theme_path.clone();
+        if let Some(cfg) = config.as_ref() {
+            if let Some(path) = cfg
+                .theme_path
+                .as_deref()
+                .map(|path| resolve_theme_path(&theme_dir, path))
+            {
+                match theme::load_theme_file(&path) {
+                    Ok(_) => {
+                        loaded_theme =
+                            theme::builtin_theme_for_path(&path).unwrap_or(theme::AppTheme::Custom);
+                        loaded_theme_path = Some(path);
+                    }
+                    Err(error) => log::warn!("load theme JSON failed: {error}"),
+                }
+            } else if let Err(error) = theme::load_builtin_theme(cfg.ui_theme, &theme_dir) {
+                log::warn!("load legacy bundled theme failed: {error}");
+            } else {
+                loaded_theme = cfg.ui_theme;
+                loaded_theme_path = theme::builtin_theme_path(cfg.ui_theme, &theme_dir);
+            }
+        } else if let Err(error) = theme::load_builtin_theme(default_theme, &theme_dir) {
+            log::warn!("load default bundled theme failed: {error}");
+        }
+        apply_theme(&cc.egui_ctx, loaded_theme);
         let mut rp = config
             .as_ref()
             .map(|c| c.panels.clone())
             .unwrap_or_default();
         rp.discard_dynamic_tabs();
         rp.dock.normalize_tool_layout();
+        rp.ensure_tiles_layout();
         let mut send = SendUiState::default();
         if let Some(cfg) = config.as_ref() {
             send.send_history = cfg
@@ -256,6 +298,7 @@ impl WorkbenchApp {
                 ..Default::default()
             },
             detached_dynamic_panels: BTreeSet::new(),
+            layout_dirty: false,
             last_auto_save_time: 0.0,
             bus: bus.clone(),
             transport,
@@ -274,7 +317,6 @@ impl WorkbenchApp {
             )),
             replay_analyzer: Default::default(),
             periodic_send: Default::default(),
-            dock_drag: Default::default(),
             keymap: config
                 .as_ref()
                 .map(|c| c.keymap.clone())
@@ -289,6 +331,9 @@ impl WorkbenchApp {
                 .as_ref()
                 .map(|c| c.monospace_font_size.clamp(10.0, 24.0))
                 .unwrap_or(13.0),
+            ui_theme: loaded_theme,
+            theme_path: loaded_theme_path,
+            theme_dir,
             marketplace: Default::default(),
         };
         // 从配置恢复等宽字体大小
@@ -309,6 +354,11 @@ impl WorkbenchApp {
             if let Err(e) = app.plugin_manager.enable(id) {
                 app.log(LogLevel::Warn, format!("restore plugin {id}: {e}"));
             }
+        }
+        if config.as_ref().is_none_or(|cfg| cfg.theme_path.is_none())
+            && let Err(error) = app.save_config()
+        {
+            log::warn!("persist theme path migration failed: {error}");
         }
         app.log(LogLevel::Info, "就绪");
         app
@@ -349,7 +399,7 @@ impl Drop for WorkbenchApp {
 
 impl eframe::App for WorkbenchApp {
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
-        theme::BG_PRIMARY.to_normalized_gamma_f32()
+        theme::bg_primary().to_normalized_gamma_f32()
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

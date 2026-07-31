@@ -247,11 +247,11 @@ impl WorkbenchApp {
                 }
 
                 egui::CentralPanel::default()
-                    .frame(egui::Frame::default().fill(theme::BG_PRIMARY))
+                    .frame(egui::Frame::default().fill(theme::bg_primary()))
                     .show(ctx, |ui| {
                         // 再手动铺一层，避免某些平台 / resize 时出现未清屏黑边。
                         let rect = ui.max_rect();
-                        ui.painter().rect_filled(rect, 0.0, theme::BG_PRIMARY);
+                        ui.painter().rect_filled(rect, 0.0, theme::bg_primary());
 
                         ui.horizontal(|ui| {
                             ui.heading(&title);
@@ -273,7 +273,7 @@ impl WorkbenchApp {
                         ui.separator();
 
                         egui::Frame::default()
-                            .fill(theme::BG_PRIMARY)
+                            .fill(theme::bg_primary())
                             .show(ui, |ui| {
                                 self.dynamic_panels.ui_body(ui, &id);
                             });

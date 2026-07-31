@@ -9,6 +9,7 @@ impl WorkbenchApp {
     pub(crate) fn apply_loaded_workspace_postprocess(&mut self) {
         self.panels.discard_dynamic_tabs();
         self.panels.dock.normalize_tool_layout();
+        self.panels.ensure_tiles_layout();
         self.refresh_ports_silent();
         self.dynamic_panels.set_ports(&self.serial.ports);
         self.send.target_port = None;
@@ -16,13 +17,14 @@ impl WorkbenchApp {
     }
 
     pub(crate) fn set_bottom_visible(&mut self, visible: bool) {
-        self.panels.dock.bottom_visible = visible;
+        self.panels.set_bottom_visible(visible);
     }
 
     pub(crate) fn toggle_bottom_panel(&mut self) {
-        self.set_bottom_visible(!self.panels.dock.bottom_visible);
+        let visible = self.panels.bottom_visible();
+        self.set_bottom_visible(!visible);
 
-        if self.panels.dock.bottom_visible {
+        if self.panels.bottom_visible() {
             self.set_status(StatusLevel::Info, "底部面板已打开");
         }
     }

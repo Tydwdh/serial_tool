@@ -2,8 +2,6 @@ use eframe::egui;
 use std::path::PathBuf;
 use tool_panels::theme;
 
-pub const ACTIVITY_BAR_WIDTH: f32 = 104.0; //左侧活动栏宽度
-pub const BOTTOM_PANEL_MIN: f32 = 280.0; //底部面板最小高度
 pub const DEFAULT_WINDOW_WIDTH: f32 = 1280.0; //默认窗口宽度
 pub const DEFAULT_WINDOW_HEIGHT: f32 = 820.0; //默认窗口高度
 
@@ -95,9 +93,20 @@ fn set_family(fonts: &mut egui::FontDefinitions, family: egui::FontFamily, names
 }
 
 // ── 主题 ──
-pub fn apply_theme(ctx: &egui::Context) {
-    ctx.set_theme(egui::Theme::Dark);
-    ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
+pub fn apply_theme(ctx: &egui::Context, selected_theme: theme::AppTheme) {
+    theme::set_active_theme(selected_theme);
+    let is_dark = theme::active_theme_is_dark();
+    let egui_theme = if is_dark {
+        egui::Theme::Dark
+    } else {
+        egui::Theme::Light
+    };
+    ctx.set_theme(egui_theme);
+    ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(if is_dark {
+        egui::SystemTheme::Dark
+    } else {
+        egui::SystemTheme::Light
+    }));
     let mut s = (*ctx.global_style()).clone();
 
     // ── 间距 ──
@@ -158,33 +167,37 @@ pub fn apply_theme(ctx: &egui::Context) {
     s.text_styles = text_styles;
 
     // ── Visuals ──
-    let mut v = egui::Visuals::dark();
+    let mut v = if is_dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
 
     // 圆角
     v.window_corner_radius = 8.into();
     v.menu_corner_radius = 6.into();
 
     // 背景 — 使用新的层级色
-    v.panel_fill = theme::BG_PRIMARY;
-    v.window_fill = theme::BG_DEEP;
-    v.extreme_bg_color = theme::BG_DEEP;
-    v.faint_bg_color = theme::BG_CARD;
-    v.code_bg_color = theme::BG_INPUT;
-    v.text_edit_bg_color = Some(theme::BG_INPUT);
+    v.panel_fill = theme::bg_primary();
+    v.window_fill = theme::bg_deep();
+    v.extreme_bg_color = theme::bg_deep();
+    v.faint_bg_color = theme::bg_card();
+    v.code_bg_color = theme::bg_input();
+    v.text_edit_bg_color = Some(theme::bg_input());
 
     // 文本
-    v.override_text_color = Some(theme::TEXT_PRIMARY);
-    v.weak_text_color = Some(theme::TEXT_SECONDARY);
-    v.warn_fg_color = theme::YELLOW;
-    v.error_fg_color = theme::RED;
-    v.hyperlink_color = theme::CYAN;
+    v.override_text_color = Some(theme::text_primary());
+    v.weak_text_color = Some(theme::text_secondary());
+    v.warn_fg_color = theme::yellow();
+    v.error_fg_color = theme::red();
+    v.hyperlink_color = theme::cyan();
 
     // 选中
-    v.selection.bg_fill = theme::BG_SELECTION;
-    v.selection.stroke = egui::Stroke::new(1.0, theme::BLUE);
+    v.selection.bg_fill = theme::bg_selection();
+    v.selection.stroke = egui::Stroke::new(1.0, theme::blue());
 
     // 窗口
-    v.window_stroke = egui::Stroke::new(1.0, theme::SEPARATOR);
+    v.window_stroke = egui::Stroke::new(1.0, theme::separator());
     v.resize_corner_size = 8.0;
     v.striped = true;
     v.collapsing_header_frame = false;
@@ -192,45 +205,84 @@ pub fn apply_theme(ctx: &egui::Context) {
     v.button_frame = true;
     v.indent_has_left_vline = false;
 
+    // catppuccin-egui 的官方映射。该 crate 目前只支持到 egui 0.33，
+    // 项目使用 0.35，因此在保持当前 egui 类型一致的前提下移植其 Visuals 规则。
+    if theme::is_catppuccin() {
+        v.panel_fill = theme::bg_primary();
+        v.window_fill = theme::bg_primary();
+        v.extreme_bg_color = theme::bg_deep();
+        v.faint_bg_color = theme::bg_tertiary();
+        v.code_bg_color = theme::bg_secondary();
+        v.text_edit_bg_color = Some(theme::bg_secondary());
+        v.window_stroke = egui::Stroke::new(1.0, theme::overlay1());
+        v.selection.bg_fill = theme::blue().linear_multiply(if is_dark { 0.2 } else { 0.4 });
+        v.selection.stroke = egui::Stroke::new(1.0, theme::text_primary());
+    }
+
     // ── Widget 样式 ──
     let w = &mut v.widgets;
 
     // noninteractive（标签、分隔线等）
     w.noninteractive.corner_radius = 4.into();
-    w.noninteractive.bg_fill = theme::BG_CARD;
-    w.noninteractive.bg_stroke = egui::Stroke::new(1.0, theme::BORDER);
-    w.noninteractive.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_PRIMARY);
-    w.noninteractive.weak_bg_fill = theme::BG_SECONDARY;
+    w.noninteractive.bg_fill = theme::bg_card();
+    w.noninteractive.bg_stroke = egui::Stroke::new(1.0, theme::border());
+    w.noninteractive.fg_stroke = egui::Stroke::new(1.0, theme::text_primary());
+    w.noninteractive.weak_bg_fill = theme::bg_secondary();
 
     // inactive（按钮、输入框等未交互状态）
     w.inactive.corner_radius = 6.into();
     // 滚动条 handle（solid 模式，scroll_area.rs:1457-1466 走 &visuals.widgets.inactive.bg_fill）、
     // 也作为按钮/输入框等未交互状态的默认填充色。#373C47 中灰对两者都合适。
-    w.inactive.bg_fill = theme::SCROLLBAR;
-    w.inactive.weak_bg_fill = theme::BG_INPUT;
-    w.inactive.bg_stroke = egui::Stroke::new(1.0, theme::BORDER);
-    w.inactive.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_PRIMARY);
+    w.inactive.bg_fill = theme::scrollbar();
+    w.inactive.weak_bg_fill = theme::bg_input();
+    w.inactive.bg_stroke = egui::Stroke::new(1.0, theme::border());
+    w.inactive.fg_stroke = egui::Stroke::new(1.0, theme::text_primary());
 
     // hovered
     w.hovered.corner_radius = 6.into();
-    w.hovered.bg_fill = theme::BG_HOVER;
-    w.hovered.weak_bg_fill = theme::BG_TERTIARY;
-    w.hovered.bg_stroke = egui::Stroke::new(1.0, theme::BORDER_LIGHT);
-    w.hovered.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_PRIMARY);
+    w.hovered.bg_fill = theme::bg_hover();
+    w.hovered.weak_bg_fill = theme::bg_tertiary();
+    w.hovered.bg_stroke = egui::Stroke::new(1.0, theme::border_light());
+    w.hovered.fg_stroke = egui::Stroke::new(1.0, theme::text_primary());
 
     // active（按下/选中）
     w.active.corner_radius = 6.into();
-    w.active.bg_fill = theme::WIDGET_ACTIVE_WEAK;
-    w.active.weak_bg_fill = theme::WIDGET_ACTIVE_WEAK;
-    w.active.bg_stroke = egui::Stroke::new(1.0, theme::BLUE);
-    w.active.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_WHITE);
+    w.active.bg_fill = theme::widget_active_weak();
+    w.active.weak_bg_fill = theme::widget_active_weak();
+    w.active.bg_stroke = egui::Stroke::new(1.0, theme::blue());
+    w.active.fg_stroke = egui::Stroke::new(1.0, theme::text_white());
 
     // open（展开状态）
     w.open.corner_radius = 6.into();
-    w.open.bg_fill = theme::WIDGET_OPEN;
-    w.open.weak_bg_fill = theme::BG_INPUT;
-    w.open.bg_stroke = egui::Stroke::new(1.0, theme::BORDER_LIGHT);
-    w.open.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_PRIMARY);
+    w.open.bg_fill = theme::widget_open();
+    w.open.weak_bg_fill = theme::bg_input();
+    w.open.bg_stroke = egui::Stroke::new(1.0, theme::border_light());
+    w.open.fg_stroke = egui::Stroke::new(1.0, theme::text_primary());
+
+    if theme::is_catppuccin() {
+        let widget_stroke = egui::Stroke::new(1.0, theme::overlay1());
+        let text_stroke = egui::Stroke::new(1.0, theme::text_primary());
+        for widget in [
+            &mut w.noninteractive,
+            &mut w.inactive,
+            &mut w.hovered,
+            &mut w.active,
+            &mut w.open,
+        ] {
+            widget.bg_stroke = widget_stroke;
+            widget.fg_stroke = text_stroke;
+        }
+        w.noninteractive.bg_fill = theme::bg_primary();
+        w.noninteractive.weak_bg_fill = theme::bg_primary();
+        w.inactive.bg_fill = theme::bg_tertiary();
+        w.inactive.weak_bg_fill = theme::bg_tertiary();
+        w.hovered.bg_fill = theme::surface2();
+        w.hovered.weak_bg_fill = theme::surface2();
+        w.active.bg_fill = theme::surface1();
+        w.active.weak_bg_fill = theme::surface1();
+        w.open.bg_fill = theme::bg_tertiary();
+        w.open.weak_bg_fill = theme::bg_tertiary();
+    }
 
     s.visuals = v;
     ctx.set_global_style(s);

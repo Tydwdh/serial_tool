@@ -485,10 +485,10 @@ impl WorkbenchApp {
                 .max_height(SEND_BOTTOM_ERROR_MAX_HEIGHT)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    ui.colored_label(theme::RED, err);
+                    ui.colored_label(theme::red(), err);
                 });
         } else {
-            ui.colored_label(theme::RED, err);
+            ui.colored_label(theme::red(), err);
         }
     }
 
@@ -553,16 +553,16 @@ impl WorkbenchApp {
         if !trimmed.is_empty() {
             match trimmed.parse::<f64>() {
                 Ok(v) if v <= 0.0 => {
-                    ui.colored_label(theme::YELLOW, "间隔必须 > 0ms");
+                    ui.colored_label(theme::yellow(), "间隔必须 > 0ms");
                 }
                 Err(_) => {
-                    ui.colored_label(theme::YELLOW, "请输入有效数字");
+                    ui.colored_label(theme::yellow(), "请输入有效数字");
                 }
                 _ => {}
             }
         } else if self.send.periodic_enabled {
             // 不应出现（空串已禁止启用），但防御性提示
-            ui.colored_label(theme::YELLOW, "请设置间隔");
+            ui.colored_label(theme::yellow(), "请设置间隔");
         }
     }
 
@@ -575,9 +575,9 @@ impl WorkbenchApp {
             ui.label(
                 egui::RichText::new(format!("HEX: {preview}"))
                     .color(if is_err {
-                        theme::RED
+                        theme::red()
                     } else {
-                        theme::TEXT_SECONDARY
+                        theme::text_secondary()
                     })
                     .monospace()
                     .small(),
@@ -724,13 +724,13 @@ impl WorkbenchApp {
                 ui.label(
                     egui::RichText::new("发送历史")
                         .strong()
-                        .color(theme::TEXT_WHITE),
+                        .color(theme::text_white()),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         egui::RichText::new(format!("{} 条", self.send.send_history.len()))
                             .small()
-                            .color(theme::TEXT_DIMMED),
+                            .color(theme::text_dimmed()),
                     );
                 });
             });
@@ -770,7 +770,7 @@ impl WorkbenchApp {
                         } else {
                             "无匹配项"
                         })
-                        .color(theme::TEXT_DIMMED),
+                        .color(theme::text_dimmed()),
                     );
                     ui.add_space(12.0);
                 });
@@ -807,7 +807,7 @@ impl WorkbenchApp {
                                 .split('\n')
                                 .map(|seg| {
                                     egui::WidgetText::from(seg)
-                                        .color(theme::TEXT_PRIMARY)
+                                        .color(theme::text_primary())
                                         .into_galley(
                                             ui,
                                             Some(egui::TextWrapMode::Truncate),
@@ -832,7 +832,7 @@ impl WorkbenchApp {
                                         .1;
                                     let trect = text_resp.rect;
                                     if text_resp.hovered() {
-                                        ui.painter().rect_filled(trect, 3.0, theme::BG_HOVER);
+                                        ui.painter().rect_filled(trect, 3.0, theme::bg_hover());
                                     }
                                     // 逐个绘制每段 galley（按 \n 拆分的），垂直排列
                                     let mut y = trect.center().y - total_text_h / 2.0;
@@ -840,7 +840,7 @@ impl WorkbenchApp {
                                         ui.painter().galley(
                                             egui::pos2(trect.left() + 8.0, y),
                                             g.clone(),
-                                            theme::TEXT_PRIMARY,
+                                            theme::text_primary(),
                                         );
                                         y += g.size().y;
                                     }
@@ -860,7 +860,7 @@ impl WorkbenchApp {
                                         .1;
                                     let drect = del_resp.rect;
                                     if del_resp.hovered() {
-                                        ui.painter().rect_filled(drect, 3.0, theme::BG_HOVER);
+                                        ui.painter().rect_filled(drect, 3.0, theme::bg_hover());
                                     }
                                     ui.painter().text(
                                         drect.center(),
@@ -868,9 +868,9 @@ impl WorkbenchApp {
                                         "×",
                                         font_id.clone(),
                                         if del_resp.hovered() {
-                                            theme::TEXT_PRIMARY
+                                            theme::text_primary()
                                         } else {
-                                            theme::TEXT_SECONDARY
+                                            theme::text_secondary()
                                         },
                                     );
                                     if del_resp.clicked() {
@@ -891,7 +891,7 @@ impl WorkbenchApp {
                                         egui::pos2(rect.left() + 4.0, y),
                                         egui::pos2(rect.right() - 4.0, y),
                                     ],
-                                    egui::Stroke::new(1.0, theme::BORDER),
+                                    egui::Stroke::new(1.0, theme::border()),
                                 );
                             }
                         }
@@ -914,7 +914,7 @@ impl WorkbenchApp {
                 };
                 if ui
                     .add(
-                        egui::Button::new(egui::RichText::new(label).color(theme::RED).small())
+                        egui::Button::new(egui::RichText::new(label).color(theme::red()).small())
                             .frame(true),
                     )
                     .on_hover_text(if armed {
@@ -940,7 +940,7 @@ impl WorkbenchApp {
                     ui.label(
                         egui::RichText::new("点击条目填入发送框")
                             .small()
-                            .color(theme::TEXT_DIMMED),
+                            .color(theme::text_dimmed()),
                     );
                 });
             });

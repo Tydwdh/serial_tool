@@ -1,4 +1,6 @@
+use egui_tiles::{Container, Tile, TileId, Tiles, Tree};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// 面板种类。左侧栏（= Center 标签栏）、底部、右侧三个停靠区共用同一套 PanelKind。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -164,8 +166,6 @@ fn default_right_size() -> f32 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DockLayout {
     #[serde(default = "default_true")]
-    pub activity_bar_visible: bool,
-    #[serde(default = "default_true")]
     pub bottom_visible: bool,
     #[serde(default)]
     pub right_visible: bool,
@@ -179,6 +179,342 @@ pub struct DockLayout {
     pub bottom: DockStack,
     #[serde(default)]
     pub right: DockStack,
+}
+
+/// egui_tiles 的持久化布局。额外保存三个默认 tab 容器的 id，
+/// 使顶部工具栏和快捷键仍能快速显示/隐藏底部、右侧区域。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TilesLayout {
+    pub tree: Tree<PanelKind>,
+    pub main_tabs: TileId,
+    pub bottom_tabs: TileId,
+    pub right_tabs: TileId,
+    /// 动态面板的所属插件，仅在运行期分组时使用。
+    #[serde(default)]
+    pub plugin_panel_owners: BTreeMap<String, String>,
+    /// 一个插件有多个动态面板时，对应的父标签容器。
+    #[serde(default)]
+    pub plugin_groups: BTreeMap<String, TileId>,
+}
+
+impl TilesLayout {
+    fn pane_ids(tiles: &mut Tiles<PanelKind>, panes: &[PanelKind]) -> Vec<TileId> {
+        panes
+            .iter()
+            .cloned()
+            .map(|pane| tiles.insert_pane(pane))
+            .collect()
+    }
+
+    /// 将 v0.7.3 的三栏 Dock 配置转换为可自由拆分、拖拽的 tiles 树。
+    pub fn from_legacy(dock: &DockLayout) -> Self {
+        let mut tiles = Tiles::default();
+
+        let center = if dock.center.tabs.is_empty() {
+            vec![PanelKind::Devices]
+        } else {
+            dock.center.tabs.clone()
+        };
+        let bottom = if dock.bottom.tabs.is_empty() {
+            vec![PanelKind::Terminal, PanelKind::Logs, PanelKind::Sender]
+        } else {
+            dock.bottom.tabs.clone()
+        };
+
+        let main_panes = Self::pane_ids(&mut tiles, &center);
+        let bottom_panes = Self::pane_ids(&mut tiles, &bottom);
+        let right_panes = Self::pane_ids(&mut tiles, &dock.right.tabs);
+        let main_tabs = tiles.insert_tab_tile(main_panes);
+        let bottom_tabs = tiles.insert_tab_tile(bottom_panes);
+        let right_tabs = tiles.insert_tab_tile(right_panes);
+
+        if let Some(active) = dock.center.active.as_ref()
+            && let Some(id) = tiles.find_pane(active)
+            && let Some(Tile::Container(Container::Tabs(tabs))) = tiles.get_mut(main_tabs)
+        {
+            tabs.set_active(id);
+        }
+        if let Some(active) = dock.bottom.active.as_ref()
+            && let Some(id) = tiles.find_pane(active)
+            && let Some(Tile::Container(Container::Tabs(tabs))) = tiles.get_mut(bottom_tabs)
+        {
+            tabs.set_active(id);
+        }
+        if let Some(active) = dock.right.active.as_ref()
+            && let Some(id) = tiles.find_pane(active)
+            && let Some(Tile::Container(Container::Tabs(tabs))) = tiles.get_mut(right_tabs)
+        {
+            tabs.set_active(id);
+        }
+
+        let main_column = tiles.insert_vertical_tile(vec![main_tabs, bottom_tabs]);
+        let root = tiles.insert_horizontal_tile(vec![main_column, right_tabs]);
+        let mut tree = Tree::new("hardware-workbench-layout", root, tiles);
+        tree.set_visible(bottom_tabs, dock.bottom_visible);
+        tree.set_visible(
+            right_tabs,
+            dock.right_visible && !dock.right.tabs.is_empty(),
+        );
+
+        Self {
+            tree,
+            main_tabs,
+            bottom_tabs,
+            right_tabs,
+            plugin_panel_owners: BTreeMap::new(),
+            plugin_groups: BTreeMap::new(),
+        }
+    }
+
+    pub fn set_bottom_visible(&mut self, visible: bool) {
+        if self.tree.tiles.get(self.bottom_tabs).is_some() {
+            self.tree.set_visible(self.bottom_tabs, visible);
+        }
+    }
+
+    pub fn bottom_visible(&self) -> bool {
+        self.tree.tiles.get(self.bottom_tabs).is_some() && self.tree.is_visible(self.bottom_tabs)
+    }
+
+    pub fn set_right_visible(&mut self, visible: bool) {
+        if self.tree.tiles.get(self.right_tabs).is_some() {
+            self.tree.set_visible(self.right_tabs, visible);
+        }
+    }
+
+    pub fn right_visible(&self) -> bool {
+        self.tree.tiles.get(self.right_tabs).is_some() && self.tree.is_visible(self.right_tabs)
+    }
+
+    pub fn select_pane(&mut self, kind: &PanelKind) -> bool {
+        let Some(id) = self.tree.tiles.find_pane(kind) else {
+            return false;
+        };
+        let mut child = id;
+        let mut selected = false;
+        while let Some(parent) = self.tree.tiles.parent_of(child) {
+            if let Some(Tile::Container(Container::Tabs(tabs))) = self.tree.tiles.get_mut(parent) {
+                tabs.set_active(child);
+                selected = true;
+            }
+            child = parent;
+        }
+        selected
+    }
+
+    pub fn add_to_main_tabs(&mut self, kind: PanelKind, activate: bool) {
+        if let Some(id) = self.tree.tiles.find_pane(&kind) {
+            if activate {
+                self.select_pane(&kind);
+            }
+            self.tree.set_visible(id, true);
+            return;
+        }
+
+        let main_tabs = self.ensure_main_tabs();
+        let id = self.tree.tiles.insert_pane(kind);
+        if let Some(Tile::Container(Container::Tabs(tabs))) = self.tree.tiles.get_mut(main_tabs) {
+            tabs.add_child(id);
+            if activate {
+                tabs.set_active(id);
+            }
+        }
+    }
+
+    /// 打开由插件拥有的动态面板。第一个面板保持独立；同一插件创建第二个
+    /// 面板时，自动建立父标签容器，将两个面板作为子标签收纳其中。
+    pub fn add_to_plugin_tabs(&mut self, kind: PanelKind, plugin_id: &str) {
+        let Some(panel_id) = kind.dynamic_id().map(str::to_owned) else {
+            self.add_to_main_tabs(kind, true);
+            return;
+        };
+
+        if self.tree.tiles.find_pane(&kind).is_some() {
+            self.plugin_panel_owners
+                .insert(panel_id, plugin_id.to_owned());
+            self.select_pane(&kind);
+            return;
+        }
+
+        let group_id = self.plugin_groups.get(plugin_id).copied().filter(|id| {
+            matches!(
+                self.tree.tiles.get(*id),
+                Some(Tile::Container(Container::Tabs(_)))
+            )
+        });
+        if group_id.is_none() {
+            self.plugin_groups.remove(plugin_id);
+        }
+
+        let existing_pane = self
+            .plugin_panel_owners
+            .iter()
+            .find(|(_, owner)| owner.as_str() == plugin_id)
+            .and_then(|(id, _)| self.tree.tiles.find_pane(&PanelKind::Dynamic(id.clone())));
+
+        let new_pane = self.tree.tiles.insert_pane(kind.clone());
+        self.plugin_panel_owners
+            .insert(panel_id, plugin_id.to_owned());
+
+        if let Some(group_id) = group_id {
+            if let Some(Tile::Container(Container::Tabs(tabs))) = self.tree.tiles.get_mut(group_id)
+            {
+                tabs.add_child(new_pane);
+                tabs.set_active(new_pane);
+            }
+            self.select_pane(&kind);
+            return;
+        }
+
+        let Some(existing_pane) = existing_pane else {
+            // 插件的第一个面板：作为普通独立窗格插入。
+            let main_tabs = self.ensure_main_tabs();
+            if let Some(Tile::Container(Container::Tabs(tabs))) = self.tree.tiles.get_mut(main_tabs)
+            {
+                tabs.add_child(new_pane);
+                tabs.set_active(new_pane);
+            }
+            self.select_pane(&kind);
+            return;
+        };
+
+        // 必须在插入新 Tabs 容器前记录旧父节点。插入后 `existing_pane` 同时属于
+        // 旧容器和新容器，`parent_of` 的返回顺序不保证；错误地取到新容器会把它
+        // 加回自身，形成循环布局树并在渲染时栈溢出。
+        let existing_parent = self.tree.tiles.parent_of(existing_pane);
+        let group_id = self
+            .tree
+            .tiles
+            .insert_tab_tile(vec![existing_pane, new_pane]);
+        if let Some(parent_id) = existing_parent {
+            if let Some(Tile::Container(parent)) = self.tree.tiles.get_mut(parent_id) {
+                parent.remove_child(existing_pane);
+                parent.add_child(group_id);
+                if let Container::Tabs(tabs) = parent {
+                    tabs.set_active(group_id);
+                }
+            }
+        } else {
+            self.tree.root = Some(group_id);
+        }
+        self.plugin_groups.insert(plugin_id.to_owned(), group_id);
+        self.select_pane(&kind);
+    }
+
+    /// 返回可承载新标签的主标签栏。布局简化可能回收原来的容器，
+    /// 此时优先复用当前可见标签栏，确保运行时新建面板不会成为孤立节点。
+    fn ensure_main_tabs(&mut self) -> TileId {
+        if matches!(
+            self.tree.tiles.get(self.main_tabs),
+            Some(Tile::Container(Container::Tabs(_)))
+        ) {
+            return self.main_tabs;
+        }
+
+        if let Some(existing_tabs) = self.tree.active_tiles().into_iter().rev().find(|id| {
+            matches!(
+                self.tree.tiles.get(*id),
+                Some(Tile::Container(Container::Tabs(_)))
+            )
+        }) {
+            self.main_tabs = existing_tabs;
+            return existing_tabs;
+        }
+
+        let main_tabs = self.tree.tiles.insert_tab_tile(Vec::new());
+        if let Some(root) = self
+            .tree
+            .root
+            .filter(|id| self.tree.tiles.get(*id).is_some())
+        {
+            let new_root = self
+                .tree
+                .tiles
+                .insert_horizontal_tile(vec![root, main_tabs]);
+            self.tree.root = Some(new_root);
+        } else {
+            self.tree.root = Some(main_tabs);
+        }
+        self.main_tabs = main_tabs;
+        main_tabs
+    }
+
+    pub fn remove_pane(&mut self, kind: &PanelKind) {
+        let plugin_id = kind
+            .dynamic_id()
+            .and_then(|id| self.plugin_panel_owners.remove(id));
+        if let Some(id) = self.tree.tiles.find_pane(kind) {
+            self.tree.remove_recursively(id);
+        }
+        if let Some(plugin_id) = plugin_id {
+            self.collapse_plugin_group(&plugin_id);
+        }
+    }
+
+    pub fn discard_dynamic_panes(&mut self) {
+        let dynamic_ids: Vec<TileId> = self
+            .tree
+            .tiles
+            .iter()
+            .filter_map(|(id, tile)| match tile {
+                Tile::Pane(kind) if kind.dynamic_id().is_some() => Some(*id),
+                _ => None,
+            })
+            .collect();
+        for id in dynamic_ids {
+            self.tree.remove_recursively(id);
+        }
+        self.plugin_panel_owners.clear();
+        self.plugin_groups.clear();
+    }
+
+    fn collapse_plugin_group(&mut self, plugin_id: &str) {
+        let Some(group_id) = self.plugin_groups.get(plugin_id).copied() else {
+            return;
+        };
+        let children = match self.tree.tiles.get(group_id) {
+            Some(Tile::Container(Container::Tabs(tabs))) => tabs.children.clone(),
+            _ => {
+                self.plugin_groups.remove(plugin_id);
+                return;
+            }
+        };
+
+        match children.as_slice() {
+            [] => {
+                self.tree.remove_recursively(group_id);
+            }
+            [only_child] => {
+                if let Some(parent_id) = self.tree.tiles.parent_of(group_id) {
+                    if let Some(Tile::Container(parent)) = self.tree.tiles.get_mut(parent_id) {
+                        parent.remove_child(group_id);
+                        parent.add_child(*only_child);
+                        if let Container::Tabs(tabs) = parent {
+                            tabs.set_active(*only_child);
+                        }
+                    }
+                } else {
+                    self.tree.root = Some(*only_child);
+                }
+                self.tree.tiles.remove(group_id);
+            }
+            _ => return,
+        }
+        self.plugin_groups.remove(plugin_id);
+    }
+
+    pub fn plugin_group_id(&self, tile_id: TileId) -> Option<&str> {
+        self.plugin_groups
+            .iter()
+            .find_map(|(plugin_id, id)| (*id == tile_id).then_some(plugin_id.as_str()))
+    }
+
+    pub fn is_pane_visible(&self, kind: &PanelKind) -> bool {
+        self.tree
+            .tiles
+            .find_pane(kind)
+            .is_some_and(|id| self.tree.active_tiles().contains(&id))
+    }
 }
 
 impl Default for DockLayout {
@@ -196,7 +532,6 @@ impl Default for DockLayout {
         bottom.active = Some(PanelKind::Terminal);
 
         Self {
-            activity_bar_visible: true,
             bottom_visible: true,
             right_visible: false,
             bottom_size: default_bottom_size(),
@@ -329,6 +664,9 @@ pub struct PanelManager {
     pub inspector_visible: bool, // legacy: ignored, kept for old workspace compatibility
     #[serde(default)]
     pub dock: DockLayout,
+    /// 新版工作区布局。None 表示从旧版 `dock` 字段自动迁移。
+    #[serde(default)]
+    pub tiles: Option<TilesLayout>,
 }
 
 impl Default for PanelManager {
@@ -337,25 +675,78 @@ impl Default for PanelManager {
             active_tab: PanelKind::Devices,
             inspector_visible: false,
             dock: DockLayout::default(),
+            tiles: None,
         }
     }
 }
 
 impl PanelManager {
+    /// 确保当前管理器拥有 tiles 布局；旧版配置会在首次调用时自动转换。
+    pub fn ensure_tiles_layout(&mut self) -> &mut TilesLayout {
+        if self.tiles.is_none() {
+            self.dock.normalize_tool_layout();
+            self.tiles = Some(TilesLayout::from_legacy(&self.dock));
+        }
+        self.tiles.as_mut().expect("tiles layout was initialized")
+    }
+
+    pub fn reset_tiles_layout(&mut self) {
+        self.dock = DockLayout::default();
+        self.tiles = Some(TilesLayout::from_legacy(&self.dock));
+        self.active_tab = PanelKind::Devices;
+    }
+
+    pub fn bottom_visible(&mut self) -> bool {
+        self.ensure_tiles_layout().bottom_visible()
+    }
+
+    pub fn set_bottom_visible(&mut self, visible: bool) {
+        self.ensure_tiles_layout().set_bottom_visible(visible);
+    }
+
+    pub fn right_visible(&mut self) -> bool {
+        self.ensure_tiles_layout().right_visible()
+    }
+
+    pub fn set_right_visible(&mut self, visible: bool) {
+        self.ensure_tiles_layout().set_right_visible(visible);
+    }
+
+    pub fn plugin_group_id(&self, tile_id: TileId) -> Option<&str> {
+        self.tiles.as_ref()?.plugin_group_id(tile_id)
+    }
+
     /// 从 dock 的所有 stack 中派生 tabs 列表（唯一真相来源）
     pub fn tabs(&self) -> Vec<PanelKind> {
+        if let Some(tiles) = self.tiles.as_ref() {
+            return tiles
+                .tree
+                .tiles
+                .iter()
+                .filter_map(|(_, tile)| match tile {
+                    Tile::Pane(kind) => Some(kind.clone()),
+                    Tile::Container(_) => None,
+                })
+                .collect();
+        }
         self.dock.all_tabs()
     }
 
     /// 切换 Center 标签栏的激活面板（左侧栏点击）。
     pub fn select_center_panel(&mut self, kind: PanelKind) {
         self.active_tab = kind.clone();
-        self.dock.center.active = Some(kind);
+        self.ensure_tiles_layout().select_pane(&kind);
     }
 
     pub fn open_tab(&mut self, kind: PanelKind) {
         self.active_tab = kind.clone();
-        self.dock.center.open(kind);
+        self.ensure_tiles_layout().add_to_main_tabs(kind, true);
+    }
+
+    pub fn open_plugin_tab(&mut self, kind: PanelKind, plugin_id: &str) {
+        self.active_tab = kind.clone();
+        self.ensure_tiles_layout()
+            .add_to_plugin_tabs(kind, plugin_id);
     }
 
     /// 同步 active_tab 到 Center 当前激活面板（Center 渲染后调用）。
@@ -368,18 +759,37 @@ impl PanelManager {
     }
 
     pub fn is_panel_visible(&self, kind: &PanelKind) -> bool {
+        if let Some(tiles) = self.tiles.as_ref() {
+            return tiles.is_pane_visible(kind);
+        }
         self.dock.center.active_or_first().as_ref() == Some(kind)
             || (self.dock.bottom_visible
                 && self.dock.bottom.active_or_first().as_ref() == Some(kind))
             || (self.dock.right_visible && self.dock.right.active_or_first().as_ref() == Some(kind))
     }
 
-    /// 添加标签但不自动切换（插件后台创建面板时使用）
-    pub fn add_tab(&mut self, kind: PanelKind) {
-        self.dock.center.add_inactive(kind);
-    }
-
     pub fn close_tab(&mut self, kind: PanelKind) {
+        if self.tiles.is_some() {
+            let fallback = self
+                .tiles
+                .as_ref()
+                .and_then(|layout| {
+                    layout.tree.tiles.iter().find_map(|(_, tile)| match tile {
+                        Tile::Pane(candidate)
+                            if candidate != &kind && candidate.dynamic_id().is_some() =>
+                        {
+                            Some(candidate.clone())
+                        }
+                        _ => None,
+                    })
+                })
+                .unwrap_or(PanelKind::Devices);
+            self.ensure_tiles_layout().remove_pane(&kind);
+            if self.active_tab == kind {
+                self.active_tab = fallback;
+            }
+            return;
+        }
         // 确定关闭的 tab 在哪个 dock area，在该 stack 中查找回退
         let area = if self.dock.center.contains(&kind) {
             DockArea::Center
@@ -412,6 +822,9 @@ impl PanelManager {
     }
 
     pub fn discard_dynamic_tabs(&mut self) {
+        if let Some(tiles) = self.tiles.as_mut() {
+            tiles.discard_dynamic_panes();
+        }
         if self.active_tab.dynamic_id().is_some() {
             self.active_tab = self
                 .dock
@@ -499,5 +912,115 @@ mod tests {
         assert!(manager.is_panel_visible(&PanelKind::Settings));
         assert!(manager.is_panel_visible(&PanelKind::Logs));
         assert!(!manager.is_panel_visible(&PanelKind::Terminal));
+    }
+
+    #[test]
+    fn legacy_dock_migrates_to_tiles_and_preserves_visibility() {
+        let mut manager = PanelManager::default();
+        manager.dock.bottom_visible = false;
+        manager.dock.right_visible = true;
+        manager.dock.right.open(PanelKind::Logs);
+
+        let layout = manager.ensure_tiles_layout();
+
+        assert!(!layout.bottom_visible());
+        assert!(layout.right_visible());
+        assert!(layout.tree.tiles.find_pane(&PanelKind::Devices).is_some());
+        assert!(layout.tree.tiles.find_pane(&PanelKind::Logs).is_some());
+    }
+
+    #[test]
+    fn dynamic_pane_is_added_to_and_removed_from_tiles() {
+        let mut manager = PanelManager::default();
+        let dynamic = PanelKind::Dynamic("runtime".to_owned());
+
+        manager.open_tab(dynamic.clone());
+        assert!(
+            manager
+                .ensure_tiles_layout()
+                .tree
+                .tiles
+                .find_pane(&dynamic)
+                .is_some()
+        );
+
+        manager.close_tab(dynamic.clone());
+        assert!(
+            manager
+                .ensure_tiles_layout()
+                .tree
+                .tiles
+                .find_pane(&dynamic)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn opening_dynamic_pane_recovers_when_main_tabs_was_pruned() {
+        let mut manager = PanelManager::default();
+        let removed_main_tabs = manager.ensure_tiles_layout().main_tabs;
+        manager
+            .ensure_tiles_layout()
+            .tree
+            .remove_recursively(removed_main_tabs);
+
+        let dynamic = PanelKind::Dynamic("runtime".to_owned());
+        manager.open_tab(dynamic.clone());
+        assert_eq!(manager.active_tab, dynamic);
+
+        let layout = manager.ensure_tiles_layout();
+        let pane_id = layout
+            .tree
+            .tiles
+            .find_pane(&dynamic)
+            .expect("dynamic pane should be inserted");
+        assert!(layout.tree.active_tiles().contains(&pane_id));
+    }
+
+    #[test]
+    fn plugin_dynamic_panes_group_and_collapse_back_to_one_pane() {
+        let mut manager = PanelManager::default();
+        let first = PanelKind::Dynamic("demo.chart".to_owned());
+        let second = PanelKind::Dynamic("demo.form".to_owned());
+        let third = PanelKind::Dynamic("demo.gauge".to_owned());
+
+        manager.open_plugin_tab(first.clone(), "demo");
+        manager.open_plugin_tab(second.clone(), "demo");
+        manager.open_plugin_tab(third.clone(), "demo");
+
+        {
+            let layout = manager.ensure_tiles_layout();
+            let group_id = *layout
+                .plugin_groups
+                .get("demo")
+                .expect("second plugin pane should create a group");
+            let first_id = layout.tree.tiles.find_pane(&first).expect("first pane");
+            let second_id = layout.tree.tiles.find_pane(&second).expect("second pane");
+            let Some(Tile::Container(Container::Tabs(tabs))) = layout.tree.tiles.get(group_id)
+            else {
+                panic!("plugin group should be a tab container");
+            };
+            assert_eq!(tabs.children.len(), 3);
+            assert_eq!(tabs.children[..2], [first_id, second_id]);
+        }
+
+        manager.close_tab(third);
+        manager.close_tab(second);
+
+        let layout = manager.ensure_tiles_layout();
+        assert!(!layout.plugin_groups.contains_key("demo"));
+        assert!(layout.tree.tiles.find_pane(&first).is_some());
+    }
+
+    #[test]
+    fn tiles_layout_round_trips_through_workspace_json() {
+        let mut manager = PanelManager::default();
+        manager.ensure_tiles_layout().set_right_visible(true);
+
+        let json = serde_json::to_string(&manager).expect("serialize tiles layout");
+        let restored: PanelManager = serde_json::from_str(&json).expect("deserialize tiles layout");
+
+        assert!(restored.tiles.is_some());
+        assert!(restored.tiles.expect("tiles layout").right_visible());
     }
 }
