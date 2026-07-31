@@ -3,11 +3,74 @@
 //! `RowHighlight` 被日志面板和终端面板共用，消除重复代码。
 //! `RowSelection` 提供框选、Shift/Ctrl 多选、边缘自动滚动。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use egui::{Id, Ui};
 
 use crate::theme;
+
+/// 动态消息流的共享行高缓存。
+///
+/// 日志和接收区都可能有换行、长文本折行和字体大小切换。缓存按稳定行 ID、内容签名
+/// 与内容列宽度失效，只在进入视口时重新测量真实高度；离屏行使用保守估算值。
+#[derive(Default)]
+pub(crate) struct MessageList {
+    row_heights: BTreeMap<u64, CachedMessageRowHeight>,
+    last_total_height: f32,
+    last_row_count: usize,
+}
+
+#[derive(Clone, Copy)]
+struct CachedMessageRowHeight {
+    signature: u64,
+    width_key: u64,
+    height: f32,
+}
+
+impl MessageList {
+    pub(crate) fn clear(&mut self) {
+        self.row_heights.clear();
+        self.last_total_height = 0.0;
+        self.last_row_count = 0;
+    }
+
+    pub(crate) fn remove(&mut self, id: u64) {
+        self.row_heights.remove(&id);
+    }
+
+    pub(crate) fn estimated_height(
+        &self,
+        id: u64,
+        signature: u64,
+        width_key: u64,
+        fallback: f32,
+    ) -> f32 {
+        self.row_heights
+            .get(&id)
+            .filter(|cached| cached.signature == signature && cached.width_key == width_key)
+            .map_or(fallback, |cached| cached.height.max(fallback))
+    }
+
+    pub(crate) fn record_height(&mut self, id: u64, signature: u64, width_key: u64, height: f32) {
+        self.row_heights.insert(
+            id,
+            CachedMessageRowHeight {
+                signature,
+                width_key,
+                height,
+            },
+        );
+    }
+
+    /// 记录本帧内容总高；高度变化时要求下一帧重绘，使滚动条和底部跟随立即收敛。
+    pub(crate) fn note_total_height(&mut self, ui: &Ui, total_height: f32, row_count: usize) {
+        if (self.last_total_height - total_height).abs() > 0.5 || self.last_row_count != row_count {
+            ui.ctx().request_repaint();
+        }
+        self.last_total_height = total_height;
+        self.last_row_count = row_count;
+    }
+}
 
 /// 管理表格行高亮和右键菜单的行匹配冻结状态。
 ///
@@ -409,7 +472,20 @@ pub(crate) fn edge_scroll_delta(pointer_y: f32, viewport_rect: egui::Rect) -> f3
 
 #[cfg(test)]
 mod tests {
-    use super::{RowHighlight, RowSelection, edge_scroll_delta};
+    use super::{MessageList, RowHighlight, RowSelection, edge_scroll_delta};
+
+    #[test]
+    fn message_list_height_cache_requires_matching_content_and_width() {
+        let mut list = MessageList::default();
+        list.record_height(7, 11, 120, 42.0);
+
+        assert_eq!(list.estimated_height(7, 11, 120, 16.0), 42.0);
+        assert_eq!(list.estimated_height(7, 12, 120, 16.0), 16.0);
+        assert_eq!(list.estimated_height(7, 11, 121, 16.0), 16.0);
+
+        list.remove(7);
+        assert_eq!(list.estimated_height(7, 11, 120, 16.0), 16.0);
+    }
 
     #[test]
     fn row_lookup_handles_variable_heights_and_dragging_past_edges() {

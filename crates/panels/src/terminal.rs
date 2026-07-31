@@ -1,12 +1,13 @@
 use crate::{
     MAX_INGEST_PER_FRAME, fmt_ts,
-    table::{RowHighlight, RowSelection, edge_scroll_delta},
+    table::{MessageList, RowHighlight, RowSelection, edge_scroll_delta},
     theme,
 };
 use egui::text_selection::LabelSelectionState;
 use egui::{Color32, RichText, ScrollArea, Sense, Stroke};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use tool_core::{Direction, Event};
 use tool_databus::{DataBus, Subscription, TopicFilter};
 use tool_transport::serial_topics;
@@ -72,11 +73,8 @@ pub struct TerminalPanel {
     pub merge_window_ms: u64,
     /// 框选状态
     pub selection: RowSelection,
-    /// 每条 entry 的真实渲染高度缓存，避免多行内容在自动追踪时把底部位置算错。
-    row_height_cache: BTreeMap<u64, TerminalRowHeightCacheEntry>,
-    /// 记录上一帧总高度，供高度缓存变更时观察整体偏移。
-    cached_total_height: f32,
-    cached_total_height_rows: usize,
+    /// 接收消息流的共享虚拟渲染状态（行高缓存与总高收敛）。
+    message_list: MessageList,
 }
 
 #[derive(Default)]
@@ -165,7 +163,7 @@ struct RenderOutcome {
     pending_navigate_to_id: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 struct TerminalRowHeightSignature {
     show_hex: bool,
     show_raw: bool,
@@ -174,14 +172,6 @@ struct TerminalRowHeightSignature {
     display_len: usize,
     hex_len: usize,
     preview_len: usize,
-}
-
-#[derive(Clone, Copy)]
-struct TerminalRowHeightCacheEntry {
-    signature: TerminalRowHeightSignature,
-    content_width_px: i32,
-    preview_width_px: i32,
-    height: f32,
 }
 
 /// 将一行文本作为 entry push，或合并到上一条 entry（如果间隔 ≤ merge_window_ms
@@ -348,9 +338,7 @@ impl TerminalPanel {
             font_size: 13.0,
             merge_window_ms: 5,
             selection: RowSelection::new(0),
-            row_height_cache: BTreeMap::new(),
-            cached_total_height: 0.0,
-            cached_total_height_rows: 0,
+            message_list: MessageList::default(),
         }
     }
     pub fn ingest_all_pending(&mut self) -> usize {
@@ -397,13 +385,11 @@ impl TerminalPanel {
         self.search_text.clear();
         self.port_filter = None;
         self.bookmarked_entry_ids.clear();
-        self.row_height_cache.clear();
+        self.message_list.clear();
         // 清空后重置为自动滚动，与 LogPanel::clear() 保持一致
         self.show_raw = false;
         self.auto_scroll = true;
         self.selection.clear();
-        self.cached_total_height = 0.0;
-        self.cached_total_height_rows = 0;
     }
 
     pub fn is_bookmarked(&self, entry_id: u64) -> bool {
@@ -802,9 +788,7 @@ impl TerminalPanel {
                 self.font_size,
                 &mut self.selection,
                 empty_hint,
-                &mut self.row_height_cache,
-                &mut self.cached_total_height,
-                &mut self.cached_total_height_rows,
+                &mut self.message_list,
                 self.navigate_highlight,
             )
         };
@@ -947,7 +931,7 @@ impl TerminalPanel {
                     self.detail_entry_id = None;
                 }
                 self.bookmarked_entry_ids.remove(&id);
-                self.row_height_cache.remove(&id);
+                self.message_list.remove(id);
                 self.truncated = true;
             },
             self.merge_window_ms,
@@ -1105,7 +1089,7 @@ fn terminal_row_height_signature(
 fn cached_or_estimated_terminal_row_height(
     row: &VisibleRow<'_>,
     signature: TerminalRowHeightSignature,
-    row_height_cache: &BTreeMap<u64, TerminalRowHeightCacheEntry>,
+    message_list: &MessageList,
     show_hex: bool,
     show_raw: bool,
     base_row_height: f32,
@@ -1113,18 +1097,22 @@ fn cached_or_estimated_terminal_row_height(
     preview_width_px: i32,
 ) -> f32 {
     let estimated = estimated_terminal_row_height(row, show_hex, show_raw, base_row_height);
-    if let Some(cached) = row_height_cache.get(&row.id)
-        && cached.signature == signature
-    {
-        let width_unchanged = cached.content_width_px == content_width_px
-            && cached.preview_width_px == preview_width_px;
-        let height_is_intrinsic = cached.height <= estimated + 1.0;
-        if width_unchanged || height_is_intrinsic {
-            return cached.height;
-        }
-    }
+    message_list.estimated_height(
+        row.id,
+        terminal_row_height_signature_key(signature),
+        terminal_row_width_key(content_width_px, preview_width_px),
+        estimated,
+    )
+}
 
-    estimated
+fn terminal_row_height_signature_key(signature: TerminalRowHeightSignature) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    signature.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn terminal_row_width_key(content_width_px: i32, preview_width_px: i32) -> u64 {
+    ((content_width_px as u32 as u64) << 32) | preview_width_px as u32 as u64
 }
 
 fn estimated_terminal_row_height(
@@ -1198,9 +1186,7 @@ fn render_rows_view(
     font_size: f32,
     selection: &mut RowSelection,
     empty_hint: &str,
-    row_height_cache: &mut BTreeMap<u64, TerminalRowHeightCacheEntry>,
-    cached_total_height: &mut f32,
-    cached_total_height_rows: &mut usize,
+    message_list: &mut MessageList,
     navigate_highlight: Option<(u64, f64)>,
 ) -> RenderOutcome {
     let height = height.max(40.0);
@@ -1280,7 +1266,7 @@ fn render_rows_view(
                     cached_or_estimated_terminal_row_height(
                         row,
                         signature,
-                        row_height_cache,
+                        message_list,
                         show_hex,
                         show_raw,
                         row_height,
@@ -1442,14 +1428,11 @@ fn render_rows_view(
                     };
                     let height = height.round().max(row_height);
                     row_heights[row_idx] = height;
-                    row_height_cache.insert(
+                    message_list.record_height(
                         row.id,
-                        TerminalRowHeightCacheEntry {
-                            signature: row_signatures[row_idx],
-                            content_width_px,
-                            preview_width_px,
-                            height,
-                        },
+                        terminal_row_height_signature_key(row_signatures[row_idx]),
+                        terminal_row_width_key(content_width_px, preview_width_px),
+                        height,
                     );
                     (Some(galley), preview_galley, height)
                 } else {
@@ -1629,11 +1612,7 @@ fn render_rows_view(
             }
 
             let actual_total = (current_y - label_rect.top()).round();
-            if (*cached_total_height - actual_total).abs() > 0.5 {
-                ui.ctx().request_repaint();
-            }
-            *cached_total_height = actual_total;
-            *cached_total_height_rows = rows.len();
+            message_list.note_total_height(ui, actual_total, rows.len());
             if actual_total > total_height + 0.5 {
                 ui.allocate_space(egui::vec2(0.0, actual_total - total_height));
             }
@@ -2425,20 +2404,24 @@ mod tests {
             preview_text: Cow::Borrowed("short"),
         };
         let signature = terminal_row_height_signature(&row, false, false, 13.0);
-        let mut cache = BTreeMap::new();
-        cache.insert(
+        let mut message_list = MessageList::default();
+        message_list.record_height(
             row.id,
-            TerminalRowHeightCacheEntry {
-                signature,
-                content_width_px: 240,
-                preview_width_px: 0,
-                height: 13.0,
-            },
+            terminal_row_height_signature_key(signature),
+            terminal_row_width_key(240, 0),
+            13.0,
         );
 
         assert_eq!(
             cached_or_estimated_terminal_row_height(
-                &row, signature, &cache, false, false, 13.0, 180, 0
+                &row,
+                signature,
+                &message_list,
+                false,
+                false,
+                13.0,
+                180,
+                0
             ),
             13.0
         );

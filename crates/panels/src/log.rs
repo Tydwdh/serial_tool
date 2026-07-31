@@ -1,11 +1,12 @@
 use crate::{
     MAX_INGEST_PER_FRAME, fmt_ts,
-    table::{RowHighlight, RowSelection, edge_scroll_delta},
+    table::{MessageList, RowHighlight, RowSelection, edge_scroll_delta},
     theme,
 };
 use egui::text_selection::LabelSelectionState;
 use egui::{RichText, ScrollArea, Sense, Stroke, TextEdit};
 use std::collections::{BTreeSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use tool_core::{Event, LogLevel};
 use tool_databus::{DataBus, Subscription, TopicFilter};
 
@@ -48,6 +49,8 @@ pub struct LogPanel {
     pub font_size: f32,
     /// 行框选状态
     pub selection: RowSelection,
+    /// 日志消息流的共享虚拟渲染状态（与接收区共用实现）。
+    message_list: MessageList,
     /// 是否发生过截断（用于状态栏提示，显示后清除）
     pub truncated: bool,
     /// 待推送到状态栏的 warn/error 通知（每帧由 app 层 take 后推给 NotificationQueue）
@@ -86,6 +89,7 @@ impl LogPanel {
             source_filter: None,
             font_size: 13.0,
             selection: RowSelection::new(0),
+            message_list: MessageList::default(),
             truncated: false,
             pending_notifications: VecDeque::new(),
         }
@@ -115,6 +119,7 @@ impl LogPanel {
         self.search_text.clear();
         self.source_filter = None;
         self.selection.clear();
+        self.message_list.clear();
     }
 
     /// 收集所有已出现过的 source 名称，用于过滤下拉框。
@@ -316,6 +321,7 @@ impl LogPanel {
             force_scroll_to_bottom,
             self.font_size,
             &mut self.selection,
+            &mut self.message_list,
             self.navigate_highlight,
         );
 
@@ -382,7 +388,9 @@ impl LogPanel {
         });
 
         while self.entries.len() > self.max_entries {
-            self.entries.pop_front();
+            if let Some(removed) = self.entries.pop_front() {
+                self.message_list.remove(removed.id);
+            }
             self.truncated = true;
         }
     }
@@ -432,14 +440,6 @@ impl LogPanel {
 
 // ── 渲染 ──
 
-/// 预计算的单行布局（复用终端面板的 LayoutJob 模式）。
-struct RowLayout {
-    /// 消息列的 galley（支持文本选择）。
-    message_galley: std::sync::Arc<egui::Galley>,
-    /// 该行高度（至少 base_row_height）。
-    height: f32,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct LogTableWidths {
     label: f32,
@@ -454,6 +454,18 @@ fn log_table_widths(full_width: f32, desired_label_width: f32) -> LogTableWidths
     LogTableWidths { label, message }
 }
 
+fn log_row_height_signature(entry: &LogEntry, font_size: f32) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (entry.message.len(), (font_size * 1000.0).round() as i32).hash(&mut hasher);
+    hasher.finish()
+}
+
+fn estimated_log_row_height(entry: &LogEntry, base_row_height: f32) -> f32 {
+    (entry.message.lines().count().max(1) as f32 * base_row_height)
+        .round()
+        .max(base_row_height)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_log_rows(
     ui: &mut egui::Ui,
@@ -465,6 +477,7 @@ fn render_log_rows(
     force_scroll_to_bottom: bool,
     font_size: f32,
     selection: &mut RowSelection,
+    message_list: &mut MessageList,
     navigate_highlight: Option<(u64, f64)>,
 ) -> LogRenderOutcome {
     let font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
@@ -523,27 +536,24 @@ fn render_log_rows(
             let text_padding = 4.0;
             let galley_width = (message_width - text_padding).max(0.0);
 
-            // 预计算所有行的 LayoutJob
-            let row_layouts: Vec<RowLayout> = rows
+            let width_key = galley_width.max(0.0).round() as u64;
+            let row_signatures: Vec<u64> = rows
                 .iter()
-                .map(|entry| {
-                    let mut layout_job = egui::text::LayoutJob::simple(
-                        entry.message.clone(),
-                        font_id.clone(),
-                        text_color,
-                        galley_width,
-                    );
-                    layout_job.halign = egui::Align::LEFT;
-                    let galley = ui.fonts_mut(|f| f.layout_job(layout_job));
-                    let height = galley.size().y.max(base_row_height);
-                    RowLayout {
-                        message_galley: galley,
-                        height,
-                    }
+                .map(|entry| log_row_height_signature(entry, font_size))
+                .collect();
+            let mut row_heights: Vec<f32> = rows
+                .iter()
+                .zip(row_signatures.iter().copied())
+                .map(|(entry, signature)| {
+                    message_list.estimated_height(
+                        entry.id,
+                        signature,
+                        width_key,
+                        estimated_log_row_height(entry, base_row_height),
+                    )
                 })
                 .collect();
-
-            let total_height: f32 = row_layouts.iter().map(|r| r.height).sum();
+            let total_height: f32 = row_heights.iter().sum();
 
             // 分配总区域
             let (full_rect, _alloc_response) =
@@ -581,9 +591,9 @@ fn render_log_rows(
 
             // 先记录所有行范围，当前帧的点击/拖拽才能立即命中正确行。
             let mut recorded_y = label_rect.top();
-            for layout in &row_layouts {
-                hl.record_row(recorded_y, layout.height);
-                recorded_y += layout.height;
+            for height in &row_heights {
+                hl.record_row(recorded_y, *height);
+                recorded_y += *height;
             }
 
             let mut ctx_response = ui.interact(
@@ -633,8 +643,37 @@ fn render_log_rows(
 
             let mut current_y = label_rect.top();
             let mut text_drag_response: Option<egui::Response> = None;
-            for (row_idx, (entry, layout)) in rows.iter().zip(row_layouts.iter()).enumerate() {
-                let entry_height = layout.height;
+            for (row_idx, entry) in rows.iter().enumerate() {
+                let estimated_height = row_heights[row_idx].max(base_row_height);
+                let in_viewport = current_y + estimated_height
+                    >= viewport_rect.top() - estimated_height
+                    && current_y <= viewport_rect.bottom() + estimated_height;
+                let (message_galley, entry_height) = if in_viewport {
+                    let mut layout_job = egui::text::LayoutJob::simple(
+                        entry.message.clone(),
+                        font_id.clone(),
+                        text_color,
+                        galley_width,
+                    );
+                    layout_job.halign = egui::Align::LEFT;
+                    let galley = ui.fonts_mut(|f| f.layout_job(layout_job));
+                    let height = galley.size().y.max(base_row_height).round();
+                    row_heights[row_idx] = height;
+                    message_list.record_height(
+                        entry.id,
+                        row_signatures[row_idx],
+                        width_key,
+                        height,
+                    );
+                    (Some(galley), height)
+                } else {
+                    (None, estimated_height)
+                };
+
+                if !in_viewport {
+                    current_y += entry_height;
+                    continue;
+                }
                 // 标签对齐第一行中心（和终端面板一致）
                 let label_y = current_y + base_row_height * 0.5;
 
@@ -716,12 +755,14 @@ fn render_log_rows(
                 }
 
                 // --- 可选择的消息文本 ---
-                if message_width > 0.0 {
+                if let Some(message_galley) = message_galley
+                    && message_width > 0.0
+                {
                     // galley 从行顶开始绘制（和终端面板一致）
                     let galley_pos = egui::pos2(message_rect.left() + text_padding, current_y);
                     // row_text_rect 只覆盖 galley 实际文本区域。点击文本 → egui 字符级拖选；
                     // 点击文本外的空白 → 整行选中。
-                    let galley_size = layout.message_galley.size();
+                    let galley_size = message_galley.size();
                     let row_text_rect = egui::Rect::from_min_size(galley_pos, galley_size);
                     let msg_row_rect = egui::Rect::from_min_size(
                         egui::pos2(message_rect.left(), current_y),
@@ -769,7 +810,7 @@ fn render_log_rows(
                     if selection.is_dragging() {
                         ui.painter().add(egui::epaint::TextShape::new(
                             galley_pos,
-                            layout.message_galley.clone(),
+                            message_galley.clone(),
                             text_color,
                         ));
                     } else {
@@ -777,7 +818,7 @@ fn render_log_rows(
                             ui,
                             &response,
                             galley_pos,
-                            layout.message_galley.clone(),
+                            message_galley.clone(),
                             text_color,
                             Stroke::NONE,
                         );
@@ -785,6 +826,12 @@ fn render_log_rows(
                 }
 
                 current_y += entry_height;
+            }
+
+            let actual_total = (current_y - label_rect.top()).round();
+            message_list.note_total_height(ui, actual_total, rows.len());
+            if actual_total > total_height + 0.5 {
+                ui.allocate_space(egui::vec2(0.0, actual_total - total_height));
             }
 
             if text_drag_response
