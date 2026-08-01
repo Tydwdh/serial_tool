@@ -1,6 +1,17 @@
 {
-  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v0.7.2/hardware-workbench-app.zip",
-  "version": "0.7.2",
-  "changelog": [],
-  "date": "2026-07-09"
+  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v1.0.0/hardware-workbench-app.zip",
+  "version": "1.0.0",
+  "changelog": [
+    "将插件源码、市场索引和发布产物统一合并到主仓库维护。",
+    "完善 Lua 插件生命周期、权限、命令、任务、配置和动态面板能力。",
+    "增加可停靠工作区、JSON 主题系统、数据表格与插件场景测试。",
+    "设置页显示可点击的项目仓库地址。",
+    "恢复 Rust + egui 为唯一桌面客户端，移除 Flutter 和小窗模式遗留。",
+    "重构插件管理页为响应式紧凑卡片，并统一界面层级、间距和对比度。",
+    "简化界面提示文字和次要操作，减少视觉噪声。",
+    "修复接收区和日志区自动跟随无法通过向上滚轮暂停的问题。",
+    "支持左键拖选文本或跨行选择时继续使用滚轮滚动。",
+    "修复设置导航、工具栏按钮和插件统计切换时的布局抖动。"
+  ],
+  "date": "2026-08-02"
 }
