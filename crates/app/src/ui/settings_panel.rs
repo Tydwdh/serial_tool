@@ -15,6 +15,27 @@ use tool_panels::{
     dynamic_form_ui, parse_fields, theme,
 };
 
+const SETTINGS_NAV_BUTTON_SIZE: egui::Vec2 = egui::vec2(136.0, 32.0);
+const SETTINGS_NAV_ITEMS: [(usize, egui_material_icons::MaterialIcon, &str); 5] = [
+    (0, ICON_SETTINGS, "常规"),
+    (1, ICON_DATA_USAGE, "连接与数据"),
+    (2, ICON_KEYBOARD, "快捷键"),
+    (3, ICON_APPS, "插件设置"),
+    (4, ICON_INFO, "关于与重置"),
+];
+
+fn settings_nav_button(
+    ui: &mut egui::Ui,
+    selected: bool,
+    icon: egui_material_icons::MaterialIcon,
+    label: &str,
+) -> egui::Response {
+    ui.add_sized(
+        SETTINGS_NAV_BUTTON_SIZE,
+        egui::Button::selectable(selected, design::icon_text(icon, label)).corner_radius(7.0),
+    )
+}
+
 impl WorkbenchApp {
     pub(super) fn settings_panel(&mut self, ui: &mut egui::Ui) {
         let nav_id = ui.id().with("settings_category");
@@ -25,24 +46,8 @@ impl WorkbenchApp {
             .min(4);
         design::elevated_card().show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                for (index, icon, label) in [
-                    (0, ICON_SETTINGS, "常规"),
-                    (1, ICON_DATA_USAGE, "连接与数据"),
-                    (2, ICON_KEYBOARD, "快捷键"),
-                    (3, ICON_APPS, "插件设置"),
-                    (4, ICON_INFO, "关于与重置"),
-                ] {
-                    if ui
-                        .add(
-                            egui::Button::selectable(
-                                category == index,
-                                design::icon_text(icon, label),
-                            )
-                            .corner_radius(7.0)
-                            .min_size(egui::vec2(112.0, 32.0)),
-                        )
-                        .clicked()
-                    {
+                for (index, icon, label) in SETTINGS_NAV_ITEMS {
+                    if settings_nav_button(ui, category == index, icon, label).clicked() {
                         category = index;
                     }
                 }
@@ -628,4 +633,38 @@ fn open_config_location(path: &Path, open_self: bool) -> Result<PathBuf, String>
     open::that(&target)
         .map_err(|e| format!("打开目录失败：{e}"))
         .map(|()| target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_navigation_does_not_move_when_longest_item_is_selected() {
+        let mut first_row = Vec::new();
+        let mut second_row = Vec::new();
+
+        egui::__run_test_ui(|ui| {
+            ui.set_max_width(900.0);
+            ui.horizontal_wrapped(|ui| {
+                for (index, icon, label) in SETTINGS_NAV_ITEMS {
+                    first_row.push(settings_nav_button(ui, index == 0, icon, label).rect);
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                for (index, icon, label) in SETTINGS_NAV_ITEMS {
+                    second_row.push(settings_nav_button(ui, index == 1, icon, label).rect);
+                }
+            });
+        });
+
+        assert_eq!(first_row.len(), second_row.len());
+        for (before, after) in first_row.iter().zip(&second_row) {
+            assert!((before.left() - after.left()).abs() < 0.1);
+            assert!((before.width() - SETTINGS_NAV_BUTTON_SIZE.x).abs() < 0.1);
+            assert!((after.width() - SETTINGS_NAV_BUTTON_SIZE.x).abs() < 0.1);
+            assert!((before.height() - SETTINGS_NAV_BUTTON_SIZE.y).abs() < 0.1);
+            assert!((after.height() - SETTINGS_NAV_BUTTON_SIZE.y).abs() < 0.1);
+        }
+    }
 }
