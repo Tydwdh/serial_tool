@@ -649,13 +649,22 @@ impl PluginsPanel {
                         }
                     }
                 });
-                ui.horizontal_wrapped(|ui| {
+                ui.horizontal(|ui| {
                     ui.label("路径");
-                    ui.label(
-                        egui::RichText::new(summary.path.display().to_string())
-                            .monospace()
-                            .color(theme::text_primary()),
-                    );
+                    let full_path = summary.path.display().to_string();
+                    let available_width = ui.available_width().max(40.0);
+                    let display_path =
+                        crate::compact_middle(&full_path, plugin_path_char_limit(available_width));
+                    ui.add_sized(
+                        egui::vec2(available_width, ui.spacing().interact_size.y),
+                        egui::Label::new(
+                            egui::RichText::new(display_path)
+                                .monospace()
+                                .color(theme::text_primary()),
+                        )
+                        .truncate(),
+                    )
+                    .on_hover_text(full_path);
                 });
 
                 if !summary.contributes.panels.is_empty() {
@@ -822,6 +831,10 @@ fn plugin_column_count(available_width: f32) -> usize {
     usize::from(available_width >= TWO_COLUMN_PLUGIN_WIDTH) + 1
 }
 
+fn plugin_path_char_limit(available_width: f32) -> usize {
+    (available_width / 8.5).floor().max(12.0) as usize
+}
+
 fn state_label(state: PluginState) -> &'static str {
     match state {
         PluginState::Discovered => "已发现",
@@ -908,5 +921,11 @@ mod tests {
         assert_eq!(plugin_column_count(TWO_COLUMN_PLUGIN_WIDTH - 1.0), 1);
         assert_eq!(plugin_column_count(TWO_COLUMN_PLUGIN_WIDTH), 2);
         assert_eq!(plugin_column_count(1440.0), 2);
+    }
+
+    #[test]
+    fn plugin_path_limit_scales_with_card_width() {
+        assert_eq!(plugin_path_char_limit(80.0), 12);
+        assert!(plugin_path_char_limit(700.0) > plugin_path_char_limit(350.0));
     }
 }
