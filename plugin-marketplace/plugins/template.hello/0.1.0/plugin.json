@@ -1,0 +1,29 @@
+{
+  "$schema": "../plugin.schema.json",
+  "id": "template.hello",
+  "name": "Hello 插件模板",
+  "version": "0.1.0",
+  "api_version": "0.1",
+  "runtime": "lua",
+  "main": "main.lua",
+  "description": "最小可用插件模板：一个参数表单，演示 bus/log/ui/storage 权限的基本用法",
+  "author": "Tydwdh",
+  "homepage": "https://github.com/Tydwdh/serial_tool",
+  "repository": "https://github.com/Tydwdh/serial_tool",
+  "license": "MIT",
+  "category": "template",
+  "permissions": ["bus", "log", "ui", "storage"],
+  "live": {
+    "main": "main.lua",
+    "permissions": ["bus", "log", "ui", "storage"]
+  },
+  "contributes": {
+    "panels": [
+      {
+        "id": "template.hello.form",
+        "title": "Hello 参数",
+        "kind": "form"
+      }
+    ]
+  }
+}

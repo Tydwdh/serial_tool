@@ -1,0 +1,148 @@
+{
+  "$schema": "../plugin.schema.json",
+  "id": "demo.gcode-sender",
+  "name": "G-code Sender",
+  "version": "0.1.0",
+  "api_version": "0.1",
+  "runtime": "lua",
+  "main": "main.lua",
+  "description": "面向 Marlin 固件的 G-code 发送器：支持文件/单条发送、行号校验、暂停/恢复/取消、进度显示",
+  "author": "Tydwdh",
+  "homepage": "https://github.com/Tydwdh/serial_tool",
+  "repository": "https://github.com/Tydwdh/serial_tool",
+  "license": "MIT",
+  "category": "gcode",
+  "permissions": [
+    "bus",
+    "log",
+    "serial",
+    "ui",
+    "dialog",
+    "fs.read.user_selected",
+    "task",
+    "config"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "id": "demo.gcode-sender.send_file",
+        "title": "G文件"
+      },
+      {
+        "id": "demo.gcode-sender.send_single",
+        "title": "G单条"
+      },
+      {
+        "id": "demo.gcode-sender.pause",
+        "title": "暂停/恢复"
+      },
+      {
+        "id": "demo.gcode-sender.cancel",
+        "title": "取消"
+      }
+    ],
+    "settings": [
+      {
+        "id": "default_setup_gcode",
+        "title": "初始化 G-code",
+        "kind": "text",
+        "default": "M92 X40 Y40 Z2.5 E7.53",
+        "description": "每次发送前自动执行的 G-code（如设置步数/单位）"
+      },
+      {
+        "id": "ack_timeout_ms",
+        "title": "ACK 超时 (ms)",
+        "kind": "number",
+        "default": 300000,
+        "min": 1000,
+        "max": 600000,
+        "step": 1000,
+        "description": "等待设备响应的超时时间"
+      },
+      {
+        "id": "start_timeout_ms",
+        "title": "启动同步超时 (ms)",
+        "kind": "number",
+        "default": 3000,
+        "min": 500,
+        "max": 30000,
+        "step": 500,
+        "description": "M110 行号同步的单次超时"
+      },
+      {
+        "id": "eof_delay_ms",
+        "title": "结束延迟 (ms)",
+        "kind": "number",
+        "default": 1000,
+        "min": 0,
+        "max": 10000,
+        "step": 100,
+        "description": "发送完成后的等待时间"
+      },
+      {
+        "id": "error_followup_ms",
+        "title": "错误后续读取 (ms)",
+        "kind": "number",
+        "default": 2000,
+        "min": 100,
+        "max": 10000,
+        "step": 100,
+        "description": "收到 Error 后继续读取响应的时间"
+      },
+      {
+        "id": "max_marlin_line_bytes",
+        "title": "最大行长度 (字节)",
+        "kind": "number",
+        "default": 96,
+        "min": 32,
+        "max": 256,
+        "step": 8,
+        "description": "超过此长度的 G-code 行将被跳过"
+      }
+    ],
+    "ui": [
+      {
+        "id": "demo.gcode-sender.progress",
+        "slot": "status_bar.left",
+        "kind": "progress",
+        "title": "",
+        "tooltip": "G-code 发送进度",
+        "order": 10
+      },
+      {
+        "id": "demo.gcode-sender.send_file.button",
+        "slot": "send.toolbar",
+        "kind": "button",
+        "command": "demo.gcode-sender.send_file",
+        "tooltip": "发送区为空时选择 G-code 文件；否则把发送区内容当作文件路径",
+        "record_send_input": true,
+        "order": 20
+      },
+      {
+        "id": "demo.gcode-sender.send_single.button",
+        "slot": "send.toolbar",
+        "kind": "button",
+        "command": "demo.gcode-sender.send_single",
+        "tooltip": "按脚本 singlegcode 模式发送：M92 + 当前输入 + M2，并带行号和校验",
+        "record_send_input": true,
+        "order": 21
+      },
+      {
+        "id": "demo.gcode-sender.pause.button",
+        "slot": "send.toolbar",
+        "kind": "button",
+        "command": "demo.gcode-sender.pause",
+        "tooltip": "暂停或恢复当前 G-code 发送任务",
+        "order": 23
+      },
+      {
+        "id": "demo.gcode-sender.cancel.button",
+        "slot": "send.toolbar",
+        "kind": "button",
+        "command": "demo.gcode-sender.cancel",
+        "tooltip": "取消当前 G-code 发送任务",
+        "order": 24
+      }
+    ]
+  }
+}

@@ -11,7 +11,7 @@ use tool_updater as updater;
 
 /// 默认市场 registry URL。
 pub const DEFAULT_REGISTRY_URL: &str =
-    "https://raw.githubusercontent.com/Tydwdh/serial_tool-plugins/main/registry.json";
+    "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugin-marketplace/registry.json";
 
 // ── 数据模型（对应 registry.json schema） ──
 
@@ -337,7 +337,7 @@ mod tests {
                 "category": "gcode",
                 "icon": null,
                 "permissions": ["bus", "log", "serial"],
-                "download_url": "https://raw.githubusercontent.com/Tydwdh/serial_tool-plugins/main/plugins/gcode-sender/0.1.0/gcode-sender-0.1.0.zip",
+                "download_url": "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugin-marketplace/plugins/gcode-sender/0.1.0/gcode-sender-0.1.0.zip",
                 "sha256": "c05822f7ae52f42b5e0f2b55c51d0b9203fa355a49cd5a9b5b0cd3df5f27bc66",
                 "size": 7940,
                 "published": "2026-07-02T04:45:26Z"
@@ -408,7 +408,7 @@ mod tests {
         // 复用 updater 的域白名单：github 三域通过，其他域拒绝。
         assert!(
             updater::validate_download_url(
-                "https://raw.githubusercontent.com/Tydwdh/serial_tool-plugins/main/registry.json"
+                "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugin-marketplace/registry.json"
             )
             .is_ok()
         );
@@ -435,5 +435,56 @@ mod tests {
         // 含空格 / 中文等非法字符
         assert!(validate_plugin_id("a b").is_err());
         assert!(validate_plugin_id("插件").is_err());
+    }
+
+    #[test]
+    fn repository_marketplace_artifacts_match_registry() {
+        let marketplace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("plugin-marketplace");
+        let registry_text = std::fs::read_to_string(marketplace_root.join("registry.json"))
+            .expect("read plugin-marketplace/registry.json");
+        let registry: Registry = serde_json::from_str(&registry_text).expect("parse registry.json");
+
+        assert!(
+            !registry.plugins.is_empty(),
+            "marketplace registry is empty"
+        );
+        for plugin in registry.plugins {
+            validate_plugin_id(&plugin.id).expect("valid plugin id");
+            let version_dir = marketplace_root
+                .join("plugins")
+                .join(&plugin.id)
+                .join(&plugin.version);
+            let zip_name = format!("{}-{}.zip", plugin.id, plugin.version);
+            let zip_path = version_dir.join(&zip_name);
+            let expected_url = format!(
+                "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugin-marketplace/plugins/{}/{}/{}",
+                plugin.id, plugin.version, zip_name
+            );
+
+            assert_eq!(plugin.download_url, expected_url);
+            assert_eq!(
+                std::fs::metadata(&zip_path)
+                    .expect("plugin zip metadata")
+                    .len(),
+                plugin.size,
+                "size mismatch for {}",
+                plugin.id
+            );
+            assert_eq!(
+                updater::sha256_file(&zip_path).expect("hash plugin zip"),
+                plugin.sha256,
+                "SHA256 mismatch for {}",
+                plugin.id
+            );
+
+            let manifest_text = std::fs::read_to_string(version_dir.join("plugin.json"))
+                .expect("read published plugin manifest");
+            let manifest: serde_json::Value =
+                serde_json::from_str(&manifest_text).expect("parse published plugin manifest");
+            assert_eq!(manifest["id"], plugin.id);
+            assert_eq!(manifest["version"], plugin.version);
+        }
     }
 }

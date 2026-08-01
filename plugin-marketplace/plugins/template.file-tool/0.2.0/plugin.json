@@ -1,0 +1,25 @@
+{
+  "$schema": "../plugin.schema.json",
+  "id": "template.file-tool",
+  "name": "文件工具 (Template)",
+  "version": "0.2.0",
+  "api_version": "0.1",
+  "runtime": "lua",
+  "main": "main.lua",
+  "description": "文件读取工具模板：通过对话框选择文件并读取内容（演示 fs.read.user_selected 权限）",
+  "author": "Tydwdh",
+  "homepage": "https://github.com/Tydwdh/serial_tool",
+  "repository": "https://github.com/Tydwdh/serial_tool",
+  "license": "MIT",
+  "category": "template",
+  "permissions": ["bus", "log", "ui", "storage", "dialog", "fs.read.user_selected"],
+  "live": {
+    "main": "main.lua",
+    "permissions": ["bus", "log", "ui", "storage", "dialog", "fs.read.user_selected"]
+  },
+  "contributes": {
+    "panels": [
+      { "id": "file-tool-panel", "title": "文件工具", "kind": "form" }
+    ]
+  }
+}

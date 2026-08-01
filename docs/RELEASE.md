@@ -135,13 +135,17 @@ git push origin v0.7.1
 5. **Release** — 使用 `softprops/action-gh-release@v2` 创建 GitHub Release，自动生成 release notes
 6. **update.json** — 自动生成 `update.json` 并推回 `main` 分支
 
-### 7. 更新插件仓库（如有插件变更）
+### 7. 发布插件（如有插件变更）
 
-```bash
-# 插件仓库: Tydwdh/serial_tool-plugins
-# 更新 registry.json 中的版本号、下载 URL、SHA256
-# 上传新 zip 到对应的 release
+```powershell
+.\plugin-marketplace\scripts\publish.ps1 `
+  -PluginId gcode-sender `
+  -Version 0.3.0
 ```
+
+插件源码、市场索引和版本化 ZIP 均在本仓库维护。脚本默认从
+`plugins/<plugin-id>/` 读取源码，将产物写入 `plugin-marketplace/`，并更新
+`registry.json` 的版本、下载 URL、SHA256 和文件大小。
 
 ## update.json 格式
 

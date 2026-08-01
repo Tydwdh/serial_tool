@@ -1,0 +1,41 @@
+{
+  "$schema": "../plugin.schema.json",
+  "id": "template.serial-chart",
+  "name": "串口图表插件模板",
+  "version": "0.1.0",
+  "api_version": "0.1",
+  "runtime": "lua",
+  "main": "main.lua",
+  "description": "串口数据图表模板：订阅 RX 事件绘制曲线，含回放分析器（演示 replay 配置）",
+  "author": "Tydwdh",
+  "homepage": "https://github.com/Tydwdh/serial_tool",
+  "repository": "https://github.com/Tydwdh/serial_tool",
+  "license": "MIT",
+  "category": "chart",
+  "permissions": ["bus", "log", "serial", "ui", "storage"],
+  "live": {
+    "main": "main.lua",
+    "permissions": ["bus", "log", "serial", "ui", "storage"],
+    "subscriptions": ["transport.serial.default.rx"]
+  },
+  "replay": {
+    "main": "replay.lua",
+    "subscriptions": ["transport.serial.default.rx"],
+    "outputs": ["protocol.template.sample"],
+    "permissions": ["log", "storage"]
+  },
+  "contributes": {
+    "panels": [
+      {
+        "id": "template.serial-chart.chart",
+        "title": "串口数据图表",
+        "kind": "chart"
+      },
+      {
+        "id": "template.serial-chart.form",
+        "title": "串口图表参数",
+        "kind": "form"
+      }
+    ]
+  }
+}
