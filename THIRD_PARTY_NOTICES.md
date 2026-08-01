@@ -12,6 +12,17 @@ uses the MIT license option; its license text is available at
 `vendor/egui_tiles/LICENSE-MIT` in the source repository and
 `licenses/egui_tiles-LICENSE-MIT` in release packages.
 
+## Inno Setup Chinese Simplified Translation
+
+The Windows installer uses the `ChineseSimplified.isl` translation maintained
+by Zhenghan Yang (Kira), pinned from commit
+`6da09d23e14443d4cf8f07b1c5fd821bfe459788` of
+[Inno Setup Chinese Simplified Translation](https://github.com/kira-96/Inno-Setup-Chinese-Simplified-Translation).
+
+This translation is licensed under the MIT License. The full license is copied
+into release packages as
+`licenses/ChineseSimplified-Translation-LICENSE-MIT`.
+
 ## egui-notify
 
 The right-top toast notification overlay in `crates/app/src/ui/toast.rs` adapts

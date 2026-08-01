@@ -36,6 +36,9 @@ dist\hardware-workbench-app.zip
 
 先安装 Inno Setup 6，并确保 `ISCC.exe` 在 `PATH` 中，或安装在默认目录。
 
+简体中文安装界面使用仓库内固定版本的
+`installer\ChineseSimplified.isl`，不依赖 Inno Setup 安装目录中是否附带翻译文件。
+
 Windows PowerShell 5.1：
 
 ```powershell

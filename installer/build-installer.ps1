@@ -49,11 +49,16 @@ $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $ScriptRoot
 $PackageScript = Join-Path $RepoRoot "package.bat"
 $InstallerScript = Join-Path $ScriptRoot "hardware-workbench-app.iss"
+$InstallerLanguageFile = Join-Path $ScriptRoot "ChineseSimplified.isl"
 $PortableExe = Join-Path $RepoRoot "dist\hardware-workbench-app\hardware-workbench-app.exe"
 $InstallerExe = Join-Path $RepoRoot "dist\HardwareWorkbenchSetup.exe"
 
 Push-Location $RepoRoot
 try {
+    if (-not (Test-Path -LiteralPath $InstallerLanguageFile -PathType Leaf)) {
+        throw "Installer language file not found: $InstallerLanguageFile"
+    }
+
     if (-not $SkipPackage) {
         Write-Host "Building portable package..."
         & $PackageScript

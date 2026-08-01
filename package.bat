@@ -54,6 +54,7 @@ for %%F in (README.md CHANGELOG.md LICENSE THIRD_PARTY_NOTICES.md) do (
 )
 mkdir "%OUT_DIR%\licenses" >nul 2>nul
 if exist "vendor\egui_tiles\LICENSE-MIT" copy "vendor\egui_tiles\LICENSE-MIT" "%OUT_DIR%\licenses\egui_tiles-LICENSE-MIT" >nul
+if exist "installer\ChineseSimplified-LICENSE-MIT" copy "installer\ChineseSimplified-LICENSE-MIT" "%OUT_DIR%\licenses\ChineseSimplified-Translation-LICENSE-MIT" >nul
 
 mkdir "%OUT_DIR%\plugins" >nul 2>nul
 if exist "plugins\plugin.schema.json" copy "plugins\plugin.schema.json" "%OUT_DIR%\plugins\plugin.schema.json" >nul
