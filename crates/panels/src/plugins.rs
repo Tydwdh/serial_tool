@@ -222,12 +222,7 @@ impl PluginsPanel {
         let toolbar_status = design::card()
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                design::section_header(
-                    ui,
-                    ICON_MANAGE_ACCOUNTS,
-                    "插件管理",
-                    Some("发现并管理本地插件"),
-                );
+                design::section_header(ui, ICON_MANAGE_ACCOUNTS, "插件管理");
                 ui.separator();
                 ui.horizontal_wrapped(|ui| -> Option<PluginPanelEvent> {
                     ui.label("根目录");
@@ -263,7 +258,7 @@ impl PluginsPanel {
 
         if summaries.is_empty() && diagnostics.is_empty() {
             ui.add_space(8.0);
-            design::empty_state(ui, ICON_APPS, "未找到插件", "刷新目录或先从市场安装插件。 ");
+            design::empty_state(ui, ICON_APPS, "未找到插件");
             return status;
         }
 
@@ -324,7 +319,7 @@ impl PluginsPanel {
             ui.add_space(8.0);
             design::card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                design::section_header(ui, ICON_DIAGNOSIS, "诊断", Some("需要处理的插件问题"));
+                design::section_header(ui, ICON_DIAGNOSIS, "诊断");
                 ui.separator();
                 for diagnostic in diagnostics {
                     diagnostic_row(ui, diagnostic);
@@ -402,12 +397,7 @@ impl PluginsPanel {
         // ── 工具栏：刷新按钮 + 状态 ──
         design::card().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            design::section_header(
-                ui,
-                ICON_SHOPPING_CART,
-                "插件市场",
-                Some("搜索、筛选并安装官方索引中的插件"),
-            );
+            design::section_header(ui, ICON_SHOPPING_CART, "插件市场");
             ui.separator();
             ui.horizontal_wrapped(|ui| {
                 let refreshing = self.market.refreshing;
@@ -429,22 +419,6 @@ impl PluginsPanel {
                     ui.colored_label(theme::red(), egui::RichText::new(err).small());
                 } else if refreshing {
                     ui.label(egui::RichText::new("正在拉取市场索引…").small());
-                } else if let Some(reg) = &self.market.registry {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "共 {} 个插件（更新于 {}）",
-                            reg.plugins.len(),
-                            reg.updated
-                        ))
-                        .small(),
-                    );
-                    if let Some(diagnostics) = &self.market.network_diagnostics {
-                        ui.label(
-                            egui::RichText::new(diagnostics)
-                                .small()
-                                .color(theme::text_secondary()),
-                        );
-                    }
                 }
             });
 
@@ -487,23 +461,13 @@ impl PluginsPanel {
 
         let Some(reg) = self.market.registry.clone() else {
             if !self.market.refreshing {
-                design::empty_state(
-                    ui,
-                    ICON_SHOPPING_CART,
-                    "尚未加载市场索引",
-                    "点击“刷新市场”获取可安装插件。",
-                );
+                design::empty_state(ui, ICON_SHOPPING_CART, "尚未加载市场索引");
             }
             return events;
         };
 
         if reg.plugins.is_empty() {
-            design::empty_state(
-                ui,
-                ICON_SHOPPING_CART,
-                "市场暂无插件",
-                "索引中没有可用条目。 ",
-            );
+            design::empty_state(ui, ICON_SHOPPING_CART, "市场暂无插件");
             return events;
         }
 
@@ -532,7 +496,7 @@ impl PluginsPanel {
             .collect();
 
         if visible_plugins.is_empty() {
-            design::empty_state(ui, ICON_SEARCH, "没有匹配插件", "调整关键词或分类筛选。 ");
+            design::empty_state(ui, ICON_SEARCH, "没有匹配插件");
             return events;
         }
 

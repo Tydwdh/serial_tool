@@ -370,10 +370,6 @@ pub fn dynamic_form_ui(
     }
 
     if auto_apply {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("变更会立即应用").color(theme::text_secondary()));
-        });
-
         if changed {
             publish_form_changed(bus, panel_id, fields);
         }

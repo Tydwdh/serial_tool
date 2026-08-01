@@ -298,12 +298,6 @@ impl LogPanel {
                     self.export_request = Some(TerminalExportFormat::Json);
                     ui.close();
                 }
-                ui.separator();
-                ui.label(
-                    RichText::new("导出当前级别、搜索和来源筛选后的日志")
-                        .small()
-                        .color(theme::text_secondary()),
-                );
             });
 
             // 清空：两步确认（与终端面板一致），避免误触丢失系统日志。

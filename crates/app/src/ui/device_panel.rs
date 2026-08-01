@@ -16,12 +16,7 @@ impl WorkbenchApp {
         // ── 串口参数 ──
         design::card().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            design::section_header(
-                ui,
-                ICON_TUNE,
-                "串口参数",
-                Some("设置通信格式与断线重连策略"),
-            );
+            design::section_header(ui, ICON_TUNE, "串口参数");
             ui.separator();
 
             ui.horizontal(|ui| {
@@ -81,12 +76,7 @@ impl WorkbenchApp {
         // ── 录制 ──
         design::card().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            design::section_header(
-                ui,
-                ICON_FIBER_MANUAL_RECORD,
-                "录制",
-                Some("将串口事件写入可回放的 JSONL 文件"),
-            );
+            design::section_header(ui, ICON_FIBER_MANUAL_RECORD, "录制");
             ui.separator();
 
             ui.horizontal(|ui| {
@@ -211,12 +201,7 @@ impl WorkbenchApp {
         // ── 可用端口 ──
         design::card().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            design::section_header(
-                ui,
-                ICON_CABLE,
-                "可用端口",
-                Some("管理设备别名、分组和连接状态"),
-            );
+            design::section_header(ui, ICON_CABLE, "可用端口");
             ui.separator();
 
             // 显示已打开但不在系统端口列表中的 stale 连接
@@ -281,11 +266,6 @@ impl WorkbenchApp {
                     ui.separator();
                 }
             }
-
-            ui.label(
-                egui::RichText::new("提示：别名会显示在串口选择、发送目标和设备列表中")
-                    .color(theme::text_secondary()),
-            );
 
             // 收集所有已有组名
             let group_names: Vec<String> = {

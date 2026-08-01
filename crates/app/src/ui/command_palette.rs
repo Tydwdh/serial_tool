@@ -187,12 +187,7 @@ impl WorkbenchApp {
                         let col_width = ui.available_width();
 
                         if entries.is_empty() {
-                            design::empty_state(
-                                ui,
-                                ICON_SEARCH_OFF,
-                                "无匹配命令",
-                                "尝试输入其他关键词，或按 Esc 关闭",
-                            );
+                            design::empty_state(ui, ICON_SEARCH_OFF, "无匹配命令");
                         }
 
                         for (i, entry) in entries.iter().enumerate() {
@@ -269,15 +264,6 @@ impl WorkbenchApp {
                 {
                     self.command_palette.selected = Some(hi);
                 }
-
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("↑↓ 选择 · Enter 执行 · Esc 关闭")
-                            .small()
-                            .color(theme::text_secondary()),
-                    );
-                });
             });
 
         // 点击窗口外部 → 关闭（VSCode 风格）

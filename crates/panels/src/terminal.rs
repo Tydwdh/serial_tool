@@ -613,12 +613,6 @@ impl TerminalPanel {
                     self.export_request = Some(TerminalExportFormat::Json);
                     ui.close();
                 }
-                ui.separator();
-                ui.label(
-                    RichText::new("导出当前筛选和显示模式下的文本；字节级原始数据请使用录制功能")
-                        .small()
-                        .color(theme::text_secondary()),
-                );
             });
 
             // 清空：两步确认，避免误触丢失刚出现的故障数据。

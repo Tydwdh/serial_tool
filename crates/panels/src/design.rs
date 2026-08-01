@@ -99,29 +99,15 @@ pub fn elevated_card() -> Frame {
     })
 }
 
-pub fn section_header(
-    ui: &mut egui::Ui,
-    icon: MaterialIcon,
-    title: impl AsRef<str>,
-    subtitle: Option<&str>,
-) {
+pub fn section_header(ui: &mut egui::Ui, icon: MaterialIcon, title: impl AsRef<str>) {
     ui.horizontal(|ui| {
         ui.label(icon_only(icon, theme::blue(), 19.0));
-        ui.vertical(|ui| {
-            ui.label(
-                RichText::new(title.as_ref())
-                    .size(16.0)
-                    .strong()
-                    .color(theme::text_white()),
-            );
-            if let Some(subtitle) = subtitle {
-                ui.label(
-                    RichText::new(subtitle)
-                        .small()
-                        .color(theme::text_secondary()),
-                );
-            }
-        });
+        ui.label(
+            RichText::new(title.as_ref())
+                .size(16.0)
+                .strong()
+                .color(theme::text_white()),
+        );
     });
 }
 
@@ -189,12 +175,7 @@ pub fn status_pill_sized(
         .response
 }
 
-pub fn empty_state(
-    ui: &mut egui::Ui,
-    icon: MaterialIcon,
-    title: impl AsRef<str>,
-    detail: impl AsRef<str>,
-) {
+pub fn empty_state(ui: &mut egui::Ui, icon: MaterialIcon, title: impl AsRef<str>) {
     ui.with_layout(
         egui::Layout::top_down(egui::Align::Center).with_cross_justify(true),
         |ui| {
@@ -205,11 +186,6 @@ pub fn empty_state(
                 RichText::new(title.as_ref())
                     .strong()
                     .color(theme::text_primary()),
-            );
-            ui.label(
-                RichText::new(detail.as_ref())
-                    .small()
-                    .color(theme::text_secondary()),
             );
             ui.add_space(28.0);
         },

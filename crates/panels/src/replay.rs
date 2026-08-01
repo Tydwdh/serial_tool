@@ -196,12 +196,7 @@ impl ReplayPanel {
         // ── 回放文件 ──
         design::card().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            design::section_header(
-                ui,
-                ICON_FOLDER_OPEN,
-                "回放文件",
-                Some("载入 JSONL 会话并恢复当时的数据流"),
-            );
+            design::section_header(ui, ICON_FOLDER_OPEN, "回放文件");
             ui.separator();
             self.file_controls(ui);
         });
@@ -211,12 +206,7 @@ impl ReplayPanel {
         // ── 回放策略 ──
         design::card().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            design::section_header(
-                ui,
-                ICON_TUNE,
-                "回放策略",
-                Some("选择使用录制结果或重新运行解析器"),
-            );
+            design::section_header(ui, ICON_TUNE, "回放策略");
             ui.separator();
             self.policy_controls(ui);
         });
@@ -226,12 +216,7 @@ impl ReplayPanel {
         // ── 播放控制 ──
         design::card().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            design::section_header(
-                ui,
-                ICON_REPLAY,
-                "播放控制",
-                Some("定位、步进和调整回放速度"),
-            );
+            design::section_header(ui, ICON_REPLAY, "播放控制");
             ui.separator();
 
             // 控件可能修改了 manager 状态，这里重新取一次。

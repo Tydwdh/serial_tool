@@ -56,12 +56,7 @@ impl WorkbenchApp {
             // ── 工作区 ──
             design::card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                design::section_header(
-                    ui,
-                    ICON_FOLDER,
-                    "工作区",
-                    Some("配置位置、布局与最近工作区"),
-                );
+                design::section_header(ui, ICON_FOLDER, "工作区");
                 ui.separator();
                 self.render_config_locations(ui);
 
@@ -158,7 +153,7 @@ impl WorkbenchApp {
             // ── 外观 ──
             design::card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                design::section_header(ui, ICON_PALETTE, "外观", Some("主题、面板与文本显示"));
+                design::section_header(ui, ICON_PALETTE, "外观");
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("界面主题");
@@ -191,13 +186,11 @@ impl WorkbenchApp {
                             }
                         });
                 });
-                ui.label(
-                    egui::RichText::new("当前主题文件会立即写入工作区配置。")
-                        .small()
-                        .color(theme::text_secondary()),
-                );
                 ui.horizontal(|ui| {
-                    if ui.button("打开主题目录").clicked()
+                    if ui
+                        .button("打开主题目录")
+                        .on_hover_text("将 JSON 主题文件放入此目录")
+                        .clicked()
                         && let Err(error) = open::that(&self.theme_dir)
                     {
                         self.set_status_force(
@@ -205,11 +198,6 @@ impl WorkbenchApp {
                             format!("打开主题目录失败：{error}"),
                         );
                     }
-                    ui.label(
-                        egui::RichText::new("将 JSON 文件放入该目录后，在上方列表选择即可应用。")
-                            .small()
-                            .color(theme::text_secondary()),
-                    );
                 });
                 ui.add_space(4.0);
                 let mut bottom_visible = self.panels.bottom_visible();
@@ -244,29 +232,25 @@ impl WorkbenchApp {
 
         if category == 1 {
             // ── 网络 ──
-            design::card()
-            .show(ui, |ui| {
+            design::card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                design::section_header(ui, ICON_NETWORK_CHECK, "网络", Some("市场与更新代理"));
+                design::section_header(ui, ICON_NETWORK_CHECK, "网络");
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("代理地址");
-                    let response = ui.add(
-                        egui::TextEdit::singleline(&mut self.network_proxy_url)
-                            .desired_width(260.0)
-                            .hint_text("留空：系统/环境代理或直连"),
-                    );
-                    if response.changed() && let Err(error) = self.save_config() {
+                    let response = ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.network_proxy_url)
+                                .desired_width(260.0)
+                                .hint_text("留空：系统/环境代理或直连"),
+                        )
+                        .on_hover_text("支持 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080");
+                    if response.changed()
+                        && let Err(error) = self.save_config()
+                    {
                         log::warn!("save_config failed: {error}");
                     }
                 });
-                ui.label(
-                    egui::RichText::new(
-                        "支持 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080。市场和更新会依次尝试 Windows TLS 与 Rustls TLS。",
-                    )
-                    .small()
-                    .color(theme::text_secondary()),
-                );
             });
 
             ui.add_space(8.0);
@@ -274,7 +258,7 @@ impl WorkbenchApp {
             // ── 数据 ──
             design::card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                design::section_header(ui, ICON_TUNE, "数据", Some("终端聚合与容量限制"));
+                design::section_header(ui, ICON_TUNE, "数据");
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("终端合并阈值");
@@ -345,7 +329,7 @@ impl WorkbenchApp {
             // ── 快捷键 ──
             design::card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                design::section_header(ui, ICON_KEYBOARD, "快捷键", Some("录制或清除动作绑定"));
+                design::section_header(ui, ICON_KEYBOARD, "快捷键");
                 ui.separator();
                 self.render_keymap_editor(ui);
             });
@@ -396,7 +380,7 @@ impl WorkbenchApp {
             // ── 关于 ──
             design::card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                design::section_header(ui, ICON_INFO, "关于", Some("版本与运行信息"));
+                design::section_header(ui, ICON_INFO, "关于");
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label(format!("硬件调试工作台 v{}", env!("CARGO_PKG_VERSION")));
@@ -556,12 +540,7 @@ impl WorkbenchApp {
         let plugin_settings = self.plugin_manager.plugin_settings();
         if plugin_settings.is_empty() {
             design::card().show(ui, |ui| {
-                design::empty_state(
-                    ui,
-                    ICON_APPS,
-                    "暂无插件设置",
-                    "启用带设置项的插件后，其配置会显示在这里。",
-                );
+                design::empty_state(ui, ICON_APPS, "暂无插件设置");
             });
             return;
         }
@@ -618,12 +597,7 @@ impl WorkbenchApp {
 
             design::card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                design::section_header(
-                    ui,
-                    ICON_APPS,
-                    format!("{plugin_name} 设置"),
-                    Some("插件提供的可配置选项"),
-                );
+                design::section_header(ui, ICON_APPS, format!("{plugin_name} 设置"));
                 ui.separator();
 
                 let panel_id = format!("{plugin_id}.settings");

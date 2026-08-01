@@ -954,13 +954,6 @@ impl WorkbenchApp {
                     ui.ctx()
                         .memory_mut(|m| m.data.remove_temp::<f64>(confirm_id));
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new("点击条目填入发送框")
-                            .small()
-                            .color(theme::text_dimmed()),
-                    );
-                });
             });
         });
 
