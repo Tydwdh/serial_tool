@@ -6,6 +6,7 @@ pub(crate) mod popups;
 mod settings_panel;
 mod status_bar;
 mod tiles;
+pub(crate) mod toast;
 mod top_bar;
 
 use crate::app::WorkbenchApp;

@@ -3,7 +3,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::{
-    Arc,
+    Arc, Weak,
     atomic::{AtomicU64, Ordering},
 };
 use std::time::Duration;
@@ -81,13 +81,62 @@ struct Inner {
 
 struct Subscriber {
     filter: TopicFilter,
-    sender: Sender<Arc<Event>>,
+    sink: SubscriberSink,
     dropped: Arc<AtomicU64>,
+}
+
+enum SubscriberSink {
+    Channel(Sender<Arc<Event>>),
+    Ring {
+        queue: Weak<Mutex<VecDeque<Arc<Event>>>>,
+        capacity: usize,
+    },
 }
 
 pub struct Subscription {
     receiver: Receiver<Arc<Event>>,
     dropped: Arc<AtomicU64>,
+}
+
+/// 发布线程直接写入的有界环形订阅。
+///
+/// 队列满时丢弃最旧事件并保留最新事件，适合 UI 消息流：窗口最小化时不依赖
+/// UI 帧消费，内存仍有明确上限，并可通过 `take_dropped_count` 报告数据缺口。
+pub struct RingSubscription {
+    queue: Arc<Mutex<VecDeque<Arc<Event>>>>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl RingSubscription {
+    pub fn try_recv(&self) -> Option<Event> {
+        self.queue.lock().pop_front().map(|arc| (*arc).clone())
+    }
+
+    pub fn drain_limited(&self, max: usize) -> Vec<Event> {
+        let mut queue = self.queue.lock();
+        let take = max.min(queue.len());
+        queue.drain(..take).map(|arc| (*arc).clone()).collect()
+    }
+
+    pub fn clear(&self) {
+        self.queue.lock().clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.queue.lock().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.lock().is_empty()
+    }
+
+    pub fn dropped_count(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
+    pub fn take_dropped_count(&self) -> u64 {
+        self.dropped.swap(0, Ordering::Relaxed)
+    }
 }
 
 impl Subscription {
@@ -177,13 +226,27 @@ impl DataBus {
         subscribers.retain(|subscriber| {
             if subscriber.filter.matches_event(&arc) {
                 // Arc::clone 只增加引用计数，避免对每个 subscriber 都完整 clone Event
-                match subscriber.sender.try_send(Arc::clone(&arc)) {
-                    Ok(()) => true,
-                    Err(TrySendError::Full(_)) => {
-                        subscriber.dropped.fetch_add(1, Ordering::Relaxed);
+                match &subscriber.sink {
+                    SubscriberSink::Channel(sender) => match sender.try_send(Arc::clone(&arc)) {
+                        Ok(()) => true,
+                        Err(TrySendError::Full(_)) => {
+                            subscriber.dropped.fetch_add(1, Ordering::Relaxed);
+                            true
+                        }
+                        Err(TrySendError::Disconnected(_)) => false,
+                    },
+                    SubscriberSink::Ring { queue, capacity } => {
+                        let Some(queue) = queue.upgrade() else {
+                            return false;
+                        };
+                        let mut queue = queue.lock();
+                        if queue.len() >= *capacity {
+                            queue.pop_front();
+                            subscriber.dropped.fetch_add(1, Ordering::Relaxed);
+                        }
+                        queue.push_back(Arc::clone(&arc));
                         true
                     }
-                    Err(TrySendError::Disconnected(_)) => false,
                 }
             } else {
                 true
@@ -201,7 +264,7 @@ impl DataBus {
         let dropped = Arc::new(AtomicU64::new(0));
         self.inner.subscribers.lock().push(Subscriber {
             filter,
-            sender,
+            sink: SubscriberSink::Channel(sender),
             dropped: Arc::clone(&dropped),
         });
         Subscription { receiver, dropped }
@@ -220,10 +283,26 @@ impl DataBus {
         let dropped = Arc::new(AtomicU64::new(0));
         self.inner.subscribers.lock().push(Subscriber {
             filter,
-            sender,
+            sink: SubscriberSink::Channel(sender),
             dropped: Arc::clone(&dropped),
         });
         Subscription { receiver, dropped }
+    }
+
+    /// 有界环形订阅：队列满时丢弃最旧事件，始终优先保留最新状态。
+    pub fn subscribe_ring_bounded(&self, filter: TopicFilter, capacity: usize) -> RingSubscription {
+        let capacity = capacity.max(1);
+        let queue = Arc::new(Mutex::new(VecDeque::with_capacity(capacity)));
+        let dropped = Arc::new(AtomicU64::new(0));
+        self.inner.subscribers.lock().push(Subscriber {
+            filter,
+            sink: SubscriberSink::Ring {
+                queue: Arc::downgrade(&queue),
+                capacity,
+            },
+            dropped: Arc::clone(&dropped),
+        });
+        RingSubscription { queue, dropped }
     }
 
     pub fn history(&self) -> Vec<Event> {
@@ -349,6 +428,26 @@ mod tests {
         }
         assert_eq!(sub.drain().len(), 1);
         assert_eq!(sub.dropped_count(), 3);
+    }
+
+    #[test]
+    fn ring_bounded_keeps_the_latest_events_and_counts_oldest_drops() {
+        let bus = DataBus::new();
+        let sub = bus.subscribe_ring_bounded(TopicFilter::All, 2);
+        for index in 0..4 {
+            bus.publish(ev(&format!("t{index}")));
+        }
+
+        let events = sub.drain_limited(10);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.topic.as_str())
+                .collect::<Vec<_>>(),
+            ["t2", "t3"]
+        );
+        assert_eq!(sub.take_dropped_count(), 2);
+        assert_eq!(sub.take_dropped_count(), 0);
     }
 
     #[test]

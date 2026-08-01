@@ -1,4 +1,4 @@
-use crate::theme;
+use crate::{copy_text_with_feedback, theme};
 use egui::{Color32, ScrollArea, TextEdit};
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -34,6 +34,8 @@ pub struct MarketplaceState {
     pub registry: Option<Registry>,
     pub refreshing: bool,
     pub error: Option<String>,
+    /// 最近一次成功刷新实际使用的网络路径。
+    pub network_diagnostics: Option<String>,
     /// 正在安装的插件 id → 进度 0.0..1.0。
     pub installing: HashMap<String, f32>,
     /// 已安装插件 id 集合（由 app 每帧从 PluginManager summaries 回填）。
@@ -77,10 +79,11 @@ impl PluginsPanel {
 
     // ── 市场 UI 状态 setter（供 app 回填） ──
 
-    pub fn set_market_registry(&mut self, reg: Registry) {
+    pub fn set_market_registry(&mut self, reg: Registry, network_diagnostics: String) {
         self.market.registry = Some(reg);
         self.market.refreshing = false;
         self.market.error = None;
+        self.market.network_diagnostics = Some(network_diagnostics);
     }
 
     pub fn set_market_error(&mut self, msg: String) {
@@ -229,6 +232,37 @@ impl PluginsPanel {
             return status;
         }
 
+        if !summaries.is_empty() {
+            let running = summaries
+                .iter()
+                .filter(|summary| matches!(summary.state, PluginState::Running))
+                .count();
+            let failed = summaries
+                .iter()
+                .filter(|summary| matches!(summary.state, PluginState::Failed))
+                .count();
+            let inactive = summaries.len().saturating_sub(running + failed);
+            ui.add_space(8.0);
+            egui::Frame::group(ui.style())
+                .inner_margin(egui::Margin::symmetric(12, 6))
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(format!("已发现 {}", summaries.len()));
+                        ui.colored_label(theme::green(), format!("● 运行 {running}"));
+                        ui.colored_label(theme::text_secondary(), format!("● 未运行 {inactive}"));
+                        if failed > 0 {
+                            ui.colored_label(theme::red(), format!("● 异常 {failed}"));
+                        }
+                        if !diagnostics.is_empty() {
+                            ui.colored_label(
+                                theme::yellow(),
+                                format!("⚠ 诊断 {}", diagnostics.len()),
+                            );
+                        }
+                    });
+                });
+        }
+
         // ── 诊断 ──
         if !diagnostics.is_empty() {
             ui.add_space(8.0);
@@ -316,6 +350,13 @@ impl PluginsPanel {
                             ))
                             .small(),
                         );
+                        if let Some(diagnostics) = &self.market.network_diagnostics {
+                            ui.label(
+                                egui::RichText::new(diagnostics)
+                                    .small()
+                                    .color(theme::text_secondary()),
+                            );
+                        }
                     }
                 });
             });
@@ -460,7 +501,7 @@ impl PluginsPanel {
                     );
                     ui.label(format!("v{}", summary.version));
                     ui.label(
-                        egui::RichText::new(format!("{:?}", summary.state))
+                        egui::RichText::new(state_label(summary.state))
                             .color(state_color(summary.state)),
                     );
                 });
@@ -472,6 +513,12 @@ impl PluginsPanel {
                     ui.label("运行时");
                     ui.label(
                         egui::RichText::new(&summary.runtime)
+                            .monospace()
+                            .color(theme::text_primary()),
+                    );
+                    ui.label("API");
+                    ui.label(
+                        egui::RichText::new(&summary.api_version)
                             .monospace()
                             .color(theme::text_primary()),
                     );
@@ -652,6 +699,17 @@ fn state_color(state: PluginState) -> Color32 {
     }
 }
 
+fn state_label(state: PluginState) -> &'static str {
+    match state {
+        PluginState::Discovered => "已发现",
+        PluginState::Enabled => "已启用",
+        PluginState::Running => "运行中",
+        PluginState::Finished => "已结束",
+        PluginState::Failed => "运行失败",
+        PluginState::Disabled => "已禁用",
+    }
+}
+
 fn diagnostic_row(ui: &mut egui::Ui, diagnostic: &PluginDiagnostic) {
     let color = match diagnostic.severity {
         PluginDiagnosticSeverity::Warning => theme::yellow(),
@@ -659,7 +717,11 @@ fn diagnostic_row(ui: &mut egui::Ui, diagnostic: &PluginDiagnostic) {
     };
 
     ui.horizontal_wrapped(|ui| {
-        ui.colored_label(color, format!("{:?}", diagnostic.severity));
+        let severity = match diagnostic.severity {
+            PluginDiagnosticSeverity::Warning => "警告",
+            PluginDiagnosticSeverity::Error => "错误",
+        };
+        ui.colored_label(color, severity);
         ui.label(
             egui::RichText::new(&diagnostic.code)
                 .monospace()
@@ -681,5 +743,40 @@ fn diagnostic_row(ui: &mut egui::Ui, diagnostic: &PluginDiagnostic) {
                 .monospace()
                 .color(theme::text_primary()),
         );
+        if ui.small_button("复制").clicked() {
+            copy_text_with_feedback(
+                ui,
+                diagnostic.path.display().to_string(),
+                "已复制插件诊断路径",
+            );
+        }
+        if ui.small_button("打开位置").clicked() {
+            let target = if diagnostic.path.is_file() {
+                diagnostic.path.parent().unwrap_or(&diagnostic.path)
+            } else {
+                &diagnostic.path
+            };
+            let _ = open::that(target);
+        }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_plugin_state_has_a_localized_label() {
+        for state in [
+            PluginState::Discovered,
+            PluginState::Enabled,
+            PluginState::Running,
+            PluginState::Finished,
+            PluginState::Failed,
+            PluginState::Disabled,
+        ] {
+            assert!(!state_label(state).is_empty());
+            assert!(!state_label(state).is_ascii());
+        }
+    }
 }

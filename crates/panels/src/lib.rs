@@ -12,6 +12,9 @@ pub mod theme;
 
 /// 面板每帧最多摄入的事件数，避免 UI 卡顿。
 pub(crate) const MAX_INGEST_PER_FRAME: usize = 500;
+/// 接收区和日志区的发布侧环形缓冲容量。窗口最小化时仍由 DataBus 发布线程写入，
+/// 队列满后丢最旧事件并通过面板通知用户。
+pub(crate) const MESSAGE_EVENT_BUFFER_CAPACITY: usize = 65_536;
 
 pub use attitude::AttitudePanel;
 pub use chart::ChartPanel;
@@ -24,8 +27,8 @@ pub use log::LogPanel;
 pub use manager::{DockArea, DockLayout, DockStack, PanelKind, PanelManager, TilesLayout};
 pub use plugins::{MarketplaceState, PluginPanelEvent, PluginTab, PluginsPanel};
 pub use replay::ReplayPanel;
-pub use table::RowSelection;
-pub use terminal::TerminalPanel;
+pub use table::{RowSelection, copy_text_with_feedback, take_copy_feedback};
+pub use terminal::{TerminalExportFormat, TerminalPanel};
 
 /// 将毫秒时间戳格式化为本地时间 HH:MM:SS.mmm
 pub fn fmt_ts(ms: u64) -> String {
@@ -76,9 +79,11 @@ pub(crate) fn scroll_is_at_bottom(
     offset_y >= bottom_offset - AUTO_SCROLL_BOTTOM_EPSILON
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn next_auto_scroll_state(
     auto_scroll: bool,
     pointer_inside: bool,
+    primary_down: bool,
     scroll_delta_y: f32,
     previous_offset_y: f32,
     offset_y: f32,
@@ -94,7 +99,8 @@ pub(crate) fn next_auto_scroll_state(
     let moved_towards_bottom = offset_y > previous_offset_y + AUTO_SCROLL_OFFSET_EPSILON;
     let scrolled_towards_bottom = scroll_delta_moves_towards_bottom(scroll_delta_y);
 
-    if auto_scroll && moved_away_from_bottom && !at_bottom {
+    let user_moved_away = scroll_delta_moves_away_from_bottom(scroll_delta_y) || primary_down;
+    if auto_scroll && moved_away_from_bottom && !at_bottom && user_moved_away {
         return false;
     }
 
@@ -222,21 +228,21 @@ mod tests {
 
     #[test]
     fn auto_scroll_stays_enabled_when_scroll_input_moves_towards_bottom() {
-        let next = next_auto_scroll_state(true, true, -24.0, 96.0, 100.0, 200.0, 100.0);
+        let next = next_auto_scroll_state(true, true, false, -24.0, 96.0, 100.0, 200.0, 100.0);
 
         assert!(next);
     }
 
     #[test]
     fn auto_scroll_disables_after_view_moves_away_from_bottom() {
-        let next = next_auto_scroll_state(true, true, 24.0, 100.0, 80.0, 200.0, 100.0);
+        let next = next_auto_scroll_state(true, true, false, 24.0, 100.0, 80.0, 200.0, 100.0);
 
         assert!(!next);
     }
 
     #[test]
     fn auto_scroll_reenables_when_manual_scroll_reaches_bottom() {
-        let next = next_auto_scroll_state(false, true, -24.0, 80.0, 100.0, 200.0, 100.0);
+        let next = next_auto_scroll_state(false, true, false, -24.0, 80.0, 100.0, 200.0, 100.0);
 
         assert!(next);
     }
@@ -251,9 +257,16 @@ mod tests {
 
     #[test]
     fn auto_scroll_pause_is_not_immediately_reenabled_without_bottomward_motion() {
-        let next = next_auto_scroll_state(false, true, 0.0, 100.0, 100.0, 200.0, 100.0);
+        let next = next_auto_scroll_state(false, true, false, 0.0, 100.0, 100.0, 200.0, 100.0);
 
         assert!(!next);
+    }
+
+    #[test]
+    fn passive_height_correction_does_not_disable_auto_scroll() {
+        let next = next_auto_scroll_state(true, true, false, 0.0, 100.0, 80.0, 200.0, 100.0);
+
+        assert!(next);
     }
 
     // ── compact_middle ────────────────────────────────────────────────

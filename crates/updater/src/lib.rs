@@ -11,9 +11,9 @@ pub mod update_info;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{self, Read as _, Write as _};
-use std::net::{SocketAddr, ToSocketAddrs as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// 远端 update.json 的 URL。
@@ -22,15 +22,92 @@ pub const UPDATE_JSON_URL: &str =
 /// 应用 exe 文件名（zip 内顶层）。
 pub const APP_EXE_NAME: &str = "hardware-workbench-app.exe";
 const UPDATE_USER_AGENT: &str = "HardwareWorkbench-Updater";
-const UPDATE_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+const UPDATE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const UPDATE_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+const NETWORK_RETRY_COUNT: u8 = 2;
+const NETWORK_RETRY_DELAY: Duration = Duration::from_millis(350);
 const UPDATE_HELPER_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const UPDATE_HELPER_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const UPDATE_HELPER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(2);
 const UPDATE_HELPER_LAUNCH_RETRY_INTERVAL: Duration = Duration::from_millis(100);
-const GITHUB_UPDATE_HOSTS: &[&str] = &["raw.githubusercontent.com", "github.com"];
+/// 网络设置。`proxy_url` 为空时使用 reqwest 的系统与环境代理探测；非空时强制使用该代理。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NetworkSettings {
+    pub proxy_url: Option<String>,
+}
 
-fn update_http_client_with_proxy(proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
+impl NetworkSettings {
+    pub fn with_proxy(proxy_url: Option<String>) -> Self {
+        Self {
+            proxy_url: proxy_url
+                .filter(|value| !value.trim().is_empty())
+                .map(normalize_proxy_url),
+        }
+    }
+
+    fn effective_proxy_url(&self) -> Option<String> {
+        self.proxy_url.clone().or_else(explicit_proxy_url)
+    }
+
+    fn route_label(&self) -> &'static str {
+        if self.proxy_url.is_some() {
+            "自定义代理"
+        } else if explicit_proxy_url().is_some() {
+            "环境代理"
+        } else {
+            "系统代理或直连"
+        }
+    }
+}
+
+/// 一次成功请求使用的网络路径，用于 UI 状态与日志诊断。
+#[derive(Clone, Debug)]
+pub struct NetworkDiagnostics {
+    route: &'static str,
+    tls: &'static str,
+    http: &'static str,
+    attempts: u8,
+}
+
+impl NetworkDiagnostics {
+    pub fn summary(&self) -> String {
+        format!(
+            "{} · {} · {} · 第 {} 次尝试",
+            self.route, self.tls, self.http, self.attempts
+        )
+    }
+}
+
+pub struct NetworkResponse {
+    pub response: reqwest::Response,
+    pub diagnostics: NetworkDiagnostics,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum TlsBackend {
+    Native,
+    Rustls,
+}
+
+impl TlsBackend {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Native => "Windows TLS",
+            Self::Rustls => "Rustls TLS",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ClientKey {
+    proxy_url: Option<String>,
+    tls: TlsBackend,
+}
+
+static HTTP_CLIENTS: OnceLock<Mutex<std::collections::HashMap<ClientKey, reqwest::Client>>> =
+    OnceLock::new();
+
+fn update_http_client(key: &ClientKey) -> Result<reqwest::Client, String> {
     // 安全：自定义重定向策略——每次跳转前重新校验目标 host 在下载白名单内。
     // 默认 Policy 会无差别跟随最多 10 次重定向，可被「初始 URL 过白名单 + 302 跳到攻击者域」绕过。
     // 此处放行 GitHub raw→objects.githubusercontent.com 这类正常跳转，拒绝跳到白名单外域。
@@ -50,18 +127,34 @@ fn update_http_client_with_proxy(proxy_url: Option<&str>) -> Result<reqwest::Cli
         .timeout(UPDATE_REQUEST_TIMEOUT)
         .redirect(redirect_policy);
 
-    if let Some(proxy_url) = proxy_url {
+    builder = match key.tls {
+        TlsBackend::Native => builder.use_native_tls(),
+        TlsBackend::Rustls => builder.use_rustls_tls(),
+    };
+
+    if let Some(proxy_url) = &key.proxy_url {
         log::info!("updater: 使用代理 {}", redact_proxy_url(proxy_url));
         let proxy = reqwest::Proxy::all(proxy_url)
             .map_err(|e| format!("解析代理地址失败：{}", describe_reqwest_error(&e)))?;
         builder = builder.proxy(proxy);
-    } else {
-        builder = apply_github_ipv4_dns_overrides(builder.no_proxy());
     }
 
     builder
         .build()
         .map_err(|e| format!("构建 HTTP 客户端失败：{}", describe_reqwest_error(&e)))
+}
+
+fn shared_http_client(key: ClientKey) -> Result<reqwest::Client, String> {
+    let clients = HTTP_CLIENTS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut clients = clients
+        .lock()
+        .map_err(|_| "HTTP 客户端缓存锁已损坏".to_owned())?;
+    if let Some(client) = clients.get(&key) {
+        return Ok(client.clone());
+    }
+    let client = update_http_client(&key)?;
+    clients.insert(key, client.clone());
+    Ok(client)
 }
 
 /// 判断 host 是否在下载白名单内（供 redirect Policy 与 validate_download_url 共用）。
@@ -70,55 +163,69 @@ fn is_allowed_download_host(host: &str) -> bool {
 }
 
 pub async fn send_update_get(url: &str) -> Result<reqwest::Response, String> {
-    let configured_proxy = explicit_proxy_url();
-    let client = update_http_client_with_proxy(configured_proxy.as_deref())?;
+    Ok(
+        send_update_get_with_network_settings(url, &NetworkSettings::default())
+            .await?
+            .response,
+    )
+}
 
-    match client.get(url).send().await {
-        Ok(resp) => Ok(resp),
-        Err(primary_error) => {
-            let primary_message = describe_reqwest_error(&primary_error);
-            if configured_proxy.is_some() {
-                return Err(primary_message);
+/// 用系统/自定义代理、native TLS 与 Rustls TLS 依次尝试请求。
+///
+/// 不强制 IPv4，保留系统 DNS 的正常地址选择与回退能力。
+pub async fn send_update_get_with_network_settings(
+    url: &str,
+    settings: &NetworkSettings,
+) -> Result<NetworkResponse, String> {
+    let proxy_url = settings.effective_proxy_url();
+    let mut failures = Vec::new();
+
+    for tls in [TlsBackend::Native, TlsBackend::Rustls] {
+        let client = shared_http_client(ClientKey {
+            proxy_url: proxy_url.clone(),
+            tls,
+        })?;
+        for attempt in 1..=NETWORK_RETRY_COUNT {
+            match client.get(url).send().await {
+                Ok(response) => {
+                    let http = match response.version() {
+                        reqwest::Version::HTTP_2 => "HTTP/2",
+                        reqwest::Version::HTTP_3 => "HTTP/3",
+                        _ => "HTTP/1.1",
+                    };
+                    return Ok(NetworkResponse {
+                        response,
+                        diagnostics: NetworkDiagnostics {
+                            route: settings.route_label(),
+                            tls: tls.label(),
+                            http,
+                            attempts: attempt,
+                        },
+                    });
+                }
+                Err(error) => {
+                    let retryable = error.is_connect() || error.is_timeout();
+                    failures.push(format!(
+                        "{} 第 {} 次：{}",
+                        tls.label(),
+                        attempt,
+                        describe_reqwest_error(&error)
+                    ));
+                    if retryable && attempt < NETWORK_RETRY_COUNT {
+                        tokio::time::sleep(NETWORK_RETRY_DELAY * u32::from(attempt)).await;
+                    } else {
+                        break;
+                    }
+                }
             }
-
-            let Some(proxy_url) = fallback_proxy_url() else {
-                return Err(primary_message);
-            };
-
-            log::warn!(
-                "updater: 直连失败，改用备用代理 {} 重试：{}",
-                redact_proxy_url(proxy_url.as_str()),
-                primary_message
-            );
-            let fallback_client = update_http_client_with_proxy(Some(proxy_url.as_str()))?;
-            fallback_client.get(url).send().await.map_err(|fallback| {
-                format!(
-                    "{}；备用代理 {} 也失败：{}",
-                    primary_message,
-                    redact_proxy_url(proxy_url.as_str()),
-                    describe_reqwest_error(&fallback)
-                )
-            })
         }
     }
-}
 
-fn apply_github_ipv4_dns_overrides(mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-    for host in GITHUB_UPDATE_HOSTS {
-        let addrs = resolve_ipv4_socket_addrs(host, 443);
-        if addrs.is_empty() {
-            continue;
-        }
-        builder = builder.resolve_to_addrs(host, &addrs);
-    }
-    builder
-}
-
-fn resolve_ipv4_socket_addrs(host: &str, port: u16) -> Vec<SocketAddr> {
-    (host, port)
-        .to_socket_addrs()
-        .map(|addrs| addrs.filter(|addr| addr.is_ipv4()).collect())
-        .unwrap_or_default()
+    Err(format!(
+        "网络请求失败（{}）：{}",
+        settings.route_label(),
+        failures.join("；")
+    ))
 }
 
 pub(crate) fn describe_reqwest_error(error: &dyn std::error::Error) -> String {
@@ -147,142 +254,6 @@ fn explicit_proxy_url() -> Option<String> {
     .map(|value| value.trim().to_owned())
     .find(|value| !value.is_empty())
     .map(normalize_proxy_url)
-}
-
-fn fallback_proxy_url() -> Option<String> {
-    windows_internet_settings_proxy_url()
-}
-
-#[cfg(windows)]
-fn windows_internet_settings_proxy_url() -> Option<String> {
-    use windows_sys::Win32::System::Registry::{
-        HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
-    };
-
-    const SUBKEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
-    let subkey_utf16: Vec<u16> = SUBKEY.encode_utf16().chain(std::iter::once(0)).collect();
-
-    // 安全：直接读注册表而非 spawn powershell，避免 GUI 进程启动控制台子进程
-    // 导致黑窗一闪（powershell.exe 是控制台子系统程序）。
-    let mut hkey = std::ptr::null_mut();
-    let status = unsafe {
-        RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            subkey_utf16.as_ptr(),
-            0,
-            KEY_READ,
-            &mut hkey,
-        )
-    };
-    if status != 0 {
-        return None;
-    }
-    // RAII 关闭句柄
-    struct RegGuard(*mut std::ffi::c_void);
-    impl Drop for RegGuard {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                unsafe { RegCloseKey(self.0) };
-            }
-        }
-    }
-    let _guard = RegGuard(hkey);
-
-    // 先读 ProxyEnable(DWORD)：仅当为 1 时才使用系统代理
-    let mut enable: u32 = 0;
-    let mut enable_len: u32 = std::mem::size_of::<u32>() as u32;
-    let mut enable_type: u32 = 0;
-    let enable_name: Vec<u16> = "ProxyEnable\0".encode_utf16().collect();
-    let status = unsafe {
-        RegQueryValueExW(
-            hkey,
-            enable_name.as_ptr(),
-            std::ptr::null(),
-            &mut enable_type,
-            &mut enable as *mut u32 as *mut u8,
-            &mut enable_len,
-        )
-    };
-    // ProxyEnable 不是 1 则视为未启用系统代理
-    if status != 0 || enable != 1 {
-        return None;
-    }
-
-    // 读 ProxyServer(REG_SZ)
-    let server_name: Vec<u16> = "ProxyServer\0".encode_utf16().collect();
-    let mut server_type: u32 = 0;
-    // 先查长度
-    let mut buf_len: u32 = 0;
-    let status = unsafe {
-        RegQueryValueExW(
-            hkey,
-            server_name.as_ptr(),
-            std::ptr::null(),
-            &mut server_type,
-            std::ptr::null_mut(),
-            &mut buf_len,
-        )
-    };
-    if status != 0 || buf_len == 0 {
-        return None;
-    }
-    let mut buf = vec![0u8; buf_len as usize];
-    let status = unsafe {
-        RegQueryValueExW(
-            hkey,
-            server_name.as_ptr(),
-            std::ptr::null(),
-            &mut server_type,
-            buf.as_mut_ptr(),
-            &mut buf_len,
-        )
-    };
-    if status != 0 {
-        return None;
-    }
-    // REG_SZ 可能以 null 结尾；去掉末尾的 0
-    while buf.len() >= 2 {
-        let last = buf.len() - 2;
-        if buf[last] == 0 && buf[last + 1] == 0 {
-            buf.truncate(last);
-        } else {
-            break;
-        }
-    }
-    let proxy = String::from_utf16_lossy(
-        &buf.chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect::<Vec<u16>>(),
-    );
-    proxy_server_value_to_url(proxy.trim())
-}
-
-#[cfg(not(windows))]
-fn windows_internet_settings_proxy_url() -> Option<String> {
-    None
-}
-
-fn proxy_server_value_to_url(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return None;
-    }
-
-    for prefix in ["https=", "http="] {
-        if let Some(proxy) = value.split(';').find_map(|part| part.strip_prefix(prefix)) {
-            return Some(normalize_proxy_url(proxy.to_owned()));
-        }
-    }
-
-    if !value.contains('=') {
-        return Some(normalize_proxy_url(value.to_owned()));
-    }
-
-    value
-        .split(';')
-        .find_map(|part| part.split_once('=').map(|(_, proxy)| proxy))
-        .filter(|proxy| !proxy.trim().is_empty())
-        .map(|proxy| normalize_proxy_url(proxy.trim().to_owned()))
 }
 
 fn normalize_proxy_url(proxy: String) -> String {
@@ -1001,6 +972,14 @@ pub fn validate_download_url(url: &str) -> Result<(), String> {
 }
 
 pub async fn download_update(url: &str, on_progress: impl Fn(u64, u64)) -> Result<String, String> {
+    download_update_with_network_settings(url, &NetworkSettings::default(), on_progress).await
+}
+
+pub async fn download_update_with_network_settings(
+    url: &str,
+    network: &NetworkSettings,
+    on_progress: impl Fn(u64, u64),
+) -> Result<String, String> {
     // 安全：强制 https 且 host 在白名单，防止被篡改的 update.json 把下载指向任意域。
     validate_download_url(url)?;
 
@@ -1014,7 +993,7 @@ pub async fn download_update(url: &str, on_progress: impl Fn(u64, u64)) -> Resul
     let _ = std::fs::remove_file(&zip_path);
     let _ = std::fs::remove_file(zip_path.with_extension("zip.part"));
 
-    let hash = download_to_file(url, &zip_path, on_progress).await?;
+    let hash = download_to_file_with_network_settings(url, &zip_path, network, on_progress).await?;
 
     // download_to_file 内部已通过 .part 原子 rename 到 zip_path。
     Ok(hash)
@@ -1032,6 +1011,16 @@ pub async fn download_to_file(
     dest_path: &Path,
     on_progress: impl Fn(u64, u64),
 ) -> Result<String, String> {
+    download_to_file_with_network_settings(url, dest_path, &NetworkSettings::default(), on_progress)
+        .await
+}
+
+pub async fn download_to_file_with_network_settings(
+    url: &str,
+    dest_path: &Path,
+    network: &NetworkSettings,
+    on_progress: impl Fn(u64, u64),
+) -> Result<String, String> {
     if let Some(parent) = dest_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("创建下载目录失败：{e}"))?;
     }
@@ -1040,9 +1029,10 @@ pub async fn download_to_file(
     // 清理可能残留的半截 .part。
     let _ = std::fs::remove_file(&part_path);
 
-    let mut resp = send_update_get(url)
+    let mut resp = send_update_get_with_network_settings(url, network)
         .await
-        .map_err(|e| format!("下载失败：{e}"))?;
+        .map_err(|e| format!("下载失败：{e}"))?
+        .response;
 
     if !resp.status().is_success() {
         return Err(format!("下载返回状态码 {}", resp.status()));
@@ -1185,18 +1175,20 @@ mod tests {
     }
 
     #[test]
-    fn proxy_server_value_to_url_handles_plain_host_port() {
+    fn network_settings_normalizes_custom_proxy() {
         assert_eq!(
-            proxy_server_value_to_url("172.18.88.90:3128").as_deref(),
+            NetworkSettings::with_proxy(Some("172.18.88.90:3128".to_owned()))
+                .proxy_url
+                .as_deref(),
             Some("http://172.18.88.90:3128")
         );
     }
 
     #[test]
-    fn proxy_server_value_to_url_prefers_https_mapping() {
+    fn blank_custom_proxy_uses_system_or_environment_route() {
         assert_eq!(
-            proxy_server_value_to_url("http=proxy-a:8080;https=proxy-b:8443").as_deref(),
-            Some("http://proxy-b:8443")
+            NetworkSettings::with_proxy(Some("   ".to_owned())).route_label(),
+            "系统代理或直连"
         );
     }
 

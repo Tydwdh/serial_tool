@@ -150,16 +150,27 @@ impl LineBuffer {
         self.lines.pop_front()
     }
 
-    /// 把一行回灌到队首（恢复 next_line 取出的顺序）。
-    ///
-    /// 用于 `write_line_and_expect` 的匹配循环：发送后从缓冲区 drain 出若干行
-    /// 逐个匹配 pattern，**不匹配的行不能丢弃**——否则噪声行会把后续真正的
-    /// ok/ack 一起挤掉，导致命令反复超时重发。回灌后下个 tick 仍能取到。
-    /// 传入的行按"取出顺序"的反序 push_front，从而恢复原始队列顺序。
+    /// 把若干行按原顺序回灌到队首。
     pub(crate) fn push_front_lines(&mut self, lines: Vec<String>) {
         for line in lines.into_iter().rev() {
             self.lines.push_front(line);
         }
+    }
+
+    /// 完成一批 expect 扫描后处理候选行。
+    ///
+    /// 没有命中 return pattern 时，候选行已经确认与本次请求无关，必须消费掉；
+    /// 如果重新放回队首，超过单批扫描上限的噪声会永久挡住后面的 ACK。
+    /// 命中时只回灌命中行之后尚未检查的尾部，供后续读取使用。
+    pub(crate) fn finish_expect_scan(
+        &mut self,
+        candidates: Vec<String>,
+        matched_through: Option<usize>,
+    ) {
+        let Some(consumed) = matched_through else {
+            return;
+        };
+        self.push_front_lines(candidates.into_iter().skip(consumed).collect());
     }
 }
 
@@ -181,4 +192,38 @@ pub struct LuaHostServices {
     pub stop_flag: Option<Arc<AtomicBool>>,
     pub line_buffers: Option<LineBufferMap>,
     pub config_store: Option<Arc<ConfigStore>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LineBuffer;
+
+    #[test]
+    fn expect_scan_consumes_unmatched_batch_so_later_ack_can_advance() {
+        let mut buffer = LineBuffer::default();
+        for index in 0..64 {
+            buffer.lines.push_back(format!("status {index}"));
+        }
+        buffer.lines.push_back("ok".to_owned());
+
+        let candidates: Vec<_> = (0..64).filter_map(|_| buffer.next_line()).collect();
+        buffer.finish_expect_scan(candidates, None);
+
+        assert_eq!(buffer.next_line().as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn expect_scan_preserves_only_lines_after_a_return_match() {
+        let mut buffer = LineBuffer::default();
+        let candidates = vec![
+            "status".to_owned(),
+            "ok".to_owned(),
+            "next response".to_owned(),
+        ];
+
+        buffer.finish_expect_scan(candidates, Some(2));
+
+        assert_eq!(buffer.next_line().as_deref(), Some("next response"));
+        assert!(buffer.next_line().is_none());
+    }
 }

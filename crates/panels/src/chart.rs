@@ -63,9 +63,8 @@ impl ChartPanel {
         self.rebuild_cache();
 
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.paused, "暂停").on_hover_text(
-                "暂停采集：冻结图表，暂停期间到达的新样本会被丢弃。与终端的「暂停接收」行为一致。",
-            );
+            ui.checkbox(&mut self.paused, "暂停")
+                .on_hover_text("暂停采集：冻结图表，暂停期间到达的新样本会被丢弃。");
             ui.checkbox(&mut self.auto_scale, "自动")
                 .on_hover_text("自动缩放 Y 轴以完整显示所有可见样本。关闭后可手动设 min/max。");
             if !self.auto_scale {

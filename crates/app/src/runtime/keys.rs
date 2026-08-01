@@ -73,9 +73,6 @@ impl WorkbenchApp {
             Action::ClearTerminal => {
                 self.terminal_panel.clear();
             }
-            Action::ToggleTerminalPause => {
-                self.terminal_panel.paused = !self.terminal_panel.paused;
-            }
             Action::PluginCommand(plugin_id, command_id) => {
                 self.publish_plugin_command_action(&plugin_id, &command_id);
             }

@@ -177,6 +177,22 @@ impl WorkbenchApp {
 
             // ── 通知队列（多来源独立，互不覆盖） ──
             // 截断提醒也走通知队列
+            let terminal_dropped = self.terminal_panel.take_dropped_events();
+            if terminal_dropped > 0 {
+                self.notifications.push(
+                    "terminal-data-loss",
+                    StatusLevel::Error,
+                    format!("接收区缓冲已满，丢失 {terminal_dropped} 条最旧事件"),
+                );
+            }
+            let log_dropped = self.bottom_log_panel.take_dropped_events();
+            if log_dropped > 0 {
+                self.notifications.push(
+                    "log-data-loss",
+                    StatusLevel::Warn,
+                    format!("日志缓冲已满，丢失 {log_dropped} 条最旧事件"),
+                );
+            }
             if self.terminal_panel.truncated {
                 self.notifications.push(
                     "terminal",

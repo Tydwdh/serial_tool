@@ -4,12 +4,12 @@ use crate::state::StatusLevel;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tool_core::LogLevel;
-use tool_marketplace::{Registry, RegistryPlugin};
+use tool_marketplace::{RegistryFetch, RegistryPlugin};
 
 /// 市场索引 + 安装任务的运行时状态。
 pub(crate) struct MarketplaceState {
     pub(crate) url: Option<String>,
-    pub(crate) refresh_job: Option<std::thread::JoinHandle<Result<Registry, String>>>,
+    pub(crate) refresh_job: Option<std::thread::JoinHandle<Result<RegistryFetch, String>>>,
     pub(crate) install_job: Option<MarketplaceInstallJob>,
 }
 
@@ -60,9 +60,14 @@ impl WorkbenchApp {
         if let Some(handle) = self.marketplace.refresh_job.take() {
             if handle.is_finished() {
                 match handle.join() {
-                    Ok(Ok(registry)) => {
-                        self.plugins_panel.set_market_registry(registry);
-                        self.set_status(StatusLevel::Info, "市场索引已刷新");
+                    Ok(Ok(fetched)) => {
+                        let diagnostics = fetched.network_diagnostics.summary();
+                        self.plugins_panel
+                            .set_market_registry(fetched.registry, diagnostics.clone());
+                        self.set_status(
+                            StatusLevel::Info,
+                            format!("市场索引已刷新（{diagnostics}）"),
+                        );
                     }
                     Ok(Err(e)) => {
                         self.plugins_panel.set_market_error(e.clone());
@@ -128,13 +133,16 @@ impl WorkbenchApp {
             .url
             .clone()
             .unwrap_or_else(|| tool_marketplace::DEFAULT_REGISTRY_URL.to_owned());
+        let network = tool_updater::NetworkSettings::with_proxy(
+            (!self.network_proxy_url.trim().is_empty()).then(|| self.network_proxy_url.clone()),
+        );
 
         self.marketplace.refresh_job = Some(std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .map_err(|e| format!("创建 tokio runtime 失败：{e}"))?;
-            rt.block_on(async { tool_marketplace::fetch_registry(&url).await })
+            rt.block_on(async { tool_marketplace::fetch_registry(&url, &network).await })
         }));
     }
 
@@ -163,6 +171,9 @@ impl WorkbenchApp {
         self.plugins_panel.mark_installing(&id);
 
         let install_dir = app_dir().join("plugins");
+        let network = tool_updater::NetworkSettings::with_proxy(
+            (!self.network_proxy_url.trim().is_empty()).then(|| self.network_proxy_url.clone()),
+        );
         let progress = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let progress_clone = progress.clone();
 
@@ -172,14 +183,19 @@ impl WorkbenchApp {
                 .build()
                 .map_err(|e| format!("创建 tokio runtime 失败：{e}"))?;
             rt.block_on(async {
-                tool_marketplace::install_plugin(&entry, &install_dir, move |downloaded, total| {
-                    let pct = if total > 0 {
-                        ((downloaded as f64 / total as f64) * 1000.0) as u64
-                    } else {
-                        0
-                    };
-                    progress_clone.store(pct, std::sync::atomic::Ordering::Relaxed);
-                })
+                tool_marketplace::install_plugin(
+                    &entry,
+                    &install_dir,
+                    &network,
+                    move |downloaded, total| {
+                        let pct = if total > 0 {
+                            ((downloaded as f64 / total as f64) * 1000.0) as u64
+                        } else {
+                            0
+                        };
+                        progress_clone.store(pct, std::sync::atomic::Ordering::Relaxed);
+                    },
+                )
                 .await
             })
         });
@@ -277,7 +293,3 @@ impl WorkbenchApp {
         base.to_path_buf()
     }
 }
-
-/// 占位：保留 Registry 类型引用，便于未来在 app 层缓存。
-#[allow(dead_code)]
-type _RegistryRef = Registry;

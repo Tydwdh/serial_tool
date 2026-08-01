@@ -29,8 +29,6 @@ pub(crate) enum Action {
     CommandPalette,
     /// 清空终端接收区
     ClearTerminal,
-    /// 暂停/继续终端接收
-    ToggleTerminalPause,
     /// 插件命令: (plugin_id, command_id)
     PluginCommand(String, String),
 }
@@ -48,7 +46,6 @@ impl Action {
         Action::AddBookmark,
         Action::CommandPalette,
         Action::ClearTerminal,
-        Action::ToggleTerminalPause,
     ];
 
     /// 合并内置 Action 与插件命令。
@@ -77,7 +74,6 @@ impl Action {
             Action::AddBookmark => "$AddBookmark".into(),
             Action::CommandPalette => "$CommandPalette".into(),
             Action::ClearTerminal => "$ClearTerminal".into(),
-            Action::ToggleTerminalPause => "$ToggleTerminalPause".into(),
             Action::PluginCommand(plugin_id, command_id) => {
                 format!("{plugin_id}:{command_id}")
             }
@@ -97,7 +93,6 @@ impl Action {
             "$AddBookmark" => Some(Action::AddBookmark),
             "$CommandPalette" => Some(Action::CommandPalette),
             "$ClearTerminal" => Some(Action::ClearTerminal),
-            "$ToggleTerminalPause" => Some(Action::ToggleTerminalPause),
             other => {
                 // 插件命令: "plugin_id:command_id"
                 let (plugin_id, command_id) = other.split_once(':')?;
@@ -122,7 +117,6 @@ impl Action {
             Action::AddBookmark => "添加录制标记".into(),
             Action::CommandPalette => "命令面板".into(),
             Action::ClearTerminal => "清空终端".into(),
-            Action::ToggleTerminalPause => "暂停/继续终端".into(),
             Action::PluginCommand(plugin_id, command_id) => {
                 format!("{plugin_id}:{command_id}")
             }
@@ -264,10 +258,6 @@ fn default_bindings() -> HashMap<String, Vec<KeyBinding>> {
     m.insert(
         Action::ClearTerminal.key(),
         vec![KeyBinding::new("L", true, false, false)],
-    );
-    m.insert(
-        Action::ToggleTerminalPause.key(),
-        vec![KeyBinding::new("Space", false, false, false)],
     );
     // StartRecording、ReconnectPort、FocusTerminalSearch 默认无快捷键
 

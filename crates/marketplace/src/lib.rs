@@ -22,6 +22,12 @@ pub struct Registry {
     pub plugins: Vec<RegistryPlugin>,
 }
 
+/// 一次市场索引刷新结果，含实际成功的网络路径。
+pub struct RegistryFetch {
+    pub registry: Registry,
+    pub network_diagnostics: tool_updater::NetworkDiagnostics,
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct RegistryPlugin {
     pub id: String,
@@ -57,15 +63,19 @@ pub struct RegistryPlugin {
 
 /// 拉取并解析 registry.json。
 ///
-/// 复用 updater 的 HTTP 客户端（代理/直连/DNS override 逻辑一致）。
+/// 复用 updater 的多路径 HTTP 客户端（系统/自定义代理、TLS 回退、HTTP/2）。
 /// 必须在 tokio runtime 上下文中调用。
-pub async fn fetch_registry(url: &str) -> Result<Registry, String> {
+pub async fn fetch_registry(
+    url: &str,
+    network: &tool_updater::NetworkSettings,
+) -> Result<RegistryFetch, String> {
     // 安全：registry 源 URL 同样要走域白名单 + https 校验（纵深防御，与 download_url 一致）。
     updater::validate_download_url(url)?;
 
-    let resp = updater::send_update_get(url)
+    let network_response = updater::send_update_get_with_network_settings(url, network)
         .await
         .map_err(|e| format!("拉取市场索引失败：{e}"))?;
+    let resp = network_response.response;
     if !resp.status().is_success() {
         return Err(format!("拉取市场索引返回状态码 {}", resp.status()));
     }
@@ -75,7 +85,10 @@ pub async fn fetch_registry(url: &str) -> Result<Registry, String> {
         .map_err(|e| format!("读取市场索引失败：{e}"))?;
     let registry: Registry =
         serde_json::from_str(&text).map_err(|e| format!("解析市场索引失败：{e}"))?;
-    Ok(registry)
+    Ok(RegistryFetch {
+        registry,
+        network_diagnostics: network_response.diagnostics,
+    })
 }
 
 /// 校验插件 id 是否可作为安全的文件系统路径片段。
@@ -121,6 +134,7 @@ pub fn validate_plugin_id(id: &str) -> Result<(), String> {
 pub async fn install_plugin(
     entry: &RegistryPlugin,
     install_dir: &Path,
+    network: &tool_updater::NetworkSettings,
     on_progress: impl Fn(u64, u64),
 ) -> Result<(), String> {
     // 0. id 路径校验（防止恶意 registry 用 `../` 之类 id 写到 install_dir 之外）
@@ -133,7 +147,13 @@ pub async fn install_plugin(
 
     // 2. 下载到临时 zip（复用通用下载，含原子 rename + 流式 SHA256）
     let tmp_zip = install_dir.join(format!("{}.download.zip", entry.id));
-    let actual_sha = updater::download_to_file(&entry.download_url, &tmp_zip, on_progress).await?;
+    let actual_sha = updater::download_to_file_with_network_settings(
+        &entry.download_url,
+        &tmp_zip,
+        network,
+        on_progress,
+    )
+    .await?;
 
     // 3. SHA256 校验（大小写不敏感）
     if !actual_sha.eq_ignore_ascii_case(&entry.sha256) {

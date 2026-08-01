@@ -167,13 +167,11 @@ pub(crate) fn process_tasks(
                                 continue;
                             }
                         };
-                        // 遍历匹配。注意：不匹配任何 pattern 的行**不能丢弃**——
-                        // 否则噪声行会把后续真正的 ok/ack 一起挤掉，导致命令反复
-                        // 超时重发（G-code M110 同步卡住即此症状）。这些行在最后
-                        // push_front_lines 回灌到 buffer 队首，下个 tick 仍可取到。
-                        // 命中 continue（设备忙）或 return（匹配）的行算已消费，不回灌。
+                        // 遍历匹配。未命中的候选行属于本次 expect 的无关输出，扫描后
+                        // 必须消费；否则 64 行以上的噪声会被反复回灌并永久挡住后续 ACK。
+                        // 命中 return 时，只保留命中行之后尚未检查的尾部。
                         let mut matched = None;
-                        let mut consumed = 0; // 已消费（命中 continue/return）的行数
+                        let mut matched_through = None;
                         for (i, line) in lines.iter().enumerate() {
                             let patterns: Option<Table> = op.get("patterns").ok();
                             if let Some(ref pts) = patterns {
@@ -188,14 +186,13 @@ pub(crate) fn process_tasks(
                                         if action == "continue" {
                                             let _ = state
                                                 .set("status", format!("设备忙: {pname}: {line}"));
-                                            consumed = i + 1;
                                             break;
                                         }
                                         matched = Some((
                                             p.get::<String>("name").unwrap_or_default(),
                                             line.clone(),
                                         ));
-                                        consumed = i + 1;
+                                        matched_through = Some(i + 1);
                                         break;
                                     }
                                 }
@@ -204,13 +201,10 @@ pub(crate) fn process_tasks(
                                 break;
                             }
                         }
-                        // 回灌未消费的行（matched 之后的，或全不匹配时的全部）。
-                        // push_front_lines 按 rev 顺序 push_front 以恢复原始队列顺序。
-                        let unconsumed: Vec<String> = lines.into_iter().skip(consumed).collect();
-                        if !unconsumed.is_empty() {
+                        {
                             let mut map_lock = map.lock();
                             if let Some(buffer) = map_lock.get_mut(&key) {
-                                buffer.push_front_lines(unconsumed);
+                                buffer.finish_expect_scan(lines, matched_through);
                             }
                         }
                         if let Some((name, line)) = matched {

@@ -232,6 +232,7 @@ end
 ### write_line_and_expect(port, line, options)
 
 发送一行文本，并等待一组响应模式中的某一项命中。该 API 也必须在 `ctx.task.start` 的任务函数里调用。
+等待期间已经检查但未命中任何模式的响应行会被消费；命中响应之后尚未检查的行会保留给后续读取。原始串口事件仍会正常发布到终端和数据总线。
 
 ```lua
 local resp = ctx.serial.write_line_and_expect("COM3", "M105", {

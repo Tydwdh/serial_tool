@@ -23,6 +23,9 @@ impl WorkbenchApp {
             let mut behavior = WorkbenchTiles { app: self };
             layout.tree.ui(&mut behavior, ui);
         }
+        if layout.reconcile_plugin_groups() {
+            self.layout_dirty = true;
+        }
         if self.panels.tiles.as_ref() == Some(&original_layout) {
             self.panels.tiles = Some(layout);
         }
@@ -156,6 +159,18 @@ impl Behavior<PanelKind> for WorkbenchTiles<'_> {
         }
         match tiles.get(tile_id) {
             Some(Tile::Pane(pane)) => self.tab_title_for_pane(pane),
+            Some(Tile::Container(Container::Tabs(tabs))) => {
+                if let Some(Tile::Pane(pane)) = tabs
+                    .children
+                    .iter()
+                    .find_map(|child_id| tiles.get(*child_id))
+                    .filter(|_| tabs.children.len() == 1)
+                {
+                    self.tab_title_for_pane(pane)
+                } else {
+                    format!("标签组（{}）", tabs.children.len()).into()
+                }
+            }
             Some(Tile::Container(container)) => format!("{:?}", container.kind()).into(),
             None => "MISSING TILE".into(),
         }
@@ -278,7 +293,7 @@ impl Behavior<PanelKind> for WorkbenchTiles<'_> {
             }
             ContainerKind::Horizontal => {
                 let parent_center = preview.parent_rect.unwrap_or(preview.target_rect).center();
-                let label = if preview.target_rect.center().x <= parent_center.x {
+                let label = if preview.preview_rect.center().x <= parent_center.x {
                     "左侧拆分"
                 } else {
                     "右侧拆分"
@@ -287,7 +302,7 @@ impl Behavior<PanelKind> for WorkbenchTiles<'_> {
             }
             ContainerKind::Vertical => {
                 let parent_center = preview.parent_rect.unwrap_or(preview.target_rect).center();
-                let label = if preview.target_rect.center().y <= parent_center.y {
+                let label = if preview.preview_rect.center().y <= parent_center.y {
                     "上方拆分"
                 } else {
                     "下方拆分"
@@ -330,6 +345,7 @@ impl Behavior<PanelKind> for WorkbenchTiles<'_> {
 
     fn simplification_options(&self) -> SimplificationOptions {
         SimplificationOptions {
+            // 单面板仍保留标签栏，保证区域标题与拖拽把手始终可见。
             all_panes_must_have_tabs: true,
             // 最后一个标签被移走或关闭后，立即回收空标签页及其父容器，
             // 避免布局中留下无法使用的空白区域。

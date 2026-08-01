@@ -1,34 +1,14 @@
 use crate::state::LineEnding;
 use std::path::{Path, PathBuf};
-use tool_core::now_timestamp_ms;
+use tool_core::{
+    config::{CURRENT_SCHEMA_VERSION, atomic_write_json, quarantine_corrupt_file},
+    now_timestamp_ms,
+};
 use tool_recorder::RecordMode;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tool_panels::PanelManager;
-
-/// 原子写入 JSON 文件：先写临时文件，再 rename 替换目标文件。
-/// 崩溃时不会留下半写的目标文件。旧文件会被备份到 `.backup`。
-fn atomic_write_json<T: Serialize>(path: &std::path::Path, value: &T) -> Result<(), String> {
-    let temp_path = path.with_extension("tmp");
-    let backup_path = path.with_extension("json.backup");
-
-    // 1. 序列化到内存
-    let data = serde_json::to_string_pretty(value).map_err(|e| format!("序列化失败：{e}"))?;
-
-    // 2. 写入临时文件（同目录，保证 rename 是原子操作）
-    std::fs::write(&temp_path, data).map_err(|e| format!("写入临时文件失败：{e}"))?;
-
-    // 3. 备份旧文件（如果存在）
-    if path.exists()
-        && let Err(e) = std::fs::copy(path, &backup_path)
-    {
-        log::warn!("config: failed to backup to {}: {e}", backup_path.display());
-    }
-
-    // 4. 原子替换
-    std::fs::rename(&temp_path, path).map_err(|e| format!("原子替换失败：{e}"))
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct PortProfile {
@@ -40,6 +20,9 @@ pub(crate) struct PortProfile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PersistedConfig {
+    /// 配置格式版本。缺失时按 v0 读取并迁移到当前版本。
+    #[serde(default, alias = "version")]
+    pub(crate) schema_version: u32,
     pub(crate) panels: PanelManager,
     pub(crate) selected_port: Option<String>,
     pub(crate) baud_rate: String,
@@ -75,7 +58,7 @@ pub(crate) struct PersistedConfig {
     #[serde(default = "default_monospace_font_size")]
     pub(crate) monospace_font_size: f32,
     /// 旧版主题标识，仅用于迁移没有 `theme_path` 的配置。
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub(crate) ui_theme: tool_panels::theme::AppTheme,
     /// 当前主题 JSON 路径。内置和用户新增主题都走同一字段。
     #[serde(default, alias = "custom_theme_path")]
@@ -92,6 +75,9 @@ pub(crate) struct PersistedConfig {
     /// 命令面板使用顺序（label key 列表，最近使用的在前）。
     #[serde(default)]
     pub(crate) command_usage_order: Vec<String>,
+    /// 市场与更新使用的可选 HTTP/SOCKS 代理地址；为空时自动使用系统/环境代理。
+    #[serde(default)]
+    pub(crate) network_proxy_url: Option<String>,
 }
 
 fn default_terminal_merge_window_ms() -> u64 {
@@ -123,11 +109,69 @@ fn default_line_ending() -> LineEnding {
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum ConfigLoadResult {
     /// 成功加载
-    Ok(PersistedConfig),
+    Ok {
+        config: PersistedConfig,
+        migrated: bool,
+    },
     /// 配置文件不存在（首次运行或配置被删除）
     NotFound,
     /// 配置文件存在但解析失败（配置损坏）
-    ParseError { path: PathBuf, error: String },
+    ParseError {
+        path: PathBuf,
+        error: String,
+        backup_path: Option<PathBuf>,
+    },
+    /// 配置来自更高版本的程序；为保护数据仅允许本次使用默认值，不写回原文件。
+    FutureVersion { path: PathBuf, version: u32 },
+}
+
+fn declared_schema_version(text: &str) -> Option<u32> {
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    value
+        .as_object()?
+        .get("schema_version")
+        .or_else(|| value.as_object()?.get("version"))
+        .and_then(serde_json::Value::as_u64)
+        .map(|version| version as u32)
+}
+
+fn parse_persisted_config(text: &str) -> Result<(PersistedConfig, bool), String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(text).map_err(|error| format!("JSON 解析失败：{error}"))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "配置根节点必须是 JSON 对象".to_owned())?;
+    let version = object
+        .get("schema_version")
+        .or_else(|| object.get("version"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as u32;
+    if version > CURRENT_SCHEMA_VERSION {
+        return Err(format!(
+            "配置版本 {version} 高于当前程序支持的 {CURRENT_SCHEMA_VERSION}"
+        ));
+    }
+
+    let migrated = version != CURRENT_SCHEMA_VERSION;
+    if version == 0 {
+        if !object.contains_key("theme_path")
+            && let Some(legacy_theme_path) = object.get("custom_theme_path").cloned()
+        {
+            object.insert("theme_path".to_owned(), legacy_theme_path);
+        }
+        // `theme_path` 已经由迁移写入（或新旧字段同时存在）后，移除旧字段，避免
+        // serde 的 alias 将两个键识别为同一字段。
+        object.remove("custom_theme_path");
+    }
+    object.insert(
+        "schema_version".to_owned(),
+        serde_json::Value::from(CURRENT_SCHEMA_VERSION),
+    );
+
+    let mut config = serde_json::from_value::<PersistedConfig>(value)
+        .map_err(|error| format!("配置字段无效：{error}"))?;
+    config.schema_version = CURRENT_SCHEMA_VERSION;
+    Ok((config, migrated))
 }
 
 pub(crate) fn load_config() -> ConfigLoadResult {
@@ -135,12 +179,27 @@ pub(crate) fn load_config() -> ConfigLoadResult {
 
     // 尝试读主路径
     if let Ok(t) = std::fs::read_to_string(&primary) {
-        match serde_json::from_str(&t) {
-            Ok(cfg) => return ConfigLoadResult::Ok(cfg),
-            Err(e) => {
+        if let Some(version) = declared_schema_version(&t)
+            && version > CURRENT_SCHEMA_VERSION
+        {
+            return ConfigLoadResult::FutureVersion {
+                path: primary,
+                version,
+            };
+        }
+        match parse_persisted_config(&t) {
+            Ok((cfg, migrated)) => {
+                return ConfigLoadResult::Ok {
+                    config: cfg,
+                    migrated,
+                };
+            }
+            Err(error) => {
+                let backup_path = quarantine_corrupt_file(&primary).ok().flatten();
                 return ConfigLoadResult::ParseError {
                     path: primary,
-                    error: e.to_string(),
+                    error,
+                    backup_path,
                 };
             }
         }
@@ -152,13 +211,13 @@ pub(crate) fn load_config() -> ConfigLoadResult {
         .map(|d| d.join("workspace.json"));
     if let Some(ref legacy) = legacy
         && let Ok(t) = std::fs::read_to_string(legacy)
-        && let Ok(cfg) = serde_json::from_str::<PersistedConfig>(&t)
+        && let Ok((cfg, _)) = parse_persisted_config(&t)
     {
-        if let Some(parent) = primary.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::copy(legacy, &primary);
-        return ConfigLoadResult::Ok(cfg);
+        let _ = atomic_write_json(&primary, &cfg);
+        return ConfigLoadResult::Ok {
+            config: cfg,
+            migrated: true,
+        };
     }
     ConfigLoadResult::NotFound
 }
@@ -247,6 +306,7 @@ impl WorkbenchApp {
         let mut p = self.panels.clone();
         p.discard_dynamic_tabs();
         PersistedConfig {
+            schema_version: CURRENT_SCHEMA_VERSION,
             panels: p,
             selected_port: self.serial.selected_port.clone(),
             baud_rate: self.serial.baud_rate.clone(),
@@ -288,6 +348,8 @@ impl WorkbenchApp {
             terminal_max_entries: self.terminal_panel.max_entries,
             log_max_entries: self.bottom_log_panel.max_entries,
             command_usage_order: self.command_palette.usage_order.clone(),
+            network_proxy_url: (!self.network_proxy_url.trim().is_empty())
+                .then(|| self.network_proxy_url.trim().to_owned()),
         }
     }
 
@@ -299,8 +361,7 @@ impl WorkbenchApp {
 
     pub(crate) fn load_config_from_path(&mut self, path: &std::path::Path) -> Result<(), String> {
         let t = std::fs::read_to_string(path).map_err(|e| format!("读取失败：{e}"))?;
-        let cfg: PersistedConfig =
-            serde_json::from_str(&t).map_err(|e| format!("解析失败：{e}"))?;
+        let (cfg, _) = parse_persisted_config(&t)?;
         self.serial.selected_port = cfg.selected_port.clone();
         self.serial.baud_rate = cfg.baud_rate.clone();
         self.serial.data_bits = cfg.data_bits.clone();
@@ -327,9 +388,11 @@ impl WorkbenchApp {
             self.ui_theme = cfg.ui_theme;
         }
         self.terminal_panel.merge_window_ms = cfg.terminal_merge_window_ms;
-        self.terminal_panel.max_entries = cfg.terminal_max_entries.max(100);
-        self.bottom_log_panel.max_entries = cfg.log_max_entries.max(100);
+        self.terminal_panel
+            .set_max_entries(cfg.terminal_max_entries);
+        self.bottom_log_panel.set_max_entries(cfg.log_max_entries);
         self.command_palette.usage_order = cfg.command_usage_order;
+        self.network_proxy_url = cfg.network_proxy_url.unwrap_or_default();
         self.send.send_history = cfg
             .send_history
             .iter()
@@ -349,6 +412,43 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tool_recorder::RecordMode;
+
+    fn legacy_workspace_json() -> String {
+        serde_json::json!({
+            "panels": PanelManager::default(),
+            "selected_port": null,
+            "baud_rate": "115200",
+            "data_bits": "8",
+            "stop_bits": "1",
+            "parity": "none",
+            "recorder_path": "logs/session.jsonl",
+            "custom_theme_path": "one-dark-pro.json"
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn legacy_workspace_migrates_to_versioned_theme_path() {
+        let (config, migrated) = parse_persisted_config(&legacy_workspace_json())
+            .expect("legacy workspace should migrate");
+
+        assert!(migrated);
+        assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(config.theme_path.as_deref(), Some("one-dark-pro.json"));
+    }
+
+    #[test]
+    fn future_workspace_schema_is_rejected() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&legacy_workspace_json()).expect("valid test JSON");
+        value["schema_version"] = serde_json::json!(CURRENT_SCHEMA_VERSION + 1);
+
+        assert_eq!(
+            declared_schema_version(&value.to_string()),
+            Some(CURRENT_SCHEMA_VERSION + 1)
+        );
+        assert!(parse_persisted_config(&value.to_string()).is_err());
+    }
 
     // ── ensure_jsonl_extension ──
 

@@ -8,6 +8,9 @@ use std::{
         atomic::{AtomicU8, Ordering},
     },
 };
+use tool_core::config::{
+    CURRENT_SCHEMA_VERSION, atomic_write_json, atomic_write_text, quarantine_corrupt_file,
+};
 
 /// 可选界面配色。One Dark Pro 系列取自官方 VS Code 主题；Catppuccin 配色取自官方调色板库。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -132,6 +135,9 @@ struct ThemeColors {
 /// 用户主题文件。`base` 可继承任一内置主题，`colors` 只需填写要覆盖的颜色。
 #[derive(Debug, Clone, Deserialize)]
 pub struct ThemeFile {
+    /// 主题 JSON 格式版本。缺失的旧主题按 v0 兼容读取。
+    #[serde(default, alias = "version")]
+    pub schema_version: u32,
     pub name: String,
     #[serde(default)]
     pub dark_mode: Option<bool>,
@@ -229,12 +235,71 @@ pub fn custom_theme_is_dark() -> bool {
 }
 
 pub fn load_theme_file(path: &Path) -> Result<String, String> {
-    let custom = parse_theme_file(path, 0)?;
+    migrate_theme_file(path)?;
+    let custom = match parse_theme_file(path, 0) {
+        Ok(custom) => custom,
+        Err(error) => {
+            let backup = quarantine_corrupt_file(path).ok().flatten();
+            let backup_note =
+                backup.map_or_else(String::new, |path| format!("，已备份为 {}", path.display()));
+            return Err(format!("{error}{backup_note}"));
+        }
+    };
     let name = custom.name.clone();
     *custom_theme_store()
         .write()
         .map_err(|_| "主题配置锁不可用".to_owned())? = Some(custom);
     Ok(name)
+}
+
+/// 将 v0 主题文件原地升级为带 `schema_version` 的 v1 文档。
+///
+/// 只修改有效的 JSON 对象；未来版本保持原样并拒绝加载，避免旧程序覆写新配置。
+fn migrate_theme_file(path: &Path) -> Result<(), String> {
+    let source = std::fs::read_to_string(path)
+        .map_err(|error| format!("读取主题 {} 失败：{error}", path.display()))?;
+    let mut value: serde_json::Value = match serde_json::from_str(&source) {
+        Ok(value) => value,
+        Err(error) => {
+            let backup = quarantine_corrupt_file(path).ok().flatten();
+            let backup_note =
+                backup.map_or_else(String::new, |path| format!("，已备份为 {}", path.display()));
+            return Err(format!(
+                "解析主题 {} 失败：{error}{backup_note}",
+                path.display()
+            ));
+        }
+    };
+    let Some(object) = value.as_object_mut() else {
+        let backup = quarantine_corrupt_file(path).ok().flatten();
+        let backup_note =
+            backup.map_or_else(String::new, |path| format!("，已备份为 {}", path.display()));
+        return Err(format!(
+            "主题 {} 根节点必须是 JSON 对象{backup_note}",
+            path.display()
+        ));
+    };
+    let version = object
+        .get("schema_version")
+        .or_else(|| object.get("version"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as u32;
+    if version > CURRENT_SCHEMA_VERSION {
+        return Err(format!(
+            "主题 {} 使用了未来格式 v{version}，当前仅支持到 v{CURRENT_SCHEMA_VERSION}",
+            path.display()
+        ));
+    }
+    if version == 0 {
+        object.insert(
+            "schema_version".to_owned(),
+            serde_json::Value::from(CURRENT_SCHEMA_VERSION),
+        );
+        object.remove("version");
+        atomic_write_json(path, &value)
+            .map_err(|error| format!("升级主题 {} 失败：{error}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn parse_theme_file(path: &Path, depth: u8) -> Result<CustomTheme, String> {
@@ -252,6 +317,12 @@ fn parse_theme_source(source: &str, source_name: &str, depth: u8) -> Result<Cust
     }
     let file: ThemeFile = serde_json::from_str(source)
         .map_err(|error| format!("解析主题 {source_name} 失败：{error}"))?;
+    if file.schema_version > CURRENT_SCHEMA_VERSION {
+        return Err(format!(
+            "主题 {source_name} 使用了未来格式 v{}，当前仅支持到 v{CURRENT_SCHEMA_VERSION}",
+            file.schema_version
+        ));
+    }
     let (mut colors, mut ui, inherited_dark) = match file.base {
         Some(AppTheme::Custom) => return Err("自定义主题不能以 custom 作为 base".to_owned()),
         Some(base) => {
@@ -363,15 +434,18 @@ pub fn ensure_theme_directory(dir: &Path) -> Result<(), String> {
         .map_err(|error| format!("创建主题目录 {} 失败：{error}", dir.display()))?;
     for (file, source) in BUNDLED_THEME_FILES {
         let path = dir.join(file);
-        std::fs::write(&path, source)
-            .map_err(|error| format!("同步内置主题 {} 失败：{error}", path.display()))?;
+        if !path.exists() {
+            atomic_write_text(&path, source)
+                .map_err(|error| format!("写入内置主题 {} 失败：{error}", path.display()))?;
+        }
     }
     // 模板供用户复制后修改，不作为可选主题出现在下拉列表中。
     let example = dir.join("custom-theme.example.json");
     if !example.exists() {
-        std::fs::write(
+        atomic_write_text(
             &example,
             r##"{
+  "schema_version": 1,
   "name": "My Theme",
   "base": "one_dark_pro",
   "dark_mode": true,
@@ -837,6 +911,10 @@ mod tests {
             load_builtin_theme(theme, &root).expect("bundled theme should parse");
             assert_ne!(bg_primary(), Color32::TRANSPARENT);
         }
+        for (_, source) in BUNDLED_THEME_FILES {
+            let document: ThemeFile = serde_json::from_str(source).expect("versioned theme JSON");
+            assert_eq!(document.schema_version, CURRENT_SCHEMA_VERSION);
+        }
     }
 
     #[test]
@@ -874,5 +952,68 @@ mod tests {
         assert_eq!(colors.base, Color32::from_rgb(1, 2, 3));
         assert_eq!(colors.blue, Color32::from_rgb(4, 5, 6));
         assert_eq!(colors.mantle, Color32::from_rgb(30, 34, 39));
+    }
+
+    #[test]
+    fn legacy_theme_is_accepted_but_future_schema_is_rejected() {
+        let legacy = r##"{
+            "name": "Legacy",
+            "dark_mode": true,
+            "colors": { "bg_primary": "#101112" }
+        }"##;
+        assert!(parse_theme_source(legacy, "legacy.json", 0).is_ok());
+
+        let future = r##"{
+            "schema_version": 99,
+            "name": "Future",
+            "colors": {}
+        }"##;
+        assert!(parse_theme_source(future, "future.json", 0).is_err());
+    }
+
+    #[test]
+    fn legacy_theme_file_is_migrated_and_corrupt_file_is_quarantined() {
+        let dir = std::env::temp_dir().join(format!(
+            "hw-theme-migration-test-{}-{}",
+            tool_core::now_timestamp_ms(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = dir.join("legacy.json");
+        std::fs::write(&legacy, r#"{"name":"Legacy","colors":{}}"#).unwrap();
+
+        migrate_theme_file(&legacy).expect("legacy theme should migrate");
+        let migrated: ThemeFile =
+            serde_json::from_str(&std::fs::read_to_string(&legacy).unwrap()).unwrap();
+        assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
+
+        let corrupt = dir.join("corrupt.json");
+        std::fs::write(&corrupt, "not json").unwrap();
+        assert!(migrate_theme_file(&corrupt).is_err());
+        assert!(!corrupt.exists());
+        assert!(std::fs::read_dir(&dir).unwrap().flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .contains("corrupt.json.corrupt-")
+        }));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn theme_directory_never_overwrites_existing_user_theme_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "hw-theme-directory-test-{}-{}",
+            tool_core::now_timestamp_ms(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("one-dark-pro.json");
+        let user_theme = r#"{"name":"User-adjusted","colors":{}}"#;
+        std::fs::write(&path, user_theme).unwrap();
+
+        ensure_theme_directory(&dir).expect("theme directory should initialize");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), user_theme);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

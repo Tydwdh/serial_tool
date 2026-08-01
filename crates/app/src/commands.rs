@@ -5,9 +5,111 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 use tool_core::now_timestamp_ms;
+use tool_panels::TerminalExportFormat;
 use tool_transport::{SerialConfig, parse_data_bits, parse_parity, parse_stop_bits};
 
 impl WorkbenchApp {
+    pub(crate) fn export_terminal_data(&mut self, format: TerminalExportFormat) {
+        let (format_name, extension) = match format {
+            TerminalExportFormat::Txt => ("TXT", "txt"),
+            TerminalExportFormat::Csv => ("CSV", "csv"),
+            TerminalExportFormat::Json => ("JSON", "json"),
+        };
+        let default_name = format!("serial-export-{}.{}", now_timestamp_ms(), extension);
+        let Some(mut path) = rfd::FileDialog::new()
+            .set_title(format!("导出接收数据为 {format_name}"))
+            .add_filter(format_name, &[extension])
+            .set_file_name(default_name)
+            .save_file()
+        else {
+            return;
+        };
+
+        // 用户手动输入其它后缀时仍以菜单中选定的格式为准，避免内容与扩展名不一致。
+        if !path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case(extension))
+        {
+            path.set_extension(extension);
+        }
+
+        let result = match format {
+            TerminalExportFormat::Txt => {
+                std::fs::write(&path, self.terminal_panel.export_visible_text())
+            }
+            TerminalExportFormat::Csv => {
+                let content = self.terminal_panel.export_visible_csv();
+                // UTF-8 BOM 让 Windows Excel 直接打开时能正确识别中文。
+                write_utf8_csv(&path, &content)
+            }
+            TerminalExportFormat::Json => {
+                std::fs::write(&path, self.terminal_panel.export_visible_json())
+            }
+        };
+
+        match result {
+            Ok(()) => self.notifications.push(
+                "terminal-export",
+                StatusLevel::Info,
+                format!("已导出 {format_name}：{}", path.display()),
+            ),
+            Err(error) => self.notifications.push(
+                "terminal-export",
+                StatusLevel::Error,
+                format!("导出失败：{error}"),
+            ),
+        }
+    }
+
+    pub(crate) fn export_log_data(&mut self, format: TerminalExportFormat) {
+        let (format_name, extension) = match format {
+            TerminalExportFormat::Txt => ("TXT", "txt"),
+            TerminalExportFormat::Csv => ("CSV", "csv"),
+            TerminalExportFormat::Json => ("JSON", "json"),
+        };
+        let default_name = format!("log-export-{}.{}", now_timestamp_ms(), extension);
+        let Some(mut path) = rfd::FileDialog::new()
+            .set_title(format!("导出日志为 {format_name}"))
+            .add_filter(format_name, &[extension])
+            .set_file_name(default_name)
+            .save_file()
+        else {
+            return;
+        };
+        if !path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case(extension))
+        {
+            path.set_extension(extension);
+        }
+
+        let result = match format {
+            TerminalExportFormat::Txt => {
+                std::fs::write(&path, self.bottom_log_panel.export_visible_text())
+            }
+            TerminalExportFormat::Csv => {
+                write_utf8_csv(&path, &self.bottom_log_panel.export_visible_csv())
+            }
+            TerminalExportFormat::Json => {
+                std::fs::write(&path, self.bottom_log_panel.export_visible_json())
+            }
+        };
+        match result {
+            Ok(()) => self.notifications.push(
+                "log-export",
+                StatusLevel::Info,
+                format!("已导出 {format_name}：{}", path.display()),
+            ),
+            Err(error) => self.notifications.push(
+                "log-export",
+                StatusLevel::Error,
+                format!("导出失败：{error}"),
+            ),
+        }
+    }
+
     /// 发布一条通知到状态栏。source 相同的旧通知会被替换（避免刷屏）。
     pub(crate) fn set_status(&mut self, level: StatusLevel, text: impl Into<String>) {
         self.notifications.push("general", level, text);
@@ -345,4 +447,14 @@ impl WorkbenchApp {
             }
         }
     }
+}
+
+fn write_utf8_csv(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let file = std::fs::File::create(path)?;
+    let mut writer = std::io::BufWriter::new(file);
+    writer.write_all(b"\xEF\xBB\xBF")?;
+    writer.write_all(content.as_bytes())?;
+    writer.flush()
 }

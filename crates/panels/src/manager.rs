@@ -509,6 +509,40 @@ impl TilesLayout {
             .find_map(|(plugin_id, id)| (*id == tile_id).then_some(plugin_id.as_str()))
     }
 
+    /// 拖拽可以改变任意容器的父子关系。插件分组只是“由运行时自动创建”的
+    /// 辅助元数据，不能在用户把其中的面板拆走后继续给一个普通标签组冠上插件名。
+    ///
+    /// 只保留仍然直接包含两个及以上、且全部归属于同一插件的动态面板的分组。
+    /// 布局本身完全由用户的拖拽结果决定，不会在这里重新拼接或移动任何面板。
+    pub fn reconcile_plugin_groups(&mut self) -> bool {
+        let owners_before = self.plugin_panel_owners.len();
+        self.plugin_panel_owners.retain(|panel_id, _| {
+            self.tree
+                .tiles
+                .find_pane(&PanelKind::Dynamic(panel_id.clone()))
+                .is_some()
+        });
+
+        let groups_before = self.plugin_groups.len();
+        self.plugin_groups.retain(|plugin_id, group_id| {
+            let Some(Tile::Container(Container::Tabs(tabs))) = self.tree.tiles.get(*group_id)
+            else {
+                return false;
+            };
+
+            tabs.children.len() >= 2
+                && tabs.children.iter().all(|child_id| {
+                    matches!(
+                        self.tree.tiles.get(*child_id),
+                        Some(Tile::Pane(PanelKind::Dynamic(panel_id)))
+                            if self.plugin_panel_owners.get(panel_id) == Some(plugin_id)
+                    )
+                })
+        });
+
+        owners_before != self.plugin_panel_owners.len() || groups_before != self.plugin_groups.len()
+    }
+
     pub fn is_pane_visible(&self, kind: &PanelKind) -> bool {
         self.tree
             .tiles
@@ -691,8 +725,39 @@ impl PanelManager {
     }
 
     pub fn reset_tiles_layout(&mut self) {
+        // 布局重置不等于关闭插件：保留当前运行期动态面板及其插件归属，
+        // 在默认布局中重新建立它们，避免用户恢复布局后找不到插件窗口。
+        let dynamic_panels: Vec<(PanelKind, Option<String>)> = self
+            .tiles
+            .as_ref()
+            .map(|layout| {
+                layout
+                    .tree
+                    .tiles
+                    .iter()
+                    .filter_map(|(_, tile)| match tile {
+                        Tile::Pane(kind @ PanelKind::Dynamic(panel_id)) => Some((
+                            kind.clone(),
+                            layout.plugin_panel_owners.get(panel_id).cloned(),
+                        )),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         self.dock = DockLayout::default();
         self.tiles = Some(TilesLayout::from_legacy(&self.dock));
+        if let Some(layout) = self.tiles.as_mut() {
+            for (kind, plugin_id) in dynamic_panels {
+                if let Some(plugin_id) = plugin_id {
+                    layout.add_to_plugin_tabs(kind, &plugin_id);
+                } else {
+                    layout.add_to_main_tabs(kind, false);
+                }
+            }
+            layout.select_pane(&PanelKind::Devices);
+        }
         self.active_tab = PanelKind::Devices;
     }
 
@@ -1013,6 +1078,24 @@ mod tests {
     }
 
     #[test]
+    fn dragging_a_plugin_panel_out_clears_the_automatic_group_label() {
+        let mut manager = PanelManager::default();
+        let first = PanelKind::Dynamic("demo.chart".to_owned());
+        let second = PanelKind::Dynamic("demo.form".to_owned());
+        manager.open_plugin_tab(first.clone(), "demo");
+        manager.open_plugin_tab(second.clone(), "demo");
+
+        let layout = manager.ensure_tiles_layout();
+        let group_id = *layout.plugin_groups.get("demo").expect("plugin group");
+        let second_id = layout.tree.tiles.find_pane(&second).expect("second pane");
+        layout.tree.remove_recursively(second_id);
+
+        assert!(layout.reconcile_plugin_groups());
+        assert!(!layout.plugin_groups.contains_key("demo"));
+        assert_eq!(layout.plugin_group_id(group_id), None);
+    }
+
+    #[test]
     fn tiles_layout_round_trips_through_workspace_json() {
         let mut manager = PanelManager::default();
         manager.ensure_tiles_layout().set_right_visible(true);
@@ -1022,5 +1105,29 @@ mod tests {
 
         assert!(restored.tiles.is_some());
         assert!(restored.tiles.expect("tiles layout").right_visible());
+    }
+
+    #[test]
+    fn resetting_layout_preserves_running_plugin_panels() {
+        let mut manager = PanelManager::default();
+        let first = PanelKind::Dynamic("demo.chart".to_owned());
+        let second = PanelKind::Dynamic("demo.form".to_owned());
+        manager.open_plugin_tab(first.clone(), "demo");
+        manager.open_plugin_tab(second.clone(), "demo");
+
+        manager.reset_tiles_layout();
+
+        let layout = manager.ensure_tiles_layout();
+        assert!(layout.tree.tiles.find_pane(&first).is_some());
+        assert!(layout.tree.tiles.find_pane(&second).is_some());
+        assert_eq!(
+            layout
+                .plugin_panel_owners
+                .get("demo.chart")
+                .map(String::as_str),
+            Some("demo")
+        );
+        assert!(layout.plugin_groups.contains_key("demo"));
+        assert_eq!(manager.active_tab, PanelKind::Devices);
     }
 }
