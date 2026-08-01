@@ -123,13 +123,6 @@ mod tests {
 
 pub(crate) const MAX_SEND_HISTORY: usize = 200;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DetachedPanelAction {
-    None,
-    Attach,
-    Close,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum LineEnding {
     None,
@@ -165,7 +158,6 @@ pub(crate) struct SendUiState {
     pub(crate) hex_mode: bool,
     pub(crate) line_ending: LineEnding,
     pub(crate) error: Option<String>,
-    pub(crate) popup_open: bool,
     pub(crate) target_port: Option<String>,
     pub(crate) send_history: std::collections::VecDeque<String>,
     /// 发送历史 popup 的搜索框文本。
@@ -190,7 +182,6 @@ impl Default for SendUiState {
             hex_mode: false,
             line_ending: LineEnding::None,
             error: None,
-            popup_open: false,
             target_port: None,
             send_history: std::collections::VecDeque::new(),
             history_search: String::new(),

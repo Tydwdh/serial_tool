@@ -27,14 +27,4 @@ impl WorkbenchApp {
             self.set_status(StatusLevel::Error, format!("录制失败：{error}"));
         }
     }
-
-    /// 终端放大按钮：打开悬浮窗并切走底部 Terminal。
-    pub(super) fn tick_terminal_maximize(&mut self) {
-        if self.terminal_panel.maximize_clicked {
-            self.terminal_panel.maximize_clicked = false;
-            self.popups.terminal_open = true;
-            self.panels
-                .select_center_panel(tool_panels::PanelKind::Logs);
-        }
-    }
 }

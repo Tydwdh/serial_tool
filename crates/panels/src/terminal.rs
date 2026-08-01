@@ -12,8 +12,7 @@ use crate::{
 use egui::text_selection::LabelSelectionState;
 use egui::{Color32, RichText, ScrollArea, Sense, Stroke};
 use egui_material_icons::icons::{
-    ICON_CANCEL, ICON_DELETE_SWEEP, ICON_DOWNLOAD, ICON_FILTER_ALT_OFF, ICON_FULLSCREEN,
-    ICON_SEARCH,
+    ICON_CANCEL, ICON_DELETE_SWEEP, ICON_DOWNLOAD, ICON_FILTER_ALT_OFF, ICON_SEARCH,
 };
 use std::borrow::Cow;
 use std::cmp::Reverse;
@@ -63,8 +62,6 @@ pub struct TerminalPanel {
     pub max_entries: usize,
 
     pub height: f32,
-    pub maximize_clicked: bool,
-
     /// 是否发生过截断（用于状态栏提示，显示后清除）
     pub truncated: bool,
 
@@ -323,7 +320,6 @@ impl TerminalPanel {
             max_entries: 50_000,
 
             height: 350.0,
-            maximize_clicked: false,
             truncated: false,
 
             pending_navigate_to_id: None,
@@ -641,10 +637,6 @@ impl TerminalPanel {
                 if design::button(ui, ICON_CANCEL, "取消", ButtonKind::Ghost).clicked() {
                     ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(clear_id));
                 }
-            }
-
-            if design::icon_button(ui, ICON_FULLSCREEN, "放大查看").clicked() {
-                self.maximize_clicked = true;
             }
         });
 

@@ -2,7 +2,7 @@ mod bottom_panel;
 pub(crate) mod command_palette;
 mod contributions;
 mod device_panel;
-pub(crate) mod popups;
+mod dialogs;
 mod settings_panel;
 mod status_bar;
 mod tiles;

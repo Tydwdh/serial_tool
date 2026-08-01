@@ -3,8 +3,7 @@ use crate::state::{LineEnding, MAX_SEND_HISTORY, StatusLevel};
 use eframe::egui;
 use egui::widgets::text_edit::TextEditState;
 use egui_material_icons::icons::{
-    ICON_CANCEL, ICON_DELETE, ICON_DELETE_SWEEP, ICON_FULLSCREEN, ICON_HISTORY, ICON_SEARCH,
-    ICON_SEND,
+    ICON_CANCEL, ICON_DELETE, ICON_DELETE_SWEEP, ICON_HISTORY, ICON_SEARCH, ICON_SEND,
 };
 use tool_panels::{
     design::{self, ButtonKind},
@@ -22,7 +21,6 @@ fn response_id_for_send_input(layout: SendLayout) -> egui::Id {
     let salt = match layout {
         SendLayout::Horizontal => "send-input-h",
         SendLayout::Vertical => "send-input-v",
-        SendLayout::Popup => "send-input-popup",
     };
     egui::Id::new(salt)
 }
@@ -34,8 +32,6 @@ pub(crate) enum SendLayout {
     Horizontal,
     /// 右侧面板垂直布局
     Vertical,
-    /// 悬浮窗口
-    Popup,
 }
 
 impl WorkbenchApp {
@@ -89,7 +85,7 @@ impl WorkbenchApp {
             });
     }
 
-    // ── 对外入口：三个布局都走这一个核心方法 ──
+    // ── 对外入口：两种工作区布局都走同一核心方法 ──
 
     pub(super) fn send_panel_horizontal(&mut self, ui: &mut egui::Ui) {
         self.send_panel_body(ui, SendLayout::Horizontal);
@@ -97,10 +93,6 @@ impl WorkbenchApp {
 
     pub(super) fn send_panel_vertical(&mut self, ui: &mut egui::Ui) {
         self.send_panel_body(ui, SendLayout::Vertical);
-    }
-
-    pub(super) fn send_panel_popup(&mut self, ui: &mut egui::Ui) {
-        self.send_panel_body(ui, SendLayout::Popup);
     }
 
     // ── 统一核心渲染 ──
@@ -140,7 +132,6 @@ impl WorkbenchApp {
                         .unwrap_or(0.0)
             }
             SendLayout::Vertical => 150.0,
-            SendLayout::Popup => 84.0,
         };
         let input_height = if constrain_bottom {
             let min_input = SEND_BOTTOM_MIN_INPUT_HEIGHT.min(avail.y.max(0.0));
@@ -171,46 +162,14 @@ impl WorkbenchApp {
     // ── 选项栏 ──
 
     fn render_send_options(&mut self, ui: &mut egui::Ui, layout: SendLayout) {
-        let is_popup = matches!(layout, SendLayout::Popup);
-
-        // ── 标题（Popup）──
-        if is_popup {
-            ui.horizontal(|ui| {
-                ui.heading("发送");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let pin_label = if self.popups.send_always_on_top {
-                        "\u{1f4cc} 置顶"
-                    } else {
-                        "置顶"
-                    };
-                    if ui
-                        .selectable_label(self.popups.send_always_on_top, pin_label)
-                        .on_hover_text("让该窗口保持在其他窗口上方")
-                        .clicked()
-                    {
-                        self.popups.send_always_on_top = !self.popups.send_always_on_top;
-                        if let Err(e) = self.save_config() {
-                            log::warn!("save_config failed: {e}")
-                        };
-                    }
-                });
-            });
-        }
-
         // ── 目标 / 发送模式 ──
         self.render_send_target_options(ui, layout);
     }
 
     fn render_send_target_options(&mut self, ui: &mut egui::Ui, layout: SendLayout) {
-        let (target_id, line_ending_id, line_ending_width, show_popup_button) = match layout {
-            SendLayout::Horizontal => ("send-target-port-bottom", "line-ending-bottom", 64.0, true),
-            SendLayout::Vertical => ("send-target-port-right", "line-ending-right", 80.0, true),
-            SendLayout::Popup => (
-                "send-popup-target-port",
-                "send-popup-line-ending",
-                64.0,
-                false,
-            ),
+        let (target_id, line_ending_id, line_ending_width) = match layout {
+            SendLayout::Horizontal => ("send-target-port-bottom", "line-ending-bottom", 64.0),
+            SendLayout::Vertical => ("send-target-port-right", "line-ending-right", 80.0),
         };
 
         if matches!(layout, SendLayout::Horizontal) {
@@ -225,7 +184,6 @@ impl WorkbenchApp {
                             target_id,
                             line_ending_id,
                             line_ending_width,
-                            show_popup_button,
                         );
                     });
                 });
@@ -236,7 +194,6 @@ impl WorkbenchApp {
                     target_id,
                     line_ending_id,
                     line_ending_width,
-                    show_popup_button,
                 );
             });
         }
@@ -248,17 +205,12 @@ impl WorkbenchApp {
         target_id: &'static str,
         line_ending_id: &'static str,
         line_ending_width: f32,
-        show_popup_button: bool,
     ) {
         ui.label("发送到");
         self.send_target_port_combo(ui, target_id);
         ui.separator();
         self.render_hex_toggle(ui);
         self.render_line_ending_combo(ui, line_ending_id, line_ending_width);
-
-        if show_popup_button && design::icon_button(ui, ICON_FULLSCREEN, "放大编辑").clicked() {
-            self.send.popup_open = true;
-        }
     }
 
     /// HEX/文本切换 + 严格模式
@@ -310,13 +262,12 @@ impl WorkbenchApp {
         let hint_text = match layout {
             SendLayout::Horizontal => {
                 if send_port_open {
-                    "Ctrl+Enter 发送 | ⛶ 放大编辑"
+                    "Ctrl+Enter 发送"
                 } else {
                     "请选择已打开的串口"
                 }
             }
             SendLayout::Vertical => "Ctrl+Enter 发送",
-            SendLayout::Popup => "Ctrl+Enter 发送",
         };
 
         // 输入区视觉占满传入高度，但严格限制在该高度内——文本超出时在框内滚动，
@@ -347,7 +298,6 @@ impl WorkbenchApp {
         let scroll_id_salt = match layout {
             SendLayout::Horizontal => "send-input-scroll-h",
             SendLayout::Vertical => "send-input-scroll-v",
-            SendLayout::Popup => "send-input-scroll-popup",
         };
         let input = &mut self.send.input;
         let response = egui::ScrollArea::vertical()
@@ -447,7 +397,6 @@ impl WorkbenchApp {
         let (history_id, interval_width) = match layout {
             SendLayout::Horizontal => ("send-history-bottom", 54.0),
             SendLayout::Vertical => ("send-history-right", 72.0),
-            SendLayout::Popup => ("send-popup-history", 54.0),
         };
 
         if matches!(layout, SendLayout::Horizontal) {

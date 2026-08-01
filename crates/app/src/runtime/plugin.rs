@@ -104,7 +104,6 @@ impl WorkbenchApp {
         for plugin_id in self.plugin_manager.take_cleanup_requests() {
             let removed = self.dynamic_panels.remove_by_plugin(&plugin_id);
             for id in &removed {
-                self.detached_dynamic_panels.remove(id);
                 self.panels
                     .close_tab(tool_panels::PanelKind::Dynamic(id.clone()));
             }

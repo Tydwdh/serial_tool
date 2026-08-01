@@ -65,17 +65,7 @@ impl WorkbenchApp {
                     .show(ui, |ui| self.settings_panel(ui));
             }
             PanelKind::Terminal => {
-                if self.popups.terminal_open {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(24.0);
-                        ui.label("接收区已在悬浮窗口中打开");
-                        if ui.button("关闭悬浮窗口并回到工作区").clicked() {
-                            self.popups.terminal_open = false;
-                        }
-                    });
-                } else {
-                    self.terminal_panel.ui(ui);
-                }
+                self.terminal_panel.ui(ui);
             }
             PanelKind::Sender => {
                 if ui.available_width() < 420.0 {
@@ -86,9 +76,7 @@ impl WorkbenchApp {
             }
             PanelKind::Logs => self.bottom_log_panel.ui(ui),
             PanelKind::Dynamic(id) => {
-                if self.detached_dynamic_panels.contains(id) {
-                    ui.label("已弹出到独立窗口");
-                } else if self.dynamic_panels.contains(id) {
+                if self.dynamic_panels.contains(id) {
                     egui::ScrollArea::vertical().show(ui, |ui| self.dynamic_panels.ui_body(ui, id));
                 } else {
                     ui.colored_label(theme::red(), format!("动态面板不存在：{id}"));
