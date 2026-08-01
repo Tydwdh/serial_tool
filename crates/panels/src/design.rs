@@ -158,6 +158,37 @@ pub fn status_pill(ui: &mut egui::Ui, color: Color32, text: impl AsRef<str>) -> 
         .inner
 }
 
+pub fn status_pill_sized(
+    ui: &mut egui::Ui,
+    color: Color32,
+    text: impl AsRef<str>,
+    width: f32,
+) -> Response {
+    Frame::new()
+        .fill(color.gamma_multiply(0.11))
+        .stroke(Stroke::new(1.0, color.gamma_multiply(0.35)))
+        .corner_radius(12.0)
+        .inner_margin(egui::Margin::symmetric(9, 3))
+        .show(ui, |ui| {
+            ui.set_min_width((width - 18.0).max(0.0));
+            ui.with_layout(
+                egui::Layout::left_to_right(egui::Align::Center)
+                    .with_main_align(egui::Align::Center),
+                |ui| {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                    ui.painter().circle_filled(rect.center(), 3.5, color);
+                    ui.label(
+                        RichText::new(text.as_ref())
+                            .small()
+                            .color(theme::text_primary()),
+                    );
+                },
+            );
+        })
+        .response
+}
+
 pub fn empty_state(
     ui: &mut egui::Ui,
     icon: MaterialIcon,
@@ -281,5 +312,33 @@ mod tests {
         let size = measured.get();
         assert!(size.x > 80.0, "badge was compressed to {size:?}");
         assert!(size.y <= 30.0, "badge text wrapped vertically: {size:?}");
+    }
+
+    #[test]
+    fn sized_status_pills_have_identical_dimensions() {
+        let measured = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let measured_in_ui = Rc::clone(&measured);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(420.0, 80.0))
+            .build_ui(move |ui| {
+                measured_in_ui.borrow_mut().clear();
+                ui.horizontal(|ui| {
+                    for label in ["已发现 5", "运行 1", "未运行 4"] {
+                        measured_in_ui.borrow_mut().push(
+                            status_pill_sized(ui, Color32::LIGHT_BLUE, label, 104.0)
+                                .rect
+                                .size(),
+                        );
+                    }
+                });
+            });
+        harness.run();
+
+        let measured = measured.borrow();
+        assert_eq!(measured.len(), 3);
+        for size in measured.iter().skip(1) {
+            assert!((size.x - measured[0].x).abs() < 0.1);
+            assert!((size.y - measured[0].y).abs() < 0.1);
+        }
     }
 }

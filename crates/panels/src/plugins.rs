@@ -18,6 +18,7 @@ use tool_marketplace::{Registry, RegistryPlugin};
 
 const TWO_COLUMN_PLUGIN_WIDTH: f32 = 980.0;
 const TWO_COLUMN_CARD_GAP: f32 = 10.0;
+const PLUGIN_METRIC_WIDTH: f32 = 104.0;
 
 /// 插件面板顶部 tab。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,14 +281,39 @@ impl PluginsPanel {
             design::card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal_wrapped(|ui| {
-                    design::badge(ui, format!("已发现 {}", summaries.len()), theme::cyan());
-                    design::status_pill(ui, theme::green(), format!("运行 {running}"));
-                    design::status_pill(ui, theme::text_secondary(), format!("未运行 {inactive}"));
+                    design::status_pill_sized(
+                        ui,
+                        theme::cyan(),
+                        format!("已发现 {}", summaries.len()),
+                        PLUGIN_METRIC_WIDTH,
+                    );
+                    design::status_pill_sized(
+                        ui,
+                        theme::green(),
+                        format!("运行 {running}"),
+                        PLUGIN_METRIC_WIDTH,
+                    );
+                    design::status_pill_sized(
+                        ui,
+                        theme::text_secondary(),
+                        format!("未运行 {inactive}"),
+                        PLUGIN_METRIC_WIDTH,
+                    );
                     if failed > 0 {
-                        design::status_pill(ui, theme::red(), format!("异常 {failed}"));
+                        design::status_pill_sized(
+                            ui,
+                            theme::red(),
+                            format!("异常 {failed}"),
+                            PLUGIN_METRIC_WIDTH,
+                        );
                     }
                     if !diagnostics.is_empty() {
-                        design::badge(ui, format!("诊断 {}", diagnostics.len()), theme::yellow());
+                        design::status_pill_sized(
+                            ui,
+                            theme::yellow(),
+                            format!("诊断 {}", diagnostics.len()),
+                            PLUGIN_METRIC_WIDTH,
+                        );
                     }
                 });
             });
