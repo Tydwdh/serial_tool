@@ -16,6 +16,8 @@ use tool_extension::{
 };
 use tool_marketplace::{Registry, RegistryPlugin};
 
+const TWO_COLUMN_PLUGIN_WIDTH: f32 = 980.0;
+
 /// 插件面板顶部 tab。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginTab {
@@ -314,12 +316,25 @@ impl PluginsPanel {
             ui,
             |ui| -> Option<PluginPanelEvent> {
                 let mut row_status: Option<PluginPanelEvent> = None;
-                for summary in summaries {
-                    let s = self.plugin_row(ui, manager, summary);
-                    if row_status.is_none() {
-                        row_status = s;
+                if plugin_column_count(ui.available_width()) == 2 {
+                    ui.columns(2, |columns| {
+                        for (index, summary) in summaries.into_iter().enumerate() {
+                            let column = &mut columns[index % 2];
+                            let event = self.plugin_row(column, manager, summary);
+                            if row_status.is_none() {
+                                row_status = event;
+                            }
+                            column.add_space(10.0);
+                        }
+                    });
+                } else {
+                    for summary in summaries {
+                        let event = self.plugin_row(ui, manager, summary);
+                        if row_status.is_none() {
+                            row_status = event;
+                        }
+                        ui.add_space(8.0);
                     }
-                    ui.add_space(8.0);
                 }
                 row_status
             },
@@ -478,9 +493,19 @@ impl PluginsPanel {
         let scroll_result = ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for plugin in visible_plugins {
-                    self.market_plugin_row(ui, plugin, &mut events);
-                    ui.add_space(8.0);
+                if plugin_column_count(ui.available_width()) == 2 {
+                    ui.columns(2, |columns| {
+                        for (index, plugin) in visible_plugins.into_iter().enumerate() {
+                            let column = &mut columns[index % 2];
+                            self.market_plugin_row(column, plugin, &mut events);
+                            column.add_space(10.0);
+                        }
+                    });
+                } else {
+                    for plugin in visible_plugins {
+                        self.market_plugin_row(ui, plugin, &mut events);
+                        ui.add_space(8.0);
+                    }
                 }
             });
         let _ = scroll_result;
@@ -501,7 +526,7 @@ impl PluginsPanel {
             ui.set_min_width(ui.available_width());
 
             // 标题行
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(
                     egui::RichText::new(&plugin.name)
                         .strong()
@@ -579,7 +604,7 @@ impl PluginsPanel {
                 ui.set_min_width(ui.available_width());
 
                 // 标题行
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label(
                         egui::RichText::new(&summary.name)
                             .strong()
@@ -684,7 +709,7 @@ impl PluginsPanel {
                 }
 
                 // 按钮行
-                ui.horizontal(|ui| -> Option<PluginPanelEvent> {
+                ui.horizontal_wrapped(|ui| -> Option<PluginPanelEvent> {
                     // 启用/禁用合并为单个按钮：当前正在运行/已启用则显示「禁用」并执行禁用，
                     // 否则显示「启用」并执行启用。
                     // 注意：Finished/Failed 视为未启用 —— disable() 对这两个状态是 no-op
@@ -788,6 +813,10 @@ fn state_color(state: PluginState) -> Color32 {
     }
 }
 
+fn plugin_column_count(available_width: f32) -> usize {
+    usize::from(available_width >= TWO_COLUMN_PLUGIN_WIDTH) + 1
+}
+
 fn state_label(state: PluginState) -> &'static str {
     match state {
         PluginState::Discovered => "已发现",
@@ -867,5 +896,12 @@ mod tests {
             assert!(!state_label(state).is_empty());
             assert!(!state_label(state).is_ascii());
         }
+    }
+
+    #[test]
+    fn plugin_cards_switch_to_two_columns_only_when_wide() {
+        assert_eq!(plugin_column_count(TWO_COLUMN_PLUGIN_WIDTH - 1.0), 1);
+        assert_eq!(plugin_column_count(TWO_COLUMN_PLUGIN_WIDTH), 2);
+        assert_eq!(plugin_column_count(1440.0), 2);
     }
 }

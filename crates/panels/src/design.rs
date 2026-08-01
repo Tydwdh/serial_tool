@@ -192,17 +192,29 @@ pub fn segmented_toggle(
     on_label: &str,
 ) -> Response {
     let label = if *selected { on_label } else { off_label };
-    let response = ui.add(
-        egui::Button::selectable(
-            *selected,
-            RichText::new(label).small().color(if *selected {
-                theme::toggle_selected_text()
-            } else {
-                theme::text_secondary()
-            }),
+    let (fill, stroke, foreground) = if *selected {
+        (
+            theme::toggle_selected_bg(),
+            Stroke::new(1.0, theme::toggle_selected_border()),
+            theme::toggle_selected_text(),
         )
-        .corner_radius(6.0)
-        .min_size(egui::vec2(54.0, 26.0)),
+    } else {
+        (
+            theme::bg_input(),
+            Stroke::new(1.0, theme::border()),
+            theme::text_secondary(),
+        )
+    };
+    let mut text = RichText::new(label).color(foreground);
+    if *selected {
+        text = text.strong();
+    }
+    let response = ui.add(
+        egui::Button::selectable(*selected, text)
+            .fill(fill)
+            .stroke(stroke)
+            .corner_radius(6.0)
+            .min_size(egui::vec2(54.0, 28.0)),
     );
     if response.clicked() {
         *selected = !*selected;

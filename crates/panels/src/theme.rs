@@ -516,6 +516,17 @@ pub fn is_catppuccin() -> bool {
     )
 }
 
+fn is_one_dark_family() -> bool {
+    matches!(
+        active_theme(),
+        AppTheme::OneDarkPro
+            | AppTheme::OneDarkProFlat
+            | AppTheme::OneDarkProDarker
+            | AppTheme::OneDarkProMix
+            | AppTheme::OneDarkProNightFlat
+    )
+}
+
 fn parse_hex_color(value: &str) -> Result<Color32, String> {
     let hex = value.trim().trim_start_matches('#');
     let parse = |range: std::ops::Range<usize>| {
@@ -586,6 +597,20 @@ fn translucent(color: Color32, alpha: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
 }
 
+fn mix_color(from: Color32, to: Color32, amount: f32) -> Color32 {
+    let mix_channel = |a: u8, b: u8| {
+        (a as f32 + (b as f32 - a as f32) * amount)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    Color32::from_rgba_unmultiplied(
+        mix_channel(from.r(), to.r()),
+        mix_channel(from.g(), to.g()),
+        mix_channel(from.b(), to.b()),
+        mix_channel(from.a(), to.a()),
+    )
+}
+
 // 背景层级
 pub fn bg_deep() -> Color32 {
     colors().crust
@@ -629,13 +654,28 @@ pub fn bg_hover() -> Color32 {
 
 // 文本层级
 pub fn text_primary() -> Color32 {
-    colors().text
+    let colors = colors();
+    if is_one_dark_family() {
+        mix_color(colors.text, colors.text_white, 0.18)
+    } else {
+        colors.text
+    }
 }
 pub fn text_secondary() -> Color32 {
-    colors().subtext1
+    let colors = colors();
+    if is_one_dark_family() {
+        mix_color(colors.subtext1, colors.text, 0.30)
+    } else {
+        colors.subtext1
+    }
 }
 pub fn text_dimmed() -> Color32 {
-    colors().subtext0
+    let colors = colors();
+    if is_one_dark_family() {
+        mix_color(colors.subtext0, colors.text, 0.24)
+    } else {
+        colors.subtext0
+    }
 }
 pub fn text_white() -> Color32 {
     colors().text_white
@@ -740,10 +780,20 @@ pub fn scrollbar_hover() -> Color32 {
     }
 }
 pub fn border() -> Color32 {
-    colors().surface2
+    let colors = colors();
+    if is_one_dark_family() {
+        colors.overlay0
+    } else {
+        colors.surface2
+    }
 }
 pub fn border_light() -> Color32 {
-    colors().overlay0
+    let colors = colors();
+    if is_one_dark_family() {
+        colors.overlay1
+    } else {
+        colors.overlay0
+    }
 }
 pub fn border_dark() -> Color32 {
     colors().crust
@@ -902,6 +952,16 @@ mod tests {
         assert_eq!(AppTheme::default(), AppTheme::OneDarkPro);
         assert!(!AppTheme::Latte.is_dark());
         assert!(AppTheme::OneDarkPro.is_dark());
+    }
+
+    #[test]
+    fn color_mix_moves_each_channel_towards_target() {
+        let mixed = mix_color(
+            Color32::from_rgb(80, 100, 120),
+            Color32::from_rgb(180, 200, 220),
+            0.25,
+        );
+        assert_eq!(mixed, Color32::from_rgb(105, 125, 145));
     }
 
     #[test]
