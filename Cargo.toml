@@ -23,6 +23,8 @@ rust-version = "1.92"
 [workspace.dependencies]
 eframe = { version = "0.35", features = ["persistence", "glow", "inspection"] }
 egui = "0.35"
+egui_extras = { version = "0.35", default-features = false }
+egui_material_icons = "0.7"
 egui_tiles = "0.16"
 crossbeam-channel = "0.5"
 dirs-next = "2"

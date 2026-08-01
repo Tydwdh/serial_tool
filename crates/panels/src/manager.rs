@@ -1,3 +1,10 @@
+use egui_material_icons::{
+    MaterialIcon,
+    icons::{
+        ICON_CABLE, ICON_EXTENSION, ICON_HISTORY, ICON_SEND, ICON_SETTINGS, ICON_TERMINAL,
+        ICON_USB, ICON_VIEW_IN_AR,
+    },
+};
 use egui_tiles::{Container, Tile, TileId, Tiles, Tree};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -31,17 +38,17 @@ impl PanelKind {
         }
     }
 
-    /// 左侧栏/标签栏显示用的图标（emoji）。
-    pub fn icon(&self) -> &'static str {
+    /// 标签栏使用的统一 Material Symbol。
+    pub fn icon(&self) -> MaterialIcon {
         match self {
-            Self::Devices => "📟",
-            Self::Replay => "⏪",
-            Self::Plugins => "🧩",
-            Self::Settings => "⚙",
-            Self::Terminal => "📡",
-            Self::Sender => "📤",
-            Self::Logs => "📝",
-            Self::Dynamic(_) => "🔌",
+            Self::Devices => ICON_USB,
+            Self::Replay => ICON_HISTORY,
+            Self::Plugins => ICON_EXTENSION,
+            Self::Settings => ICON_SETTINGS,
+            Self::Terminal => ICON_TERMINAL,
+            Self::Sender => ICON_SEND,
+            Self::Logs => ICON_VIEW_IN_AR,
+            Self::Dynamic(_) => ICON_CABLE,
         }
     }
 

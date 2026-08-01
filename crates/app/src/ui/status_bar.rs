@@ -2,7 +2,11 @@ use crate::app::WorkbenchApp;
 use crate::state::StatusLevel;
 use eframe::egui;
 use egui::Color32;
-use tool_panels::theme;
+use egui_material_icons::icons::{
+    ICON_CHECK_CIRCLE, ICON_CLOUD_DOWNLOAD, ICON_ERROR, ICON_NOTIFICATIONS, ICON_REFRESH,
+    ICON_SYSTEM_UPDATE, ICON_WARNING,
+};
+use tool_panels::{design, theme};
 use tool_transport::TransportStatus;
 
 impl WorkbenchApp {
@@ -14,7 +18,7 @@ impl WorkbenchApp {
             .map(|p| self.transport.status_port(p))
             .unwrap_or_else(TransportStatus::closed);
         ui.horizontal(|ui| {
-            // 串口状态 — 带发光效果的圆点
+            // 串口状态
             let (dot_color, label) =
                 if let (Some(p), Some(b)) = (self.serial.selected_port.clone(), st.baud_rate) {
                     let label = self.serial.port_label(&p);
@@ -29,62 +33,37 @@ impl WorkbenchApp {
                 } else {
                     (theme::text_secondary(), "串口已关闭".into())
                 };
-            // 发光圆点：外层半透明大圆 + 内层实心小圆
-            let dot_rect = egui::Rect::from_center_size(
-                egui::pos2(ui.cursor().left() + 6.0, ui.cursor().center().y),
-                egui::vec2(10.0, 10.0),
-            );
-            if st.open {
-                ui.painter()
-                    .circle_filled(dot_rect.center(), 5.0, dot_color.linear_multiply(0.3));
-            }
-            ui.painter()
-                .circle_filled(dot_rect.center(), 3.0, dot_color);
-            ui.add_space(12.0);
-            ui.label(label);
-            ui.separator();
+            design::status_pill(ui, dot_color, label);
 
-            // 录制状态 — 发光圆点
+            // 录制状态
             let rec = self.recorder.is_running();
-            let rec_dot_rect = egui::Rect::from_center_size(
-                egui::pos2(ui.cursor().left() + 6.0, ui.cursor().center().y),
-                egui::vec2(10.0, 10.0),
-            );
-            if rec {
-                ui.painter().circle_filled(
-                    rec_dot_rect.center(),
-                    5.0,
-                    theme::red().linear_multiply(0.3),
-                );
-            }
-            ui.painter().circle_filled(
-                rec_dot_rect.center(),
-                3.0,
-                if rec {
-                    theme::red()
-                } else {
-                    theme::text_secondary()
-                },
-            );
-            ui.add_space(12.0);
-            if rec {
+            let recording_label = if rec {
                 let stats = self.recorder.stats();
                 if stats.paused {
-                    ui.label(format!(
+                    format!(
                         "已暂停 {} 条 {:.1}MB",
                         stats.events_written,
                         stats.bytes_written as f64 / 1024.0 / 1024.0
-                    ));
+                    )
                 } else {
-                    ui.label(format!(
+                    format!(
                         "录制中 {} 条 {:.1}MB",
                         stats.events_written,
                         stats.bytes_written as f64 / 1024.0 / 1024.0
-                    ));
+                    )
                 }
             } else {
-                ui.label("未录制");
-            }
+                "未录制".to_owned()
+            };
+            design::status_pill(
+                ui,
+                if rec {
+                    theme::red()
+                } else {
+                    theme::text_dimmed()
+                },
+                recording_label,
+            );
             if rec {
                 let stats = self.recorder.stats();
                 if let Some(ref err) = stats.last_error {
@@ -220,8 +199,8 @@ impl WorkbenchApp {
 
             if !notifications.is_empty() {
                 ui.separator();
-                // 最多显示 3 条，超出显示可点击的 "…及 N 条消息" 弹出全部。
-                let max_show = 3;
+                // 状态栏只保留一条摘要，其余消息放入通知列表，避免挤压串口状态。
+                let max_show = 1;
                 let total = notifications.len();
                 let shown: Vec<_> = notifications.iter().take(max_show).collect();
                 for n in &shown {
@@ -236,8 +215,11 @@ impl WorkbenchApp {
                 }
                 if total > max_show {
                     let overflow_id = ui.id().with("notification_overflow");
-                    let overflow_text =
-                        egui::RichText::new(format!("…及 {} 条消息", total - max_show))
+                    let overflow_text = egui::RichText::new(format!(
+                        "{} {} 条",
+                        ICON_NOTIFICATIONS.codepoint,
+                        total - max_show
+                    ))
                             .small()
                             .color(theme::text_secondary());
                     let overflow_resp =
@@ -270,13 +252,13 @@ impl WorkbenchApp {
                                             StatusLevel::Error => theme::red(),
                                         };
                                         let level_mark = match n.level {
-                                            StatusLevel::Error => "✕ ",
-                                            StatusLevel::Warn => "⚠ ",
+                                            StatusLevel::Error => ICON_ERROR.codepoint,
+                                            StatusLevel::Warn => ICON_WARNING.codepoint,
                                             StatusLevel::Info => "",
                                         };
                                         ui.label(
                                             egui::RichText::new(format!(
-                                                "{level_mark}{}",
+                                                "{level_mark} {}",
                                                 n.text
                                             ))
                                             .color(color)
@@ -307,7 +289,7 @@ impl WorkbenchApp {
         });
     }
 
-    /// 更新图标：🔄 / ✓ / ⚠ + 下载进度/按钮。
+    /// 更新图标与下载进度/按钮。
     fn draw_update_icon(&mut self, ui: &mut egui::Ui) {
         let us = &self.update_state;
 
@@ -322,11 +304,19 @@ impl WorkbenchApp {
         if us.update_available {
             let version_str = us.latest_version.as_deref().unwrap_or("?");
             if let Some(ref err) = us.error {
-                ui.label(egui::RichText::new("⚠ 更新失败").color(theme::yellow()))
-                    .on_hover_text(err);
+                ui.label(
+                    egui::RichText::new(format!("{} 更新失败", ICON_WARNING.codepoint))
+                        .color(theme::yellow()),
+                )
+                .on_hover_text(err);
             }
-            let label = ui
-                .label(egui::RichText::new(format!("⬇ v{version_str} 可用")).color(theme::cyan()));
+            let label = ui.label(
+                egui::RichText::new(format!(
+                    "{} v{version_str} 可用",
+                    ICON_SYSTEM_UPDATE.codepoint
+                ))
+                .color(theme::cyan()),
+            );
 
             // hover 显示 changelog
             if !us.changelog.is_empty() {
@@ -345,35 +335,42 @@ impl WorkbenchApp {
                 ui.spinner();
                 ui.label(format!("下载中 {pct:.0}%"));
             } else if us.downloaded {
-                if ui
-                    .button(egui::RichText::new("更新并重启").color(theme::green()))
+                if design::button(ui, ICON_REFRESH, "更新并重启", design::ButtonKind::Primary)
                     .clicked()
                 {
                     self.update_state.want_restart = true;
                 }
-            } else if ui.button("下载更新").clicked() {
+            } else if design::button(
+                ui,
+                ICON_CLOUD_DOWNLOAD,
+                "下载更新",
+                design::ButtonKind::Secondary,
+            )
+            .clicked()
+            {
                 self.start_update_download();
             }
             return;
         }
 
-        // 错误时显示 ⚠
+        // 错误时显示警告
         if let Some(ref err) = us.error {
-            ui.label(egui::RichText::new("⚠").color(theme::yellow()))
+            ui.label(design::icon_only(ICON_WARNING, theme::yellow(), 17.0))
                 .on_hover_text(err);
         }
 
-        // 图标：未检查=🔄，已检查无更新=✓
+        // 图标：未检查=刷新，已检查无更新=完成。
         let (icon, color, hover) = if us.latest_version.is_some() && us.error.is_none() {
-            ("✓", theme::green(), "已是最新版本，点击重新检查")
+            (
+                ICON_CHECK_CIRCLE,
+                theme::green(),
+                "已是最新版本，点击重新检查",
+            )
         } else {
-            ("🔄", theme::text_secondary(), "检查更新")
+            (ICON_REFRESH, theme::text_secondary(), "检查更新")
         };
         if ui
-            .add(
-                egui::Label::new(egui::RichText::new(icon).color(color))
-                    .sense(egui::Sense::click()),
-            )
+            .add(egui::Label::new(design::icon_only(icon, color, 17.0)).sense(egui::Sense::click()))
             .on_hover_text(hover)
             .clicked()
         {

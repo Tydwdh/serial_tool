@@ -1,4 +1,12 @@
 use eframe::egui;
+use egui_material_icons::{
+    MaterialIcon,
+    icons::{
+        ICON_CANCEL, ICON_FIBER_MANUAL_RECORD, ICON_LINK_OFF, ICON_POWER_SETTINGS_NEW,
+        ICON_REFRESH, ICON_STOP,
+    },
+};
+use tool_panels::design::{self, ButtonKind};
 use tool_transport::SerialPortDescriptor;
 
 const SERIAL_ACTION_BUTTON_SIZE: egui::Vec2 = egui::vec2(52.0, 26.0);
@@ -52,18 +60,28 @@ pub(super) fn serial_combo(
         });
 }
 
-pub(super) fn serial_action_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    ui.add_sized(SERIAL_ACTION_BUTTON_SIZE, egui::Button::new(text))
+pub(super) fn serial_action_button(
+    ui: &mut egui::Ui,
+    icon: MaterialIcon,
+    text: &str,
+) -> egui::Response {
+    ui.add_sized(
+        SERIAL_ACTION_BUTTON_SIZE,
+        egui::Button::new(design::icon_text(icon, text)).corner_radius(6.0),
+    )
 }
 
 pub(super) fn serial_action_button_enabled(
     ui: &mut egui::Ui,
     enabled: bool,
+    icon: MaterialIcon,
     text: &str,
 ) -> egui::Response {
     ui.add_enabled(
         enabled,
-        egui::Button::new(text).min_size(SERIAL_ACTION_BUTTON_SIZE),
+        egui::Button::new(design::icon_text(icon, text))
+            .corner_radius(6.0)
+            .min_size(SERIAL_ACTION_BUTTON_SIZE),
     )
 }
 
@@ -73,7 +91,7 @@ use tool_panels::theme;
 
 impl WorkbenchApp {
     pub(super) fn top_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let so = self
                 .serial
                 .selected_port
@@ -94,8 +112,11 @@ impl WorkbenchApp {
             if ui
                 .selectable_label(
                     !self.serial.top_bar_serial_collapsed,
-                    egui::RichText::new(format!("{} {sl}", if so { "●" } else { "○" }))
-                        .color(if so { theme::green() } else { theme::red() }),
+                    egui::RichText::new(format!(
+                        "{} {sl}",
+                        egui_material_icons::icons::ICON_CABLE.codepoint
+                    ))
+                    .color(if so { theme::green() } else { theme::red() }),
                 )
                 .clicked()
             {
@@ -125,14 +146,15 @@ impl WorkbenchApp {
                     .is_some_and(|port| self.transport.status_port(port).open);
 
                 if selected_open {
-                    if serial_action_button(ui, "重连").clicked() {
+                    if serial_action_button(ui, ICON_REFRESH, "重连").clicked() {
                         self.reconnect_selected_port();
                     }
-                } else if serial_action_button(ui, "打开").clicked() {
+                } else if serial_action_button(ui, ICON_POWER_SETTINGS_NEW, "打开").clicked() {
                     self.open_selected_port();
                 }
 
-                let mut close_btn = serial_action_button_enabled(ui, selected_open, "关闭");
+                let mut close_btn =
+                    serial_action_button_enabled(ui, selected_open, ICON_LINK_OFF, "关闭");
                 if !selected_open {
                     close_btn = close_btn.on_disabled_hover_text("端口未打开");
                 }
@@ -166,7 +188,8 @@ impl WorkbenchApp {
                 let now = tool_core::now_timestamp_ms() as f64 / 1000.0;
                 let remaining = (pending.next_try_at - now).max(0.0);
                 let label = format!(
-                    "⟳ 重连中 {} {:.1}s ({}/{})",
+                    "{} 重连中 {} {:.1}s ({}/{})",
+                    ICON_REFRESH.codepoint,
                     pending.port_name,
                     remaining,
                     pending.attempts + 1,
@@ -174,7 +197,7 @@ impl WorkbenchApp {
                 );
                 ui.label(egui::RichText::new(label).color(theme::yellow()))
                     .on_hover_text("点击 × 取消等待重连");
-                if ui.small_button("×").on_hover_text("取消重连").clicked() {
+                if design::icon_button(ui, ICON_CANCEL, "取消重连").clicked() {
                     self.serial.pending_reconnect = None;
                     self.set_status_force(StatusLevel::Info, "已取消自动重连".to_owned());
                 }
@@ -183,14 +206,12 @@ impl WorkbenchApp {
             // ── 插件贡献：top_bar.left ──
             self.ui_contribution_slot(ui, "top_bar.left");
             let rec = self.recorder.is_running();
-            if ui
-                .button(if rec {
-                    egui::RichText::new("⏹ 停止").color(theme::red())
-                } else {
-                    egui::RichText::new("⏺ 录制").color(theme::text_secondary())
-                })
-                .clicked()
-            {
+            let record_response = if rec {
+                design::button(ui, ICON_STOP, "停止录制", ButtonKind::Danger)
+            } else {
+                design::button(ui, ICON_FIBER_MANUAL_RECORD, "开始录制", ButtonKind::Ghost)
+            };
+            if record_response.clicked() {
                 self.start_or_stop_recording();
             }
 

@@ -1099,6 +1099,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "egui_extras"
+version = "0.35.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2bd33be7338367bf21f54d62e069d58a5fb3ae033fa8bc6df7a77b9ef4cf957"
+dependencies = [
+ "ahash",
+ "egui",
+ "enum-map",
+ "itertools",
+ "log",
+ "profiling",
+]
+
+[[package]]
 name = "egui_glow"
 version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1125,6 +1139,28 @@ dependencies = [
  "rmp-serde",
  "serde",
  "serde_bytes",
+]
+
+[[package]]
+name = "egui_kittest"
+version = "0.35.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "002c31e1f41461ce206333ffbd2e07563b79e87eb71c27e026151d12ee7b78e0"
+dependencies = [
+ "egui",
+ "kittest",
+ "log",
+ "serde",
+ "toml",
+]
+
+[[package]]
+name = "egui_material_icons"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd64a174529ad8ad5b3fcf74bafa368ed24aacc5887c2742b1e69ce4151c1a61"
+dependencies = [
+ "egui",
 ]
 
 [[package]]
@@ -1159,6 +1195,26 @@ name = "endi"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
+
+[[package]]
+name = "enum-map"
+version = "2.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6866f3bfdf8207509a033af1a75a7b08abda06bbaaeae6669323fd5a097df2e9"
+dependencies = [
+ "enum-map-derive",
+]
+
+[[package]]
+name = "enum-map-derive"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f282cfdfe92516eb26c2af8589c274c7c17681f5ecc03c18255fe741c6aa64eb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "enumflags2"
@@ -1682,6 +1738,8 @@ dependencies = [
  "dirs-next",
  "eframe",
  "egui",
+ "egui_extras",
+ "egui_material_icons",
  "egui_tiles",
  "log",
  "open",
@@ -2200,6 +2258,16 @@ name = "khronos_api"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
+
+[[package]]
+name = "kittest"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90ceaa75eb0036a32b6b9833962eb18137449e9817e2e586006471925b727fd5"
+dependencies = [
+ "accesskit",
+ "accesskit_consumer 0.35.0",
+]
 
 [[package]]
 name = "kurbo"
@@ -3322,7 +3390,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4412,6 +4480,8 @@ version = "0.7.3"
 dependencies = [
  "chrono",
  "egui",
+ "egui_kittest",
+ "egui_material_icons",
  "egui_tiles",
  "open",
  "serde",

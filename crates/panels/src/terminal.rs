@@ -1,5 +1,7 @@
 use crate::{
-    MAX_INGEST_PER_FRAME, MESSAGE_EVENT_BUFFER_CAPACITY, fmt_ts,
+    MAX_INGEST_PER_FRAME, MESSAGE_EVENT_BUFFER_CAPACITY,
+    design::{self, ButtonKind},
+    fmt_ts,
     table::{
         AutoScrollState, MessageList, MessageSearch, RowHighlight, RowSelection, TextSelectionRows,
         bulk_copy_button, claim_copy_focus, copy_text_with_feedback, edge_scroll_delta,
@@ -9,6 +11,10 @@ use crate::{
 };
 use egui::text_selection::LabelSelectionState;
 use egui::{Color32, RichText, ScrollArea, Sense, Stroke};
+use egui_material_icons::icons::{
+    ICON_CANCEL, ICON_DELETE_SWEEP, ICON_DOWNLOAD, ICON_FILTER_ALT_OFF, ICON_FULLSCREEN,
+    ICON_SEARCH,
+};
 use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -587,14 +593,14 @@ impl TerminalPanel {
         let mut force_scroll_to_bottom = self.auto_scroll.take_pending(&scroll_key);
 
         ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut self.show_rx, "RX");
-            ui.checkbox(&mut self.show_tx, "TX");
-            ui.checkbox(&mut self.show_hex, "HEX");
-            ui.checkbox(&mut self.show_raw, "原始");
+            design::segmented_toggle(ui, &mut self.show_rx, "RX", "RX");
+            design::segmented_toggle(ui, &mut self.show_tx, "TX", "TX");
+            design::segmented_toggle(ui, &mut self.show_hex, "HEX", "HEX");
+            design::segmented_toggle(ui, &mut self.show_raw, "原始", "原始");
 
             force_scroll_to_bottom |= self.auto_scroll.button(ui);
 
-            ui.menu_button("导出", |ui| {
+            ui.menu_button(design::icon_text(ICON_DOWNLOAD, "导出"), |ui| {
                 if ui.button("导出 TXT 纯文本…").clicked() {
                     self.export_request = Some(TerminalExportFormat::Txt);
                     ui.close();
@@ -623,12 +629,12 @@ impl TerminalPanel {
             let armed_ts: Option<f64> = ui.ctx().memory(|m| m.data.get_temp(clear_id));
             let armed = armed_ts.is_some_and(|t| now - t < 3.0);
             let clear_label = if armed { "确认清空?" } else { "清空" };
-            let clear_btn = egui::Button::new(egui::RichText::new(clear_label).color(if armed {
-                crate::theme::red()
+            let clear_kind = if armed {
+                ButtonKind::Danger
             } else {
-                crate::theme::text_primary()
-            }));
-            if ui.add(clear_btn).clicked() {
+                ButtonKind::Ghost
+            };
+            if design::button(ui, ICON_DELETE_SWEEP, clear_label, clear_kind).clicked() {
                 if armed {
                     self.clear();
                     ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(clear_id));
@@ -638,12 +644,12 @@ impl TerminalPanel {
             }
             if armed {
                 // 解除武装的可点击提示（点此取消）
-                if ui.small_button("取消").clicked() {
+                if design::button(ui, ICON_CANCEL, "取消", ButtonKind::Ghost).clicked() {
                     ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(clear_id));
                 }
             }
 
-            if ui.button("⛶").on_hover_text("放大查看").clicked() {
+            if design::icon_button(ui, ICON_FULLSCREEN, "放大查看").clicked() {
                 self.maximize_clicked = true;
             }
         });
@@ -651,7 +657,11 @@ impl TerminalPanel {
         force_scroll_to_bottom |= self.auto_scroll.enabled && wheel_moves_towards_bottom;
 
         ui.horizontal(|ui| {
-            ui.label("搜索");
+            ui.label(design::icon_only(
+                ICON_SEARCH,
+                theme::text_secondary(),
+                17.0,
+            ));
             self.search.toolbar(
                 ui,
                 140.0,
@@ -670,7 +680,8 @@ impl TerminalPanel {
                     }
                 });
 
-            if ui.button("清除筛选").clicked() {
+            if design::button(ui, ICON_FILTER_ALT_OFF, "清除筛选", ButtonKind::Ghost).clicked()
+            {
                 self.search.clear();
                 self.port_filter = None;
             }

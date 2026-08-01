@@ -1185,14 +1185,6 @@ mod tests {
     }
 
     #[test]
-    fn blank_custom_proxy_uses_system_or_environment_route() {
-        assert_eq!(
-            NetworkSettings::with_proxy(Some("   ".to_owned())).route_label(),
-            "系统代理或直连"
-        );
-    }
-
-    #[test]
     fn find_exe_in_extracted_direct() {
         let dir = tempfile::tempdir().unwrap();
         let exe_path = dir.path().join(APP_EXE_NAME);

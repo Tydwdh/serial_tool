@@ -1,7 +1,11 @@
 use std::collections::VecDeque;
 
-use crate::theme;
+use crate::{design, theme};
 use egui::{Color32, ComboBox, ProgressBar, RichText, Sense, TextEdit};
+use egui_material_icons::icons::{
+    ICON_FOLDER_OPEN, ICON_PAUSE, ICON_PLAY_ARROW, ICON_REPLAY, ICON_SKIP_NEXT, ICON_SKIP_PREVIOUS,
+    ICON_STOP, ICON_TUNE, ICON_UPLOAD_FILE,
+};
 use tool_databus::DataBus;
 use tool_recorder::{ReplayBlockReason, ReplayManager, ReplayPolicy, ReplayState};
 
@@ -190,55 +194,55 @@ impl ReplayPanel {
         let mut status = self.manager.status();
 
         // ── 回放文件 ──
-        egui::Frame::group(ui.style())
-            .inner_margin(egui::Margin::symmetric(12, 8))
-            .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::card_accent_replay());
-                    ui.label(egui::RichText::new("📁 回放文件").heading());
-                });
-                ui.separator();
-                self.file_controls(ui);
-            });
+        design::card().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            design::section_header(
+                ui,
+                ICON_FOLDER_OPEN,
+                "回放文件",
+                Some("载入 JSONL 会话并恢复当时的数据流"),
+            );
+            ui.separator();
+            self.file_controls(ui);
+        });
 
         ui.add_space(8.0);
 
         // ── 回放策略 ──
-        egui::Frame::group(ui.style())
-            .inner_margin(egui::Margin::symmetric(12, 8))
-            .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::card_accent_replay());
-                    ui.label(egui::RichText::new("⚙ 回放策略").heading());
-                });
-                ui.separator();
-                self.policy_controls(ui);
-            });
+        design::card().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            design::section_header(
+                ui,
+                ICON_TUNE,
+                "回放策略",
+                Some("选择使用录制结果或重新运行解析器"),
+            );
+            ui.separator();
+            self.policy_controls(ui);
+        });
 
         ui.add_space(8.0);
 
         // ── 播放控制 ──
-        egui::Frame::group(ui.style())
-            .inner_margin(egui::Margin::symmetric(12, 8))
-            .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::card_accent_replay());
-                    ui.label(egui::RichText::new("▶ 播放控制").heading());
-                });
-                ui.separator();
+        design::card().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            design::section_header(
+                ui,
+                ICON_REPLAY,
+                "播放控制",
+                Some("定位、步进和调整回放速度"),
+            );
+            ui.separator();
 
-                // 控件可能修改了 manager 状态，这里重新取一次。
-                status = self.manager.status();
+            // 控件可能修改了 manager 状态，这里重新取一次。
+            status = self.manager.status();
 
-                self.playback_controls(ui, &status);
+            self.playback_controls(ui, &status);
 
-                status = self.manager.status();
-                self.progress_bar(ui, &status);
-                self.bookmark_controls(ui, &status);
-            });
+            status = self.manager.status();
+            self.progress_bar(ui, &status);
+            self.bookmark_controls(ui, &status);
+        });
 
         ui.add_space(4.0);
 
@@ -301,11 +305,13 @@ impl ReplayPanel {
                     .hint_text("选择 JSONL 回放文件"),
             );
 
-            if ui.button("浏览").clicked() {
+            if design::button(ui, ICON_FOLDER_OPEN, "浏览", design::ButtonKind::Secondary).clicked()
+            {
                 self.want_pick_file = true;
             }
 
-            if ui.button("加载").clicked() {
+            if design::button(ui, ICON_UPLOAD_FILE, "加载", design::ButtonKind::Primary).clicked()
+            {
                 self.try_load();
             }
         });
@@ -384,17 +390,18 @@ impl ReplayPanel {
 
         ui.horizontal_wrapped(|ui| {
             if status.state == ReplayState::Playing {
-                if ui.button("⏸ 暂停").clicked() {
+                if design::button(ui, ICON_PAUSE, "暂停", design::ButtonKind::Secondary).clicked()
+                {
                     self.manager.pause();
                 }
             } else {
-                let label = match status.state {
-                    ReplayState::Finished => "↻ 重播",
-                    _ => "▶ 播放",
+                let (icon, label) = match status.state {
+                    ReplayState::Finished => (ICON_REPLAY, "重播"),
+                    _ => (ICON_PLAY_ARROW, "播放"),
                 };
 
                 if ui
-                    .add_enabled(can_play, egui::Button::new(label))
+                    .add_enabled(can_play, egui::Button::new(design::icon_text(icon, label)))
                     .on_disabled_hover_text("当前回放策略需要先完成 Replay Analyzer")
                     .clicked()
                 {
@@ -415,7 +422,10 @@ impl ReplayPanel {
             }
 
             if ui
-                .add_enabled(can_control, egui::Button::new("⏹ 停止"))
+                .add_enabled(
+                    can_control,
+                    egui::Button::new(design::icon_text(ICON_STOP, "停止")),
+                )
                 .clicked()
             {
                 self.manager.stop();
@@ -436,7 +446,10 @@ impl ReplayPanel {
                 });
 
             if ui
-                .add_enabled(can_seek && status.cursor > 0, egui::Button::new("◀"))
+                .add_enabled(
+                    can_seek && status.cursor > 0,
+                    egui::Button::new(ICON_SKIP_PREVIOUS),
+                )
                 .on_hover_text("后退指定事件数")
                 .clicked()
             {
@@ -446,7 +459,7 @@ impl ReplayPanel {
             if ui
                 .add_enabled(
                     can_seek && status.cursor < status.total_events,
-                    egui::Button::new("▶"),
+                    egui::Button::new(ICON_SKIP_NEXT),
                 )
                 .on_hover_text("前进指定事件数")
                 .clicked()

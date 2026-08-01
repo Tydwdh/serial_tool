@@ -3,21 +3,65 @@ use crate::bootstrap::apply_theme;
 use crate::config::{config_path, default_recorder_path};
 use crate::state::StatusLevel;
 use eframe::egui;
+use egui_extras::{Column, TableBuilder};
+use egui_material_icons::icons::{
+    ICON_APPS, ICON_CONTENT_COPY, ICON_DATA_USAGE, ICON_FOLDER, ICON_FOLDER_OPEN, ICON_INFO,
+    ICON_KEYBOARD, ICON_NETWORK_CHECK, ICON_PALETTE, ICON_RESTART_ALT, ICON_SETTINGS, ICON_TUNE,
+};
 use std::path::{Path, PathBuf};
-use tool_panels::theme;
-use tool_panels::{DynamicField, copy_text_with_feedback, dynamic_form_ui, parse_fields};
+use tool_panels::{
+    DynamicField, copy_text_with_feedback,
+    design::{self, ButtonKind},
+    dynamic_form_ui, parse_fields, theme,
+};
 
 impl WorkbenchApp {
     pub(super) fn settings_panel(&mut self, ui: &mut egui::Ui) {
-        // ── 工作区 ──
-        egui::Frame::group(ui.style())
-            .inner_margin(egui::Margin::symmetric(12, 8))
-            .show(ui, |ui| {
+        let nav_id = ui.id().with("settings_category");
+        let mut category = ui
+            .ctx()
+            .data_mut(|data| data.get_persisted::<usize>(nav_id))
+            .unwrap_or(0)
+            .min(4);
+        design::elevated_card().show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for (index, icon, label) in [
+                    (0, ICON_SETTINGS, "常规"),
+                    (1, ICON_DATA_USAGE, "连接与数据"),
+                    (2, ICON_KEYBOARD, "快捷键"),
+                    (3, ICON_APPS, "插件设置"),
+                    (4, ICON_INFO, "关于与重置"),
+                ] {
+                    if ui
+                        .add(
+                            egui::Button::selectable(
+                                category == index,
+                                design::icon_text(icon, label),
+                            )
+                            .corner_radius(7.0)
+                            .min_size(egui::vec2(112.0, 32.0)),
+                        )
+                        .clicked()
+                    {
+                        category = index;
+                    }
+                }
+            });
+        });
+        ui.ctx()
+            .data_mut(|data| data.insert_persisted(nav_id, category));
+        ui.add_space(design::SECTION_GAP);
+
+        if category == 0 {
+            // ── 工作区 ──
+            design::card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::card_accent_settings());
-                    ui.label(egui::RichText::new("📂 工作区").heading());
-                });
+                design::section_header(
+                    ui,
+                    ICON_FOLDER,
+                    "工作区",
+                    Some("配置位置、布局与最近工作区"),
+                );
                 ui.separator();
                 self.render_config_locations(ui);
 
@@ -109,17 +153,12 @@ impl WorkbenchApp {
                 }
             });
 
-        ui.add_space(8.0);
+            ui.add_space(8.0);
 
-        // ── 外观 ──
-        egui::Frame::group(ui.style())
-            .inner_margin(egui::Margin::symmetric(12, 8))
-            .show(ui, |ui| {
+            // ── 外观 ──
+            design::card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::card_accent_settings());
-                    ui.label(egui::RichText::new("🎨 外观").heading());
-                });
+                design::section_header(ui, ICON_PALETTE, "外观", Some("主题、面板与文本显示"));
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("界面主题");
@@ -199,18 +238,16 @@ impl WorkbenchApp {
                     }
                 });
             });
+        }
 
         ui.add_space(8.0);
 
-        // ── 网络 ──
-        egui::Frame::group(ui.style())
-            .inner_margin(egui::Margin::symmetric(12, 8))
+        if category == 1 {
+            // ── 网络 ──
+            design::card()
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::card_accent_settings());
-                    ui.label(egui::RichText::new("🌐 网络").heading());
-                });
+                design::section_header(ui, ICON_NETWORK_CHECK, "网络", Some("市场与更新代理"));
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("代理地址");
@@ -232,17 +269,12 @@ impl WorkbenchApp {
                 );
             });
 
-        ui.add_space(8.0);
+            ui.add_space(8.0);
 
-        // ── 数据 ──
-        egui::Frame::group(ui.style())
-            .inner_margin(egui::Margin::symmetric(12, 8))
-            .show(ui, |ui| {
+            // ── 数据 ──
+            design::card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::card_accent_settings());
-                    ui.label(egui::RichText::new("📊 数据").heading());
-                });
+                design::section_header(ui, ICON_TUNE, "数据", Some("终端聚合与容量限制"));
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("终端合并阈值");
@@ -305,71 +337,66 @@ impl WorkbenchApp {
                 .response
                 .on_hover_text("日志面板保留的最近条数上限。可拖拽滑块或直接输入数字。");
             });
+        }
 
         ui.add_space(8.0);
 
-        // ── 快捷键 ──
-        egui::Frame::group(ui.style())
-            .inner_margin(egui::Margin::symmetric(12, 8))
-            .show(ui, |ui| {
+        if category == 2 {
+            // ── 快捷键 ──
+            design::card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::card_accent_settings());
-                    ui.label(egui::RichText::new("⌨ 快捷键").heading());
-                });
+                design::section_header(ui, ICON_KEYBOARD, "快捷键", Some("录制或清除动作绑定"));
                 ui.separator();
                 self.render_keymap_editor(ui);
             });
+        }
 
         ui.add_space(8.0);
 
-        // ── 插件设置 ──
-        self.render_plugin_settings(ui);
+        if category == 3 {
+            // ── 插件设置 ──
+            self.render_plugin_settings(ui);
+        }
 
         ui.add_space(8.0);
 
-        // ── 恢复默认 ──
-        ui.horizontal(|ui| {
-            if ui
-                .button(egui::RichText::new("🔄 恢复所有默认设置").color(theme::orange()))
-                .clicked()
-            {
-                self.serial.selected_port = None;
-                self.serial.baud_rate = "115200".to_owned();
-                self.serial.data_bits = "8".to_owned();
-                self.serial.stop_bits = "1".to_owned();
-                self.serial.parity = "none".to_owned();
-                self.recorder_path = default_recorder_path();
-                self.serial.port_aliases.clear();
-                self.serial.port_groups.clear();
-                self.panels.reset_tiles_layout();
-                self.terminal_panel.merge_window_ms = 5;
-                self.terminal_panel.set_max_entries(50000);
-                self.bottom_log_panel.set_max_entries(50000);
-                self.monospace_font_size = 13.0;
-                self.ui_theme = theme::AppTheme::default();
-                self.theme_path = theme::builtin_theme_path(self.ui_theme, &self.theme_dir);
-                if let Err(error) = theme::load_builtin_theme(self.ui_theme, &self.theme_dir) {
-                    log::warn!("load default theme failed: {error}");
+        if category == 4 {
+            // ── 恢复默认 ──
+            ui.horizontal(|ui| {
+                if design::button(ui, ICON_RESTART_ALT, "恢复所有默认设置", ButtonKind::Danger)
+                    .clicked()
+                {
+                    self.serial.selected_port = None;
+                    self.serial.baud_rate = "115200".to_owned();
+                    self.serial.data_bits = "8".to_owned();
+                    self.serial.stop_bits = "1".to_owned();
+                    self.serial.parity = "none".to_owned();
+                    self.recorder_path = default_recorder_path();
+                    self.serial.port_aliases.clear();
+                    self.serial.port_groups.clear();
+                    self.panels.reset_tiles_layout();
+                    self.terminal_panel.merge_window_ms = 5;
+                    self.terminal_panel.set_max_entries(50000);
+                    self.bottom_log_panel.set_max_entries(50000);
+                    self.monospace_font_size = 13.0;
+                    self.ui_theme = theme::AppTheme::default();
+                    self.theme_path = theme::builtin_theme_path(self.ui_theme, &self.theme_dir);
+                    if let Err(error) = theme::load_builtin_theme(self.ui_theme, &self.theme_dir) {
+                        log::warn!("load default theme failed: {error}");
+                    }
+                    self.terminal_panel.font_size = 13.0;
+                    self.bottom_log_panel.font_size = 13.0;
+                    apply_theme(ui.ctx(), self.ui_theme);
+                    self.set_status_force(StatusLevel::Warn, "已恢复默认设置");
                 }
-                self.terminal_panel.font_size = 13.0;
-                self.bottom_log_panel.font_size = 13.0;
-                apply_theme(ui.ctx(), self.ui_theme);
-                self.set_status_force(StatusLevel::Warn, "已恢复默认设置");
-            }
-        });
+            });
 
-        ui.add_space(8.0);
+            ui.add_space(8.0);
 
-        // ── 关于 ──
-        egui::Frame::group(ui.style())
-            .inner_margin(egui::Margin::symmetric(12, 8))
-            .show(ui, |ui| {
+            // ── 关于 ──
+            design::card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::card_accent_settings());
-                    ui.label(egui::RichText::new("ℹ 关于").heading());
-                });
+                design::section_header(ui, ICON_INFO, "关于", Some("版本与运行信息"));
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label(format!("硬件调试工作台 v{}", env!("CARGO_PKG_VERSION")));
@@ -382,6 +409,7 @@ impl WorkbenchApp {
                     }
                 });
             });
+        }
     }
 
     fn render_config_locations(&mut self, ui: &mut egui::Ui) {
@@ -410,14 +438,10 @@ impl WorkbenchApp {
                     .color(theme::text_primary()),
             )
             .on_hover_text(&path_text);
-            if ui.small_button("📋").on_hover_text("复制路径").clicked() {
+            if design::icon_button(ui, ICON_CONTENT_COPY, "复制路径").clicked() {
                 copy_text_with_feedback(ui, path_text.clone(), format!("已复制{label}路径"));
             }
-            if ui
-                .small_button("📂")
-                .on_hover_text("打开所在目录")
-                .clicked()
-            {
+            if design::icon_button(ui, ICON_FOLDER_OPEN, "打开所在目录").clicked() {
                 match open_config_location(path, open_self) {
                     Ok(target) => self.set_status_force(
                         StatusLevel::Info,
@@ -448,61 +472,76 @@ impl WorkbenchApp {
             .collect();
         let all_actions = Action::all_with_plugins(&plugin_summaries);
 
-        egui::Grid::new("keymap_grid")
-            .num_columns(4)
+        TableBuilder::new(ui)
             .striped(true)
-            .min_col_width(80.0)
-            .show(ui, |ui| {
-                // 表头
-                ui.label(
-                    egui::RichText::new("操作")
-                        .strong()
-                        .color(theme::text_secondary()),
-                );
-                ui.label(
-                    egui::RichText::new("快捷键")
-                        .strong()
-                        .color(theme::text_secondary()),
-                );
-                ui.label("");
-                ui.label("");
-                ui.end_row();
-
+            .resizable(true)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::remainder().at_least(150.0))
+            .column(Column::remainder().at_least(120.0))
+            .column(Column::auto().at_least(72.0))
+            .column(Column::auto().at_least(72.0))
+            .header(30.0, |mut header| {
+                for title in ["操作", "快捷键", "录制", "清除"] {
+                    header.col(|ui| {
+                        ui.label(
+                            egui::RichText::new(title)
+                                .strong()
+                                .color(theme::text_secondary()),
+                        );
+                    });
+                }
+            })
+            .body(|mut body| {
                 for action in &all_actions {
-                    let bindings = self.keymap.get_bindings(action);
+                    let bindings = self.keymap.get_bindings(action).to_vec();
                     let action_label = action.label_with_plugins(&plugin_summaries);
                     let is_recording = self.key_recording.as_ref() == Some(action);
-
-                    ui.label(&action_label);
-
-                    // 快捷键显示
-                    if bindings.is_empty() {
-                        ui.colored_label(theme::text_dimmed(), "未绑定");
-                    } else {
-                        let shortcuts: Vec<String> = bindings.iter().map(|b| b.display()).collect();
-                        ui.label(shortcuts.join(", "));
-                    }
-
-                    // 录制按钮 / 录制中状态
-                    if is_recording {
-                        ui.colored_label(theme::yellow(), "按下按键...");
-                    } else if ui.small_button("录制").clicked() {
-                        self.key_recording = Some(action.clone());
-                    }
-
-                    // 清除按钮
-                    if !bindings.is_empty() && ui.small_button("清除").clicked() {
-                        self.keymap.set_bindings(action, vec![]);
-                        if let Err(e) = self.save_config() {
-                            log::warn!("save_config failed: {e}")
-                        };
-                    }
-                    ui.end_row();
+                    body.row(32.0, |mut row| {
+                        row.col(|ui| {
+                            ui.label(&action_label);
+                        });
+                        row.col(|ui| {
+                            if bindings.is_empty() {
+                                ui.colored_label(theme::text_dimmed(), "未绑定");
+                            } else {
+                                let shortcuts: Vec<String> =
+                                    bindings.iter().map(|binding| binding.display()).collect();
+                                design::badge(ui, shortcuts.join(", "), theme::cyan());
+                            }
+                        });
+                        row.col(|ui| {
+                            if is_recording {
+                                design::status_pill(ui, theme::yellow(), "按下按键…");
+                            } else if design::button(ui, ICON_KEYBOARD, "录制", ButtonKind::Ghost)
+                                .clicked()
+                            {
+                                self.key_recording = Some(action.clone());
+                            }
+                        });
+                        row.col(|ui| {
+                            if !bindings.is_empty()
+                                && design::button(ui, ICON_RESTART_ALT, "清除", ButtonKind::Ghost)
+                                    .clicked()
+                            {
+                                self.keymap.set_bindings(action, vec![]);
+                                if let Err(e) = self.save_config() {
+                                    log::warn!("save_config failed: {e}")
+                                };
+                            }
+                        });
+                    });
                 }
             });
 
         ui.add_space(4.0);
-        if ui.button("恢复默认快捷键").clicked() {
+        if design::button(
+            ui,
+            ICON_RESTART_ALT,
+            "恢复默认快捷键",
+            ButtonKind::Secondary,
+        )
+        .clicked()
+        {
             self.keymap = Keymap::default();
             self.key_recording = None;
             if let Err(e) = self.save_config() {
@@ -516,6 +555,14 @@ impl WorkbenchApp {
     fn render_plugin_settings(&mut self, ui: &mut egui::Ui) {
         let plugin_settings = self.plugin_manager.plugin_settings();
         if plugin_settings.is_empty() {
+            design::card().show(ui, |ui| {
+                design::empty_state(
+                    ui,
+                    ICON_APPS,
+                    "暂无插件设置",
+                    "启用带设置项的插件后，其配置会显示在这里。",
+                );
+            });
             return;
         }
         for (plugin_id, plugin_name, settings) in &plugin_settings {
@@ -569,28 +616,28 @@ impl WorkbenchApp {
                 continue;
             }
 
-            egui::Frame::group(ui.style())
-                .inner_margin(egui::Margin::symmetric(12, 8))
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        theme::card_accent_bar(ui, theme::card_accent_plugin());
-                        ui.label(egui::RichText::new(format!("🧩 {plugin_name} 设置")).heading());
-                    });
-                    ui.separator();
+            design::card().show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                design::section_header(
+                    ui,
+                    ICON_APPS,
+                    format!("{plugin_name} 设置"),
+                    Some("插件提供的可配置选项"),
+                );
+                ui.separator();
 
-                    let panel_id = format!("{plugin_id}.settings");
+                let panel_id = format!("{plugin_id}.settings");
 
-                    // 手动渲染表单
-                    dynamic_form_ui(
-                        ui,
-                        &self.bus,
-                        &panel_id,
-                        &mut fields,
-                        true, // auto_apply
-                        &self.serial.ports,
-                    );
-                });
+                // 手动渲染表单
+                dynamic_form_ui(
+                    ui,
+                    &self.bus,
+                    &panel_id,
+                    &mut fields,
+                    true, // auto_apply
+                    &self.serial.ports,
+                );
+            });
         }
     }
 }

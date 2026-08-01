@@ -1,5 +1,14 @@
-use crate::{copy_text_with_feedback, theme};
+use crate::{
+    copy_text_with_feedback,
+    design::{self, ButtonKind},
+    theme,
+};
 use egui::{Color32, ScrollArea, TextEdit};
+use egui_material_icons::icons::{
+    ICON_APPS, ICON_CANCEL, ICON_CONTENT_COPY, ICON_DELETE, ICON_DIAGNOSIS, ICON_DOWNLOAD,
+    ICON_FOLDER_OPEN, ICON_MANAGE_ACCOUNTS, ICON_OPEN_IN_NEW, ICON_REFRESH, ICON_RESTART_ALT,
+    ICON_SEARCH, ICON_SHOPPING_CART, ICON_TOGGLE_OFF, ICON_TOGGLE_ON,
+};
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use tool_extension::{
@@ -51,6 +60,8 @@ pub struct PluginsPanel {
     pending_uninstall: Option<String>,
     tab: PluginTab,
     market: MarketplaceState,
+    market_search: String,
+    market_category: Option<String>,
 }
 
 impl PluginsPanel {
@@ -62,6 +73,8 @@ impl PluginsPanel {
             pending_uninstall: None,
             tab: PluginTab::Installed,
             market: MarketplaceState::default(),
+            market_search: String::new(),
+            market_category: None,
         }
     }
 
@@ -146,24 +159,39 @@ impl PluginsPanel {
         }
 
         // ── tab 切换 ──
-        ui.horizontal(|ui| {
-            if ui
-                .selectable_label(self.tab == PluginTab::Installed, "已安装")
-                .clicked()
-            {
-                self.tab = PluginTab::Installed;
-                self.pending_uninstall = None;
-            }
-            ui.separator();
-            if ui
-                .selectable_label(self.tab == PluginTab::Marketplace, "市场")
-                .clicked()
-            {
-                self.tab = PluginTab::Marketplace;
-                self.pending_uninstall = None;
-            }
+        design::elevated_card().show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add(
+                        egui::Button::selectable(
+                            self.tab == PluginTab::Installed,
+                            design::icon_text(ICON_APPS, "已安装"),
+                        )
+                        .corner_radius(7.0)
+                        .min_size(egui::vec2(112.0, 32.0)),
+                    )
+                    .clicked()
+                {
+                    self.tab = PluginTab::Installed;
+                    self.pending_uninstall = None;
+                }
+                if ui
+                    .add(
+                        egui::Button::selectable(
+                            self.tab == PluginTab::Marketplace,
+                            design::icon_text(ICON_SHOPPING_CART, "市场"),
+                        )
+                        .corner_radius(7.0)
+                        .min_size(egui::vec2(112.0, 32.0)),
+                    )
+                    .clicked()
+                {
+                    self.tab = PluginTab::Marketplace;
+                    self.pending_uninstall = None;
+                }
+            });
         });
-        ui.separator();
+        ui.add_space(design::SECTION_GAP);
 
         match self.tab {
             PluginTab::Installed => {
@@ -187,19 +215,20 @@ impl PluginsPanel {
         manager: &mut PluginManager,
     ) -> Option<PluginPanelEvent> {
         // ── 管理 ──
-        let toolbar_status = egui::Frame::group(ui.style())
-            .inner_margin(egui::Margin::symmetric(12, 8))
+        let toolbar_status = design::card()
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::card_accent_plugin());
-                    ui.label(egui::RichText::new("🔧 管理").heading());
-                });
+                design::section_header(
+                    ui,
+                    ICON_MANAGE_ACCOUNTS,
+                    "插件管理",
+                    Some("发现并管理本地插件"),
+                );
                 ui.separator();
-                ui.horizontal(|ui| -> Option<PluginPanelEvent> {
+                ui.horizontal_wrapped(|ui| -> Option<PluginPanelEvent> {
                     ui.label("根目录");
                     ui.add(TextEdit::singleline(&mut self.root).desired_width(240.0));
-                    if ui.button("刷新").clicked() {
+                    if design::button(ui, ICON_REFRESH, "刷新", ButtonKind::Primary).clicked() {
                         match manager.discover_roots([PathBuf::from(self.root.trim())]) {
                             Ok(count) => {
                                 return Some(PluginPanelEvent::Status(
@@ -212,7 +241,9 @@ impl PluginsPanel {
                             }
                         }
                     }
-                    if ui.button("打开目录").clicked() {
+                    if design::button(ui, ICON_FOLDER_OPEN, "打开目录", ButtonKind::Secondary)
+                        .clicked()
+                    {
                         let _ = open::that(&self.root);
                     }
                     None
@@ -228,7 +259,7 @@ impl PluginsPanel {
 
         if summaries.is_empty() && diagnostics.is_empty() {
             ui.add_space(8.0);
-            ui.label("未找到插件");
+            design::empty_state(ui, ICON_APPS, "未找到插件", "刷新目录或先从市场安装插件。 ");
             return status;
         }
 
@@ -243,42 +274,32 @@ impl PluginsPanel {
                 .count();
             let inactive = summaries.len().saturating_sub(running + failed);
             ui.add_space(8.0);
-            egui::Frame::group(ui.style())
-                .inner_margin(egui::Margin::symmetric(12, 6))
-                .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(format!("已发现 {}", summaries.len()));
-                        ui.colored_label(theme::green(), format!("● 运行 {running}"));
-                        ui.colored_label(theme::text_secondary(), format!("● 未运行 {inactive}"));
-                        if failed > 0 {
-                            ui.colored_label(theme::red(), format!("● 异常 {failed}"));
-                        }
-                        if !diagnostics.is_empty() {
-                            ui.colored_label(
-                                theme::yellow(),
-                                format!("⚠ 诊断 {}", diagnostics.len()),
-                            );
-                        }
-                    });
+            design::card().show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    design::badge(ui, format!("已发现 {}", summaries.len()), theme::cyan());
+                    design::status_pill(ui, theme::green(), format!("运行 {running}"));
+                    design::status_pill(ui, theme::text_secondary(), format!("未运行 {inactive}"));
+                    if failed > 0 {
+                        design::status_pill(ui, theme::red(), format!("异常 {failed}"));
+                    }
+                    if !diagnostics.is_empty() {
+                        design::badge(ui, format!("诊断 {}", diagnostics.len()), theme::yellow());
+                    }
                 });
+            });
         }
 
         // ── 诊断 ──
         if !diagnostics.is_empty() {
             ui.add_space(8.0);
-            egui::Frame::group(ui.style())
-                .inner_margin(egui::Margin::symmetric(12, 8))
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        theme::card_accent_bar(ui, theme::yellow());
-                        ui.label(egui::RichText::new("⚠ 诊断").heading());
-                    });
-                    ui.separator();
-                    for diagnostic in diagnostics {
-                        diagnostic_row(ui, diagnostic);
-                    }
-                });
+            design::card().show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                design::section_header(ui, ICON_DIAGNOSIS, "诊断", Some("需要处理的插件问题"));
+                ui.separator();
+                for diagnostic in diagnostics {
+                    diagnostic_row(ui, diagnostic);
+                }
+            });
         }
 
         if summaries.is_empty() {
@@ -318,67 +339,146 @@ impl PluginsPanel {
         }
 
         // ── 工具栏：刷新按钮 + 状态 ──
-        egui::Frame::group(ui.style())
-            .inner_margin(egui::Margin::symmetric(12, 8))
-            .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::card_accent_plugin());
-                    ui.label(egui::RichText::new("🛒 市场").heading());
-                });
-                ui.separator();
-                ui.horizontal(|ui| {
-                    let refreshing = self.market.refreshing;
-                    let btn = egui::Button::new(if refreshing {
-                        "刷新中…"
-                    } else {
-                        "刷新市场"
-                    });
-                    if ui.add_enabled(!refreshing, btn).clicked() {
-                        events.push(PluginPanelEvent::RefreshMarket);
-                    }
-                    if let Some(err) = &self.market.error {
-                        ui.colored_label(theme::red(), egui::RichText::new(err).small());
-                    } else if refreshing {
-                        ui.label(egui::RichText::new("正在拉取市场索引…").small());
-                    } else if let Some(reg) = &self.market.registry {
+        design::card().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            design::section_header(
+                ui,
+                ICON_SHOPPING_CART,
+                "插件市场",
+                Some("搜索、筛选并安装官方索引中的插件"),
+            );
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                let refreshing = self.market.refreshing;
+                let refresh_label = if refreshing {
+                    "刷新中…"
+                } else {
+                    "刷新市场"
+                };
+                if ui
+                    .add_enabled_ui(!refreshing, |ui| {
+                        design::button(ui, ICON_REFRESH, refresh_label, ButtonKind::Primary)
+                    })
+                    .inner
+                    .clicked()
+                {
+                    events.push(PluginPanelEvent::RefreshMarket);
+                }
+                if let Some(err) = &self.market.error {
+                    ui.colored_label(theme::red(), egui::RichText::new(err).small());
+                } else if refreshing {
+                    ui.label(egui::RichText::new("正在拉取市场索引…").small());
+                } else if let Some(reg) = &self.market.registry {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "共 {} 个插件（更新于 {}）",
+                            reg.plugins.len(),
+                            reg.updated
+                        ))
+                        .small(),
+                    );
+                    if let Some(diagnostics) = &self.market.network_diagnostics {
                         ui.label(
-                            egui::RichText::new(format!(
-                                "共 {} 个插件（更新于 {}）",
-                                reg.plugins.len(),
-                                reg.updated
-                            ))
-                            .small(),
+                            egui::RichText::new(diagnostics)
+                                .small()
+                                .color(theme::text_secondary()),
                         );
-                        if let Some(diagnostics) = &self.market.network_diagnostics {
-                            ui.label(
-                                egui::RichText::new(diagnostics)
-                                    .small()
-                                    .color(theme::text_secondary()),
+                    }
+                }
+            });
+
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(design::icon_only(
+                    ICON_SEARCH,
+                    theme::text_secondary(),
+                    18.0,
+                ));
+                ui.add(
+                    TextEdit::singleline(&mut self.market_search)
+                        .desired_width(240.0)
+                        .hint_text("搜索名称、ID、描述或作者"),
+                );
+                let categories: BTreeSet<String> = self
+                    .market
+                    .registry
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|registry| registry.plugins.iter())
+                    .filter_map(|plugin| plugin.category.clone())
+                    .collect();
+                egui::ComboBox::from_id_salt("plugin-market-category")
+                    .selected_text(self.market_category.as_deref().unwrap_or("全部分类"))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.market_category, None, "全部分类");
+                        for category in categories {
+                            ui.selectable_value(
+                                &mut self.market_category,
+                                Some(category.clone()),
+                                category,
                             );
                         }
-                    }
-                });
+                    });
             });
+        });
 
         ui.add_space(8.0);
 
         let Some(reg) = self.market.registry.clone() else {
             if !self.market.refreshing {
-                ui.label("尚未加载市场索引，点击「刷新市场」");
+                design::empty_state(
+                    ui,
+                    ICON_SHOPPING_CART,
+                    "尚未加载市场索引",
+                    "点击“刷新市场”获取可安装插件。",
+                );
             }
             return events;
         };
 
         if reg.plugins.is_empty() {
-            ui.label("市场暂无可用插件");
+            design::empty_state(
+                ui,
+                ICON_SHOPPING_CART,
+                "市场暂无插件",
+                "索引中没有可用条目。 ",
+            );
+            return events;
+        }
+
+        let query = self.market_search.trim().to_lowercase();
+        let visible_plugins: Vec<&RegistryPlugin> = reg
+            .plugins
+            .iter()
+            .filter(|plugin| {
+                let category_matches = self
+                    .market_category
+                    .as_ref()
+                    .is_none_or(|category| plugin.category.as_ref() == Some(category));
+                let query_matches = query.is_empty()
+                    || plugin.name.to_lowercase().contains(&query)
+                    || plugin.id.to_lowercase().contains(&query)
+                    || plugin
+                        .description
+                        .as_deref()
+                        .is_some_and(|text| text.to_lowercase().contains(&query))
+                    || plugin
+                        .author
+                        .as_deref()
+                        .is_some_and(|text| text.to_lowercase().contains(&query));
+                category_matches && query_matches
+            })
+            .collect();
+
+        if visible_plugins.is_empty() {
+            design::empty_state(ui, ICON_SEARCH, "没有匹配插件", "调整关键词或分类筛选。 ");
             return events;
         }
 
         let scroll_result = ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for plugin in &reg.plugins {
+                for plugin in visible_plugins {
                     self.market_plugin_row(ui, plugin, &mut events);
                     ui.add_space(8.0);
                 }
@@ -397,83 +497,75 @@ impl PluginsPanel {
         let is_installed = self.market.installed_ids.contains(&plugin.id);
         let progress = self.market.installing.get(&plugin.id).copied();
 
-        egui::Frame::group(ui.style())
-            .inner_margin(egui::Margin::symmetric(12, 8))
-            .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
+        design::card().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
 
-                // 标题行
-                ui.horizontal(|ui| {
+            // 标题行
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(&plugin.name)
+                        .strong()
+                        .color(theme::text_primary()),
+                );
+                ui.label(
+                    egui::RichText::new(&plugin.id)
+                        .monospace()
+                        .color(theme::text_secondary()),
+                );
+                ui.label(format!("v{}", plugin.version));
+                if is_installed {
+                    design::status_pill(ui, theme::green(), "已安装");
+                }
+                if let Some(cat) = &plugin.category {
+                    design::badge(ui, cat, theme::blue());
+                }
+            });
+
+            ui.separator();
+
+            // 描述
+            if let Some(desc) = &plugin.description {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(desc);
+                });
+            }
+
+            // 作者 / 大小 / 权限
+            ui.horizontal_wrapped(|ui| {
+                if let Some(author) = &plugin.author {
+                    ui.label("作者");
                     ui.label(
-                        egui::RichText::new(&plugin.name)
-                            .strong()
+                        egui::RichText::new(author)
+                            .monospace()
                             .color(theme::text_primary()),
                     );
-                    ui.label(
-                        egui::RichText::new(&plugin.id)
-                            .monospace()
-                            .color(theme::text_secondary()),
-                    );
-                    ui.label(format!("v{}", plugin.version));
-                    if is_installed {
-                        ui.colored_label(theme::green(), "✓ 已安装");
-                    }
-                    if let Some(cat) = &plugin.category {
-                        ui.label(
-                            egui::RichText::new(cat)
-                                .small()
-                                .color(theme::text_secondary()),
-                        );
-                    }
-                });
-
-                ui.separator();
-
-                // 描述
-                if let Some(desc) = &plugin.description {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(desc);
-                    });
                 }
-
-                // 作者 / 大小 / 权限
-                ui.horizontal_wrapped(|ui| {
-                    if let Some(author) = &plugin.author {
-                        ui.label("作者");
-                        ui.label(
-                            egui::RichText::new(author)
-                                .monospace()
-                                .color(theme::text_primary()),
-                        );
+                ui.label(format!("{} 字节", plugin.size));
+                ui.label("权限");
+                if plugin.permissions.is_empty() {
+                    design::badge(ui, "无额外权限", theme::green());
+                } else {
+                    for permission in &plugin.permissions {
+                        design::badge(ui, permission, theme::orange());
                     }
-                    ui.label(format!("{} 字节", plugin.size));
-                    ui.label("权限");
-                    ui.label(
-                        egui::RichText::new(if plugin.permissions.is_empty() {
-                            "none".to_owned()
-                        } else {
-                            plugin.permissions.join(", ")
-                        })
-                        .monospace()
-                        .color(theme::text_primary()),
-                    );
-                });
-
-                // 安装按钮 / 进度
-                ui.horizontal(|ui| {
-                    if let Some(pct) = progress {
-                        // 安装中：显示进度条
-                        let progress_bar = egui::ProgressBar::new(pct)
-                            .text(format!("安装中… {:.0}%", pct * 100.0));
-                        ui.add(progress_bar);
-                    } else {
-                        let label = if is_installed { "重装" } else { "安装" };
-                        if ui.button(label).clicked() {
-                            events.push(PluginPanelEvent::InstallPlugin(plugin.id.clone()));
-                        }
-                    }
-                });
+                }
             });
+
+            // 安装按钮 / 进度
+            ui.horizontal(|ui| {
+                if let Some(pct) = progress {
+                    // 安装中：显示进度条
+                    let progress_bar =
+                        egui::ProgressBar::new(pct).text(format!("安装中… {:.0}%", pct * 100.0));
+                    ui.add(progress_bar);
+                } else {
+                    let label = if is_installed { "重装" } else { "安装" };
+                    if design::button(ui, ICON_DOWNLOAD, label, ButtonKind::Primary).clicked() {
+                        events.push(PluginPanelEvent::InstallPlugin(plugin.id.clone()));
+                    }
+                }
+            });
+        });
     }
 
     fn plugin_row(
@@ -482,8 +574,7 @@ impl PluginsPanel {
         manager: &mut PluginManager,
         summary: PluginSummary,
     ) -> Option<PluginPanelEvent> {
-        egui::Frame::group(ui.style())
-            .inner_margin(egui::Margin::symmetric(12, 8))
+        design::card()
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
 
@@ -500,10 +591,7 @@ impl PluginsPanel {
                             .color(theme::text_secondary()),
                     );
                     ui.label(format!("v{}", summary.version));
-                    ui.label(
-                        egui::RichText::new(state_label(summary.state))
-                            .color(state_color(summary.state)),
-                    );
+                    design::status_pill(ui, state_color(summary.state), state_label(summary.state));
                 });
 
                 ui.separator();
@@ -523,15 +611,13 @@ impl PluginsPanel {
                             .color(theme::text_primary()),
                     );
                     ui.label("权限");
-                    ui.label(
-                        egui::RichText::new(if summary.permissions.is_empty() {
-                            "none".to_owned()
-                        } else {
-                            summary.permissions.join(", ")
-                        })
-                        .monospace()
-                        .color(theme::text_primary()),
-                    );
+                    if summary.permissions.is_empty() {
+                        design::badge(ui, "无额外权限", theme::green());
+                    } else {
+                        for permission in &summary.permissions {
+                            design::badge(ui, permission, theme::orange());
+                        }
+                    }
                 });
                 ui.horizontal_wrapped(|ui| {
                     ui.label("路径");
@@ -570,16 +656,15 @@ impl PluginsPanel {
                                 if registered.iter().any(|r| r == &cmd.id) {
                                     ui.colored_label(theme::green(), format!("✓ {}", cmd.id));
                                 } else if missing.iter().any(|m| m == &cmd.id) {
-                                    ui.colored_label(theme::yellow(), format!("⚠ {}", cmd.id))
-                                        .on_hover_text(
-                                            "此命令已在 manifest 声明但尚未注册 handler",
-                                        );
+                                    design::badge(ui, &cmd.id, theme::yellow()).on_hover_text(
+                                        "此命令已在 manifest 声明但尚未注册 handler",
+                                    );
                                 } else {
                                     ui.label(cmd.id.as_str());
                                 }
                             }
                             for cmd in undeclared {
-                                ui.colored_label(theme::text_secondary(), format!("ℹ {}", cmd))
+                                design::badge(ui, cmd, theme::text_secondary())
                                     .on_hover_text("此命令在运行时动态注册，未在 manifest 声明");
                             }
                         } else {
@@ -607,7 +692,9 @@ impl PluginsPanel {
                     let is_active =
                         matches!(summary.state, PluginState::Running | PluginState::Enabled);
                     if is_active {
-                        if ui.button("禁用").clicked() {
+                        if design::button(ui, ICON_TOGGLE_OFF, "禁用", ButtonKind::Secondary)
+                            .clicked()
+                        {
                             match manager.disable(&summary.id) {
                                 Ok(()) => {
                                     self.recently_disabled.push(summary.id.clone());
@@ -617,7 +704,9 @@ impl PluginsPanel {
                                 }
                             }
                         }
-                    } else if ui.button("启用").clicked() {
+                    } else if design::button(ui, ICON_TOGGLE_ON, "启用", ButtonKind::Primary)
+                        .clicked()
+                    {
                         match manager.enable(&summary.id) {
                             Ok(()) => {}
                             Err(error) => {
@@ -630,7 +719,10 @@ impl PluginsPanel {
                     // 因此「重启」对所有非 Discovered 状态都可点。
                     let can_restart = !matches!(summary.state, PluginState::Discovered);
                     if ui
-                        .add_enabled(can_restart, egui::Button::new("重启"))
+                        .add_enabled_ui(can_restart, |ui| {
+                            design::button(ui, ICON_RESTART_ALT, "重启", ButtonKind::Ghost)
+                        })
+                        .inner
                         .on_hover_text("禁用后重新启用")
                         .clicked()
                     {
@@ -659,20 +751,17 @@ impl PluginsPanel {
                     // 第二次点「确认卸载?」→ 发出 UninstallPlugin 事件。
                     let confirming = self.pending_uninstall.as_deref() == Some(&summary.id);
                     if confirming {
-                        if ui
-                            .add(
-                                egui::Button::new("确认卸载?")
-                                    .fill(theme::red().gamma_multiply(0.3)),
-                            )
+                        if design::button(ui, ICON_DELETE, "确认卸载?", ButtonKind::Danger)
                             .clicked()
                         {
                             self.pending_uninstall = None;
                             return Some(PluginPanelEvent::UninstallPlugin(summary.id.clone()));
                         }
-                        if ui.button("取消").clicked() {
+                        if design::button(ui, ICON_CANCEL, "取消", ButtonKind::Ghost).clicked() {
                             self.pending_uninstall = None;
                         }
-                    } else if ui.button("卸载").clicked() {
+                    } else if design::button(ui, ICON_DELETE, "卸载", ButtonKind::Danger).clicked()
+                    {
                         self.pending_uninstall = Some(summary.id.clone());
                     }
                     None
@@ -721,7 +810,7 @@ fn diagnostic_row(ui: &mut egui::Ui, diagnostic: &PluginDiagnostic) {
             PluginDiagnosticSeverity::Warning => "警告",
             PluginDiagnosticSeverity::Error => "错误",
         };
-        ui.colored_label(color, severity);
+        design::badge(ui, severity, color);
         ui.label(
             egui::RichText::new(&diagnostic.code)
                 .monospace()
@@ -743,14 +832,14 @@ fn diagnostic_row(ui: &mut egui::Ui, diagnostic: &PluginDiagnostic) {
                 .monospace()
                 .color(theme::text_primary()),
         );
-        if ui.small_button("复制").clicked() {
+        if design::button(ui, ICON_CONTENT_COPY, "复制", ButtonKind::Ghost).clicked() {
             copy_text_with_feedback(
                 ui,
                 diagnostic.path.display().to_string(),
                 "已复制插件诊断路径",
             );
         }
-        if ui.small_button("打开位置").clicked() {
+        if design::button(ui, ICON_OPEN_IN_NEW, "打开位置", ButtonKind::Ghost).clicked() {
             let target = if diagnostic.path.is_file() {
                 diagnostic.path.parent().unwrap_or(&diagnostic.path)
             } else {

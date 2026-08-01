@@ -5,7 +5,11 @@
 use crate::app::WorkbenchApp;
 use crate::keymap::Action;
 use eframe::egui;
-use tool_panels::theme;
+use egui_material_icons::{
+    MaterialIcon,
+    icons::{ICON_BOLT, ICON_EXTENSION, ICON_SEARCH, ICON_SEARCH_OFF},
+};
+use tool_panels::{design, theme};
 
 /// 命令面板运行时状态。
 #[derive(Default)]
@@ -18,6 +22,7 @@ pub(crate) struct CommandPaletteState {
 
 /// 命令面板的一条候选。
 struct CommandEntry {
+    icon: MaterialIcon,
     label: String,
     shortcut: String,
     kind: CommandKind,
@@ -56,6 +61,7 @@ impl WorkbenchApp {
                 .map(|b| b.display())
                 .unwrap_or_default();
             entries.push(CommandEntry {
+                icon: ICON_BOLT,
                 label: action.label(),
                 shortcut,
                 kind: CommandKind::Action(action.clone()),
@@ -65,6 +71,7 @@ impl WorkbenchApp {
         for summary in self.plugin_summaries() {
             for cmd in &summary.contributes.commands {
                 entries.push(CommandEntry {
+                    icon: ICON_EXTENSION,
                     label: format!("{}: {}", summary.name, cmd.title),
                     shortcut: String::new(),
                     kind: CommandKind::PluginCommand(summary.id.clone(), cmd.id.clone()),
@@ -138,14 +145,25 @@ impl WorkbenchApp {
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, -100.0])
-            .min_width(340.0)
+            .min_width(440.0)
+            .frame(design::elevated_card())
             .show(ctx, |ui| {
                 // 搜索框
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut self.command_palette.query)
-                        .hint_text("搜索命令…")
-                        .desired_width(f32::INFINITY),
-                );
+                let resp = ui
+                    .horizontal(|ui| {
+                        ui.label(design::icon_only(
+                            ICON_SEARCH,
+                            theme::text_secondary(),
+                            20.0,
+                        ));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.command_palette.query)
+                                .hint_text("搜索命令…")
+                                .desired_width(f32::INFINITY)
+                                .frame(egui::Frame::NONE),
+                        )
+                    })
+                    .inner;
                 if !resp.has_focus() {
                     resp.request_focus();
                 }
@@ -158,7 +176,7 @@ impl WorkbenchApp {
                     .get(&egui::TextStyle::Body)
                     .map(|f| f.size)
                     .unwrap_or(14.0);
-                let row_height = font_size + 6.0;
+                let row_height = (font_size + 14.0).max(32.0);
                 // 鼠标是否在移动（用于判断是否跟随 hover）
                 let mouse_moving = ctx.input(|i| i.pointer.delta().length_sq() > 0.01);
 
@@ -169,20 +187,12 @@ impl WorkbenchApp {
                         let col_width = ui.available_width();
 
                         if entries.is_empty() {
-                            ui.add_space(20.0);
-                            ui.vertical_centered(|ui| {
-                                ui.label(
-                                    egui::RichText::new("无匹配命令")
-                                        .color(theme::text_secondary()),
-                                );
-                                ui.add_space(4.0);
-                                ui.label(
-                                    egui::RichText::new("按 Esc 关闭")
-                                        .small()
-                                        .color(theme::text_dimmed()),
-                                );
-                            });
-                            ui.add_space(20.0);
+                            design::empty_state(
+                                ui,
+                                ICON_SEARCH_OFF,
+                                "无匹配命令",
+                                "尝试输入其他关键词，或按 Esc 关闭",
+                            );
                         }
 
                         for (i, entry) in entries.iter().enumerate() {
@@ -216,6 +226,16 @@ impl WorkbenchApp {
 
                                     ui.add_space(4.0);
 
+                                    ui.label(design::icon_only(
+                                        entry.icon,
+                                        if is_selected {
+                                            theme::blue()
+                                        } else {
+                                            theme::text_dimmed()
+                                        },
+                                        17.0,
+                                    ));
+
                                     ui.add(
                                         egui::Label::new(
                                             egui::RichText::new(&entry.label)
@@ -229,10 +249,10 @@ impl WorkbenchApp {
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
                                                 ui.add_space(4.0);
-                                                ui.label(
-                                                    egui::RichText::new(&entry.shortcut)
-                                                        .small()
-                                                        .color(theme::text_secondary()),
+                                                design::badge(
+                                                    ui,
+                                                    &entry.shortcut,
+                                                    theme::text_secondary(),
                                                 );
                                             },
                                         );

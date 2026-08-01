@@ -146,7 +146,7 @@ impl Behavior<PanelKind> for WorkbenchTiles<'_> {
     }
 
     fn tab_title_for_pane(&mut self, pane: &PanelKind) -> egui::WidgetText {
-        format!("{} {}", pane.icon(), self.app.panel_title(pane)).into()
+        format!("{} {}", pane.icon().codepoint, self.app.panel_title(pane)).into()
     }
 
     fn tab_title_for_tile(
@@ -155,7 +155,11 @@ impl Behavior<PanelKind> for WorkbenchTiles<'_> {
         tile_id: TileId,
     ) -> egui::WidgetText {
         if let Some(plugin_id) = self.app.panels.plugin_group_id(tile_id) {
-            return format!("🔌 {plugin_id}").into();
+            return format!(
+                "{} {plugin_id}",
+                egui_material_icons::icons::ICON_CABLE.codepoint
+            )
+            .into();
         }
         match tiles.get(tile_id) {
             Some(Tile::Pane(pane)) => self.tab_title_for_pane(pane),
@@ -177,7 +181,7 @@ impl Behavior<PanelKind> for WorkbenchTiles<'_> {
     }
 
     fn tab_bar_height(&self, _style: &egui::Style) -> f32 {
-        34.0
+        36.0
     }
 
     fn tab_title_spacing(&self, _visuals: &egui::Visuals) -> f32 {

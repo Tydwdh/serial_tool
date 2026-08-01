@@ -2,7 +2,14 @@ use crate::app::WorkbenchApp;
 use crate::state::{LineEnding, MAX_SEND_HISTORY, StatusLevel};
 use eframe::egui;
 use egui::widgets::text_edit::TextEditState;
-use tool_panels::theme;
+use egui_material_icons::icons::{
+    ICON_CANCEL, ICON_DELETE, ICON_DELETE_SWEEP, ICON_FULLSCREEN, ICON_HISTORY, ICON_SEARCH,
+    ICON_SEND,
+};
+use tool_panels::{
+    design::{self, ButtonKind},
+    theme,
+};
 
 const SEND_BOTTOM_TOOL_ROW_MAX_HEIGHT: f32 = 44.0;
 const SEND_BOTTOM_ACTIONS_RESERVED_HEIGHT: f32 = SEND_BOTTOM_TOOL_ROW_MAX_HEIGHT * 2.0 + 8.0;
@@ -249,15 +256,26 @@ impl WorkbenchApp {
         self.render_hex_toggle(ui);
         self.render_line_ending_combo(ui, line_ending_id, line_ending_width);
 
-        if show_popup_button && ui.small_button("⛶").on_hover_text("放大编辑").clicked() {
+        if show_popup_button && design::icon_button(ui, ICON_FULLSCREEN, "放大编辑").clicked() {
             self.send.popup_open = true;
         }
     }
 
     /// HEX/文本切换 + 严格模式
     fn render_hex_toggle(&mut self, ui: &mut egui::Ui) {
-        ui.radio_value(&mut self.send.hex_mode, false, "文本");
-        ui.radio_value(&mut self.send.hex_mode, true, "HEX");
+        let text_selected = !self.send.hex_mode;
+        if ui
+            .add(egui::Button::selectable(text_selected, "文本").corner_radius(6.0))
+            .clicked()
+        {
+            self.send.hex_mode = false;
+        }
+        if ui
+            .add(egui::Button::selectable(self.send.hex_mode, "HEX").corner_radius(6.0))
+            .clicked()
+        {
+            self.send.hex_mode = true;
+        }
         if self.send.hex_mode {
             ui.checkbox(&mut self.send.hex_strict, "严格")
                 .on_hover_text("严格模式：奇数 HEX 长度报错而非自动补0");
@@ -506,7 +524,11 @@ impl WorkbenchApp {
         };
         let can_send = send_port_open && !input_trim.is_empty() && hex_error.is_none();
 
-        let mut send_btn = ui.add_enabled(can_send, egui::Button::new("发送"));
+        let mut send_btn = ui
+            .add_enabled_ui(can_send, |ui| {
+                design::button(ui, ICON_SEND, "发送", ButtonKind::Primary)
+            })
+            .inner;
         if let Some(ref err) = hex_error {
             send_btn = send_btn.on_disabled_hover_text(format!("HEX 解析失败: {err}"));
         }
@@ -514,7 +536,7 @@ impl WorkbenchApp {
             self.do_send();
         }
 
-        if ui.button("清空").clicked() {
+        if design::button(ui, ICON_DELETE_SWEEP, "清空", ButtonKind::Ghost).clicked() {
             self.send.input.clear();
             self.send.error = None;
             self.send.periodic_send_count = 0;
@@ -695,7 +717,7 @@ impl WorkbenchApp {
         }
 
         ui.separator();
-        let btn_resp = ui.button("历史");
+        let btn_resp = design::button(ui, ICON_HISTORY, "历史", ButtonKind::Secondary);
         let popup_id = ui.id().with(id_salt);
         let popup = egui::Popup::from_response(&btn_resp)
             .open_memory(btn_resp.clicked().then_some(egui::SetOpenCommand::Toggle))
@@ -722,7 +744,7 @@ impl WorkbenchApp {
             // 标题
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new("发送历史")
+                    egui::RichText::new(format!("{} 发送历史", ICON_HISTORY.codepoint))
                         .strong()
                         .color(theme::text_white()),
                 );
@@ -740,7 +762,7 @@ impl WorkbenchApp {
             let search_resp = ui.add(
                 egui::TextEdit::singleline(&mut self.send.history_search)
                     .desired_width(f32::INFINITY)
-                    .hint_text("🔍 过滤历史…"),
+                    .hint_text(format!("{} 过滤历史…", ICON_SEARCH.codepoint)),
             );
             if !search_resp.has_focus() {
                 search_resp.request_focus();
@@ -865,8 +887,8 @@ impl WorkbenchApp {
                                     ui.painter().text(
                                         drect.center(),
                                         egui::Align2::CENTER_CENTER,
-                                        "×",
-                                        font_id.clone(),
+                                        ICON_DELETE.codepoint,
+                                        egui::FontId::new(17.0, ICON_DELETE.font_family()),
                                         if del_resp.hovered() {
                                             theme::text_primary()
                                         } else {
@@ -912,11 +934,7 @@ impl WorkbenchApp {
                 } else {
                     "清空全部"
                 };
-                if ui
-                    .add(
-                        egui::Button::new(egui::RichText::new(label).color(theme::red()).small())
-                            .frame(true),
-                    )
+                if design::button(ui, ICON_DELETE_SWEEP, label, ButtonKind::Danger)
                     .on_hover_text(if armed {
                         "再次点击确认清空"
                     } else {
@@ -932,7 +950,7 @@ impl WorkbenchApp {
                         ui.ctx().memory_mut(|m| m.data.insert_temp(confirm_id, now));
                     }
                 }
-                if armed && ui.small_button("取消").clicked() {
+                if armed && design::button(ui, ICON_CANCEL, "取消", ButtonKind::Ghost).clicked() {
                     ui.ctx()
                         .memory_mut(|m| m.data.remove_temp::<f64>(confirm_id));
                 }

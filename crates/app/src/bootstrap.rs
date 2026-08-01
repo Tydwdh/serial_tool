@@ -69,6 +69,7 @@ pub fn setup_fonts(cc: &eframe::CreationContext<'_>) {
     );
 
     cc.egui_ctx.set_fonts(fonts);
+    egui_material_icons::initialize(&cc.egui_ctx);
 }
 
 fn load_font(fonts: &mut egui::FontDefinitions, name: &str, paths: &[PathBuf]) {
@@ -130,7 +131,7 @@ pub fn apply_theme(ctx: &egui::Context, selected_theme: theme::AppTheme) {
     s.interaction.tooltip_delay = 0.3;
 
     // ── 动画 ──
-    s.animation_time = 0.05;
+    s.animation_time = 0.16;
 
     #[cfg(debug_assertions)]
     {

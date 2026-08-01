@@ -7,8 +7,10 @@
 use std::collections::VecDeque;
 
 use eframe::egui::{self, Align, Align2, Frame, Id, Layout, Order, RichText, Stroke};
+use egui_material_icons::icons::{ICON_CLOSE, ICON_ERROR, ICON_INFO, ICON_WARNING};
 
 use crate::state::{NotificationQueue, StatusLevel};
+use tool_panels::design;
 use tool_panels::theme;
 
 const MAX_TOASTS: usize = 5;
@@ -136,9 +138,9 @@ impl ToastOverlay {
 
 fn render_toast(ui: &mut egui::Ui, toast: &mut Toast, now_ms: u64) {
     let (accent, icon, title) = match toast.level {
-        StatusLevel::Info => (theme::blue(), "ℹ", "提示"),
-        StatusLevel::Warn => (theme::yellow(), "⚠", "警告"),
-        StatusLevel::Error => (theme::red(), "⨯", "错误"),
+        StatusLevel::Info => (theme::blue(), ICON_INFO, "提示"),
+        StatusLevel::Warn => (theme::yellow(), ICON_WARNING, "警告"),
+        StatusLevel::Error => (theme::red(), ICON_ERROR, "错误"),
     };
     let mut close = false;
     let frame = Frame::new()
@@ -150,14 +152,10 @@ fn render_toast(ui: &mut egui::Ui, toast: &mut Toast, now_ms: u64) {
     frame.show(ui, |ui| {
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(icon).color(accent).size(17.0));
+                ui.label(design::icon_only(icon, accent, 18.0));
                 ui.label(RichText::new(title).color(accent).strong());
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui
-                        .small_button(RichText::new("×").color(theme::text_secondary()))
-                        .on_hover_text("关闭通知")
-                        .clicked()
-                    {
+                    if design::icon_button(ui, ICON_CLOSE, "关闭通知").clicked() {
                         close = true;
                     }
                 });

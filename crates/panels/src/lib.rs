@@ -1,5 +1,6 @@
 mod attitude;
 mod chart;
+pub mod design;
 mod dynamic;
 mod gauge;
 mod log;
