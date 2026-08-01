@@ -505,8 +505,8 @@ pub(crate) fn create_serial_api(
             if let Some(ref map) = lb_expect {
                 let mut map_lock = map.lock();
                 if let Some(buffer) = map_lock.get_mut(&key) {
-                    // drain 出最多 64 行做立即匹配；不匹配的行最后回灌，避免噪声行
-                    // 挤掉后续真正的 ok/ack（与 process_tasks 侧语义一致）。
+                    // drain 出最多 64 行做立即匹配。未命中行会被消费，避免同一批
+                    // 噪声被反复检查并挡住后续真正的 ok/ack。
                     let mut candidates: Vec<String> = Vec::new();
                     while let Some(candidate) = buffer.next_line() {
                         candidates.push(candidate);
@@ -515,7 +515,7 @@ pub(crate) fn create_serial_api(
                         }
                     }
                     let mut matched: Option<(Table, String)> = None;
-                    let mut consumed = 0; // 命中 continue/return 的行数（含该行）
+                    let mut matched_through = None;
                     for (i, candidate) in candidates.iter().enumerate() {
                         for pair in patterns.pairs::<Value, Table>().flatten() {
                             let p: Table = pair.1;
@@ -539,11 +539,10 @@ pub(crate) fn create_serial_api(
                                             );
                                         }
                                     }
-                                    consumed = i + 1;
                                     break;
                                 }
                                 matched = Some((p, candidate.clone()));
-                                consumed = i + 1;
+                                matched_through = Some(i + 1);
                                 break;
                             }
                         }
@@ -551,11 +550,7 @@ pub(crate) fn create_serial_api(
                             break;
                         }
                     }
-                    // 回灌未消费的行（matched 之后的，或全不匹配时的全部）
-                    let unconsumed: Vec<String> = candidates.into_iter().skip(consumed).collect();
-                    if !unconsumed.is_empty() {
-                        buffer.push_front_lines(unconsumed);
-                    }
+                    buffer.finish_expect_scan(candidates, matched_through);
                     if let Some((p, candidate)) = matched {
                         let r = lua.create_table()?;
                         r.set("name", p.get::<String>("name").unwrap_or_default())?;

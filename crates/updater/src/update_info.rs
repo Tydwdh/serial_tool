@@ -20,9 +20,17 @@ pub struct UpdateInfo {
 
 /// 从远端获取 update.json。
 pub async fn fetch_update_info(url: &str) -> Result<UpdateInfo, String> {
-    let resp = crate::send_update_get(url)
+    fetch_update_info_with_network_settings(url, &crate::NetworkSettings::default()).await
+}
+
+pub async fn fetch_update_info_with_network_settings(
+    url: &str,
+    network: &crate::NetworkSettings,
+) -> Result<UpdateInfo, String> {
+    let resp = crate::send_update_get_with_network_settings(url, network)
         .await
-        .map_err(|e| format!("请求更新信息失败：{e}"))?;
+        .map_err(|e| format!("请求更新信息失败：{e}"))?
+        .response;
 
     if !resp.status().is_success() {
         let status = resp.status();

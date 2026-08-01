@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 egui.workspace = true
+egui_tiles.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tool-core = { path = "../core" }

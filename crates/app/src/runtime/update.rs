@@ -149,6 +149,9 @@ impl WorkbenchApp {
         self.update_state.force_check = false;
         self.update_state.error = None;
         let current_version = env!("CARGO_PKG_VERSION").to_owned();
+        let network = tool_updater::NetworkSettings::with_proxy(
+            (!self.network_proxy_url.trim().is_empty()).then(|| self.network_proxy_url.clone()),
+        );
 
         self.update_state.check_handle = Some(std::thread::spawn(move || {
             // 先检查 24h 缓存（非强制时）
@@ -170,9 +173,11 @@ impl WorkbenchApp {
                 .map_err(|e| format!("创建 tokio runtime 失败：{e}"))?;
 
             rt.block_on(async {
-                let info =
-                    tool_updater::update_info::fetch_update_info(tool_updater::UPDATE_JSON_URL)
-                        .await?;
+                let info = tool_updater::update_info::fetch_update_info_with_network_settings(
+                    tool_updater::UPDATE_JSON_URL,
+                    &network,
+                )
+                .await?;
 
                 let had_update =
                     tool_updater::update_info::is_newer_version(&info.version, &current_version);
@@ -217,6 +222,9 @@ impl WorkbenchApp {
 
         let progress = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let progress_clone = progress.clone();
+        let network = tool_updater::NetworkSettings::with_proxy(
+            (!self.network_proxy_url.trim().is_empty()).then(|| self.network_proxy_url.clone()),
+        );
 
         self.update_state.download_handle = Some(std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -225,14 +233,18 @@ impl WorkbenchApp {
                 .map_err(|e| format!("创建 tokio runtime 失败：{e}"))?;
 
             rt.block_on(async {
-                tool_updater::download_update(&url, move |downloaded, total| {
-                    let pct = if total > 0 {
-                        ((downloaded as f64 / total as f64) * 1000.0) as u64
-                    } else {
-                        0
-                    };
-                    progress_clone.store(pct, std::sync::atomic::Ordering::Relaxed);
-                })
+                tool_updater::download_update_with_network_settings(
+                    &url,
+                    &network,
+                    move |downloaded, total| {
+                        let pct = if total > 0 {
+                            ((downloaded as f64 / total as f64) * 1000.0) as u64
+                        } else {
+                            0
+                        };
+                        progress_clone.store(pct, std::sync::atomic::Ordering::Relaxed);
+                    },
+                )
                 .await
             })
         }));

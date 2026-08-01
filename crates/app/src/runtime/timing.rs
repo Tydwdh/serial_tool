@@ -106,13 +106,7 @@ fn measure_spin_precision(interval: Duration, samples: usize) -> (Duration, Dura
 #[test]
 #[ignore = "requires a quiet local machine; CI runners have unstable sub-millisecond scheduling"]
 fn spin_wait_100us_precision() {
-    let (avg, p99, max) = measure_spin_precision(Duration::from_micros(100), 1000);
-    eprintln!(
-        "100us: avg_late={}us p99_late={}us max_late={}us",
-        avg.as_micros(),
-        p99.as_micros(),
-        max.as_micros()
-    );
+    let (_, p99, _) = measure_spin_precision(Duration::from_micros(100), 1000);
     assert!(
         p99 <= Duration::from_micros(500),
         "p99_late {}us > 500us",
@@ -123,13 +117,7 @@ fn spin_wait_100us_precision() {
 #[test]
 #[ignore = "requires a quiet local machine; CI runners have unstable sub-millisecond scheduling"]
 fn spin_wait_1ms_precision() {
-    let (avg, p99, max) = measure_spin_precision(Duration::from_millis(1), 1000);
-    eprintln!(
-        "1ms: avg_late={}us p99_late={}us max_late={}us",
-        avg.as_micros(),
-        p99.as_micros(),
-        max.as_micros()
-    );
+    let (_, p99, _) = measure_spin_precision(Duration::from_millis(1), 1000);
     assert!(
         p99 <= Duration::from_millis(2),
         "p99_late {}us > 2ms",
@@ -140,13 +128,7 @@ fn spin_wait_1ms_precision() {
 #[test]
 #[ignore = "requires a quiet local machine; CI runners have unstable sub-millisecond scheduling"]
 fn spin_wait_10ms_precision() {
-    let (avg, p99, max) = measure_spin_precision(Duration::from_millis(10), 500);
-    eprintln!(
-        "10ms: avg_late={}us p99_late={}us max_late={}us",
-        avg.as_micros(),
-        p99.as_micros(),
-        max.as_micros()
-    );
+    let (_, p99, _) = measure_spin_precision(Duration::from_millis(10), 500);
     assert!(
         p99 <= Duration::from_micros(300),
         "p99_late {}us > 300us",
@@ -157,13 +139,7 @@ fn spin_wait_10ms_precision() {
 #[test]
 #[ignore = "requires a quiet local machine; CI runners have unstable sub-millisecond scheduling"]
 fn spin_wait_100ms_precision() {
-    let (avg, p99, max) = measure_spin_precision(Duration::from_millis(100), 100);
-    eprintln!(
-        "100ms: avg_late={}us p99_late={}us max_late={}us",
-        avg.as_micros(),
-        p99.as_micros(),
-        max.as_micros()
-    );
+    let (_, p99, _) = measure_spin_precision(Duration::from_millis(100), 100);
     assert!(
         p99 <= Duration::from_micros(300),
         "p99_late {}us > 300us",
@@ -187,12 +163,6 @@ fn spin_wait_no_drift() {
     let expected = interval * samples as u32;
     let elapsed = Instant::now().saturating_duration_since(start);
     let drift = elapsed.abs_diff(expected);
-    eprintln!(
-        "1000x1ms: expected={}ms actual={}ms drift={}us",
-        expected.as_millis(),
-        elapsed.as_millis(),
-        drift.as_micros()
-    );
     assert!(
         drift <= Duration::from_millis(5),
         "drift {}us",

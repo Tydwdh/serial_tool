@@ -1,14 +1,21 @@
 use crate::{
-    MAX_INGEST_PER_FRAME, fmt_ts,
-    table::{RowHighlight, RowSelection, edge_scroll_delta},
+    MAX_INGEST_PER_FRAME, MESSAGE_EVENT_BUFFER_CAPACITY, fmt_ts,
+    table::{
+        AutoScrollState, MessageList, MessageSearch, RowHighlight, RowSelection, TextSelectionRows,
+        bulk_copy_button, claim_copy_focus, copy_text_with_feedback, edge_scroll_delta,
+        estimated_wrapped_line_count, owns_copy_focus, report_copy_feedback,
+    },
     theme,
 };
 use egui::text_selection::LabelSelectionState;
 use egui::{Color32, RichText, ScrollArea, Sense, Stroke};
 use std::borrow::Cow;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use tool_core::{Direction, Event};
-use tool_databus::{DataBus, Subscription, TopicFilter};
+use tool_databus::{DataBus, RingSubscription, TopicFilter};
 use tool_transport::serial_topics;
 
 const TIME_COL_WIDTH: f32 = 118.0;
@@ -17,6 +24,14 @@ const DIR_COL_WIDTH: f32 = 28.0;
 const ROW_LEFT_PADDING: f32 = 4.0;
 const COL_GAP: f32 = 3.0;
 const PREVIEW_COL_MIN_WIDTH: f32 = 80.0;
+const COPY_OWNER: &str = "terminal";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalExportFormat {
+    Txt,
+    Csv,
+    Json,
+}
 
 /// 跳转目标行高亮总时长（秒）。
 const NAV_HIGHLIGHT_DURATION: f64 = 1.5;
@@ -24,26 +39,18 @@ const NAV_HIGHLIGHT_DURATION: f64 = 1.5;
 const NAV_FADE: f64 = 0.3;
 
 pub struct TerminalPanel {
-    subscription: Subscription,
+    subscription: RingSubscription,
     ports: BTreeMap<String, PortData>,
 
     show_rx: bool,
     show_tx: bool,
     show_hex: bool,
     show_raw: bool,
-    auto_scroll: bool,
-    /// 暂停接收：置位后 ingest 直接 drain subscription，不 push 新事件，
-    /// 已显示内容冻结。用于高速数据流下停下来仔细看一段数据。
-    pub paused: bool,
-    /// 暂停期间被丢弃的事件计数（drain 掉的）。恢复后用于在画面顶部
-    /// 显示一条 "已暂停 · 丢弃 N 条数据" 的提示，提醒用户此处有数据缺口。
-    paused_dropped_count: u64,
-    /// 暂停提示的剩余显示时间（秒）。恢复后置位，归零后不再绘制提示。
-    paused_banner_remain: f64,
+    auto_scroll: AutoScrollState,
+    /// 工具栏产生的导出请求，由 app 层打开原生文件保存框并写入文件。
+    export_request: Option<TerminalExportFormat>,
 
-    search_text: String,
-    /// 搜索是否大小写敏感（false=不敏感，默认；true=敏感）。
-    search_case_sensitive: bool,
+    search: MessageSearch,
     port_filter: Option<String>,
     bookmarked_entry_ids: BTreeSet<u64>,
 
@@ -55,8 +62,6 @@ pub struct TerminalPanel {
     /// 是否发生过截断（用于状态栏提示，显示后清除）
     pub truncated: bool,
 
-    last_scroll_offsets: BTreeMap<String, f32>,
-    pending_scroll_to_bottom_keys: BTreeSet<String>,
     /// 双击搜索匹配行时设置：下帧清除搜索并滚动到该行。
     pending_navigate_to_id: Option<u64>,
     /// 跳转目标行高亮：(目标行 id, 起始时间秒)。渲染时若命中且未超时画强调色并淡出。
@@ -72,17 +77,15 @@ pub struct TerminalPanel {
     pub merge_window_ms: u64,
     /// 框选状态
     pub selection: RowSelection,
-    /// 每条 entry 的真实渲染高度缓存，避免多行内容在自动追踪时把底部位置算错。
-    row_height_cache: BTreeMap<u64, TerminalRowHeightCacheEntry>,
-    /// 记录上一帧总高度，供高度缓存变更时观察整体偏移。
-    cached_total_height: f32,
-    cached_total_height_rows: usize,
+    /// 字符级拖选覆盖的行；用于在自动滚动时保活视口外的选区端点。
+    text_selection_rows: TextSelectionRows,
+    /// 接收消息流的共享虚拟渲染状态（行高缓存与总高收敛）。
+    message_list: MessageList,
 }
 
 #[derive(Default)]
 struct PortData {
     entries: VecDeque<TerminalEntry>,
-    truncated_count: u64,
 }
 
 // impl Default for PortData {
@@ -119,7 +122,6 @@ struct TerminalEntry {
 
 struct VisibleRow<'a> {
     id: u64,
-    event_id: u64,
     port: Option<Cow<'a, str>>,
     timestamp_label: Cow<'a, str>,
     direction: Direction,
@@ -133,7 +135,6 @@ impl<'a> VisibleRow<'a> {
     fn from_entry(port: Option<&'a str>, entry: &'a TerminalEntry) -> Self {
         Self {
             id: entry.id,
-            event_id: entry.event_id,
             port: port.map(Cow::Borrowed),
             timestamp_label: Cow::Borrowed(&entry.timestamp_label),
             direction: entry.direction,
@@ -165,7 +166,7 @@ struct RenderOutcome {
     pending_navigate_to_id: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 struct TerminalRowHeightSignature {
     show_hex: bool,
     show_raw: bool,
@@ -176,14 +177,6 @@ struct TerminalRowHeightSignature {
     preview_len: usize,
 }
 
-#[derive(Clone, Copy)]
-struct TerminalRowHeightCacheEntry {
-    signature: TerminalRowHeightSignature,
-    content_width_px: i32,
-    preview_width_px: i32,
-    height: f32,
-}
-
 /// 将一行文本作为 entry push，或合并到上一条 entry（如果间隔 ≤ merge_window_ms
 /// 且上一条不以 \n 结尾）。
 fn push_entry(
@@ -191,8 +184,6 @@ fn push_entry(
     text: &str,
     event: &Event,
     next_entry_id: &mut u64,
-    max_entries: usize,
-    on_remove: &mut dyn FnMut(u64),
     merge_window_ms: u64,
 ) {
     let bytes = text.as_bytes().to_vec();
@@ -301,33 +292,25 @@ fn push_entry(
         hex_preview,
         preview_text,
     });
-
-    while data.entries.len() > max_entries {
-        if let Some(removed) = data.entries.pop_front() {
-            on_remove(removed.id);
-        }
-        data.truncated_count += 1;
-    }
 }
 
 impl TerminalPanel {
     pub fn new(bus: &DataBus) -> Self {
         Self {
-            subscription: bus
-                .subscribe_lossy_bounded(TopicFilter::prefix("transport.serial."), 4096),
+            subscription: bus.subscribe_ring_bounded(
+                TopicFilter::prefix("transport.serial."),
+                MESSAGE_EVENT_BUFFER_CAPACITY,
+            ),
             ports: BTreeMap::new(),
 
             show_rx: true,
             show_tx: true,
             show_hex: false,
             show_raw: false,
-            auto_scroll: true,
-            paused: false,
-            paused_dropped_count: 0,
-            paused_banner_remain: 0.0,
+            auto_scroll: AutoScrollState::default(),
+            export_request: None,
 
-            search_text: String::new(),
-            search_case_sensitive: false,
+            search: MessageSearch::default(),
             port_filter: None,
             bookmarked_entry_ids: BTreeSet::new(),
 
@@ -337,8 +320,6 @@ impl TerminalPanel {
             maximize_clicked: false,
             truncated: false,
 
-            last_scroll_offsets: BTreeMap::new(),
-            pending_scroll_to_bottom_keys: BTreeSet::new(),
             pending_navigate_to_id: None,
             navigate_highlight: None,
 
@@ -348,9 +329,8 @@ impl TerminalPanel {
             font_size: 13.0,
             merge_window_ms: 5,
             selection: RowSelection::new(0),
-            row_height_cache: BTreeMap::new(),
-            cached_total_height: 0.0,
-            cached_total_height_rows: 0,
+            text_selection_rows: TextSelectionRows::default(),
+            message_list: MessageList::default(),
         }
     }
     pub fn ingest_all_pending(&mut self) -> usize {
@@ -358,15 +338,7 @@ impl TerminalPanel {
         const MAX_INGEST_ALL: usize = 5000;
         let mut count = 0;
 
-        // 暂停接收：drain subscription 避免积压，但不 push 新事件，视图冻结。
-        if self.paused {
-            while self.subscription.try_recv().is_some() {
-                self.paused_dropped_count = self.paused_dropped_count.saturating_add(1);
-            }
-            return 0;
-        }
-
-        while let Some(event) = self.subscription.try_recv() {
+        for event in self.subscription.drain_limited(MAX_INGEST_ALL) {
             if !matches!(
                 event.topic.as_str(),
                 serial_topics::SERIAL_RX | serial_topics::SERIAL_TX
@@ -376,9 +348,6 @@ impl TerminalPanel {
 
             self.push_event(event);
             count += 1;
-            if count >= MAX_INGEST_ALL {
-                break;
-            }
         }
 
         count
@@ -388,26 +357,79 @@ impl TerminalPanel {
     }
 
     pub fn clear(&mut self) {
-        while self.subscription.try_recv().is_some() {}
+        self.subscription.clear();
         self.ports.clear();
-        self.last_scroll_offsets.clear();
-        self.pending_scroll_to_bottom_keys.clear();
+        self.auto_scroll.reset();
         self.selected_entry_id = None;
         self.detail_entry_id = None;
-        self.search_text.clear();
+        self.search.clear();
         self.port_filter = None;
         self.bookmarked_entry_ids.clear();
-        self.row_height_cache.clear();
+        self.message_list.clear();
         // 清空后重置为自动滚动，与 LogPanel::clear() 保持一致
         self.show_raw = false;
-        self.auto_scroll = true;
         self.selection.clear();
-        self.cached_total_height = 0.0;
-        self.cached_total_height_rows = 0;
+        self.text_selection_rows.clear();
     }
 
     pub fn is_bookmarked(&self, entry_id: u64) -> bool {
         self.bookmarked_entry_ids.contains(&entry_id)
+    }
+
+    pub fn take_dropped_events(&self) -> u64 {
+        self.subscription.take_dropped_count()
+    }
+
+    /// 设置接收区的全局保留上限，并立即清理所有端口中最旧的条目。
+    pub fn set_max_entries(&mut self, max_entries: usize) {
+        self.max_entries = max_entries.max(100);
+        self.enforce_max_entries();
+    }
+
+    fn enforce_max_entries(&mut self) {
+        let mut total_entries: usize = self.ports.values().map(|data| data.entries.len()).sum();
+        while total_entries > self.max_entries {
+            let oldest_port = self
+                .ports
+                .iter()
+                .filter_map(|(port, data)| {
+                    data.entries
+                        .front()
+                        .map(|entry| (entry.event_id, port.clone()))
+                })
+                .min_by_key(|(event_id, _)| *event_id)
+                .map(|(_, port)| port);
+            let Some(port) = oldest_port else {
+                break;
+            };
+
+            let removed = self
+                .ports
+                .get_mut(&port)
+                .and_then(|data| data.entries.pop_front());
+            let port_is_empty = self
+                .ports
+                .get(&port)
+                .is_some_and(|data| data.entries.is_empty());
+            if port_is_empty {
+                self.ports.remove(&port);
+            }
+
+            if let Some(removed) = removed {
+                if self.selected_entry_id == Some(removed.id) {
+                    self.selected_entry_id = None;
+                }
+                if self.detail_entry_id == Some(removed.id) {
+                    self.detail_entry_id = None;
+                }
+                self.bookmarked_entry_ids.remove(&removed.id);
+                self.message_list.remove(removed.id);
+                self.truncated = true;
+                total_entries -= 1;
+            } else {
+                break;
+            }
+        }
     }
 
     pub fn toggle_bookmark(&mut self, entry_id: u64) {
@@ -418,50 +440,30 @@ impl TerminalPanel {
 
     /// 返回用于匹配的搜索词：大小写敏感时保留原样，否则转小写。
     fn search_query(&self) -> String {
-        let trimmed = self.search_text.trim();
-        if self.search_case_sensitive {
-            trimmed.to_owned()
-        } else {
-            trimmed.to_ascii_lowercase()
-        }
+        self.search.query()
     }
 
     fn collect_visible_rows(&self) -> Vec<VisibleRow<'_>> {
         let search_key = self.search_query();
-        let mut rows = Vec::new();
-        for (port, data) in &self.ports {
-            if let Some(ref filter) = self.port_filter
-                && filter != port
-            {
-                continue;
-            }
+        collect_visible_rows_merged(
+            &self.ports,
+            self.port_filter.as_deref(),
+            self.show_rx,
+            self.show_tx,
+            &search_key,
+            self.search.case_sensitive,
+            self.show_hex,
+            self.show_raw,
+        )
+    }
 
-            let mut port_rows = build_visible_rows_for_port(
-                Some(port.as_str()),
-                data.entries
-                    .iter()
-                    .filter(|entry| entry_visible(entry.direction, self.show_rx, self.show_tx)),
-            );
-            if !search_key.is_empty() {
-                port_rows.retain(|row| {
-                    row_matches_search(
-                        row,
-                        &search_key,
-                        self.search_case_sensitive,
-                        self.show_hex,
-                        self.show_raw,
-                    )
-                });
-            }
-            rows.extend(port_rows);
-        }
-
-        rows.sort_by_key(|row| row.event_id);
-        rows
+    pub fn take_export_request(&mut self) -> Option<TerminalExportFormat> {
+        self.export_request.take()
     }
 
     pub fn export_visible_csv(&self) -> String {
         let show_hex = self.show_hex;
+        let show_raw = self.show_raw;
         let rows = self.collect_visible_rows();
         let show_metadata = true;
 
@@ -471,11 +473,13 @@ impl TerminalPanel {
             headers.push("port");
             headers.push("direction");
         }
-        if show_hex {
-            headers.push("hex");
+        headers.push(if show_hex {
+            "hex"
+        } else if show_raw {
+            "raw"
         } else {
-            headers.push("text");
-        }
+            "text"
+        });
 
         let mut out = headers.join(",");
         out.push('\n');
@@ -491,23 +495,33 @@ impl TerminalPanel {
                     Direction::Internal => "INTERNAL",
                 }));
             }
-            if show_hex {
-                cells.push(csv_cell(&row.hex_text));
-            } else {
-                cells.push(csv_cell(&row.raw_text));
-            }
+            cells.push(csv_cell(&visible_row_content(&row, show_hex, show_raw)));
             out.push_str(&cells.join(","));
             out.push('\n');
         }
         out
     }
 
-    pub fn export_visible_jsonl(&self) -> String {
+    pub fn export_visible_text(&self) -> String {
+        let mut out = self
+            .collect_visible_rows()
+            .iter()
+            .map(|row| visible_row_content(row, self.show_hex, self.show_raw))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out
+    }
+
+    pub fn export_visible_json(&self) -> String {
         let show_hex = self.show_hex;
+        let show_raw = self.show_raw;
         let rows = self.collect_visible_rows();
         let show_metadata = true;
 
-        let mut out = String::new();
+        let mut values = Vec::with_capacity(rows.len());
         for row in rows {
             let mut obj = serde_json::Map::new();
             if show_metadata {
@@ -527,24 +541,20 @@ impl TerminalPanel {
                     }),
                 );
             }
-            if show_hex {
-                obj.insert(
-                    "hex".into(),
-                    serde_json::Value::String(row.hex_text.to_string()),
-                );
+            let content_key = if show_hex {
+                "hex"
+            } else if show_raw {
+                "raw"
             } else {
-                obj.insert(
-                    "text".into(),
-                    serde_json::Value::String(row.raw_text.to_string()),
-                );
-            }
-            out.push_str(
-                &serde_json::to_string(&serde_json::Value::Object(obj))
-                    .unwrap_or_else(|_| "{}".to_owned()),
+                "text"
+            };
+            obj.insert(
+                content_key.into(),
+                serde_json::Value::String(visible_row_content(&row, show_hex, show_raw)),
             );
-            out.push('\n');
+            values.push(serde_json::Value::Object(obj));
         }
-        out
+        serde_json::to_string_pretty(&values).expect("serializable terminal export values")
     }
 
     pub fn port_names(&self) -> Vec<String> {
@@ -556,6 +566,17 @@ impl TerminalPanel {
         // 仅当指针位于本面板内时，滚轮向下才触发强制滚到底；
         // 否则全局 smooth_scroll_delta 会误捕获其它区域的滚轮事件。
         let panel_rect = ui.max_rect();
+        let panel_clicked = ui.input(|input| {
+            let pointer = &input.pointer;
+            (pointer.button_pressed(egui::PointerButton::Primary)
+                || pointer.button_pressed(egui::PointerButton::Secondary))
+                && pointer
+                    .hover_pos()
+                    .is_some_and(|position| panel_rect.contains(position))
+        });
+        if panel_clicked {
+            claim_copy_focus(ui, COPY_OWNER);
+        }
         let pointer_inside = ui
             .input(|input| input.pointer.hover_pos())
             .is_some_and(|pos| panel_rect.contains(pos));
@@ -563,7 +584,7 @@ impl TerminalPanel {
             && crate::scroll_delta_moves_towards_bottom(
                 ui.input(|input| input.smooth_scroll_delta.y),
             );
-        let mut force_scroll_to_bottom = self.pending_scroll_to_bottom_keys.remove(&scroll_key);
+        let mut force_scroll_to_bottom = self.auto_scroll.take_pending(&scroll_key);
 
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut self.show_rx, "RX");
@@ -571,27 +592,28 @@ impl TerminalPanel {
             ui.checkbox(&mut self.show_hex, "HEX");
             ui.checkbox(&mut self.show_raw, "原始");
 
-            force_scroll_to_bottom |= crate::theme::auto_scroll_button(ui, &mut self.auto_scroll);
+            force_scroll_to_bottom |= self.auto_scroll.button(ui);
 
-            // 暂停接收：用文字按钮而非 ⏸，避免与自动滚动按钮（⏸/↓）视觉撞图。
-            // 语义不同：暂停接收会冻结已显示内容并丢弃新数据，自动滚动只控制滚到底。
-            let (pause_label, pause_hint) = if self.paused {
-                ("继续", "已暂停接收 · 新数据被丢弃，点击继续")
-            } else {
-                ("暂停", "暂停接收 · 冻结画面查看")
-            };
-            if ui
-                .add(egui::Button::new(pause_label).selected(self.paused))
-                .on_hover_text(pause_hint)
-                .clicked()
-            {
-                self.paused = !self.paused;
-                // 恢复接收时，若期间丢弃过数据，在画面顶部留一条提示 5 秒，
-                // 让用户知道此处有数据缺口（高速流下恢复后容易看不出暂停过）。
-                if !self.paused && self.paused_dropped_count > 0 {
-                    self.paused_banner_remain = 5.0;
+            ui.menu_button("导出", |ui| {
+                if ui.button("导出 TXT 纯文本…").clicked() {
+                    self.export_request = Some(TerminalExportFormat::Txt);
+                    ui.close();
                 }
-            }
+                if ui.button("导出 CSV…").clicked() {
+                    self.export_request = Some(TerminalExportFormat::Csv);
+                    ui.close();
+                }
+                if ui.button("导出 JSON…").clicked() {
+                    self.export_request = Some(TerminalExportFormat::Json);
+                    ui.close();
+                }
+                ui.separator();
+                ui.label(
+                    RichText::new("导出当前筛选和显示模式下的文本；字节级原始数据请使用录制功能")
+                        .small()
+                        .color(theme::text_secondary()),
+                );
+            });
 
             // 清空：两步确认，避免误触丢失刚出现的故障数据。
             // 「清空」首次点击 → 变红「确认清空?」→ 再次点击才真正清空；
@@ -602,9 +624,9 @@ impl TerminalPanel {
             let armed = armed_ts.is_some_and(|t| now - t < 3.0);
             let clear_label = if armed { "确认清空?" } else { "清空" };
             let clear_btn = egui::Button::new(egui::RichText::new(clear_label).color(if armed {
-                crate::theme::RED
+                crate::theme::red()
             } else {
-                crate::theme::TEXT_PRIMARY
+                crate::theme::text_primary()
             }));
             if ui.add(clear_btn).clicked() {
                 if armed {
@@ -626,31 +648,16 @@ impl TerminalPanel {
             }
         });
 
-        force_scroll_to_bottom |= self.auto_scroll && wheel_moves_towards_bottom;
+        force_scroll_to_bottom |= self.auto_scroll.enabled && wheel_moves_towards_bottom;
 
         ui.horizontal(|ui| {
             ui.label("搜索");
-            let search_resp = ui.add(
-                egui::TextEdit::singleline(&mut self.search_text)
-                    .desired_width(140.0)
-                    .hint_text("文本 / HEX"),
+            self.search.toolbar(
+                ui,
+                140.0,
+                "文本 / HEX",
+                "区分大小写（HEX 为大写，默认不区分）",
             );
-            // Escape 清空搜索（聚焦时），与 VSCode/Chrome 查找栏行为一致
-            if search_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                self.search_text.clear();
-                search_resp.surrender_focus();
-            }
-            // 大小写敏感切换：选中时 "Aa" 高亮，匹配区分大小写。
-            let case_btn = egui::Button::new("Aa")
-                .selected(self.search_case_sensitive)
-                .small();
-            if ui
-                .add(case_btn)
-                .on_hover_text("区分大小写（HEX 为大写，默认不区分）")
-                .clicked()
-            {
-                self.search_case_sensitive = !self.search_case_sensitive;
-            }
 
             ui.label("端口");
             egui::ComboBox::from_id_salt("terminal-port-filter")
@@ -664,101 +671,49 @@ impl TerminalPanel {
                 });
 
             if ui.button("清除筛选").clicked() {
-                self.search_text.clear();
+                self.search.clear();
                 self.port_filter = None;
+            }
+
+            let selected_count = self.selection.selected_count();
+            if selected_count > 0 {
+                ui.separator();
+                ui.label(
+                    RichText::new(format!("已选 {selected_count} 行"))
+                        .color(theme::cyan())
+                        .strong(),
+                );
             }
         });
 
         ui.separator();
 
-        // 暂停提示：暂停中实时显示已丢弃条数；恢复后保留提示数秒再消失。
-        if self.paused {
-            // 暂停中：每帧都刷（数据仍在 drain），请求重绘以保持计数新鲜。
-            ui.ctx().request_repaint();
-            let dropped = self.paused_dropped_count;
-            egui::Frame::group(ui.style())
-                .inner_margin(egui::Margin::symmetric(8, 3))
-                .fill(crate::theme::YELLOW_BG)
-                .stroke(egui::Stroke::new(1.0, crate::theme::YELLOW))
-                .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "已暂停接收 · 丢弃 {dropped} 条数据（点击「继续」恢复）"
-                        ))
-                        .color(crate::theme::YELLOW),
-                    );
-                });
-        } else if self.paused_banner_remain > 0.0 {
-            // 恢复后：保留提示数秒，按 dt 递减。
-            let dt = ui.input(|i| i.unstable_dt) as f64;
-            self.paused_banner_remain = (self.paused_banner_remain - dt).max(0.0);
-            let dropped = self.paused_dropped_count;
-            egui::Frame::group(ui.style())
-                .inner_margin(egui::Margin::symmetric(8, 3))
-                .fill(crate::theme::YELLOW_BG)
-                .stroke(egui::Stroke::new(1.0, crate::theme::YELLOW))
-                .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "已恢复接收 · 暂停期间丢弃了 {dropped} 条数据"
-                        ))
-                        .color(crate::theme::YELLOW),
-                    );
-                });
-        } else if self.paused_dropped_count > 0 {
-            // 提示期结束且未再次暂停：清零计数，下一次暂停重新累计。
-            self.paused_dropped_count = 0;
-        }
-
         // 跳转到目标 entry 的 row 索引（用于"搜索时双击 → 跳转上下文"）
         let mut scroll_to_row: Option<usize> = None;
 
         // 双击搜索结果 → 下一帧清除搜索、关闭自动追踪、显示全部、跳转到对应行
-        if self.pending_navigate_to_id.is_some() && !self.search_text.trim().is_empty() {
-            self.search_text.clear();
+        if self.pending_navigate_to_id.is_some() && self.search.is_active() {
+            self.search.clear();
             self.port_filter = None;
-            self.auto_scroll = false;
+            self.auto_scroll.enabled = false;
         }
 
         let render_outcome = {
             // 预计算搜索查询：大小写敏感时保留原样，否则转小写（避免渲染循环中重复分配）。
             let search_key = self.search_query();
 
-            let mut rows: Vec<VisibleRow<'_>> = Vec::new();
-
-            for (port, data) in &self.ports {
-                if let Some(filter_port) = &self.port_filter
-                    && filter_port != port
-                {
-                    continue;
-                }
-                let mut port_rows = build_visible_rows_for_port(
-                    Some(port.as_str()),
-                    data.entries
-                        .iter()
-                        .filter(|entry| entry_visible(entry.direction, self.show_rx, self.show_tx)),
-                );
-                if !search_key.is_empty() {
-                    port_rows.retain(|row| {
-                        row_matches_search(
-                            row,
-                            &search_key,
-                            self.search_case_sensitive,
-                            self.show_hex,
-                            self.show_raw,
-                        )
-                    });
-                }
-                rows.extend(port_rows);
-            }
-
-            // 关键修复：
-            // 全局视图按 DataBus 发布顺序显示，不按端口名分组，也不按毫秒时间排序。
-            //
-            // timestamp_ms 在高频串口下会大量相同；
-            // BTreeMap 遍历又会按 COM 名排序；
-            // 所以只按 timestamp_ms 或 (timestamp_ms, local_id) 都可能看起来像 COM 分组。
-            rows.sort_by_key(|row| row.event_id);
+            // 每个端口队列自身有序，用 k 路归并保持 DataBus 发布顺序；复杂度为
+            // O(N log P)，避免高数据量下每帧对所有可见行做 O(N log N) 全量排序。
+            let rows = collect_visible_rows_merged(
+                &self.ports,
+                self.port_filter.as_deref(),
+                self.show_rx,
+                self.show_tx,
+                &search_key,
+                self.search.case_sensitive,
+                self.show_hex,
+                self.show_raw,
+            );
 
             // 获取下帧跳转目标的 row 索引（现在是完整列表）
             if let Some(target_id) = self.pending_navigate_to_id.take() {
@@ -786,14 +741,13 @@ impl TerminalPanel {
                 show_metadata,
                 show_metadata,
                 show_metadata,
-                self.auto_scroll,
+                self.auto_scroll.enabled,
                 force_scroll_to_bottom,
                 self.font_size,
                 &mut self.selection,
+                &mut self.text_selection_rows,
                 empty_hint,
-                &mut self.row_height_cache,
-                &mut self.cached_total_height,
-                &mut self.cached_total_height_rows,
+                &mut self.message_list,
                 self.navigate_highlight,
             )
         };
@@ -814,7 +768,7 @@ impl TerminalPanel {
         if let Some(id) = outcome.pending_navigate_to_id {
             self.pending_navigate_to_id = Some(id);
         }
-        self.update_auto_scroll(
+        self.auto_scroll.update(
             ui,
             scroll_key,
             outcome.inner_rect,
@@ -823,74 +777,10 @@ impl TerminalPanel {
         );
     }
 
-    fn update_auto_scroll(
-        &mut self,
-        ui: &egui::Ui,
-        scroll_key: &str,
-        inner_rect: egui::Rect,
-        content_height: f32,
-        offset_y: f32,
-    ) {
-        let pointer_inside = ui
-            .input(|input| input.pointer.hover_pos())
-            .is_some_and(|pos| inner_rect.contains(pos));
-
-        let smooth_scroll_y = ui.input(|input| input.smooth_scroll_delta.y);
-
-        let previous_offset_y = self
-            .last_scroll_offsets
-            .get(scroll_key)
-            .copied()
-            .unwrap_or(offset_y);
-        let next_auto_scroll = crate::next_auto_scroll_state(
-            self.auto_scroll,
-            pointer_inside,
-            smooth_scroll_y,
-            previous_offset_y,
-            offset_y,
-            content_height,
-            inner_rect.height(),
-        );
-        let should_repair_stick_to_bottom = next_auto_scroll
-            && !crate::scroll_delta_moves_away_from_bottom(smooth_scroll_y)
-            && !crate::scroll_is_at_bottom(offset_y, content_height, inner_rect.height());
-
-        if self.auto_scroll != next_auto_scroll {
-            if !self.auto_scroll && next_auto_scroll {
-                self.pending_scroll_to_bottom_keys
-                    .insert(scroll_key.to_owned());
-            }
-
-            self.auto_scroll = next_auto_scroll;
-            ui.ctx().request_repaint();
-        }
-
-        if should_repair_stick_to_bottom {
-            self.pending_scroll_to_bottom_keys
-                .insert(scroll_key.to_owned());
-            ui.ctx().request_repaint();
-        }
-
-        self.last_scroll_offsets
-            .insert(scroll_key.to_owned(), offset_y);
-    }
-
     fn ingest(&mut self) -> usize {
         let mut count = 0;
 
-        // 暂停接收：drain subscription 避免积压，但不 push 新事件，视图冻结。
-        if self.paused {
-            while self.subscription.try_recv().is_some() {
-                self.paused_dropped_count = self.paused_dropped_count.saturating_add(1);
-            }
-            return 0;
-        }
-
-        for _ in 0..MAX_INGEST_PER_FRAME {
-            let Some(event) = self.subscription.try_recv() else {
-                break;
-            };
-
+        for event in self.subscription.drain_limited(MAX_INGEST_PER_FRAME) {
             if !matches!(
                 event.topic.as_str(),
                 serial_topics::SERIAL_RX | serial_topics::SERIAL_TX
@@ -927,20 +817,9 @@ impl TerminalPanel {
             &text,
             &event,
             &mut self.next_entry_id,
-            self.max_entries,
-            &mut |id| {
-                if self.selected_entry_id == Some(id) {
-                    self.selected_entry_id = None;
-                }
-                if self.detail_entry_id == Some(id) {
-                    self.detail_entry_id = None;
-                }
-                self.bookmarked_entry_ids.remove(&id);
-                self.row_height_cache.remove(&id);
-                self.truncated = true;
-            },
             self.merge_window_ms,
         );
+        self.enforce_max_entries();
     }
 
     /// 将一行文本作为 entry push，或合并到上一条 entry（如果间隔 ≤ merge_window_ms
@@ -989,24 +868,28 @@ impl TerminalPanel {
 
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(&detail.timestamp_label).monospace());
-                    ui.label(RichText::new(&detail.port).monospace().color(theme::YELLOW));
+                    ui.label(
+                        RichText::new(&detail.port)
+                            .monospace()
+                            .color(theme::yellow()),
+                    );
                     ui.label(RichText::new(dir_label).strong().color(dir_color));
                     ui.label(
                         RichText::new(format!("#{} · {}B", detail.id, detail.raw_text.len()))
-                            .color(theme::TEXT_DIMMED)
+                            .color(theme::text_dimmed())
                             .small(),
                     );
 
                     if ui.button("复制内容").clicked() {
-                        ui.ctx().copy_text(detail.raw_text.clone());
+                        copy_text_with_feedback(ui, detail.raw_text.clone(), "已复制原始内容");
                     }
 
                     if ui.button("复制显示文本").clicked() {
-                        ui.ctx().copy_text(detail.display_text.clone());
+                        copy_text_with_feedback(ui, detail.display_text.clone(), "已复制显示文本");
                     }
 
                     if ui.button("复制 HEX").clicked() {
-                        ui.ctx().copy_text(detail.hex_text.clone());
+                        copy_text_with_feedback(ui, detail.hex_text.clone(), "已复制 HEX");
                     }
                 });
 
@@ -1059,6 +942,7 @@ impl TerminalPanel {
     }
 }
 
+#[cfg(test)]
 fn build_visible_rows_for_port<'a>(
     port: Option<&'a str>,
     entries: impl IntoIterator<Item = &'a TerminalEntry>,
@@ -1067,6 +951,61 @@ fn build_visible_rows_for_port<'a>(
         .into_iter()
         .map(|entry| VisibleRow::from_entry(port, entry))
         .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_visible_rows_merged<'a>(
+    ports: &'a BTreeMap<String, PortData>,
+    port_filter: Option<&str>,
+    show_rx: bool,
+    show_tx: bool,
+    search_key: &str,
+    case_sensitive: bool,
+    show_hex: bool,
+    show_raw: bool,
+) -> Vec<VisibleRow<'a>> {
+    let mut streams: Vec<(
+        &'a str,
+        std::collections::vec_deque::Iter<'a, TerminalEntry>,
+    )> = ports
+        .iter()
+        .filter(|(port, _)| port_filter.is_none_or(|filter| filter == port.as_str()))
+        .map(|(port, data)| (port.as_str(), data.entries.iter()))
+        .collect();
+    let capacity = streams
+        .iter()
+        .map(|(_, entries)| entries.len())
+        .sum::<usize>();
+    let mut current: Vec<Option<&'a TerminalEntry>> = vec![None; streams.len()];
+    let mut heap: BinaryHeap<Reverse<(u64, u64, usize)>> = BinaryHeap::new();
+
+    for (index, (_, entries)) in streams.iter_mut().enumerate() {
+        if let Some(entry) = entries.next() {
+            current[index] = Some(entry);
+            heap.push(Reverse((entry.event_id, entry.id, index)));
+        }
+    }
+
+    let mut rows = Vec::with_capacity(capacity);
+    while let Some(Reverse((_, _, index))) = heap.pop() {
+        let entry = current[index]
+            .take()
+            .expect("heap entries always have a current terminal entry");
+        if entry_visible(entry.direction, show_rx, show_tx) {
+            let row = VisibleRow::from_entry(Some(streams[index].0), entry);
+            if search_key.is_empty()
+                || row_matches_search(&row, search_key, case_sensitive, show_hex, show_raw)
+            {
+                rows.push(row);
+            }
+        }
+
+        if let Some(entry) = streams[index].1.next() {
+            current[index] = Some(entry);
+            heap.push(Reverse((entry.event_id, entry.id, index)));
+        }
+    }
+    rows
 }
 
 fn terminal_row_height_signature(
@@ -1090,26 +1029,39 @@ fn terminal_row_height_signature(
 fn cached_or_estimated_terminal_row_height(
     row: &VisibleRow<'_>,
     signature: TerminalRowHeightSignature,
-    row_height_cache: &BTreeMap<u64, TerminalRowHeightCacheEntry>,
+    message_list: &MessageList,
     show_hex: bool,
     show_raw: bool,
     base_row_height: f32,
+    glyph_width: f32,
     content_width_px: i32,
     preview_width_px: i32,
 ) -> f32 {
-    let estimated = estimated_terminal_row_height(row, show_hex, show_raw, base_row_height);
-    if let Some(cached) = row_height_cache.get(&row.id)
-        && cached.signature == signature
-    {
-        let width_unchanged = cached.content_width_px == content_width_px
-            && cached.preview_width_px == preview_width_px;
-        let height_is_intrinsic = cached.height <= estimated + 1.0;
-        if width_unchanged || height_is_intrinsic {
-            return cached.height;
-        }
-    }
+    let estimated = estimated_terminal_row_height(
+        row,
+        show_hex,
+        show_raw,
+        base_row_height,
+        glyph_width,
+        content_width_px as f32,
+        preview_width_px as f32,
+    );
+    message_list.estimated_height(
+        row.id,
+        terminal_row_height_signature_key(signature),
+        terminal_row_width_key(content_width_px, preview_width_px),
+        estimated,
+    )
+}
 
-    estimated
+fn terminal_row_height_signature_key(signature: TerminalRowHeightSignature) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    signature.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn terminal_row_width_key(content_width_px: i32, preview_width_px: i32) -> u64 {
+    ((content_width_px as u32 as u64) << 32) | preview_width_px as u32 as u64
 }
 
 fn estimated_terminal_row_height(
@@ -1117,24 +1069,31 @@ fn estimated_terminal_row_height(
     show_hex: bool,
     show_raw: bool,
     base_row_height: f32,
+    glyph_width: f32,
+    content_width: f32,
+    preview_width: f32,
 ) -> f32 {
     let line_count = if show_hex {
-        visible_line_count(row.hex_text.as_ref()).max(visible_line_count(row.preview_text.as_ref()))
+        estimated_wrapped_line_count(row.hex_text.as_ref(), content_width, glyph_width).max(
+            estimated_wrapped_line_count(row.preview_text.as_ref(), preview_width, glyph_width),
+        )
     } else if show_raw {
-        1
+        estimated_wrapped_line_count(
+            visible_row_content(row, false, true).as_ref(),
+            content_width,
+            glyph_width,
+        )
     } else {
-        visible_line_count(strip_terminal_trailing_line_ending(
-            row.display_text.as_ref(),
-        ))
+        estimated_wrapped_line_count(
+            strip_terminal_trailing_line_ending(row.display_text.as_ref()),
+            content_width,
+            glyph_width,
+        )
     };
 
     (line_count as f32 * base_row_height)
         .round()
         .max(base_row_height)
-}
-
-fn visible_line_count(text: &str) -> usize {
-    text.split('\n').count().max(1)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1182,10 +1141,9 @@ fn render_rows_view(
     force_scroll_to_bottom: bool,
     font_size: f32,
     selection: &mut RowSelection,
+    text_selection_rows: &mut TextSelectionRows,
     empty_hint: &str,
-    row_height_cache: &mut BTreeMap<u64, TerminalRowHeightCacheEntry>,
-    cached_total_height: &mut f32,
-    cached_total_height_rows: &mut usize,
+    message_list: &mut MessageList,
     navigate_highlight: Option<(u64, f64)>,
 ) -> RenderOutcome {
     let height = height.max(40.0);
@@ -1203,11 +1161,12 @@ fn render_rows_view(
 
     if rows.is_empty() {
         let scroll_output = ScrollArea::vertical()
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
             .max_height(height)
             .auto_shrink([false, false])
             .id_salt((scroll_key, "v2"))
             .show(ui, |ui| {
-                ui.label(RichText::new(empty_hint).color(theme::TEXT_SECONDARY));
+                ui.label(RichText::new(empty_hint).color(theme::text_secondary()));
             });
 
         return RenderOutcome {
@@ -1233,6 +1192,7 @@ fn render_rows_view(
     let mut navigate_id: Option<u64> = None;
 
     let scroll_output = ScrollArea::vertical()
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
         .auto_shrink([false, false])
         .stick_to_bottom(stick_to_bottom)
         .id_salt((scroll_key, "v2"))
@@ -1244,10 +1204,11 @@ fn render_rows_view(
             let preview_width = widths.preview;
             let text_padding = 4.0;
             let text_color = ui.style().visuals.text_color();
+            let glyph_width = ui.fonts_mut(|fonts| fonts.glyph_width(&font_id, '0'));
 
-            let galley_width = (hex_width - text_padding).max(0.0);
+            let galley_width = (hex_width - text_padding).max(0.0).floor();
             let preview_galley_width = if show_hex {
-                (preview_width - text_padding).max(0.0)
+                (preview_width - text_padding).max(0.0).floor()
             } else {
                 0.0
             };
@@ -1265,10 +1226,11 @@ fn render_rows_view(
                     cached_or_estimated_terminal_row_height(
                         row,
                         signature,
-                        row_height_cache,
+                        message_list,
                         show_hex,
                         show_raw,
                         row_height,
+                        glyph_width,
                         content_width_px,
                         preview_width_px,
                     )
@@ -1334,7 +1296,7 @@ fn render_rows_view(
             let hovered_idx = ui
                 .input(|input| input.pointer.hover_pos().map(|pos| pos.y))
                 .and_then(|y| hl.row_index_at_y_clamped(y));
-            let _data_pressed = ui.input(|input| {
+            let data_pressed = ui.input(|input| {
                 input.pointer.button_pressed(egui::PointerButton::Primary)
                     && input
                         .pointer
@@ -1350,8 +1312,33 @@ fn render_rows_view(
                             .is_some_and(|pos| rect.contains(pos))
                 }) && ui.rect_contains_pointer(rect)
             });
-            if blank_pressed {
+            if data_pressed || blank_pressed {
                 selection.clear();
+            }
+            let primary_down =
+                ui.input(|input| input.pointer.button_down(egui::PointerButton::Primary));
+            let owns_text_selection = owns_copy_focus(ui, COPY_OWNER);
+            let has_text_selection = owns_text_selection
+                && ui
+                    .ctx()
+                    .plugin::<LabelSelectionState>()
+                    .lock()
+                    .has_selection();
+            if !owns_text_selection || (!primary_down && !has_text_selection) {
+                text_selection_rows.clear();
+            }
+            if data_pressed
+                && let Some(index) = hovered_idx
+                && let Some(row) = rows.get(index)
+            {
+                text_selection_rows.begin(row.id);
+            }
+            if primary_down
+                && text_selection_rows.is_active()
+                && let Some(index) = hovered_idx
+                && let Some(row) = rows.get(index)
+            {
+                text_selection_rows.update(row.id);
             }
             let mut scroll_delta: f32 = 0.0;
             let row_selection_started = selection.handle_input(
@@ -1362,6 +1349,7 @@ fn render_rows_view(
                 &mut scroll_delta,
             );
             if row_selection_started || blank_pressed || selection.is_dragging() {
+                text_selection_rows.clear();
                 ui.ctx()
                     .plugin::<LabelSelectionState>()
                     .lock()
@@ -1370,6 +1358,8 @@ fn render_rows_view(
 
             let mut current_y = label_rect.top();
             let mut text_drag_response: Option<egui::Response> = None;
+            let text_selection_layout_range =
+                text_selection_rows.layout_range(rows.iter().map(|row| row.id));
             // 视口剔除：视口外的行跳过 layout + paint + interact。
             // 只对视口内行做懒 layout（约 30-60 行），resize 宽度变化时不再 O(rows)。
             // 上下各留 1 行 buffer，避免边界行因浮点误差被误剔。
@@ -1382,8 +1372,11 @@ fn render_rows_view(
                     .unwrap_or(row_height)
                     .max(row_height);
                 // 先用缓存高度做视口判断；视口内才懒 layout 得到真实高度。
-                let in_viewport =
-                    current_y + estimated_height >= clip_top && current_y <= clip_bottom;
+                let in_text_selection = text_selection_layout_range
+                    .as_ref()
+                    .is_some_and(|range| range.contains(&row_idx));
+                let in_viewport = in_text_selection
+                    || current_y + estimated_height >= clip_top && current_y <= clip_bottom;
 
                 let (galley, preview_galley, entry_height) = if in_viewport {
                     let content = visible_row_content(row, show_hex, show_raw);
@@ -1411,7 +1404,7 @@ fn render_rows_view(
                         let mut layout_job = egui::text::LayoutJob::simple(
                             preview_text,
                             font_id.clone(),
-                            theme::TEXT_DIMMED,
+                            theme::text_dimmed(),
                             preview_galley_width,
                         );
                         layout_job.halign = egui::Align::LEFT;
@@ -1427,14 +1420,11 @@ fn render_rows_view(
                     };
                     let height = height.round().max(row_height);
                     row_heights[row_idx] = height;
-                    row_height_cache.insert(
+                    message_list.record_height(
                         row.id,
-                        TerminalRowHeightCacheEntry {
-                            signature: row_signatures[row_idx],
-                            content_width_px,
-                            preview_width_px,
-                            height,
-                        },
+                        terminal_row_height_signature_key(row_signatures[row_idx]),
+                        terminal_row_width_key(content_width_px, preview_width_px),
+                        height,
                     );
                     (Some(galley), preview_galley, height)
                 } else {
@@ -1479,7 +1469,7 @@ fn render_rows_view(
                                 egui::vec2(full_rect.width(), entry_height),
                             ),
                             0.0,
-                            theme::NAV_HIGHLIGHT.gamma_multiply(alpha as f32),
+                            theme::nav_highlight().gamma_multiply(alpha as f32),
                         );
                         ui.ctx().request_repaint();
                     }
@@ -1494,7 +1484,7 @@ fn render_rows_view(
                         egui::Align2::LEFT_CENTER,
                         row.timestamp_label.as_ref(),
                         font_id.clone(),
-                        theme::TEXT_SECONDARY,
+                        theme::text_secondary(),
                     );
                     x += time_col_width + col_gap;
                 }
@@ -1506,7 +1496,7 @@ fn render_rows_view(
                             egui::Align2::LEFT_CENTER,
                             port,
                             font_id.clone(),
-                            theme::YELLOW,
+                            theme::yellow(),
                         );
                     }
                     x += port_col_width + col_gap;
@@ -1540,7 +1530,15 @@ fn render_rows_view(
                     // （松开判定）都要用到它。
                     // Use a separate id salt for hex column to avoid id collision with preview
                     let row_id = ui.make_persistent_id(("hex", row.id));
-                    let response = ui.interact(row_text_rect, row_id, Sense::click_and_drag());
+                    // 字符拖选已经开始后，将命中区扩展到整条内容行。这样从面板外
+                    // 移回来时，即使当前行比起点短、指针落在文字右侧，egui 也能
+                    // 把内部 cursor 从旧端点迁移到当前行。
+                    let text_interact_rect = if has_text_selection && primary_down {
+                        hex_row_rect
+                    } else {
+                        row_text_rect
+                    };
+                    let response = ui.interact(text_interact_rect, row_id, Sense::click_and_drag());
 
                     let (primary_pressed, ctrl, shift) = ui.input(|i| {
                         (
@@ -1555,6 +1553,7 @@ fn render_rows_view(
                         && ui.rect_contains_pointer(hex_row_rect)
                         && !ui.rect_contains_pointer(row_text_rect)
                     {
+                        text_selection_rows.clear();
                         selection.begin_pointer(row_idx, ctrl, shift);
                         // 整行选中与字符级文本选区互斥：清掉 egui 的 label 文本选区。
                         ui.ctx()
@@ -1567,6 +1566,7 @@ fn render_rows_view(
                     // （拖动超过阈值后松开走 drag，clicked 为 false，字符选区正常进行）。
                     // Ctrl/Shift/Ctrl+Shift 修饰键在松开时读取，复用 begin_pointer 语义。
                     if response.clicked() && ui.rect_contains_pointer(row_text_rect) {
+                        text_selection_rows.clear();
                         selection.begin_pointer(row_idx, ctrl, shift);
                         ui.ctx()
                             .plugin::<LabelSelectionState>()
@@ -1606,7 +1606,7 @@ fn render_rows_view(
                     preview_painter.add(egui::epaint::TextShape::new(
                         preview_pos,
                         pg.clone(),
-                        theme::TEXT_DIMMED,
+                        theme::text_dimmed(),
                     ));
                 }
 
@@ -1614,11 +1614,7 @@ fn render_rows_view(
             }
 
             let actual_total = (current_y - label_rect.top()).round();
-            if (*cached_total_height - actual_total).abs() > 0.5 {
-                ui.ctx().request_repaint();
-            }
-            *cached_total_height = actual_total;
-            *cached_total_height_rows = rows.len();
+            message_list.note_total_height(ui, actual_total, rows.len());
             if actual_total > total_height + 0.5 {
                 ui.allocate_space(egui::vec2(0.0, actual_total - total_height));
             }
@@ -1643,6 +1639,12 @@ fn render_rows_view(
                 &ctx_response,
                 ui.make_persistent_id(("term-frozen-row", scroll_key)),
             );
+            if ctx_response.clicked_by(egui::PointerButton::Secondary)
+                && let Some(index) = frozen_row_idx
+                && !selection.is_selected(index)
+            {
+                selection.select_only(index);
+            }
             // 双击任意位置（文字或空白）→ 离开搜索进入上下文：设置导航目标让下帧跳转。
             // 用全局 button_double_clicked + 整行 rect 命中，不再依赖只覆盖文本列的 ctx_response。
             let double_clicked = ui.input(|i| {
@@ -1695,7 +1697,8 @@ fn render_rows_view(
             // Ctrl+A 全选：无 TextEdit 聚焦时选中所有可见行。
             // 用 consume_key 消费事件，阻止 egui 的 LabelSelectionState 再对当前 galley
             // 做字符级 Ctrl+A 全选（会与整行多选冲突）。
-            if !ui.ctx().text_edit_focused()
+            if owns_copy_focus(ui, COPY_OWNER)
+                && !ui.ctx().text_edit_focused()
                 && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::A))
             {
                 selection.select_all();
@@ -1710,65 +1713,123 @@ fn render_rows_view(
                 ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
             if !selected_indices.is_empty()
                 && copy_requested
+                && owns_copy_focus(ui, COPY_OWNER)
                 && !ui.ctx().text_edit_focused()
-                && let (Some(full), _) =
-                    build_selected_text(rows, &selected_indices, show_hex, show_raw)
+                && let Some(full) =
+                    build_selected_full_text(rows, &selected_indices, show_hex, show_raw)
             {
-                ui.ctx().copy_text(full);
+                copy_text_with_feedback(
+                    ui,
+                    full,
+                    format!("已复制 {} 行（含时间、端口和方向）", selected_indices.len()),
+                );
+            }
+            if selected_indices.is_empty()
+                && copy_requested
+                && owns_copy_focus(ui, COPY_OWNER)
+                && !ui.ctx().text_edit_focused()
+                && ui
+                    .ctx()
+                    .plugin::<LabelSelectionState>()
+                    .lock()
+                    .has_selection()
+            {
+                report_copy_feedback(ui, "已复制所选文本");
             }
 
             ctx_response.context_menu(move |ctx_ui| {
-                // 闭包仅在菜单打开时执行，此处构造选中文本开销可接受。
-                let (selected_full, selected_data) =
-                    build_selected_text(rows, &selected_indices, show_hex, show_raw);
-
-                // 统一菜单：有框选用选中文本，否则用单行文本
-                let copy_full = selected_full
-                    .clone()
-                    .or_else(|| hovered_row.as_ref().map(|(f, _)| f.clone()));
-                let copy_data = selected_data
-                    .clone()
-                    .or_else(|| hovered_row.as_ref().map(|(_, d)| d.clone()));
-
-                if let Some(ref text) = copy_full
-                    && ctx_ui.button("复制选中行").clicked()
-                {
-                    ctx_ui.ctx().copy_text(text.clone());
+                let selected_count = selected_indices.len();
+                let target_count = if selected_count > 0 {
+                    selected_count
+                } else {
+                    usize::from(hovered_row.is_some())
+                };
+                let full_label = if selected_count > 0 {
+                    format!("复制选中 {selected_count} 行（含元数据）")
+                } else {
+                    "复制此行（含元数据）".to_owned()
+                };
+                if bulk_copy_button(ctx_ui, "terminal-selected-full", full_label, target_count) {
+                    let text = if selected_count > 0 {
+                        build_selected_full_text(rows, &selected_indices, show_hex, show_raw)
+                    } else {
+                        hovered_row.as_ref().map(|(full, _)| full.clone())
+                    };
+                    if let Some(text) = text {
+                        copy_text_with_feedback(
+                            ctx_ui,
+                            text,
+                            format!("已复制 {target_count} 行（含时间、端口和方向）"),
+                        );
+                    }
                     ctx_ui.close();
                 }
-                if let Some(ref text) = copy_data
-                    && ctx_ui.button("复制选中行数据").clicked()
-                {
-                    ctx_ui.ctx().copy_text(text.clone());
+
+                let data_label = if selected_count > 0 {
+                    format!("复制选中 {selected_count} 行数据")
+                } else {
+                    "复制此行数据".to_owned()
+                };
+                if bulk_copy_button(ctx_ui, "terminal-selected-data", data_label, target_count) {
+                    let text = if selected_count > 0 {
+                        build_selected_data_text(rows, &selected_indices, show_hex, show_raw)
+                    } else {
+                        hovered_row.as_ref().map(|(_, data)| data.clone())
+                    };
+                    if let Some(text) = text {
+                        copy_text_with_feedback(
+                            ctx_ui,
+                            text,
+                            format!("已复制 {target_count} 行数据"),
+                        );
+                    }
                     ctx_ui.close();
                 }
-                if copy_full.is_some() || copy_data.is_some() {
+                if target_count > 0 {
                     ctx_ui.separator();
                 }
 
-                if ctx_ui.button("复制全部可见内容").clicked() {
-                    // 按需构造，避免菜单未打开时每帧 join ~2000 行。
+                if bulk_copy_button(
+                    ctx_ui,
+                    "terminal-all-content",
+                    format!("复制全部可见内容（{} 行）", rows.len()),
+                    rows.len(),
+                ) {
                     let combined_text: String = rows
                         .iter()
                         .map(|row| visible_row_content(row, show_hex, show_raw))
                         .collect::<Vec<_>>()
                         .join("\n");
-                    ctx_ui.ctx().copy_text(combined_text);
+                    copy_text_with_feedback(
+                        ctx_ui,
+                        combined_text,
+                        format!("已复制全部可见内容（{} 行）", rows.len()),
+                    );
                     ctx_ui.close();
                 }
 
-                if ctx_ui.button("复制 CSV").clicked() {
+                if bulk_copy_button(ctx_ui, "terminal-all-csv", "复制全部可见为 CSV", rows.len())
+                {
                     let csv = build_csv(
                         rows,
                         show_hex,
                         show_raw,
                         show_timestamp || show_port || show_direction,
                     );
-                    ctx_ui.ctx().copy_text(csv);
+                    copy_text_with_feedback(
+                        ctx_ui,
+                        csv,
+                        format!("已复制 CSV（{} 行）", rows.len()),
+                    );
                     ctx_ui.close();
                 }
 
-                if ctx_ui.button("复制 JSONL").clicked() {
+                if bulk_copy_button(
+                    ctx_ui,
+                    "terminal-all-jsonl",
+                    "复制全部可见为 JSONL",
+                    rows.len(),
+                ) {
                     let jsonl = build_jsonl(
                         rows,
                         show_hex,
@@ -1777,7 +1838,11 @@ fn render_rows_view(
                         show_port,
                         show_direction,
                     );
-                    ctx_ui.ctx().copy_text(jsonl);
+                    copy_text_with_feedback(
+                        ctx_ui,
+                        jsonl,
+                        format!("已复制 JSONL（{} 行）", rows.len()),
+                    );
                     ctx_ui.close();
                 }
             });
@@ -1929,16 +1994,15 @@ fn entry_visible(direction: Direction, show_rx: bool, show_tx: bool) -> bool {
     }
 }
 
-/// 构造选中行的文本：full（含时间戳/端口/方向前缀）和 data（仅内容）。
-/// 供右键菜单和 Ctrl+C 复用。
-fn build_selected_text<'a>(
+/// 构造选中行的完整文本（含时间戳、端口和方向）。
+fn build_selected_full_text<'a>(
     rows: &[VisibleRow<'a>],
     selected_indices: &[usize],
     show_hex: bool,
     show_raw: bool,
-) -> (Option<String>, Option<String>) {
+) -> Option<String> {
     if selected_indices.is_empty() {
-        return (None, None);
+        return None;
     }
     let full: String = selected_indices
         .iter()
@@ -1954,13 +2018,27 @@ fn build_selected_text<'a>(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let data: String = selected_indices
-        .iter()
-        .map(|&index| &rows[index])
-        .map(|row| visible_row_content(row, show_hex, show_raw))
-        .collect::<Vec<_>>()
-        .join("\n");
-    (Some(full), Some(data))
+    Some(full)
+}
+
+/// 构造选中行的纯数据文本。
+fn build_selected_data_text<'a>(
+    rows: &[VisibleRow<'a>],
+    selected_indices: &[usize],
+    show_hex: bool,
+    show_raw: bool,
+) -> Option<String> {
+    if selected_indices.is_empty() {
+        return None;
+    }
+    Some(
+        selected_indices
+            .iter()
+            .map(|&index| &rows[index])
+            .map(|row| visible_row_content(row, show_hex, show_raw))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 fn row_matches_search(
@@ -1977,7 +2055,7 @@ fn row_matches_search(
         if case_sensitive {
             haystack.contains(search_key)
         } else {
-            haystack.to_ascii_lowercase().contains(search_key)
+            haystack.to_lowercase().contains(search_key)
         }
     };
     // 根据显示模式搜索对应字段：
@@ -2054,8 +2132,8 @@ fn format_raw_visible(text: &str) -> String {
 
 fn direction_label(direction: Direction) -> (&'static str, Color32) {
     match direction {
-        Direction::Rx => ("RX", theme::GREEN),
-        Direction::Tx => ("TX", theme::BLUE),
+        Direction::Rx => ("RX", theme::green()),
+        Direction::Tx => ("TX", theme::blue()),
         Direction::Internal => ("IN", Color32::GRAY),
     }
 }
@@ -2120,52 +2198,106 @@ mod tests {
     }
 
     #[test]
-    fn paused_ingest_drains_subscription_without_pushing() {
+    fn max_entries_is_global_across_ports_and_keeps_newest_events() {
         let bus = DataBus::new();
         let mut panel = TerminalPanel::new(&bus);
+        panel.max_entries = 100;
 
-        // 暂停前置一条已有数据，验证暂停期间不新增。
+        for index in 0..120 {
+            let port = if index % 2 == 0 { "COM1" } else { "COM2" };
+            bus.publish(
+                Event::with_timestamp(
+                    1_000 + index,
+                    serial_topics::SERIAL_RX,
+                    format!("serial:{port}"),
+                    Direction::Rx,
+                    Payload::Text(format!("message-{index}\n")),
+                )
+                .with_metadata(serde_json::json!({ "port": port })),
+            );
+        }
+
+        assert_eq!(panel.ingest_all_pending(), 120);
+        let entries: Vec<&TerminalEntry> = panel
+            .ports
+            .values()
+            .flat_map(|data| data.entries.iter())
+            .collect();
+        assert_eq!(entries.len(), 100);
+        assert!(entries.iter().all(|entry| entry.event_id > 20));
+        let visible_ids: Vec<u64> = panel
+            .collect_visible_rows()
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        assert!(visible_ids.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(panel.truncated);
+    }
+
+    #[test]
+    fn lowering_max_entries_trims_immediately() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+        for index in 0..120 {
+            bus.publish(Event::with_timestamp(
+                index,
+                serial_topics::SERIAL_RX,
+                "serial:COM1",
+                Direction::Rx,
+                Payload::Text(format!("message-{index}\n")),
+            ));
+        }
+        panel.ingest_all_pending();
+
+        panel.set_max_entries(100);
+
+        assert_eq!(panel.ports["COM1"].entries.len(), 100);
+        assert_eq!(panel.ports["COM1"].entries.front().unwrap().event_id, 21);
+    }
+
+    #[test]
+    fn export_uses_standard_json_and_the_current_visible_content_mode() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
         bus.publish(
             Event::new(
                 serial_topics::SERIAL_RX,
                 "serial:COM1",
                 Direction::Rx,
-                Payload::Bytes(b"first".to_vec()),
-            )
-            .with_metadata(serde_json::json!({ "port": "COM1" })),
-        );
-        assert_eq!(panel.ingest_all_pending(), 1);
-
-        panel.paused = true;
-
-        // 暂停期间发布两条，ingest 应返回 0 且不 push。
-        bus.publish(
-            Event::new(
-                serial_topics::SERIAL_RX,
-                "serial:COM1",
-                Direction::Rx,
-                Payload::Bytes(b"dropped1".to_vec()),
+                Payload::Bytes(b"hello,\"world\"".to_vec()),
             )
             .with_metadata(serde_json::json!({ "port": "COM1" })),
         );
         bus.publish(
             Event::new(
-                serial_topics::SERIAL_RX,
+                serial_topics::SERIAL_TX,
                 "serial:COM1",
-                Direction::Rx,
-                Payload::Bytes(b"dropped2".to_vec()),
+                Direction::Tx,
+                Payload::Bytes(b"hidden tx".to_vec()),
             )
             .with_metadata(serde_json::json!({ "port": "COM1" })),
         );
+        assert_eq!(panel.ingest_all_pending(), 2);
+        panel.show_tx = false;
 
-        assert_eq!(panel.ingest_all_pending(), 0);
-        let port = panel.ports.get("COM1").expect("COM1 still present");
-        assert_eq!(port.entries.len(), 1, "paused should not push new entries");
-        assert_eq!(port.entries.front().unwrap().raw_text, "first");
+        let csv = panel.export_visible_csv();
+        assert!(csv.starts_with("time,port,direction,text\n"));
+        assert!(csv.contains("\"hello,\"\"world\"\"\""));
+        assert_eq!(panel.export_visible_text(), "hello,\"world\"\n");
 
-        // 恢复后，subscription 已被 drain，旧数据不会补放（丢弃语义）。
-        panel.paused = false;
-        assert_eq!(panel.ingest_all_pending(), 0);
+        let json: serde_json::Value =
+            serde_json::from_str(&panel.export_visible_json()).expect("valid JSON array");
+        let rows = json.as_array().expect("top-level array");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["port"], "COM1");
+        assert_eq!(rows[0]["direction"], "RX");
+        assert_eq!(rows[0]["text"], "hello,\"world\"");
+
+        panel.show_hex = true;
+        let json: serde_json::Value =
+            serde_json::from_str(&panel.export_visible_json()).expect("valid HEX JSON array");
+        assert_eq!(json[0]["hex"], "68 65 6C 6C 6F 2C 22 77 6F 72 6C 64 22");
+        assert!(json[0].get("text").is_none());
     }
 
     /// 新逻辑：按 \n 拆分行，同包内不合并，跨包只合并未完成行。
@@ -2322,7 +2454,6 @@ mod tests {
     fn visible_row_hides_only_the_final_line_ending() {
         let row = VisibleRow {
             id: 1,
-            event_id: 1,
             port: Some(Cow::Borrowed("COM6")),
             timestamp_label: Cow::Borrowed("[10:00:39.580]"),
             direction: Direction::Rx,
@@ -2349,7 +2480,6 @@ mod tests {
     fn estimated_row_height_counts_internal_newlines_not_final_line_ending() {
         let row = VisibleRow {
             id: 1,
-            event_id: 1,
             port: Some(Cow::Borrowed("COM6")),
             timestamp_label: Cow::Borrowed("[10:00:39.580]"),
             direction: Direction::Rx,
@@ -2360,7 +2490,7 @@ mod tests {
         };
 
         assert_eq!(
-            estimated_terminal_row_height(&row, false, false, 10.0),
+            estimated_terminal_row_height(&row, false, false, 10.0, 5.0, 100.0, 100.0),
             20.0
         );
     }
@@ -2369,7 +2499,6 @@ mod tests {
     fn row_height_signature_changes_when_entry_text_grows() {
         let short = VisibleRow {
             id: 1,
-            event_id: 1,
             port: Some(Cow::Borrowed("COM6")),
             timestamp_label: Cow::Borrowed("[10:00:39.580]"),
             direction: Direction::Rx,
@@ -2380,7 +2509,6 @@ mod tests {
         };
         let grown = VisibleRow {
             id: 1,
-            event_id: 1,
             port: Some(Cow::Borrowed("COM6")),
             timestamp_label: Cow::Borrowed("[10:00:39.581]"),
             direction: Direction::Rx,
@@ -2400,7 +2528,6 @@ mod tests {
     fn unwrapped_row_height_cache_survives_width_changes() {
         let row = VisibleRow {
             id: 1,
-            event_id: 1,
             port: Some(Cow::Borrowed("COM6")),
             timestamp_label: Cow::Borrowed("[10:00:39.580]"),
             direction: Direction::Rx,
@@ -2410,20 +2537,25 @@ mod tests {
             preview_text: Cow::Borrowed("short"),
         };
         let signature = terminal_row_height_signature(&row, false, false, 13.0);
-        let mut cache = BTreeMap::new();
-        cache.insert(
+        let mut message_list = MessageList::default();
+        message_list.record_height(
             row.id,
-            TerminalRowHeightCacheEntry {
-                signature,
-                content_width_px: 240,
-                preview_width_px: 0,
-                height: 13.0,
-            },
+            terminal_row_height_signature_key(signature),
+            terminal_row_width_key(240, 0),
+            13.0,
         );
 
         assert_eq!(
             cached_or_estimated_terminal_row_height(
-                &row, signature, &cache, false, false, 13.0, 180, 0
+                &row,
+                signature,
+                &message_list,
+                false,
+                false,
+                13.0,
+                6.0,
+                180,
+                0
             ),
             13.0
         );
@@ -2625,12 +2757,12 @@ mod tests {
 
         assert_eq!(panel.ingest_all_pending(), 3);
 
-        panel.search_text = "2".to_owned();
+        panel.search.text = "2".to_owned();
         let rows = panel.collect_visible_rows();
         assert_eq!(rows.len(), 1, "search '2' should match exactly 1 entry");
         assert_eq!(rows[0].raw_text, "2");
 
-        panel.search_text = "3".to_owned();
+        panel.search.text = "3".to_owned();
         let rows = panel.collect_visible_rows();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].raw_text, "3");

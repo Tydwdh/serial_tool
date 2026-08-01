@@ -172,13 +172,14 @@ impl WorkbenchApp {
                             ui.add_space(20.0);
                             ui.vertical_centered(|ui| {
                                 ui.label(
-                                    egui::RichText::new("无匹配命令").color(theme::TEXT_SECONDARY),
+                                    egui::RichText::new("无匹配命令")
+                                        .color(theme::text_secondary()),
                                 );
                                 ui.add_space(4.0);
                                 ui.label(
                                     egui::RichText::new("按 Esc 关闭")
                                         .small()
-                                        .color(theme::TEXT_DIMMED),
+                                        .color(theme::text_dimmed()),
                                 );
                             });
                             ui.add_space(20.0);
@@ -201,9 +202,9 @@ impl WorkbenchApp {
                                     }
                                     if resp.hovered() || is_selected {
                                         let color = if is_selected {
-                                            theme::BG_SELECTION
+                                            theme::bg_selection()
                                         } else {
-                                            theme::BG_HOVER
+                                            theme::bg_hover()
                                         };
                                         ui.painter().rect_filled(rect, 3.0, color);
                                     }
@@ -218,7 +219,7 @@ impl WorkbenchApp {
                                     ui.add(
                                         egui::Label::new(
                                             egui::RichText::new(&entry.label)
-                                                .color(theme::TEXT_PRIMARY),
+                                                .color(theme::text_primary()),
                                         )
                                         .selectable(false),
                                     );
@@ -231,7 +232,7 @@ impl WorkbenchApp {
                                                 ui.label(
                                                     egui::RichText::new(&entry.shortcut)
                                                         .small()
-                                                        .color(theme::TEXT_SECONDARY),
+                                                        .color(theme::text_secondary()),
                                                 );
                                             },
                                         );
@@ -254,7 +255,7 @@ impl WorkbenchApp {
                     ui.label(
                         egui::RichText::new("↑↓ 选择 · Enter 执行 · Esc 关闭")
                             .small()
-                            .color(theme::TEXT_SECONDARY),
+                            .color(theme::text_secondary()),
                     );
                 });
             });

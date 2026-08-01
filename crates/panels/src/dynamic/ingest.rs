@@ -23,7 +23,16 @@ impl super::DynamicPanels {
     pub fn ingest(&mut self, panel_manager: &mut PanelManager) {
         for event in self.subscription.drain_limited(500) {
             match self.create_from_event(event) {
-                Ok(Some(id)) => panel_manager.add_tab(PanelKind::Dynamic(id)),
+                // 插件主动创建面板时立即显示并聚焦；同一插件的多个面板自动分组。
+                Ok(Some(id)) => {
+                    let owner = self.panel_owner(&id).map(str::to_owned);
+                    let pane = PanelKind::Dynamic(id);
+                    if let Some(owner) = owner {
+                        panel_manager.open_plugin_tab(pane, &owner);
+                    } else {
+                        panel_manager.open_tab(pane);
+                    }
+                }
                 Ok(None) => {}
                 Err(error) => self.last_error = Some(error),
             }

@@ -1,8 +1,18 @@
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use serde_json::Map;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use tool_core::config::{CURRENT_SCHEMA_VERSION, atomic_write_json, quarantine_corrupt_file};
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PluginConfigDocument {
+    #[serde(default, alias = "version")]
+    schema_version: u32,
+    #[serde(default)]
+    values: Map<String, serde_json::Value>,
+}
 
 /// 跨组件共享的配置持久化存储。
 ///
@@ -13,6 +23,8 @@ pub struct ConfigStore {
     root: PathBuf,
     /// 内存缓存，避免重复读盘
     cache: Mutex<HashMap<String, serde_json::Value>>,
+    /// 高于当前版本的配置只读，避免旧程序覆盖新程序写入的数据。
+    unsupported_versions: Mutex<HashSet<String>>,
 }
 
 impl ConfigStore {
@@ -22,6 +34,7 @@ impl ConfigStore {
         Self {
             root,
             cache: Mutex::new(HashMap::new()),
+            unsupported_versions: Mutex::new(HashSet::new()),
         }
     }
 
@@ -35,24 +48,88 @@ impl ConfigStore {
     }
 
     fn ensure_loaded(&self, plugin_id: &str) {
-        let mut cache = self.cache.lock();
-        if cache.contains_key(plugin_id) {
+        if self.cache.lock().contains_key(plugin_id) {
             return;
         }
         let path = self.config_path(plugin_id);
-        let data = if path.exists() {
-            fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .and_then(|v| v.as_object().cloned())
-                .unwrap_or_default()
-        } else {
-            Map::new()
+        let (data, migrated, unsupported_version) = self.read_document(&path);
+        self.cache
+            .lock()
+            .insert(plugin_id.to_owned(), serde_json::Value::Object(data));
+        if unsupported_version {
+            self.unsupported_versions
+                .lock()
+                .insert(plugin_id.to_owned());
+            return;
+        }
+        if migrated && let Err(error) = self.write(plugin_id) {
+            log::warn!("plugin config migration for {plugin_id} could not be persisted: {error}");
+        }
+    }
+
+    fn read_document(&self, path: &Path) -> (Map<String, serde_json::Value>, bool, bool) {
+        let Ok(source) = fs::read_to_string(path) else {
+            return (Map::new(), false, false);
         };
-        cache.insert(plugin_id.to_owned(), serde_json::Value::Object(data));
+        let value: serde_json::Value = match serde_json::from_str(&source) {
+            Ok(value) => value,
+            Err(error) => {
+                let backup = quarantine_corrupt_file(path).ok().flatten();
+                log::warn!(
+                    "plugin config {} is invalid: {error}; backup: {}",
+                    path.display(),
+                    backup.as_ref().map_or_else(
+                        || "unavailable".to_owned(),
+                        |path| path.display().to_string()
+                    )
+                );
+                return (Map::new(), false, false);
+            }
+        };
+        let Some(object) = value.as_object() else {
+            let backup = quarantine_corrupt_file(path).ok().flatten();
+            log::warn!(
+                "plugin config {} root must be an object; backup: {}",
+                path.display(),
+                backup.as_ref().map_or_else(
+                    || "unavailable".to_owned(),
+                    |path| path.display().to_string()
+                )
+            );
+            return (Map::new(), false, false);
+        };
+
+        if object.contains_key("schema_version") || object.contains_key("version") {
+            let version = object
+                .get("schema_version")
+                .or_else(|| object.get("version"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u32;
+            if version > CURRENT_SCHEMA_VERSION {
+                log::error!(
+                    "plugin config {} uses unsupported future schema v{version}",
+                    path.display()
+                );
+                return (Map::new(), false, true);
+            }
+            let values = object
+                .get("values")
+                .and_then(serde_json::Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            return (values, version != CURRENT_SCHEMA_VERSION, false);
+        }
+
+        // v0: 插件键直接位于根对象，读取后立即保存为带 schema_version 的文档。
+        (object.clone(), true, false)
     }
 
     fn write(&self, plugin_id: &str) -> std::io::Result<()> {
+        if self.unsupported_versions.lock().contains(plugin_id) {
+            return Err(std::io::Error::other(
+                "插件配置版本高于当前程序支持范围，已按只读方式打开",
+            ));
+        }
         let data = {
             let cache = self.cache.lock();
             cache.get(plugin_id).cloned()
@@ -64,12 +141,19 @@ impl ConfigStore {
         let parent = path.parent().unwrap_or(Path::new("."));
         fs::create_dir_all(parent)?;
 
-        let tmp = path.with_extension("tmp");
-        let content = serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".to_owned());
-        fs::write(&tmp, &content)?;
-        if let Err(e) = fs::rename(&tmp, &path) {
-            let _ = fs::remove_file(&tmp);
-            return Err(e);
+        let values = data.as_object().cloned().unwrap_or_default();
+        let document = PluginConfigDocument {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            values,
+        };
+        atomic_write_json(&path, &document).map_err(std::io::Error::other)
+    }
+
+    fn ensure_writable(&self, plugin_id: &str) -> std::io::Result<()> {
+        if self.unsupported_versions.lock().contains(plugin_id) {
+            return Err(std::io::Error::other(
+                "插件配置版本高于当前程序支持范围，已按只读方式打开",
+            ));
         }
         Ok(())
     }
@@ -89,6 +173,7 @@ impl ConfigStore {
 
     pub fn set(&self, plugin_id: &str, key: &str, value: serde_json::Value) -> std::io::Result<()> {
         self.ensure_loaded(plugin_id);
+        self.ensure_writable(plugin_id)?;
         {
             let mut cache = self.cache.lock();
             if let Some(obj) = cache.get_mut(plugin_id).and_then(|v| v.as_object_mut()) {
@@ -100,6 +185,7 @@ impl ConfigStore {
 
     pub fn remove(&self, plugin_id: &str, key: &str) -> std::io::Result<()> {
         self.ensure_loaded(plugin_id);
+        self.ensure_writable(plugin_id)?;
         {
             let mut cache = self.cache.lock();
             if let Some(obj) = cache.get_mut(plugin_id).and_then(|v| v.as_object_mut()) {
@@ -155,6 +241,7 @@ impl ConfigStore {
         data: serde_json::Value,
     ) -> std::io::Result<()> {
         self.ensure_loaded(plugin_id);
+        self.ensure_writable(plugin_id)?;
         {
             let mut cache = self.cache.lock();
             if let Some(obj) = cache.get_mut(plugin_id).and_then(|v| v.as_object_mut()) {
@@ -172,6 +259,7 @@ impl ConfigStore {
     /// 删除 profile。
     pub fn profile_delete(&self, plugin_id: &str, name: &str) -> std::io::Result<()> {
         self.ensure_loaded(plugin_id);
+        self.ensure_writable(plugin_id)?;
         {
             let mut cache = self.cache.lock();
             if let Some(obj) = cache.get_mut(plugin_id).and_then(|v| v.as_object_mut())
@@ -297,6 +385,71 @@ mod tests {
             );
         }
 
+        let _ = fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn legacy_plugin_config_is_migrated_to_versioned_document() {
+        let tmp = std::env::temp_dir().join(format!(
+            "hw-config-migration-test-{}-{}",
+            tool_core::now_timestamp_ms(),
+            line!()
+        ));
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("demo.test.json"), r#"{"baud":115200}"#).unwrap();
+
+        let store = ConfigStore::new(tmp.clone());
+        assert_eq!(store.get("demo.test", "baud", serde_json::json!(0)), 115200);
+
+        let document: PluginConfigDocument =
+            serde_json::from_str(&fs::read_to_string(tmp.join("demo.test.json")).unwrap()).unwrap();
+        assert_eq!(document.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(document.values["baud"], 115200);
+        let _ = fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn corrupted_plugin_config_is_quarantined_before_rewrite() {
+        let tmp = std::env::temp_dir().join(format!(
+            "hw-config-corrupt-test-{}-{}",
+            tool_core::now_timestamp_ms(),
+            line!()
+        ));
+        fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("demo.test.json");
+        fs::write(&path, "not json").unwrap();
+
+        let store = ConfigStore::new(tmp.clone());
+        assert_eq!(store.get("demo.test", "x", serde_json::json!(7)), 7);
+        assert!(!path.exists());
+        assert!(fs::read_dir(&tmp).unwrap().flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .contains("demo.test.json.corrupt-")
+        }));
+
+        store.set("demo.test", "x", serde_json::json!(9)).unwrap();
+        assert!(path.exists());
+        let _ = fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn future_plugin_config_is_never_overwritten() {
+        let tmp = std::env::temp_dir().join(format!(
+            "hw-config-future-test-{}-{}",
+            tool_core::now_timestamp_ms(),
+            line!()
+        ));
+        fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("demo.test.json");
+        let source = r#"{"schema_version":99,"values":{"x":1}}"#;
+        fs::write(&path, source).unwrap();
+
+        let store = ConfigStore::new(tmp.clone());
+        assert_eq!(store.get("demo.test", "x", serde_json::json!(0)), 0);
+        assert!(store.set("demo.test", "x", serde_json::json!(2)).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), source);
         let _ = fs::remove_dir_all(tmp);
     }
 }

@@ -15,7 +15,7 @@ impl WorkbenchApp {
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::CARD_ACCENT_DEVICE);
+                    theme::card_accent_bar(ui, theme::card_accent_device());
                     ui.label(egui::RichText::new("📟 串口参数").heading());
                 });
                 ui.separator();
@@ -67,7 +67,7 @@ impl WorkbenchApp {
                             remaining,
                             pending.attempts + 1
                         ))
-                        .color(theme::YELLOW),
+                        .color(theme::yellow()),
                     );
                 }
             });
@@ -80,7 +80,7 @@ impl WorkbenchApp {
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::CARD_ACCENT_RECORD);
+                    theme::card_accent_bar(ui, theme::card_accent_record());
                     ui.label(egui::RichText::new("⏺ 录制").heading());
                 });
                 ui.separator();
@@ -165,11 +165,11 @@ impl WorkbenchApp {
                     ui.separator();
                     ui.horizontal(|ui| {
                         if stats.paused {
-                            ui.colored_label(theme::YELLOW, "⏸ 已暂停，未写入新事件");
+                            ui.colored_label(theme::yellow(), "⏸ 已暂停，未写入新事件");
                         } else if stats.running {
-                            ui.colored_label(theme::GREEN, "● 录制中");
+                            ui.colored_label(theme::green(), "● 录制中");
                         } else {
-                            ui.colored_label(theme::YELLOW, "● 正在停止");
+                            ui.colored_label(theme::yellow(), "● 正在停止");
                         }
 
                         ui.label(format!("事件 {}", stats.events_written));
@@ -184,7 +184,7 @@ impl WorkbenchApp {
                         ui.label(format!("路径：{}", path.display()));
                     }
                     if let Some(ref error) = stats.last_error {
-                        ui.colored_label(theme::RED, format!("录制错误：{error}"));
+                        ui.colored_label(theme::red(), format!("录制错误：{error}"));
                     }
                 }
             });
@@ -197,7 +197,7 @@ impl WorkbenchApp {
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::CARD_ACCENT_PORT);
+                    theme::card_accent_bar(ui, theme::card_accent_port());
                     ui.label(egui::RichText::new("🔌 可用端口").heading());
                 });
                 ui.separator();
@@ -216,11 +216,13 @@ impl WorkbenchApp {
                         .filter(|p| !system_names.contains(p.as_str()))
                         .collect();
                     if !stale.is_empty() {
-                        ui.colored_label(theme::ORANGE, "⚠ 以下端口已打开但可能已拔出：");
+                        ui.colored_label(theme::orange(), "⚠ 以下端口已打开但可能已拔出：");
                         for port in &stale {
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    egui::RichText::new(*port).monospace().color(theme::ORANGE),
+                                    egui::RichText::new(*port)
+                                        .monospace()
+                                        .color(theme::orange()),
                                 );
                                 // 两步确认：首次点击 → 变红"确认?" → 再次点击才执行。
                                 // 5 秒后自动解除武装。
@@ -232,9 +234,9 @@ impl WorkbenchApp {
                                 let label = if armed { "确认?" } else { "强制关闭" };
                                 let btn =
                                     egui::Button::new(egui::RichText::new(label).color(if armed {
-                                        theme::RED
+                                        theme::red()
                                     } else {
-                                        theme::ORANGE
+                                        theme::orange()
                                     }))
                                     .small();
                                 if ui.add(btn).clicked() {
@@ -263,7 +265,7 @@ impl WorkbenchApp {
 
                 ui.label(
                     egui::RichText::new("提示：别名会显示在串口选择、发送目标和设备列表中")
-                        .color(theme::TEXT_SECONDARY),
+                        .color(theme::text_secondary()),
                 );
 
                 // 收集所有已有组名
@@ -324,13 +326,13 @@ impl WorkbenchApp {
                                 open = !open;
                             }
                             ui.label(egui::RichText::new(group_name).color(if is_default_group {
-                                theme::TEXT_SECONDARY
+                                theme::text_secondary()
                             } else {
-                                theme::TEXT_PRIMARY
+                                theme::text_primary()
                             }));
                             ui.label(
                                 egui::RichText::new(format!("({})", ports.len()))
-                                    .color(theme::TEXT_DIMMED),
+                                    .color(theme::text_dimmed()),
                             );
 
                             // 分组操作菜单（非默认组）
@@ -419,11 +421,11 @@ impl WorkbenchApp {
                                     // 端口状态按钮：带文字 + 颜色，加大命中区，色盲友好。
                                     // ●开(绿)=已开→点击关闭，○关(红)=未开→点击打开，⟳连(黄)=重连中→点击取消。
                                     let (icon, text, color, tooltip) = if pending_reconnect {
-                                        ("⟳", "连", theme::YELLOW, "重连中，点击取消")
+                                        ("⟳", "连", theme::yellow(), "重连中，点击取消")
                                     } else if port_open {
-                                        ("●", "开", theme::GREEN, "已打开，点击关闭")
+                                        ("●", "开", theme::green(), "已打开，点击关闭")
                                     } else {
-                                        ("○", "关", theme::RED, "未打开，点击打开")
+                                        ("○", "关", theme::red(), "未打开，点击打开")
                                     };
                                     let btn_label = format!("{icon}{text}");
                                     if ui

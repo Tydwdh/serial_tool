@@ -2,7 +2,7 @@
   "$schema": "../plugin.schema.json",
   "id": "gcode-sender",
   "name": "G-code Sender",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "api_version": "0.1",
   "runtime": "lua",
   "main": "main.lua",
@@ -98,6 +98,16 @@
         "max": 256,
         "step": 8,
         "description": "超过此长度的 G-code 行将被跳过"
+      },
+      {
+        "id": "max_retries",
+        "title": "单行最大重试次数",
+        "kind": "number",
+        "default": 3,
+        "min": 0,
+        "max": 20,
+        "step": 1,
+        "description": "ACK 超时、未知命令或设备请求重传时的最大额外尝试次数；设为 0 时不重试"
       }
     ],
     "ui": [
@@ -123,7 +133,7 @@
         "slot": "send.toolbar",
         "kind": "button",
         "command": "gcode-sender.send_single",
-        "tooltip": "按脚本 singlegcode 模式发送：M92 + 当前输入 + M2，并带行号和校验",
+        "tooltip": "发送初始化 G-code 和当前输入，自动补结束命令，并添加行号与校验",
         "record_send_input": true,
         "order": 21
       },
@@ -132,7 +142,7 @@
         "slot": "send.toolbar",
         "kind": "button",
         "command": "gcode-sender.pause",
-        "tooltip": "暂停或恢复当前 G-code 发送任务",
+        "tooltip": "暂停或恢复继续下发新指令；设备已缓存的指令仍可能继续执行",
         "order": 23
       },
       {
@@ -140,7 +150,7 @@
         "slot": "send.toolbar",
         "kind": "button",
         "command": "gcode-sender.cancel",
-        "tooltip": "取消当前 G-code 发送任务",
+        "tooltip": "停止继续下发新指令；这不是急停，设备已缓存的指令仍可能继续执行",
         "order": 24
       }
     ]

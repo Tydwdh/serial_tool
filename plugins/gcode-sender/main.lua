@@ -20,6 +20,7 @@ local DEFAULTS = {
     eof_delay_ms = 1000,
     error_followup_ms = 2000,
     max_marlin_line_bytes = 96,
+    max_retries = 3,
 }
 
 -- ── helpers ──
@@ -36,19 +37,22 @@ local function sget(key)
     return ctx.config.get(key, DEFAULTS[key]) or DEFAULTS[key]
 end
 
-local function snum(key)
-    return tonumber(sget(key))
+local function bounded_int(key, minimum, maximum)
+    local value = tonumber(sget(key)) or DEFAULTS[key]
+    value = math.floor(value + 0.5)
+    return math.max(minimum, math.min(maximum, value))
 end
 
 -- 读取设置快照（一次调用，避免每行重复查 config）
 local function settings()
     return {
         setup_gcode = trim(sget("default_setup_gcode")),
-        ack_timeout_ms = snum("ack_timeout_ms"),
-        start_timeout_ms = snum("start_timeout_ms"),
-        eof_delay_ms = snum("eof_delay_ms"),
-        error_followup_ms = snum("error_followup_ms"),
-        max_line_bytes = snum("max_marlin_line_bytes"),
+        ack_timeout_ms = bounded_int("ack_timeout_ms", 1000, 600000),
+        start_timeout_ms = bounded_int("start_timeout_ms", 500, 30000),
+        eof_delay_ms = bounded_int("eof_delay_ms", 0, 10000),
+        error_followup_ms = bounded_int("error_followup_ms", 100, 10000),
+        max_line_bytes = bounded_int("max_marlin_line_bytes", 32, 256),
+        max_retries = bounded_int("max_retries", 0, 20),
     }
 end
 
@@ -76,6 +80,15 @@ end
 local function task_running()
     local t = current_task()
     return t and not t.finished and not t.cancelled
+end
+
+local function ensure_idle()
+    if not task_running() then
+        return true
+    end
+    log("warn", "已有 G-code 发送任务在运行")
+    ctx.ui.set_status("[G-code] 已有发送任务在运行，请等待完成或取消")
+    return false
 end
 
 -- ── port helpers ──
@@ -150,6 +163,8 @@ end
 local RESPONSE_PATTERNS = {
     { name = "ok", pattern = "^ok", action = "return" },
     { name = "ok", pattern = "^OK", action = "return" }, -- 兼容 Repetier 等大写 ack
+    { name = "ok", pattern = "^Ok", action = "return" },
+    { name = "ok", pattern = "^oK", action = "return" },
     { name = "resend", pattern = "^Resend:", action = "return" },
     { name = "rs", pattern = "^rs ", action = "return" },
     { name = "halted", pattern = "^Printer halted", action = "return" },
@@ -168,10 +183,24 @@ end
 
 -- ── entry builders ──
 
-local function numbered_entries(lines)
+local function numbered_entries(lines, max_wire_bytes)
     local entries = {}
-    for i, line in ipairs(lines) do
-        entries[i] = { no = i, source = line, wire = checksum_line(line, i) }
+    local skipped = 0
+    for _, line in ipairs(lines) do
+        local no = #entries + 1
+        local wire = checksum_line(line, no)
+        if #wire > max_wire_bytes then
+            skipped = skipped + 1
+            if skipped <= 3 then
+                log("warn", string.format("忽略超长发送行 (%dB > %dB): %s",
+                    #wire, max_wire_bytes, line))
+            end
+        else
+            entries[#entries + 1] = { no = no, source = line, wire = wire }
+        end
+    end
+    if skipped > 0 then
+        log("warn", "共跳过超长发送行: " .. skipped .. " 行")
     end
     return entries
 end
@@ -184,11 +213,59 @@ local function strip_parens(s)
     return (s:gsub("%b()", ""))
 end
 
+-- 清理注释，并移除文件中已有的 Marlin 行号和校验和；插件会统一重新编号。
+local function normalize_gcode_line(raw_line)
+    local clean = trim(strip_parens(raw_line):match("^[^;]*") or "")
+    clean = trim((clean:gsub("%*%d+%s*$", "")))
+    clean = trim((clean:gsub("^[Nn]%d+%s+", "", 1)))
+    return clean
+end
+
+local function command_word(line)
+    local word = tostring(line or ""):match("^([GgMmTt]%d+)")
+    return word and word:upper() or ""
+end
+
+local function is_program_end(line)
+    local command = command_word(line)
+    return command == "M2" or command == "M30"
+end
+
+local function append_clean_line(lines, raw_line, s, stats)
+    local clean = normalize_gcode_line(raw_line)
+    if clean == "" then
+        return
+    end
+    if command_word(clean) == "M110" then
+        stats.skipped_m110 = stats.skipped_m110 + 1
+        return
+    end
+    if #clean > s.max_line_bytes then
+        stats.skipped_long = stats.skipped_long + 1
+        if stats.skipped_long <= 3 then
+            log("warn", "忽略超长行 (" .. s.max_line_bytes .. "B): " .. clean)
+        end
+        return
+    end
+    lines[#lines + 1] = clean
+end
+
+local function finish_clean_lines(lines, stats)
+    if #lines > 0 and not is_program_end(lines[#lines]) then
+        lines[#lines + 1] = "M2"
+    end
+    if stats.skipped_m110 > 0 then
+        log("debug", "跳过文件内 M110: " .. stats.skipped_m110 .. " 行")
+    end
+    if stats.skipped_long > 0 then
+        log("warn", "共跳过超长 G-code: " .. stats.skipped_long .. " 行")
+    end
+    return lines
+end
+
 local function clean_gcode_file(path, s)
     local lines = {}
-    local skipped_long = 0
-    local skipped_m110 = 0
-    local last_clean
+    local stats = { skipped_long = 0, skipped_m110 = 0 }
 
     -- ctx.fs.read_lines 返回迭代器函数
     local read_lines = ctx.fs.read_lines_stream or ctx.fs.read_lines
@@ -199,33 +276,9 @@ local function clean_gcode_file(path, s)
     end
 
     for raw_line in iter do
-        -- 去注释：先移除行内括号注释 (...)，再去 ; 行注释，再 trim
-        local clean = trim(strip_parens(raw_line):match("^[^;]*") or "")
-        if clean == "" or clean:sub(1, 1) == "(" then
-            -- skip blank / comment
-        elseif clean:find("M110", 1, true) then
-            skipped_m110 = skipped_m110 + 1
-        elseif #clean > s.max_line_bytes then
-            skipped_long = skipped_long + 1
-            log("warn", "忽略超长行 (" .. s.max_line_bytes .. "B): " .. clean)
-        else
-            lines[#lines + 1] = clean
-            last_clean = clean
-        end
+        append_clean_line(lines, raw_line, s, stats)
     end
-
-    -- 确保以 M2 结束（精确匹配裸 M2，避免 M200 等子串误判）
-    if #lines > 0 and not (last_clean or ""):match("^M2%s*$") then
-        lines[#lines + 1] = "M2"
-    end
-
-    if skipped_m110 > 0 then
-        log("debug", "跳过 M110: " .. skipped_m110 .. " 行")
-    end
-    if skipped_long > 0 then
-        log("warn", "跳过超长: " .. skipped_long .. " 行")
-    end
-    return lines
+    return finish_clean_lines(lines, stats)
 end
 
 -- ── follow-up reader（error 后的补充读取） ──
@@ -271,6 +324,9 @@ local function send_and_wait(port, wire, s, task, use_checksum)
         patterns = RESPONSE_PATTERNS,
     })
 
+    if task:is_cancelled() or resp.err == "cancelled" then
+        return { kind = "cancelled", line = resp.err }
+    end
     if resp.err then
         return { kind = "timeout", line = resp.err }
     end
@@ -332,9 +388,8 @@ local function send_start_command(port, s, task)
     local start_wire = "N0 M110 N0*" .. tostring(codec.xor8("N0 M110 N0"))
     task:set_status("同步 G-code 行号")
 
-    -- M110 失败大概率是串口未连/波特率错，重试 3 次足够；间隔用 start_timeout_ms
-    -- 避免与设置脱节。每次重试前 flush，清掉上次可能的 stale 响应。
-    local max_attempts = 3
+    -- 每次重试前 flush，清掉上次可能的 stale 响应。
+    local max_attempts = s.max_retries + 1
     for attempt = 1, max_attempts do
         if attempt > 1 then
             ctx.serial.flush_rx(port)
@@ -357,9 +412,10 @@ local function send_start_command(port, s, task)
         end
 
         if attempt < max_attempts then
-            log("warn", string.format("M110 无响应，重试 %d/%d（等待 %dms）",
-                attempt, max_attempts, s.start_timeout_ms))
-            task:sleep_ms(s.start_timeout_ms)
+            log("warn", string.format("M110 无响应，将重试 %d/%d",
+                attempt, s.max_retries))
+            -- write_line_and_expect 已经等待过 start_timeout_ms，只需短暂让出任务。
+            task:sleep_ms(100)
         end
     end
 
@@ -398,6 +454,7 @@ local function run_entries(port, entries, use_checksum, task)
     local started = ctx.now_ms()
     local pos = 1
     local max_done = 0
+    local retry_count = 0
     task:set_progress(0, total)
     -- 初始化 contribution 进度
     ctx.ui.set_contribution_value("gcode-sender.progress", { value = 0, text = "0/" .. total })
@@ -409,6 +466,11 @@ local function run_entries(port, entries, use_checksum, task)
             return
         end
         task:wait_if_paused()
+        -- 取消会解除暂停；恢复执行后必须再次检查，避免额外下发一行。
+        if task:is_cancelled() then
+            task:set_status("已取消")
+            return
+        end
 
         local entry = entries[pos]
         local label = entry.no and ("N" .. entry.no) or tostring(pos)
@@ -417,6 +479,7 @@ local function run_entries(port, entries, use_checksum, task)
         local result = send_and_wait(port, entry.wire, s, task, use_checksum)
 
         if result.kind == "ok" then
+            retry_count = 0
             pos = pos + 1
             max_done = pos - 1
             task:set_progress(max_done, total)
@@ -427,32 +490,50 @@ local function run_entries(port, entries, use_checksum, task)
         elseif result.kind == "resend" then
             if not use_checksum then
                 log("warn", "raw 模式忽略 Resend: " .. (result.line or ""))
+                retry_count = 0
                 pos = pos + 1
-            elseif result.no == 0 then
-                -- Resend:0 表示设备请求重传 M110（N0），不在 entries 里。
-                -- 重新执行 M110 行号同步，然后从第 1 行继续。
-                log("warn", "设备请求重传 N0，重新同步行号")
-                ctx.serial.flush_rx(port)
-                if send_start_command(port, s, task) then
-                    pos = 1
-                else
-                    task:set_status("行号重新同步失败")
-                    return
-                end
             else
-                local resend_pos = result.no and index_by_no[result.no]
-                if not resend_pos then
-                    task:set_status("重传序号不匹配")
-                    log("error", "找不到可重传序号: N" .. tostring(result.no))
+                retry_count = retry_count + 1
+                if retry_count > s.max_retries then
+                    task:set_status("重传次数过多，已停止")
+                    log("error", string.format("设备连续请求重传，超过上限 %d 次: %s",
+                        s.max_retries, result.line or label))
                     return
                 end
-                log("warn", "设备请求重传 N" .. tostring(result.no))
-                -- 重传前 flush，避免缓冲区残留的 stale resend/ok 误匹配
+                log("warn", string.format("设备请求重传（%d/%d）: %s",
+                    retry_count, s.max_retries, result.line or label))
                 ctx.serial.flush_rx(port)
-                pos = resend_pos
+
+                if result.no == 0 then
+                    -- Resend:0 表示设备请求重传 M110（N0），不在 entries 里。
+                    -- 重新执行 M110 行号同步，然后从第 1 行继续。
+                    if send_start_command(port, s, task) then
+                        pos = 1
+                    else
+                        task:set_status("行号重新同步失败")
+                        return
+                    end
+                else
+                    local resend_pos = result.no and index_by_no[result.no]
+                    if not resend_pos then
+                        task:set_status("重传序号不匹配")
+                        log("error", "找不到可重传序号: N" .. tostring(result.no))
+                        return
+                    end
+                    pos = resend_pos
+                end
             end
         elseif result.kind == "timeout" then
-            log("warn", "无应答，重发当前行: " .. label)
+            retry_count = retry_count + 1
+            if retry_count > s.max_retries then
+                task:set_status("ACK 超时，已停止")
+                log("error", string.format("%s 连续无应答，超过重试上限 %d 次",
+                    label, s.max_retries))
+                return
+            end
+            log("warn", string.format("%s 无应答，重试 %d/%d",
+                label, retry_count, s.max_retries))
+            ctx.serial.flush_rx(port)
         elseif result.kind == "terminated" then
             task:set_status("打印机错误，已停止")
             log("error", "打印机错误: " .. (result.line or ""))
@@ -487,17 +568,10 @@ end
 
 -- ── task lifecycle ──
 
-local state = { paused = false, active = false }
-
 local function start_task(port, entries, use_checksum)
-    if task_running() then
-        log("warn", "已有 G-code 发送任务在运行")
-        ctx.ui.set_status("[G-code] 已有发送任务在运行，请等待完成或取消")
+    if not ensure_idle() then
         return
     end
-
-    state.paused = false
-    state.active = true
 
     ctx.task.start({
         id = TASK_ID,
@@ -506,8 +580,6 @@ local function start_task(port, entries, use_checksum)
         pausable = true,
     }, function(task)
         local ok, err = pcall(run_entries, port, entries, use_checksum, task)
-        state.active = false
-        state.paused = false
         if not ok then
             task:set_status("插件错误")
             log("error", err)
@@ -572,6 +644,7 @@ end
 -- ── command handlers ──
 
 local function handle_send_file(payload)
+    if not ensure_idle() then return end
     local sc = send_context(payload)
     local port = require_open_port(sc.target_port)
     if not port then return end
@@ -590,36 +663,41 @@ local function handle_send_file(payload)
     end
 
     log("info", string.format("开始发送: %s (%d 行)", path, #lines))
-    start_task(port, numbered_entries(lines), true)
+    start_task(port, numbered_entries(lines, s.max_line_bytes), true)
 end
 
 local function handle_send_single(payload)
+    if not ensure_idle() then return end
     local sc = send_context(payload)
     local port = require_open_port(sc.target_port)
     if not port then return end
 
-    local lines = split_nonempty_lines(sc.input)
-    if #lines == 0 then
+    local input_lines = split_nonempty_lines(sc.input)
+    if #input_lines == 0 then
         log("warn", "请输入单条 G-code")
         return
     end
 
     local s = settings()
     local all = {}
+    local stats = { skipped_long = 0, skipped_m110 = 0 }
     if s.setup_gcode ~= "" then
-        all[1] = s.setup_gcode
-        for i, line in ipairs(lines) do
-            all[i + 1] = line
-        end
-    else
-        for i, line in ipairs(lines) do
-            all[i] = line
+        for _, line in ipairs(split_nonempty_lines(s.setup_gcode)) do
+            append_clean_line(all, line, s, stats)
         end
     end
-    all[#all + 1] = "M2"
+    for _, line in ipairs(input_lines) do
+        append_clean_line(all, line, s, stats)
+    end
+    finish_clean_lines(all, stats)
 
-    log("info", string.format("单条模式: M92=%s (%d 行)", s.setup_gcode, #all))
-    start_task(port, numbered_entries(all), true)
+    if #all == 0 then
+        log("warn", "输入中没有可发送的 G-code")
+        return
+    end
+
+    log("info", string.format("单条模式: 初始化=%s (%d 行)", s.setup_gcode, #all))
+    start_task(port, numbered_entries(all, s.max_line_bytes), true)
 end
 
 local function handle_pause()
@@ -629,26 +707,23 @@ local function handle_pause()
         return
     end
 
-    if state.paused then
+    if task.paused then
         ctx.task.resume(TASK_ID)
-        state.paused = false
         log("info", "发送已恢复")
     else
         ctx.task.pause(TASK_ID)
-        state.paused = true
         log("info", "发送已暂停")
     end
 end
 
 local function handle_cancel()
     local task = current_task()
-    if not task or task.finished then
+    if not task or task.finished or task.cancelled then
         log("warn", "没有正在运行的 G-code 任务")
         return
     end
 
     ctx.task.cancel(TASK_ID)
-    state.paused = false
     log("warn", "发送取消请求")
 end
 

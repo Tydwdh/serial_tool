@@ -1,10 +1,11 @@
 use crate::app::WorkbenchApp;
+use crate::bootstrap::apply_theme;
 use crate::config::{config_path, default_recorder_path};
 use crate::state::StatusLevel;
 use eframe::egui;
 use std::path::{Path, PathBuf};
 use tool_panels::theme;
-use tool_panels::{DynamicField, dynamic_form_ui, parse_fields};
+use tool_panels::{DynamicField, copy_text_with_feedback, dynamic_form_ui, parse_fields};
 
 impl WorkbenchApp {
     pub(super) fn settings_panel(&mut self, ui: &mut egui::Ui) {
@@ -14,16 +15,61 @@ impl WorkbenchApp {
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::CARD_ACCENT_SETTINGS);
+                    theme::card_accent_bar(ui, theme::card_accent_settings());
                     ui.label(egui::RichText::new("📂 工作区").heading());
                 });
                 ui.separator();
                 self.render_config_locations(ui);
 
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label("工作区布局");
+                    let confirm_id = ui.id().with("reset_workspace_layout_confirm");
+                    let now = ui.input(|input| input.time);
+                    let armed_at: Option<f64> =
+                        ui.ctx().memory(|memory| memory.data.get_temp(confirm_id));
+                    let armed = armed_at.is_some_and(|time| now - time < 3.0);
+                    let label = if armed {
+                        "确认恢复默认布局?"
+                    } else {
+                        "恢复默认布局"
+                    };
+                    if ui
+                        .button(egui::RichText::new(label).color(if armed {
+                            theme::orange()
+                        } else {
+                            theme::text_primary()
+                        }))
+                        .on_hover_text("仅重置面板位置，不修改主题、串口、快捷键和插件状态")
+                        .clicked()
+                    {
+                        if armed {
+                            self.panels.reset_tiles_layout();
+                            ui.ctx()
+                                .memory_mut(|memory| memory.data.remove_temp::<f64>(confirm_id));
+                            match self.save_config() {
+                                Ok(()) => self.set_status_force(
+                                    StatusLevel::Info,
+                                    "已恢复默认布局，运行中的插件面板已保留",
+                                ),
+                                Err(error) => self.set_status_force(StatusLevel::Error, error),
+                            }
+                        } else {
+                            ui.ctx().memory_mut(|memory| {
+                                memory.data.insert_temp(confirm_id, now);
+                            });
+                        }
+                    }
+                    if armed && ui.small_button("取消").clicked() {
+                        ui.ctx()
+                            .memory_mut(|memory| memory.data.remove_temp::<f64>(confirm_id));
+                    }
+                });
+
                 // 最近工作区
                 if !self.recent_workspaces.is_empty() {
                     ui.add_space(8.0);
-                    ui.label(egui::RichText::new("最近工作区").color(theme::TEXT_SECONDARY));
+                    ui.label(egui::RichText::new("最近工作区").color(theme::text_secondary()));
                     let paths: Vec<(usize, std::path::PathBuf)> = self
                         .recent_workspaces
                         .iter()
@@ -38,6 +84,7 @@ impl WorkbenchApp {
                                 match self.load_config_from_path(path) {
                                     Ok(()) => {
                                         self.apply_loaded_workspace_postprocess();
+                                        apply_theme(ui.ctx(), self.ui_theme);
                                         self.set_status_force(
                                             StatusLevel::Info,
                                             format!("已加载: {path_str}"),
@@ -70,11 +117,63 @@ impl WorkbenchApp {
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::CARD_ACCENT_SETTINGS);
+                    theme::card_accent_bar(ui, theme::card_accent_settings());
                     ui.label(egui::RichText::new("🎨 外观").heading());
                 });
                 ui.separator();
-                let mut bottom_visible = self.panels.dock.bottom_visible;
+                ui.horizontal(|ui| {
+                    ui.label("界面主题");
+                    let selected_label =
+                        theme::current_theme_name().unwrap_or_else(|| "选择主题…".to_owned());
+                    egui::ComboBox::from_id_salt("app-theme")
+                        .selected_text(selected_label)
+                        .show_ui(ui, |ui| {
+                            for (path, name) in theme::discover_theme_files(&self.theme_dir) {
+                                if ui
+                                    .selectable_label(self.theme_path.as_ref() == Some(&path), name)
+                                    .clicked()
+                                {
+                                    match theme::load_theme_file(&path) {
+                                        Ok(_) => {
+                                            self.ui_theme = theme::builtin_theme_for_path(&path)
+                                                .unwrap_or(theme::AppTheme::Custom);
+                                            self.theme_path = Some(path);
+                                            apply_theme(ui.ctx(), self.ui_theme);
+                                            if let Err(error) = self.save_config() {
+                                                log::warn!("save_config failed: {error}");
+                                            }
+                                        }
+                                        Err(error) => self.set_status_force(
+                                            StatusLevel::Error,
+                                            format!("加载主题失败：{error}"),
+                                        ),
+                                    }
+                                }
+                            }
+                        });
+                });
+                ui.label(
+                    egui::RichText::new("当前主题文件会立即写入工作区配置。")
+                        .small()
+                        .color(theme::text_secondary()),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("打开主题目录").clicked()
+                        && let Err(error) = open::that(&self.theme_dir)
+                    {
+                        self.set_status_force(
+                            StatusLevel::Error,
+                            format!("打开主题目录失败：{error}"),
+                        );
+                    }
+                    ui.label(
+                        egui::RichText::new("将 JSON 文件放入该目录后，在上方列表选择即可应用。")
+                            .small()
+                            .color(theme::text_secondary()),
+                    );
+                });
+                ui.add_space(4.0);
+                let mut bottom_visible = self.panels.bottom_visible();
                 if ui.checkbox(&mut bottom_visible, "显示底部面板").changed() {
                     self.set_bottom_visible(bottom_visible);
                     if let Err(e) = self.save_config() {
@@ -103,13 +202,45 @@ impl WorkbenchApp {
 
         ui.add_space(8.0);
 
+        // ── 网络 ──
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    theme::card_accent_bar(ui, theme::card_accent_settings());
+                    ui.label(egui::RichText::new("🌐 网络").heading());
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("代理地址");
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.network_proxy_url)
+                            .desired_width(260.0)
+                            .hint_text("留空：系统/环境代理或直连"),
+                    );
+                    if response.changed() && let Err(error) = self.save_config() {
+                        log::warn!("save_config failed: {error}");
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "支持 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080。市场和更新会依次尝试 Windows TLS 与 Rustls TLS。",
+                    )
+                    .small()
+                    .color(theme::text_secondary()),
+                );
+            });
+
+        ui.add_space(8.0);
+
         // ── 数据 ──
         egui::Frame::group(ui.style())
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::CARD_ACCENT_SETTINGS);
+                    theme::card_accent_bar(ui, theme::card_accent_settings());
                     ui.label(egui::RichText::new("📊 数据").heading());
                 });
                 ui.separator();
@@ -136,19 +267,19 @@ impl WorkbenchApp {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.label("终端保留条数");
-                    let mut n = self.terminal_panel.max_entries as u32;
-                    let resp = ui.add(egui::DragValue::new(&mut n).range(500..=200_000).speed(500));
-                    if resp.changed() {
-                        n = n.clamp(500, 200_000);
-                        self.terminal_panel.max_entries = n as usize;
+                    let mut n = self.terminal_panel.max_entries.clamp(500, 200_000);
+                    let drag_changed = ui
+                        .add(egui::DragValue::new(&mut n).range(500..=200_000).speed(500))
+                        .changed();
+                    let slider_changed = ui
+                        .add(egui::Slider::new(&mut n, 500..=200_000).step_by(500.0))
+                        .changed();
+                    if drag_changed || slider_changed {
+                        self.terminal_panel.set_max_entries(n);
                         if let Err(e) = self.save_config() {
                             log::warn!("save_config failed: {e}")
                         };
                     }
-                    ui.add(
-                        egui::Slider::new(&mut self.terminal_panel.max_entries, 500..=200_000)
-                            .step_by(500.0),
-                    );
                 })
                 .response
                 .on_hover_text(
@@ -157,19 +288,19 @@ impl WorkbenchApp {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.label("日志保留条数");
-                    let mut n = self.bottom_log_panel.max_entries as u32;
-                    let resp = ui.add(egui::DragValue::new(&mut n).range(500..=200_000).speed(500));
-                    if resp.changed() {
-                        n = n.clamp(500, 200_000);
-                        self.bottom_log_panel.max_entries = n as usize;
+                    let mut n = self.bottom_log_panel.max_entries.clamp(500, 200_000);
+                    let drag_changed = ui
+                        .add(egui::DragValue::new(&mut n).range(500..=200_000).speed(500))
+                        .changed();
+                    let slider_changed = ui
+                        .add(egui::Slider::new(&mut n, 500..=200_000).step_by(500.0))
+                        .changed();
+                    if drag_changed || slider_changed {
+                        self.bottom_log_panel.set_max_entries(n);
                         if let Err(e) = self.save_config() {
                             log::warn!("save_config failed: {e}")
                         };
                     }
-                    ui.add(
-                        egui::Slider::new(&mut self.bottom_log_panel.max_entries, 500..=200_000)
-                            .step_by(500.0),
-                    );
                 })
                 .response
                 .on_hover_text("日志面板保留的最近条数上限。可拖拽滑块或直接输入数字。");
@@ -183,7 +314,7 @@ impl WorkbenchApp {
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::CARD_ACCENT_SETTINGS);
+                    theme::card_accent_bar(ui, theme::card_accent_settings());
                     ui.label(egui::RichText::new("⌨ 快捷键").heading());
                 });
                 ui.separator();
@@ -200,7 +331,7 @@ impl WorkbenchApp {
         // ── 恢复默认 ──
         ui.horizontal(|ui| {
             if ui
-                .button(egui::RichText::new("🔄 恢复所有默认设置").color(theme::ORANGE))
+                .button(egui::RichText::new("🔄 恢复所有默认设置").color(theme::orange()))
                 .clicked()
             {
                 self.serial.selected_port = None;
@@ -211,15 +342,20 @@ impl WorkbenchApp {
                 self.recorder_path = default_recorder_path();
                 self.serial.port_aliases.clear();
                 self.serial.port_groups.clear();
-                self.panels.dock = tool_panels::DockLayout::default();
-                self.panels.dock.bottom_visible = true;
+                self.panels.reset_tiles_layout();
                 self.terminal_panel.merge_window_ms = 5;
-                self.terminal_panel.max_entries = 50000;
-                self.bottom_log_panel.max_entries = 50000;
+                self.terminal_panel.set_max_entries(50000);
+                self.bottom_log_panel.set_max_entries(50000);
                 self.monospace_font_size = 13.0;
+                self.ui_theme = theme::AppTheme::default();
+                self.theme_path = theme::builtin_theme_path(self.ui_theme, &self.theme_dir);
+                if let Err(error) = theme::load_builtin_theme(self.ui_theme, &self.theme_dir) {
+                    log::warn!("load default theme failed: {error}");
+                }
                 self.terminal_panel.font_size = 13.0;
                 self.bottom_log_panel.font_size = 13.0;
-                self.set_status_force(StatusLevel::Warn, "已恢复默认设置，重启后生效");
+                apply_theme(ui.ctx(), self.ui_theme);
+                self.set_status_force(StatusLevel::Warn, "已恢复默认设置");
             }
         });
 
@@ -231,17 +367,16 @@ impl WorkbenchApp {
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    theme::card_accent_bar(ui, theme::CARD_ACCENT_SETTINGS);
+                    theme::card_accent_bar(ui, theme::card_accent_settings());
                     ui.label(egui::RichText::new("ℹ 关于").heading());
                 });
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label(format!("硬件调试工作台 v{}", env!("CARGO_PKG_VERSION")));
                     if ui.small_button("复制版本号").clicked() {
-                        ui.ctx()
-                            .copy_text(format!("v{}", env!("CARGO_PKG_VERSION")));
-                        self.set_status_force(
-                            StatusLevel::Info,
+                        copy_text_with_feedback(
+                            ui,
+                            format!("v{}", env!("CARGO_PKG_VERSION")),
                             format!("已复制 v{}", env!("CARGO_PKG_VERSION")),
                         );
                     }
@@ -272,12 +407,11 @@ impl WorkbenchApp {
             ui.label(
                 egui::RichText::new(&path_text)
                     .monospace()
-                    .color(theme::TEXT_PRIMARY),
+                    .color(theme::text_primary()),
             )
             .on_hover_text(&path_text);
             if ui.small_button("📋").on_hover_text("复制路径").clicked() {
-                ui.ctx().copy_text(path_text.clone());
-                self.set_status_force(StatusLevel::Info, format!("已复制: {path_text}"));
+                copy_text_with_feedback(ui, path_text.clone(), format!("已复制{label}路径"));
             }
             if ui
                 .small_button("📂")
@@ -323,12 +457,12 @@ impl WorkbenchApp {
                 ui.label(
                     egui::RichText::new("操作")
                         .strong()
-                        .color(theme::TEXT_SECONDARY),
+                        .color(theme::text_secondary()),
                 );
                 ui.label(
                     egui::RichText::new("快捷键")
                         .strong()
-                        .color(theme::TEXT_SECONDARY),
+                        .color(theme::text_secondary()),
                 );
                 ui.label("");
                 ui.label("");
@@ -343,7 +477,7 @@ impl WorkbenchApp {
 
                     // 快捷键显示
                     if bindings.is_empty() {
-                        ui.colored_label(theme::TEXT_DIMMED, "未绑定");
+                        ui.colored_label(theme::text_dimmed(), "未绑定");
                     } else {
                         let shortcuts: Vec<String> = bindings.iter().map(|b| b.display()).collect();
                         ui.label(shortcuts.join(", "));
@@ -351,7 +485,7 @@ impl WorkbenchApp {
 
                     // 录制按钮 / 录制中状态
                     if is_recording {
-                        ui.colored_label(theme::YELLOW, "按下按键...");
+                        ui.colored_label(theme::yellow(), "按下按键...");
                     } else if ui.small_button("录制").clicked() {
                         self.key_recording = Some(action.clone());
                     }
@@ -440,7 +574,7 @@ impl WorkbenchApp {
                 .show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        theme::card_accent_bar(ui, theme::CARD_ACCENT_PLUGIN);
+                        theme::card_accent_bar(ui, theme::card_accent_plugin());
                         ui.label(egui::RichText::new(format!("🧩 {plugin_name} 设置")).heading());
                     });
                     ui.separator();

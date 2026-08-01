@@ -47,9 +47,9 @@ Flutter Windows 版配置文件位于：`%APPDATA%\hardware_workbench\config.jso
 
 环境要求：
 
-- Rust 1.85+
-- Flutter SDK（已启用 Windows desktop）
-- Visual Studio C++ Windows 桌面开发组件
+- Rust 1.92+
+- Windows / macOS / Linux
+- Windows 安装器需要 Inno Setup 6
 
 ```powershell
 Set-Location "C:\Users\tyd27\Desktop\serial_tool"

@@ -102,7 +102,7 @@ impl AttitudePanel {
         let radius = rect.width().min(rect.height()) * 0.34;
 
         // 画参考圆
-        painter.circle_stroke(center, radius, Stroke::new(1.0, theme::BORDER_LIGHT));
+        painter.circle_stroke(center, radius, Stroke::new(1.0, theme::border_light()));
 
         // 画机体（填充面 + 边框，画家算法深度排序）
         draw_body(&painter, center, radius, self.roll, self.pitch, self.yaw);
@@ -111,17 +111,17 @@ impl AttitudePanel {
         let axes = [
             (
                 rotate([1.0, 0.0, 0.0], self.roll, self.pitch, self.yaw),
-                theme::ATTITUDE_AXIS_X,
+                theme::attitude_axis_x(),
                 "X",
             ),
             (
                 rotate([0.0, 1.0, 0.0], self.roll, self.pitch, self.yaw),
-                theme::ATTITUDE_AXIS_Y,
+                theme::attitude_axis_y(),
                 "Y",
             ),
             (
                 rotate([0.0, 0.0, 1.0], self.roll, self.pitch, self.yaw),
-                theme::ATTITUDE_AXIS_Z,
+                theme::attitude_axis_z(),
                 "Z",
             ),
         ];
@@ -219,16 +219,16 @@ fn draw_body(painter: &egui::Painter, center: Pos2, radius: f32, roll: f64, pitc
 
         let brightness = ((depth + 1.0) / 2.0).clamp(0.0, 1.0);
         let face_color = Color32::from_rgb(
-            (theme::ATTITUDE_BODY.r() as f32 * (0.3 + 0.7 * brightness)) as u8,
-            (theme::ATTITUDE_BODY.g() as f32 * (0.3 + 0.7 * brightness)) as u8,
-            (theme::ATTITUDE_BODY.b() as f32 * (0.3 + 0.7 * brightness)) as u8,
+            (theme::attitude_body().r() as f32 * (0.3 + 0.7 * brightness)) as u8,
+            (theme::attitude_body().g() as f32 * (0.3 + 0.7 * brightness)) as u8,
+            (theme::attitude_body().b() as f32 * (0.3 + 0.7 * brightness)) as u8,
         );
 
         painter.add(fill_triangle_fan(&clean, face_color));
     }
 
     // 画机体外轮廓：一条边相邻两面若一面朝前、一面朝后，则为轮廓边，只画一次。
-    let edge_stroke = Stroke::new(1.5, theme::ATTITUDE_BODY_EDGE);
+    let edge_stroke = Stroke::new(1.5, theme::attitude_body_edge());
     for (a, b, f1, f2) in body_edges() {
         let facing_diff = face_facing[f1] * face_facing[f2];
         if facing_diff <= 0.0 {

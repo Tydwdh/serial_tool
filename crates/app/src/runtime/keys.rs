@@ -45,15 +45,10 @@ impl WorkbenchApp {
         match action {
             Action::RefreshPorts => self.refresh_ports(),
             Action::OpenPort => self.toggle_selected_port(),
-            Action::ToggleActivityBar => {
-                self.panels.dock.activity_bar_visible = !self.panels.dock.activity_bar_visible;
-                if let Err(e) = self.save_config() {
-                    log::warn!("save_config failed: {e}")
-                };
-            }
             Action::ToggleBottomPanel => self.toggle_bottom_panel(),
             Action::ToggleRightDock => {
-                self.panels.dock.right_visible = !self.panels.dock.right_visible;
+                let visible = self.panels.right_visible();
+                self.panels.set_right_visible(!visible);
                 if let Err(e) = self.save_config() {
                     log::warn!("save_config failed: {e}")
                 };
@@ -77,9 +72,6 @@ impl WorkbenchApp {
             }
             Action::ClearTerminal => {
                 self.terminal_panel.clear();
-            }
-            Action::ToggleTerminalPause => {
-                self.terminal_panel.paused = !self.terminal_panel.paused;
             }
             Action::PluginCommand(plugin_id, command_id) => {
                 self.publish_plugin_command_action(&plugin_id, &command_id);

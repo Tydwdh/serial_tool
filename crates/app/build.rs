@@ -16,6 +16,20 @@ fn main() {
 
     // 将项目 plugins/ 目录复制到输出目录，确保 exe 旁有最新的插件脚本。
     sync_plugins();
+    sync_themes();
+}
+
+fn sync_themes() {
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
+    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap_or_else(|_| ".".into()));
+    let target_dir = out_dir
+        .ancestors()
+        .nth(4)
+        .unwrap_or_else(|| std::path::Path::new("../../target"));
+    let src = std::path::Path::new("../../assets/themes");
+    if src.exists() {
+        let _ = copy_dir(src, &target_dir.join(profile).join("themes"));
+    }
 }
 
 fn sync_plugins() {
@@ -36,8 +50,6 @@ fn sync_plugins() {
     // 简单递归复制
     if let Err(e) = copy_dir(src, &dest) {
         println!("cargo:warning=复制 plugins 目录失败: {e}");
-    } else {
-        println!("cargo:warning=plugins 已同步到 {}", dest.display());
     }
 }
 

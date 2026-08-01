@@ -63,9 +63,8 @@ impl ChartPanel {
         self.rebuild_cache();
 
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.paused, "暂停").on_hover_text(
-                "暂停采集：冻结图表，暂停期间到达的新样本会被丢弃。与终端的「暂停接收」行为一致。",
-            );
+            ui.checkbox(&mut self.paused, "暂停")
+                .on_hover_text("暂停采集：冻结图表，暂停期间到达的新样本会被丢弃。");
             ui.checkbox(&mut self.auto_scale, "自动")
                 .on_hover_text("自动缩放 Y 轴以完整显示所有可见样本。关闭后可手动设 min/max。");
             if !self.auto_scale {
@@ -93,13 +92,13 @@ impl ChartPanel {
             if self.dropped_while_paused > 0 {
                 ui.label(
                     RichText::new(format!("暂停期间跳过 {} 个样本", self.dropped_while_paused))
-                        .color(theme::TEXT_SECONDARY),
+                        .color(theme::text_secondary()),
                 );
             }
             let dropped = self.subscription.dropped_count();
             if dropped > 0 {
                 ui.colored_label(
-                    theme::YELLOW,
+                    theme::yellow(),
                     format!("队列溢出丢弃 {dropped} 条，曲线可能不完整"),
                 );
             }
@@ -247,7 +246,7 @@ impl ChartPanel {
                 egui::Align2::CENTER_CENTER,
                 "无采样数据",
                 egui::FontId::proportional(14.0),
-                theme::TEXT_SECONDARY,
+                theme::text_secondary(),
             );
             return;
         }
@@ -280,14 +279,14 @@ impl ChartPanel {
                     Pos2::new(hover_pos.x, rect.top()),
                     Pos2::new(hover_pos.x, rect.bottom()),
                 ],
-                Stroke::new(1.0, theme::CHART_CROSSHAIR),
+                Stroke::new(1.0, theme::chart_crosshair()),
             );
             painter.line_segment(
                 [
                     Pos2::new(rect.left(), hover_pos.y),
                     Pos2::new(rect.right(), hover_pos.y),
                 ],
-                Stroke::new(1.0, theme::CHART_CROSSHAIR),
+                Stroke::new(1.0, theme::chart_crosshair()),
             );
 
             // 找到 hover X 对应的数据值
@@ -327,17 +326,17 @@ impl ChartPanel {
 
             let tooltip_rect =
                 Rect::from_min_size(tooltip_pos, Vec2::new(tooltip_width, tooltip_height));
-            painter.rect_filled(tooltip_rect, 4.0, theme::CHART_TOOLTIP_BG);
+            painter.rect_filled(tooltip_rect, 4.0, theme::chart_tooltip_bg());
             painter.rect_stroke(
                 tooltip_rect,
                 4.0,
-                Stroke::new(1.0, theme::BORDER_LIGHT),
+                Stroke::new(1.0, theme::border_light()),
                 egui::StrokeKind::Inside,
             );
 
             for (i, line) in tooltip_lines.iter().enumerate() {
                 let color = if i == 0 {
-                    theme::TEXT_DIMMED
+                    theme::text_dimmed()
                 } else {
                     palette(i - 1)
                 };
@@ -448,7 +447,7 @@ fn draw_grid(painter: &egui::Painter, rect: Rect) {
         let t = index as f32 / 5.0;
         let x = egui::lerp(rect.left()..=rect.right(), t);
         let y = egui::lerp(rect.top()..=rect.bottom(), t);
-        let stroke = Stroke::new(1.0, theme::CHART_GRID);
+        let stroke = Stroke::new(1.0, theme::chart_grid());
         painter.line_segment(
             [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
             stroke,
@@ -464,7 +463,7 @@ fn draw_grid(painter: &egui::Painter, rect: Rect) {
 fn draw_y_axis_labels(painter: &egui::Painter, rect: Rect, bounds: (f64, f64, f64, f64)) {
     let (_, _, min_y, max_y) = bounds;
     let font = egui::FontId::proportional(11.0);
-    let color = theme::TEXT_DIMMED;
+    let color = theme::text_dimmed();
 
     for i in 0..5 {
         let t = i as f32 / 4.0; // 0, 0.25, 0.5, 0.75, 1.0
@@ -485,7 +484,7 @@ fn draw_y_axis_labels(painter: &egui::Painter, rect: Rect, bounds: (f64, f64, f6
 fn draw_x_axis_labels(painter: &egui::Painter, rect: Rect, bounds: (f64, f64, f64, f64)) {
     let (min_x, max_x, _, _) = bounds;
     let font = egui::FontId::proportional(11.0);
-    let color = theme::TEXT_DIMMED;
+    let color = theme::text_dimmed();
 
     painter.text(
         Pos2::new(rect.left() + 4.0, rect.bottom() - 2.0),
@@ -504,7 +503,7 @@ fn draw_x_axis_labels(painter: &egui::Painter, rect: Rect, bounds: (f64, f64, f6
 }
 
 fn palette(index: usize) -> Color32 {
-    theme::CHART_COLORS[index % theme::CHART_COLORS.len()]
+    theme::chart_colors()[index % theme::chart_colors().len()]
 }
 
 #[cfg(test)]

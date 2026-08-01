@@ -1,4 +1,6 @@
-use crate::config::{ConfigLoadResult, PersistedConfig, default_recorder_path, load_config};
+use crate::config::{
+    ConfigLoadResult, PersistedConfig, default_recorder_path, load_config, resolve_theme_path,
+};
 use crate::state::{MAX_SEND_HISTORY, NotificationQueue, SendUiState, SerialUiState, UpdateState};
 use eframe::egui;
 use std::collections::{BTreeSet, VecDeque};
@@ -15,6 +17,7 @@ use tool_transport::TransportManager;
 
 use crate::bootstrap::{app_dir, apply_theme, setup_fonts};
 use crate::ui::popups::PopupsState;
+use crate::ui::toast::ToastOverlay;
 
 // ── 数据结构 ──
 
@@ -32,11 +35,13 @@ pub(crate) struct WorkbenchApp {
     pub(crate) serial: SerialUiState,
     pub(crate) recorder_path: String,
     pub(crate) notifications: NotificationQueue,
+    pub(crate) toast_overlay: ToastOverlay,
     pub(crate) recent_workspaces: Vec<String>,
     pub(crate) send: SendUiState,
     pub(crate) popups: crate::ui::popups::PopupsState,
     pub(crate) detached_dynamic_panels: BTreeSet<String>,
-    pub(crate) dock_drag: crate::ui::dock::DockDragState,
+    /// `egui_tiles` 的拖拽、选中和尺寸变更尚未写入配置。
+    pub(crate) layout_dirty: bool,
     pub(crate) last_auto_save_time: f64,
     pub(crate) file_broker: Arc<FileAccessBroker>,
     pub(crate) dialog_receiver: crossbeam_channel::Receiver<DialogRequest>,
@@ -64,6 +69,14 @@ pub(crate) struct WorkbenchApp {
     pub(crate) plugin_summaries_cache: std::cell::OnceCell<Vec<tool_extension::PluginSummary>>,
     /// 等宽字体大小（终端/日志区），默认 13.0
     pub(crate) monospace_font_size: f32,
+    /// 当前主题的运行时风格（由已选 JSON 文件推导）。
+    pub(crate) ui_theme: theme::AppTheme,
+    /// 当前主题 JSON 的路径（内置和用户新增主题共用）。
+    pub(crate) theme_path: Option<std::path::PathBuf>,
+    /// 主题 JSON 文件目录。
+    pub(crate) theme_dir: std::path::PathBuf,
+    /// 网络请求的可选自定义代理；为空时交给系统/环境代理处理。
+    pub(crate) network_proxy_url: String,
     /// 市场索引 URL（None 表示用默认）。
     pub(crate) marketplace: crate::runtime::marketplace::MarketplaceState,
 }
@@ -112,7 +125,7 @@ pub(crate) struct ReplayAnalyzerResult {
 impl WorkbenchApp {
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // 主题必须尽早设置，否则 eframe 在 new() 返回前可能已用默认主题渲染了首帧。
-        apply_theme(&cc.egui_ctx);
+        apply_theme(&cc.egui_ctx, theme::AppTheme::default());
         setup_fonts(cc);
         cc.egui_ctx.set_embed_viewports(false);
         let bus = DataBus::new();
@@ -151,18 +164,40 @@ impl WorkbenchApp {
         }
         let recorder = JsonlRecorder::new(bus.clone());
         let config_result = load_config();
-        let config: Option<PersistedConfig> = match config_result {
-            ConfigLoadResult::Ok(cfg) => Some(cfg),
+        let (config, config_migrated, config_write_protected): (
+            Option<PersistedConfig>,
+            bool,
+            bool,
+        ) = match config_result {
+            ConfigLoadResult::Ok { config, migrated } => (Some(config), migrated, false),
             ConfigLoadResult::ParseError {
                 ref path,
                 ref error,
+                ref backup_path,
             } => {
+                let backup_note = backup_path.as_ref().map_or_else(String::new, |backup| {
+                    format!("，已备份为 {}", backup.display())
+                });
                 bus.publish(Event::system_log(
                     LogLevel::Error,
                     "app",
-                    format!("配置文件损坏 {}: {error}，使用默认设置", path.display()),
+                    format!(
+                        "配置文件损坏 {}: {error}{backup_note}，使用默认设置",
+                        path.display()
+                    ),
                 ));
-                None
+                (None, false, false)
+            }
+            ConfigLoadResult::FutureVersion { ref path, version } => {
+                bus.publish(Event::system_log(
+                    LogLevel::Error,
+                    "app",
+                    format!(
+                        "配置 {} 使用未来版本 v{version}，当前程序不会覆盖它；请升级后再打开",
+                        path.display()
+                    ),
+                ));
+                (None, false, true)
             }
             ConfigLoadResult::NotFound => {
                 bus.publish(Event::system_log(
@@ -170,15 +205,57 @@ impl WorkbenchApp {
                     "app",
                     "未找到配置文件，使用默认设置",
                 ));
-                None
+                (None, false, false)
             }
         };
+        let theme_dir = app_dir().join("themes");
+        if let Err(error) = theme::ensure_theme_directory(&theme_dir) {
+            log::warn!("initialize theme directory failed: {error}");
+        }
+        let default_theme = theme::AppTheme::default();
+        let default_theme_path = theme::builtin_theme_path(default_theme, &theme_dir);
+        let mut loaded_theme = default_theme;
+        let mut loaded_theme_path = default_theme_path.clone();
+        let mut theme_recovered = false;
+        if let Some(cfg) = config.as_ref() {
+            if let Some(path) = cfg
+                .theme_path
+                .as_deref()
+                .map(|path| resolve_theme_path(&theme_dir, path))
+            {
+                match theme::load_theme_file(&path) {
+                    Ok(_) => {
+                        loaded_theme =
+                            theme::builtin_theme_for_path(&path).unwrap_or(theme::AppTheme::Custom);
+                        loaded_theme_path = Some(path);
+                    }
+                    Err(error) => {
+                        log::warn!("load theme JSON failed: {error}");
+                        theme_recovered = true;
+                        if let Err(fallback_error) =
+                            theme::load_builtin_theme(default_theme, &theme_dir)
+                        {
+                            log::warn!("load fallback bundled theme failed: {fallback_error}");
+                        }
+                    }
+                }
+            } else if let Err(error) = theme::load_builtin_theme(cfg.ui_theme, &theme_dir) {
+                log::warn!("load legacy bundled theme failed: {error}");
+            } else {
+                loaded_theme = cfg.ui_theme;
+                loaded_theme_path = theme::builtin_theme_path(cfg.ui_theme, &theme_dir);
+            }
+        } else if let Err(error) = theme::load_builtin_theme(default_theme, &theme_dir) {
+            log::warn!("load default bundled theme failed: {error}");
+        }
+        apply_theme(&cc.egui_ctx, loaded_theme);
         let mut rp = config
             .as_ref()
             .map(|c| c.panels.clone())
             .unwrap_or_default();
         rp.discard_dynamic_tabs();
         rp.dock.normalize_tool_layout();
+        rp.ensure_tiles_layout();
         let mut send = SendUiState::default();
         if let Some(cfg) = config.as_ref() {
             send.send_history = cfg
@@ -239,6 +316,7 @@ impl WorkbenchApp {
                 .unwrap_or_else(default_recorder_path),
             panels: rp.clone(),
             notifications: NotificationQueue::new(),
+            toast_overlay: ToastOverlay::default(),
             recent_workspaces: config
                 .as_ref()
                 .map(|c| c.recent_workspaces.clone())
@@ -256,6 +334,7 @@ impl WorkbenchApp {
                 ..Default::default()
             },
             detached_dynamic_panels: BTreeSet::new(),
+            layout_dirty: false,
             last_auto_save_time: 0.0,
             bus: bus.clone(),
             transport,
@@ -274,7 +353,6 @@ impl WorkbenchApp {
             )),
             replay_analyzer: Default::default(),
             periodic_send: Default::default(),
-            dock_drag: Default::default(),
             keymap: config
                 .as_ref()
                 .map(|c| c.keymap.clone())
@@ -289,6 +367,13 @@ impl WorkbenchApp {
                 .as_ref()
                 .map(|c| c.monospace_font_size.clamp(10.0, 24.0))
                 .unwrap_or(13.0),
+            ui_theme: loaded_theme,
+            theme_path: loaded_theme_path,
+            theme_dir,
+            network_proxy_url: config
+                .as_ref()
+                .and_then(|c| c.network_proxy_url.clone())
+                .unwrap_or_default(),
             marketplace: Default::default(),
         };
         // 从配置恢复等宽字体大小
@@ -297,8 +382,8 @@ impl WorkbenchApp {
         // 从配置恢复终端/日志的数据参数
         if let Some(c) = config.as_ref() {
             app.terminal_panel.merge_window_ms = c.terminal_merge_window_ms;
-            app.terminal_panel.max_entries = c.terminal_max_entries.max(100);
-            app.bottom_log_panel.max_entries = c.log_max_entries.max(100);
+            app.terminal_panel.set_max_entries(c.terminal_max_entries);
+            app.bottom_log_panel.set_max_entries(c.log_max_entries);
         }
         app.refresh_ports();
         let enabled: Vec<String> = config
@@ -309,6 +394,13 @@ impl WorkbenchApp {
             if let Err(e) = app.plugin_manager.enable(id) {
                 app.log(LogLevel::Warn, format!("restore plugin {id}: {e}"));
             }
+        }
+        let should_persist_config = !config_write_protected
+            && (config_migrated
+                || theme_recovered
+                || config.as_ref().is_none_or(|cfg| cfg.theme_path.is_none()));
+        if should_persist_config && let Err(error) = app.save_config() {
+            log::warn!("persist theme path migration failed: {error}");
         }
         app.log(LogLevel::Info, "就绪");
         app
@@ -349,14 +441,25 @@ impl Drop for WorkbenchApp {
 
 impl eframe::App for WorkbenchApp {
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
-        theme::BG_PRIMARY.to_normalized_gamma_f32()
+        theme::bg_primary().to_normalized_gamma_f32()
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.tick_pre_ui(&ctx);
         self.draw_shell(ui, &ctx);
+        if let Some(message) = tool_panels::take_copy_feedback(&ctx) {
+            self.notifications
+                .push("clipboard", crate::state::StatusLevel::Info, message);
+        }
         self.tick_post_ui(&ctx);
+        if let Some(format) = self.terminal_panel.take_export_request() {
+            self.export_terminal_data(format);
+        }
+        if let Some(format) = self.bottom_log_panel.take_export_request() {
+            self.export_log_data(format);
+        }
+        self.toast_overlay.show(&ctx, &mut self.notifications);
 
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         let poll_interval_ms = if focused { 80 } else { 250 };

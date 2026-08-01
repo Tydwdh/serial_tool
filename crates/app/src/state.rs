@@ -9,12 +9,12 @@ pub(crate) enum StatusLevel {
 }
 
 impl StatusLevel {
-    /// 通知自动过期时间（毫秒）。Error 在用户主动关闭前不自动过期。
+    /// 通知自动过期时间（毫秒）。错误保留更久，但也会自动关闭。
     pub(crate) fn ttl_ms(self) -> Option<u64> {
         match self {
             Self::Info => Some(5_000),
             Self::Warn => Some(8_000),
-            Self::Error => None, // 错误不自动过期
+            Self::Error => Some(15_000),
         }
     }
 }
@@ -22,6 +22,8 @@ impl StatusLevel {
 /// 通知：状态栏消息的最小单元。每条消息独立存在、独立过期。
 #[derive(Clone)]
 pub(crate) struct Notification {
+    /// 单调递增的通知版本。即使同一 source 更新也会产生新编号，供 Toast 识别。
+    pub(crate) id: u64,
     pub(crate) level: StatusLevel,
     pub(crate) text: String,
     /// 过期时间戳（ms）。None 表示永不过期（Error 级别）。
@@ -40,25 +42,29 @@ impl Notification {
 pub(crate) struct NotificationQueue {
     /// (source, Notification) — 按插入顺序排列。
     entries: std::collections::VecDeque<(String, Notification)>,
+    next_id: u64,
 }
 
 impl NotificationQueue {
     pub(crate) fn new() -> Self {
         Self {
             entries: std::collections::VecDeque::new(),
+            next_id: 1,
         }
     }
 
     /// 推送一条通知。同 source 的旧消息被替换（去重但不丢失历史位置）。
-    /// Error 级别的通知不自动过期，必须手动 dismiss。
+    /// Error 级别展示时间更长，也可手动 dismiss。
     pub(crate) fn push(&mut self, source: &str, level: StatusLevel, text: impl Into<String>) {
         let now = tool_core::now_timestamp_ms();
         let deadline_ms = level.ttl_ms().map(|ttl| now + ttl);
         let notification = Notification {
+            id: self.next_id,
             level,
             text: text.into(),
             deadline_ms,
         };
+        self.next_id = self.next_id.wrapping_add(1).max(1);
 
         // 同 source 替换旧消息，保持队列位置不变
         for (s, n) in self.entries.iter_mut().rev() {
@@ -72,7 +78,7 @@ impl NotificationQueue {
     }
 
     /// 获取当前未过期的所有通知（按插入顺序）。
-    /// Error 级别永不自动过期。
+    /// Error 级别展示时间更长。
     pub(crate) fn current(&mut self) -> Vec<Notification> {
         let now = tool_core::now_timestamp_ms();
         // 清理头部过期的（非 Error）
@@ -94,6 +100,24 @@ impl NotificationQueue {
 impl Default for NotificationQueue {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replacing_a_source_creates_a_new_notification_version() {
+        let mut queue = NotificationQueue::new();
+        queue.push("serial", StatusLevel::Info, "first");
+        let first_id = queue.current()[0].id;
+
+        queue.push("serial", StatusLevel::Warn, "second");
+        let notifications = queue.current();
+        assert_eq!(notifications.len(), 1);
+        assert!(notifications[0].id > first_id);
+        assert_eq!(notifications[0].text, "second");
     }
 }
 

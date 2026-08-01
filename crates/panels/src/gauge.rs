@@ -22,6 +22,7 @@ pub(crate) struct GaugeZone {
     from: f64,
     to: f64,
     color: Color32,
+    kind: ZoneKind,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -30,18 +31,6 @@ enum ZoneKind {
     Warn,
     Danger,
     None,
-}
-
-fn zone_color_to_kind(color: Color32) -> ZoneKind {
-    if color == theme::GREEN {
-        ZoneKind::Safe
-    } else if color == theme::YELLOW {
-        ZoneKind::Warn
-    } else if color == theme::RED {
-        ZoneKind::Danger
-    } else {
-        ZoneKind::None
-    }
 }
 
 impl GaugePanel {
@@ -142,26 +131,26 @@ impl GaugePanel {
 
     fn status_color(&self) -> Color32 {
         match self.zone_kind_for_value() {
-            ZoneKind::Safe => theme::GREEN,
-            ZoneKind::Warn => theme::YELLOW,
-            ZoneKind::Danger => theme::RED,
-            ZoneKind::None => theme::TEXT_SECONDARY,
+            ZoneKind::Safe => theme::green(),
+            ZoneKind::Warn => theme::yellow(),
+            ZoneKind::Danger => theme::red(),
+            ZoneKind::None => theme::text_secondary(),
         }
     }
 
     fn zone_kind_for_value(&self) -> ZoneKind {
         for zone in &self.zones {
             if self.value >= zone.from && self.value <= zone.to {
-                return zone_color_to_kind(zone.color);
+                return zone.kind;
             }
         }
         // 越界：低于所有 zone 取首个，高于取末个，与 value_color 保持一致
         if let (Some(first), Some(last)) = (self.zones.first(), self.zones.last()) {
             if self.value < first.from {
-                return zone_color_to_kind(first.color);
+                return first.kind;
             }
             if self.value > last.to {
-                return zone_color_to_kind(last.color);
+                return last.kind;
             }
         }
         ZoneKind::None
@@ -209,7 +198,7 @@ impl GaugePanel {
             0.0,
             1.0,
             arc_steps,
-            Stroke::new(6.0, theme::GAUGE_ARC),
+            Stroke::new(6.0, theme::gauge_arc()),
         );
 
         // 画色区弧（叠在底轨道上，覆盖各自区间）
@@ -251,8 +240,11 @@ impl GaugePanel {
             center.x + needle_len * value_angle.cos(),
             center.y + needle_len * value_angle.sin(),
         );
-        painter.line_segment([center, needle_end], Stroke::new(2.0, theme::TEXT_PRIMARY));
-        painter.circle_filled(center, 4.0, theme::TEXT_PRIMARY);
+        painter.line_segment(
+            [center, needle_end],
+            Stroke::new(2.0, theme::text_primary()),
+        );
+        painter.circle_filled(center, 4.0, theme::text_primary());
 
         // 中心数值
         let value_text = if self.unit.is_empty() {
@@ -265,7 +257,7 @@ impl GaugePanel {
             egui::Align2::CENTER_TOP,
             value_text,
             egui::FontId::proportional(18.0),
-            theme::TEXT_PRIMARY,
+            theme::text_primary(),
         );
 
         // 状态提示（数值下方，颜色跟随色区）
@@ -285,7 +277,7 @@ impl GaugePanel {
                 egui::Align2::CENTER_TOP,
                 &self.label,
                 egui::FontId::proportional(11.0),
-                theme::TEXT_SECONDARY,
+                theme::text_secondary(),
             );
         }
 
@@ -306,14 +298,14 @@ impl GaugePanel {
             egui::Align2::CENTER_CENTER,
             format!("{:.0}", self.min),
             tick_font.clone(),
-            theme::TEXT_DIMMED,
+            theme::text_dimmed(),
         );
         painter.text(
             max_pos,
             egui::Align2::CENTER_CENTER,
             format!("{:.0}", self.max),
             tick_font,
-            theme::TEXT_DIMMED,
+            theme::text_dimmed(),
         );
     }
 
@@ -337,7 +329,7 @@ impl GaugePanel {
                 return last.color;
             }
         }
-        theme::GAUGE_VALUE
+        theme::gauge_value()
     }
 }
 
@@ -459,21 +451,35 @@ pub(crate) fn parse_zones(zones_value: Option<&Value>) -> Vec<GaugeZone> {
         let to = obj.get("to").and_then(Value::as_f64).unwrap_or(100.0);
         let color_str = obj.get("color").and_then(Value::as_str).unwrap_or("green");
         let color = parse_zone_color(color_str);
-        result.push(GaugeZone { from, to, color });
+        result.push(GaugeZone {
+            from,
+            to,
+            color,
+            kind: parse_zone_kind(color_str),
+        });
     }
     result
 }
 
 fn parse_zone_color(s: &str) -> Color32 {
     match s.to_lowercase().as_str() {
-        "green" => theme::GREEN,
-        "yellow" | "warn" | "warning" => theme::YELLOW,
-        "red" | "error" | "danger" => theme::RED,
-        "blue" | "info" => theme::BLUE,
-        "cyan" => theme::CYAN,
-        "purple" | "magenta" => theme::PURPLE,
-        "orange" => theme::ORANGE,
-        _ => theme::GREEN,
+        "green" => theme::green(),
+        "yellow" | "warn" | "warning" => theme::yellow(),
+        "red" | "error" | "danger" => theme::red(),
+        "blue" | "info" => theme::blue(),
+        "cyan" => theme::cyan(),
+        "purple" | "magenta" => theme::purple(),
+        "orange" => theme::orange(),
+        _ => theme::green(),
+    }
+}
+
+fn parse_zone_kind(s: &str) -> ZoneKind {
+    match s.to_lowercase().as_str() {
+        "green" => ZoneKind::Safe,
+        "yellow" | "warn" | "warning" => ZoneKind::Warn,
+        "red" | "error" | "danger" => ZoneKind::Danger,
+        _ => ZoneKind::None,
     }
 }
 
@@ -533,7 +539,7 @@ mod tests {
         assert_eq!(zones.len(), 3);
         assert_eq!(zones[0].from, 0.0);
         assert_eq!(zones[2].to, 100.0);
-        assert_eq!(zones[0].color, theme::GREEN);
+        assert_eq!(zones[0].color, theme::green());
     }
 
     #[test]
@@ -587,10 +593,10 @@ mod tests {
             GaugePanel::from_config(&bus, "t", 0.0, 5.0, String::new(), zones, String::new());
 
         gauge.set_value(4.5); // 超过最后 zone(3.6)，低于 max(5)
-        assert_eq!(gauge.value_color(), theme::GREEN); // 取末个 zone 颜色
+        assert_eq!(gauge.value_color(), theme::green()); // 取末个 zone 颜色
         assert_eq!(gauge.status_text(), "正常"); // green -> 正常
 
         gauge.set_value(-1.0); // 低于首个 zone
-        assert_eq!(gauge.value_color(), theme::RED); // 取首个 zone 颜色
+        assert_eq!(gauge.value_color(), theme::red()); // 取首个 zone 颜色
     }
 }

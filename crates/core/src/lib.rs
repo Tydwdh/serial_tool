@@ -2,6 +2,86 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// JSON 配置文件的通用读写与恢复工具。
+pub mod config {
+    use serde::Serialize;
+    use std::fs;
+    use std::io::{self, Write};
+    use std::path::{Path, PathBuf};
+
+    /// 所有由工作台管理的 JSON 配置文档当前使用的 schema 版本。
+    pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+    /// 原子写入文本：先落盘到同目录临时文件，再备份并替换目标文件。
+    pub fn atomic_write_text(path: &Path, text: &str) -> Result<(), String> {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent).map_err(|error| format!("创建配置目录失败：{error}"))?;
+
+        let temp_path = path.with_extension("tmp");
+        let backup_path = path.with_extension("json.backup");
+        let write_result = (|| -> io::Result<()> {
+            let mut file = fs::File::create(&temp_path)?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
+            Ok(())
+        })();
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&temp_path);
+            return Err(format!("写入临时配置失败：{error}"));
+        }
+
+        if path.exists()
+            && let Err(error) = fs::copy(path, &backup_path)
+        {
+            log::warn!(
+                "config: failed to backup {} to {}: {error}",
+                path.display(),
+                backup_path.display()
+            );
+        }
+
+        fs::rename(&temp_path, path).map_err(|error| {
+            let _ = fs::remove_file(&temp_path);
+            format!("原子替换配置失败：{error}")
+        })
+    }
+
+    /// 序列化并原子写入 JSON 文档。
+    pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+        let data =
+            serde_json::to_string_pretty(value).map_err(|error| format!("序列化失败：{error}"))?;
+        atomic_write_text(path, &data)
+    }
+
+    /// 将无法解析的配置移动到同目录的带时间戳备份，避免下次启动继续读取坏文件。
+    pub fn quarantine_corrupt_file(path: &Path) -> Result<Option<PathBuf>, String> {
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("config.json");
+        let timestamp = crate::now_timestamp_ms();
+        let mut backup = path.with_file_name(format!("{name}.corrupt-{timestamp}.backup"));
+        let mut suffix = 1_u32;
+        while backup.exists() {
+            backup = path.with_file_name(format!("{name}.corrupt-{timestamp}-{suffix}.backup"));
+            suffix += 1;
+        }
+
+        fs::rename(path, &backup).map_err(|error| {
+            format!(
+                "备份损坏配置 {} 到 {} 失败：{error}",
+                path.display(),
+                backup.display()
+            )
+        })?;
+        Ok(Some(backup))
+    }
+}
+
 pub mod topics {
     pub const SERIAL_RX: &str = "transport.serial.default.rx";
     pub const SERIAL_TX: &str = "transport.serial.default.tx";
