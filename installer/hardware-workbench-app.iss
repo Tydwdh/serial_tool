@@ -2,7 +2,7 @@
 #ifndef MyAppVersion
   #error MyAppVersion must be passed by build-installer.ps1 with /DMyAppVersion=<version>
 #endif
-#define MyAppExeName "hardware_workbench.exe"
+#define MyAppExeName "hardware-workbench-app.exe"
 
 [Setup]
 AppId={{9C06F7D9-4E3B-45CF-8C3A-4373D6F83C79}
@@ -34,7 +34,7 @@ Name: "{app}\plugins"
 Name: "{app}\logs"
 
 [Files]
-Source: "..\dist\hardware-workbench\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\hardware-workbench-app\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\assets\app-icon.ico"
@@ -44,7 +44,14 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDi
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent; WorkingDir: "{app}"
 
 [UninstallDelete]
-Type: files; Name: "{userappdata}\hardware_workbench\config.json"
-Type: filesandordirs; Name: "{userappdata}\hardware_workbench\plugins"
-Type: filesandordirs; Name: "{userappdata}\hardware_workbench\recordings"
-Type: dirifempty; Name: "{userappdata}\hardware_workbench"
+Type: files; Name: "{userappdata}\HardwareWorkbench\workspace.json"
+Type: files; Name: "{userappdata}\HardwareWorkbench\workspace.json.backup"
+Type: files; Name: "{userappdata}\HardwareWorkbench\*.tmp"
+Type: filesandordirs; Name: "{userappdata}\HardwareWorkbench\plugin-config"
+Type: filesandordirs; Name: "{userappdata}\HardwareWorkbench\update"
+Type: filesandordirs; Name: "{userappdata}\HardwareWorkbench\updater"
+Type: dirifempty; Name: "{userappdata}\HardwareWorkbench"
+Type: files; Name: "{app}\workspace.json"
+Type: files; Name: "{app}\workspace.json.backup"
+Type: filesandordirs; Name: "{app}\plugin-config"
+Type: filesandordirs; Name: "{app}\logs"

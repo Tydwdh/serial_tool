@@ -37,7 +37,7 @@ function Get-AppVersion {
     }
 
     $metadata = $metadataText | ConvertFrom-Json
-    $package = $metadata.packages | Where-Object { $_.name -eq "tool-backend" } | Select-Object -First 1
+    $package = $metadata.packages | Where-Object { $_.name -eq "hardware-workbench-app" } | Select-Object -First 1
     if ($null -eq $package -or [string]::IsNullOrWhiteSpace($package.version)) {
         throw "Could not find hardware-workbench-app version in cargo metadata."
     }
@@ -49,7 +49,7 @@ $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $ScriptRoot
 $PackageScript = Join-Path $RepoRoot "package.bat"
 $InstallerScript = Join-Path $ScriptRoot "hardware-workbench-app.iss"
-$PortableExe = Join-Path $RepoRoot "dist\hardware-workbench\hardware_workbench.exe"
+$PortableExe = Join-Path $RepoRoot "dist\hardware-workbench-app\hardware-workbench-app.exe"
 $InstallerExe = Join-Path $RepoRoot "dist\HardwareWorkbenchSetup.exe"
 
 Push-Location $RepoRoot

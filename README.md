@@ -1,6 +1,6 @@
 # 硬件调试工作台 (Hardware Workbench)
 
-基于 Flutter Windows 桌面前端 + Rust 后端的串口调试工具，面向硬件调试、串口数据观察、录制回放和 Lua 插件扩展。原 egui 应用仍保留在源码中作功能参照，发布与日常运行使用 Flutter 版本。
+基于 Rust + egui 的桌面串口调试工具，面向硬件调试、串口数据观察、录制回放和 Lua 插件扩展。
 
 ## 主要功能
 
@@ -27,9 +27,11 @@
 
 所有快捷键均可在设置面板中自定义。`StartRecording`、`ReconnectPort`、`AddBookmark` 默认未绑定，可手动设置。
 
+应用运行时从可执行文件同级的 `assets\`、`themes\` 和 `plugins\` 目录加载资源；用户配置写入系统配置目录。
+
 ## 配置
 
-Flutter Windows 版配置文件位于：`%APPDATA%\hardware_workbench\config.json`。
+配置文件位于：`%APPDATA%\HardwareWorkbench\workspace.json`。
 
 可配置项（部分通过设置面板暴露，也可直接编辑 JSON）：
 
@@ -53,23 +55,23 @@ Flutter Windows 版配置文件位于：`%APPDATA%\hardware_workbench\config.jso
 
 ```powershell
 Set-Location "C:\Users\tyd27\Desktop\serial_tool"
-.\build_flutter.bat
+cargo build -p hardware-workbench-app
 ```
 
-生成 Flutter 便携包：
+生成 Windows 便携包：
 
 ```powershell
 .\package.bat
 ```
 
-打包结果在 `dist\hardware-workbench\` 与 `dist\hardware-workbench-windows.zip`。
+打包结果在 `dist\hardware-workbench-app\` 与 `dist\hardware-workbench-app.zip`。
 
 ## 发布形态
 
 正式发布提供两种包：
 
 - **Portable zip**：解压后直接运行，适合临时调试和免安装使用。
-- **Windows installer**：安装 Inno Setup 6 后执行 `installer\build-installer.ps1`；安装器使用同一 Flutter 便携输出。
+- **Windows installer**：安装 Inno Setup 6 后执行 `installer\build-installer.ps1`；安装器使用同一 Rust 便携输出。
 
 发布包默认不预装个人脚本或测试脚本。应用会创建空的 `plugins\` 目录，用户可从插件市场安装或手动放入 `plugins\<plugin-id>\`。源码仓库中的模板插件仅用于开发参考，不作为默认启用功能。
 
