@@ -1,0 +1,28 @@
+[package]
+name = "tool-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "tool_backend"
+crate-type = ["cdylib", "staticlib", "lib"]
+path = "src/lib.rs"
+
+[dependencies]
+crossbeam-channel.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rfd = "0.17.2"
+tokio = { version = "1", features = ["rt", "macros"] }
+tool-core = { path = "../core" }
+tool-databus = { path = "../databus" }
+tool-transport = { path = "../transport" }
+tool-extension = { path = "../extension" }
+tool-lua-host = { path = "../lua_host" }
+tool-recorder = { path = "../recorder" }
+tool-updater = { path = "../updater" }
+tool-marketplace = { path = "../marketplace" }
