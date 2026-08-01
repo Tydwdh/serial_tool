@@ -18,7 +18,6 @@ use tool_marketplace::{Registry, RegistryPlugin};
 
 const TWO_COLUMN_PLUGIN_WIDTH: f32 = 980.0;
 const TWO_COLUMN_CARD_GAP: f32 = 10.0;
-const TWO_COLUMN_INSTALLED_CARD_MIN_HEIGHT: f32 = 360.0;
 
 /// 插件面板顶部 tab。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -329,12 +328,7 @@ impl PluginsPanel {
                             ui.spacing_mut().item_spacing.x = TWO_COLUMN_CARD_GAP;
                             ui.vertical(|ui| {
                                 ui.set_width(card_width);
-                                let event = self.plugin_row(
-                                    ui,
-                                    manager,
-                                    left,
-                                    Some(TWO_COLUMN_INSTALLED_CARD_MIN_HEIGHT),
-                                );
+                                let event = self.plugin_row(ui, manager, left);
                                 if row_status.is_none() {
                                     row_status = event;
                                 }
@@ -342,12 +336,7 @@ impl PluginsPanel {
                             if let Some(right) = right {
                                 ui.vertical(|ui| {
                                     ui.set_width(card_width);
-                                    let event = self.plugin_row(
-                                        ui,
-                                        manager,
-                                        right,
-                                        Some(TWO_COLUMN_INSTALLED_CARD_MIN_HEIGHT),
-                                    );
+                                    let event = self.plugin_row(ui, manager, right);
                                     if row_status.is_none() {
                                         row_status = event;
                                     }
@@ -360,7 +349,7 @@ impl PluginsPanel {
                     }
                 } else {
                     for summary in summaries {
-                        let event = self.plugin_row(ui, manager, summary, None);
+                        let event = self.plugin_row(ui, manager, summary);
                         if row_status.is_none() {
                             row_status = event;
                         }
@@ -646,14 +635,10 @@ impl PluginsPanel {
         ui: &mut egui::Ui,
         manager: &mut PluginManager,
         summary: PluginSummary,
-        min_height: Option<f32>,
     ) -> Option<PluginPanelEvent> {
         design::card()
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                if let Some(min_height) = min_height {
-                    ui.set_min_height(min_height);
-                }
 
                 // 标题行
                 ui.horizontal_wrapped(|ui| {
