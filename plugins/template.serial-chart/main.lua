@@ -25,31 +25,7 @@ local received = 0
 
 ctx.log.info("串口图表插件启动: " .. tostring(ctx.plugin.id))
 
-ctx.ui.create_chart({
-    id = CHART_ID,
-    title = "串口数据图表",
-    topic_prefix = "protocol.template."
-})
-
-ctx.ui.create_form({
-    id = FORM_ID,
-    title = "串口图表参数",
-    auto_apply = true,
-    fields = {
-        {
-            id = "rx_port",
-            label = "RX 端口",
-            kind = "text",
-            default = selected_port
-        },
-        {
-            id = "show_log",
-            label = "打印解析日志",
-            kind = "checkbox",
-            default = false
-        }
-    }
-})
+ctx.ui.set_values(FORM_ID, { rx_port = selected_port })
 
 local function parse_packet(text)
     local seq = tonumber(text:match('"seq":(%d+)'))
@@ -129,8 +105,6 @@ ctx.bus.on("ui.form.changed", function(event)
 end)
 
 on_disable(function()
-    ctx.ui.remove_panel(CHART_ID)
-    ctx.ui.remove_panel(FORM_ID)
     ctx.log.info(
         "串口图表插件停止: received="
         .. tostring(received)

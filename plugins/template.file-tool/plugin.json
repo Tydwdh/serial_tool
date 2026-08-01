@@ -19,7 +19,24 @@
   },
   "contributes": {
     "panels": [
-      { "id": "file-tool-panel", "title": "文件工具", "kind": "form" }
+      {
+        "id": "file-tool-panel", "title": "文件工具", "kind": "form", "auto_apply": true,
+        "fields": [
+          {
+            "id": "file_path", "label": "文件路径", "kind": "file",
+            "filters": [
+              { "name": "文本文件", "extensions": ["txt", "log", "csv", "json"] },
+              { "name": "所有文件", "extensions": ["*"] }
+            ]
+          },
+          { "id": "file_content", "label": "文件内容", "kind": "textarea", "rows": 10, "default": "" },
+          { "id": "load_btn", "label": "加载文件", "kind": "button", "variant": "primary" },
+          { "kind": "separator" },
+          { "id": "progress", "label": "进度", "kind": "progress", "default": 0 },
+          { "id": "status", "label": "状态", "kind": "status", "default": { "text": "就绪", "level": "idle" } },
+          { "id": "stats", "label": "统计信息", "kind": "label", "text": "" }
+        ]
+      }
     ]
   }
 }

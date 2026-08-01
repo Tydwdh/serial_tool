@@ -7,7 +7,6 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-#[cfg(not(windows))]
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -256,6 +255,27 @@ pub struct TransportManager {
     /// UI 重绘唤醒器，app 层注入。worker publish 串口事件后调用以立即重绘。
     /// `Arc<Mutex<Option<...>>>` 让所有 TransportManager clone 共享同一 waker（仅 app 启动时设一次）。
     repaint_waker: Arc<Mutex<Option<Arc<dyn RepaintWaker>>>>,
+}
+
+/// 插件场景测试使用的内存串口控制器。它走与真实串口相同的
+/// `TransportManager::send_to` 和 DataBus TX/RX 事件链路。
+#[derive(Clone)]
+pub struct VirtualSerialPort {
+    bus: DataBus,
+    port_name: String,
+}
+
+impl VirtualSerialPort {
+    pub fn port_name(&self) -> &str {
+        &self.port_name
+    }
+
+    pub fn inject_rx(&self, bytes: impl Into<Vec<u8>>) {
+        self.bus.publish(serial_rx_event(
+            format!("serial:{}", self.port_name),
+            bytes.into(),
+        ));
+    }
 }
 
 struct PortHandle {
@@ -515,6 +535,73 @@ impl TransportManager {
         ));
 
         Ok(())
+    }
+
+    /// 打开不访问硬件的内存串口，供插件场景测试和 CI 使用。
+    pub fn open_virtual_serial(
+        &self,
+        port_name: impl Into<String>,
+    ) -> TransportResult<VirtualSerialPort> {
+        let port_name = port_name.into();
+        if port_name.trim().is_empty() {
+            return Err(TransportError::PortNotOpen(port_name));
+        }
+        self.close_port_blocking(&port_name, Duration::from_millis(100))?;
+
+        let config = SerialConfig {
+            port_name: port_name.clone(),
+            ..SerialConfig::default()
+        };
+        let (writer, write_rx) = bounded::<Vec<u8>>(1024);
+        let (dtr_rts_tx, dtr_rts_rx) = bounded::<DtrRtsCommand>(16);
+        let stop = Arc::new(AtomicBool::new(false));
+        let alive = Arc::new(AtomicBool::new(true));
+        let thread_stop = Arc::clone(&stop);
+        let thread_alive = Arc::clone(&alive);
+        let thread_bus = self.bus.clone();
+        let source = format!("serial:{port_name}");
+        let thread_source = source.clone();
+        let join = thread::spawn(move || {
+            while !thread_stop.load(Ordering::Acquire) {
+                while dtr_rts_rx.try_recv().is_ok() {}
+                match write_rx.recv_timeout(Duration::from_millis(5)) {
+                    Ok(bytes) => {
+                        thread_bus.publish(serial_tx_event(thread_source.clone(), bytes));
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            thread_alive.store(false, Ordering::Release);
+        });
+
+        self.ports.lock().insert(
+            port_name.clone(),
+            PortHandle {
+                config: config.clone(),
+                writer,
+                dtr_rts_tx,
+                #[cfg(windows)]
+                wake: None,
+                stop,
+                alive,
+                join: Some(join),
+            },
+        );
+        self.bus.publish(Event::new(
+            tool_core::topics::SERIAL_OPENED,
+            source,
+            Direction::Internal,
+            Payload::Json(serde_json::json!({
+                "port": port_name,
+                "baud_rate": config.baud_rate,
+                "virtual": true,
+            })),
+        ));
+        Ok(VirtualSerialPort {
+            bus: self.bus.clone(),
+            port_name,
+        })
     }
 
     // ── 关闭所有端口（同步，供 shutdown 使用）──

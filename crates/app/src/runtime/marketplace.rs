@@ -165,8 +165,7 @@ impl WorkbenchApp {
         if was_active && let Err(e) = self.plugin_manager.disable(&id) {
             log::warn!("marketplace: 重装前禁用 {id} 失败（继续安装）：{e}");
         }
-        // disable 后的动态面板/资源清理由 tick_plugin_lifecycle 经
-        // take_recently_disabled() 统一处理，此处不重复。
+        // disable 后的动态面板/资源由 PluginManager 统一请求宿主回收。
 
         self.plugins_panel.mark_installing(&id);
 
@@ -222,7 +221,7 @@ impl WorkbenchApp {
     /// 2. 删除 `plugins/<id>/`。若 Windows 文件被短暂占用导致 remove_dir_all 失败，
     ///    fallback 为同卷 rename 到 `<id>.old.<pid>/`（启动时 retire_old_plugin_dirs 会清）。
     /// 3. discover_roots：refresh 会因目录不存在而移除该插件 record。
-    /// 4. 清理该插件关联的动态面板/文件授权（经 recently_disabled 走 tick_plugin_lifecycle）。
+    /// 4. PluginManager 请求宿主清理该插件关联的面板和文件授权。
     pub(crate) fn uninstall_plugin(&mut self, plugin_id: &str) {
         let plugin_dir = app_dir().join("plugins");
 
@@ -234,14 +233,8 @@ impl WorkbenchApp {
                 | Some(tool_extension::PluginState::Finished)
                 | Some(tool_extension::PluginState::Failed)
         );
-        if was_active {
-            if let Err(e) = self.plugin_manager.disable(plugin_id) {
-                log::warn!("marketplace: 卸载前禁用 {plugin_id} 失败（继续卸载）：{e}");
-            }
-            // disable 后的动态面板/资源清理由 tick_plugin_lifecycle 经
-            // take_recently_disabled() 处理，这里把它入队。
-            self.plugins_panel
-                .recently_disabled_push(plugin_id.to_owned());
+        if was_active && let Err(e) = self.plugin_manager.disable(plugin_id) {
+            log::warn!("marketplace: 卸载前禁用 {plugin_id} 失败（继续卸载）：{e}");
         }
 
         // 2. 删除插件目录（fallback rename）

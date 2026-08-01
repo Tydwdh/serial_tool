@@ -4,11 +4,14 @@ pub mod host_services;
 pub mod manager;
 pub mod manifest;
 pub mod permission;
+pub mod scenario;
+pub mod spec;
 
 // Re-export 核心类型，供外部 crate 直接通过 tool_extension:: 访问
 pub use manager::PluginManager;
 pub use manifest::{PluginDiagnostic, PluginDiagnosticSeverity, PluginState, PluginSummary};
 pub use permission::PermissionManager;
+pub use scenario::SerialPluginScenarioRunner;
 
 #[derive(Debug, Error)]
 pub enum ExtensionError {

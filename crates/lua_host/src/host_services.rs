@@ -4,7 +4,7 @@
 
 use crate::ConfigStore;
 use parking_lot::Mutex as ParkingMutex;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicBool};
 
@@ -192,6 +192,8 @@ pub struct LuaHostServices {
     pub stop_flag: Option<Arc<AtomicBool>>,
     pub line_buffers: Option<LineBufferMap>,
     pub config_store: Option<Arc<ConfigStore>>,
+    /// 清单中声明、由宿主管理生命周期的静态面板 ID。
+    pub declared_panel_ids: BTreeSet<String>,
 }
 
 #[cfg(test)]

@@ -4,6 +4,8 @@
 
 不同 API 是否存在取决于插件在 `plugin.json` 中声明的权限。
 
+串口插件可以使用[串口插件场景测试](serial-plugin-scenarios.md)在无硬件环境中验证 RX、TX、协议事件、超时、重试和取消。
+
 ## ctx.plugin
 
 插件信息，只读。通常包含：
@@ -289,6 +291,8 @@ end
 
 需要权限：`ui`
 
+清单 `contributes.panels` 中的静态面板由宿主自动管理。下面的 `create_*` 仅用于运行时数量或结构不固定的动态面板；若传入已在清单声明的 ID，宿主会拒绝并给出错误。
+
 ### create_chart(config)
 
 图表显示匹配 topic 的 JSON payload 中所有数值字段。两种订阅方式：
@@ -416,6 +420,31 @@ ctx.ui.create_gauge({
 
 `zones` 的 `color` 支持：`green`/`yellow`/`red`/`blue`/`cyan`/`purple`/`orange`。建议 zones 覆盖整个 `min..max` 区间，否则未覆盖段会显示为灰色轨道。
 
+### create_table(config)
+
+创建插件控制的数据表。`columns` 定义列；行是带稳定 `id` 的对象。
+
+```lua
+ctx.ui.create_table({
+  id = "my-plugin.samples",
+  title = "采样记录",
+  columns = {
+    { id = "time", title = "时间", width = 120 },
+    { id = "value", title = "数值" }
+  },
+  sortable = true,
+  selectable = true,
+  max_rows = 1000
+})
+
+ctx.ui.table_set_rows("my-plugin.samples", rows)
+ctx.ui.table_append_rows("my-plugin.samples", { { id = "42", time = "12:00", value = 3.14 } })
+ctx.ui.table_remove_rows("my-plugin.samples", { "42" })
+ctx.ui.table_clear("my-plugin.samples")
+```
+
+用户选择行时会发布 `ui.table.selection_changed`，payload 包含 `panel_id`、`row_id` 和完整 `row`。
+
 ### remove_panel(panel_id)
 
 ```lua
@@ -447,6 +476,15 @@ ctx.ui.set_value("my-plugin.gauge-temp", "status", "预热中")
 
 -- label 字段也可用 set_value 更新文本
 ctx.ui.set_value("my-plugin.form", "samples", "919")
+```
+
+多个字段应使用单事件批量更新，减少队列压力和中间状态闪烁：
+
+```lua
+ctx.ui.set_values("my-plugin.form", {
+  progress = 100,
+  status = { text = "完成", level = "success" }
+})
 ```
 
 ### set_contribution_value(contribution_id, value)

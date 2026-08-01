@@ -29,12 +29,18 @@
       {
         "id": "template.serial-chart.chart",
         "title": "串口数据图表",
-        "kind": "chart"
+        "kind": "chart",
+        "topic_prefix": "protocol.template."
       },
       {
         "id": "template.serial-chart.form",
         "title": "串口图表参数",
-        "kind": "form"
+        "kind": "form",
+        "auto_apply": true,
+        "fields": [
+          { "id": "rx_port", "label": "RX 端口", "kind": "text", "default": "__any__" },
+          { "id": "show_log", "label": "打印解析日志", "kind": "checkbox", "default": false }
+        ]
       }
     ]
   }

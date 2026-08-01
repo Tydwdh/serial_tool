@@ -21,105 +21,6 @@ local seq = 0
 
 ctx.log.info("Widget 展示插件启动")
 
--- ── 创建面板 ──
-
-ctx.ui.create_chart({
-    id = CHART_ID,
-    title = "正弦波图表",
-    topic = "widget.showcase.chart.sample",
-    card = true
-})
-
-ctx.ui.create_gauge({
-    id = GAUGE_TEMP_ID,
-    title = "温度",
-    topic = "widget.showcase.temperature",
-    min = 0,
-    max = 100,
-    unit = "°C",
-    label = "传感器温度",
-    zones = {
-        { from = 0,  to = 60, color = "green" },
-        { from = 60, to = 80, color = "yellow" },
-        { from = 80, to = 100, color = "red" }
-    },
-    card = true
-})
-
-ctx.ui.create_gauge({
-    id = GAUGE_VOLTAGE_ID,
-    title = "电压",
-    topic = "widget.showcase.voltage",
-    min = 0,
-    max = 5,
-    unit = "V",
-    label = "输入电压",
-    zones = {
-        { from = 3.0, to = 3.6, color = "green" },
-        { from = 2.5, to = 3.0, color = "yellow" },
-        { from = 0,   to = 2.5, color = "red" },
-        { from = 3.6, to = 5.0, color = "red" }
-    },
-    card = true
-})
-
-ctx.ui.create_attitude({
-    id = ATTITUDE_ID,
-    title = "姿态指示器",
-    topic = "widget.showcase.attitude",
-    card = true
-})
-
-ctx.ui.create_form({
-    id = FORM_ID,
-    title = "参数控制",
-    auto_apply = true,
-    card = true,
-    fields = {
-        {
-            id = "freq",
-            label = "频率 (Hz)",
-            kind = "slider",
-            min = 0.1, max = 5.0, step = 0.1,
-            default = 1.0
-        },
-        {
-            id = "amplitude",
-            label = "振幅",
-            kind = "slider",
-            min = 0.1, max = 3.0, step = 0.1,
-            default = 1.0
-        },
-        {
-            id = "temp_offset",
-            label = "温度偏移 (°C)",
-            kind = "slider",
-            min = 0, max = 100, step = 1,
-            default = 50.0
-        },
-        {
-            id = "voltage_offset",
-            label = "电压偏移 (V)",
-            kind = "slider",
-            min = 0, max = 5, step = 0.1,
-            default = 3.3
-        },
-        { kind = "separator" },
-        {
-            id = "status",
-            label = "运行状态",
-            kind = "status",
-            default = { text = "运行中", level = "running" }
-        },
-        {
-            id = "samples",
-            label = "已生成样本",
-            kind = "label",
-            default = "0"
-        }
-    }
-})
-
 -- ── 参数变更 ──
 
 ctx.bus.on("ui.form.changed", function(event)
@@ -177,10 +78,5 @@ end)
 
 on_disable(function()
     ctx.timer.cancel(timer_id)
-    ctx.ui.remove_panel(CHART_ID)
-    ctx.ui.remove_panel(GAUGE_TEMP_ID)
-    ctx.ui.remove_panel(GAUGE_VOLTAGE_ID)
-    ctx.ui.remove_panel(ATTITUDE_ID)
-    ctx.ui.remove_panel(FORM_ID)
     ctx.log.info("Widget 展示插件停止: 共生成 " .. tostring(seq) .. " 个样本")
 end)

@@ -51,8 +51,12 @@
       }
     ],
     "panels": [
-      { "id": "demo-signal-chart", "title": "信号波形", "kind": "chart" },
-      { "id": "demo-signal-form", "title": "信号参数", "kind": "form" }
+      { "id": "demo-signal-chart", "title": "信号波形", "kind": "chart", "topic": "protocol.demo.sample" },
+      {
+        "id": "demo-signal-form", "title": "信号参数", "kind": "form",
+        "auto_apply": true,
+        "fields": [{ "id": "gain", "label": "增益", "kind": "number", "default": 1.0 }]
+      }
     ]
   }
 }
@@ -154,7 +158,10 @@ chart
 form
 gauge
 attitude
+table
 ```
+
+`contributes.panels` 是静态面板的完整声明，宿主会在插件启用/结束时自动创建和销毁；Lua 不应再次调用 `create_*` 或 `remove_panel`。只有运行时数量或结构确实不固定的面板，才使用 `ctx.ui.create_*`。
 
 ## contributes.ui
 
@@ -185,6 +192,10 @@ attitude
 
 ```text
 send.toolbar
+top_bar.left
+top_bar.right
+status_bar.left
+status_bar.right
 ```
 
 当前受控控件类型：
@@ -195,7 +206,11 @@ small_button
 separator
 label
 status
+toggle
+progress
 ```
+
+完整枚举由 [plugin-spec.generated.md](plugin-spec.generated.md) 自动生成；修改协议后运行 `cargo run -p tool-extension --example sync_plugin_spec` 同步 Schema 和文档。
 
 `send.*` 插槽中的控件可以设置 `record_send_input: true`。点击时宿主会把当前发送区内容写入发送历史；插件仍只处理 command，不需要直接操作宿主 UI 状态。
 

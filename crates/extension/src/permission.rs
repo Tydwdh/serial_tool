@@ -29,9 +29,8 @@ impl PermissionManager {
         }
 
         // 检查 replay 权限（只允许 log / storage）
-        const REPLAY_ALLOWED: &[&str] = &["log", "storage"];
         for permission in manifest.replay_permissions() {
-            if !REPLAY_ALLOWED.contains(&permission.as_str()) {
+            if !crate::spec::REPLAY_PERMISSIONS.contains(&permission.as_str()) {
                 return Err(ExtensionError::PermissionDenied {
                     plugin_id: manifest.id.clone(),
                     permission: permission.clone(),
@@ -45,18 +44,6 @@ impl PermissionManager {
 
 impl Default for PermissionManager {
     fn default() -> Self {
-        Self::new([
-            "bus",
-            "log",
-            "serial",
-            "ui",
-            "storage",
-            "timer",
-            "testing",
-            "dialog",
-            "fs.read.user_selected",
-            "task",
-            "config",
-        ])
+        Self::new(crate::spec::LIVE_PERMISSIONS.iter().copied())
     }
 }

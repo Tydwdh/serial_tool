@@ -5,7 +5,7 @@ mod schema;
 pub use form_render::dynamic_form_ui;
 pub use schema::{DynamicField, DynamicFieldKind, FieldFilter, FieldOption, parse_fields};
 
-use crate::{AttitudePanel, ChartPanel, GaugePanel, theme};
+use crate::{AttitudePanel, ChartPanel, DataTablePanel, GaugePanel, theme};
 use std::collections::BTreeMap;
 use tool_core::topics;
 use tool_databus::{DataBus, Subscription, TopicFilter};
@@ -17,10 +17,15 @@ pub struct DynamicPanels {
     remove_subscription: Subscription,
     // UI 状态更新订阅
     set_value_subscription: Subscription,
+    set_values_subscription: Subscription,
     set_enabled_subscription: Subscription,
     set_visible_subscription: Subscription,
     file_browse_subscription: Subscription,
     file_selected_subscription: Subscription,
+    table_set_rows_subscription: Subscription,
+    table_append_rows_subscription: Subscription,
+    table_remove_rows_subscription: Subscription,
+    table_clear_subscription: Subscription,
     panels: BTreeMap<String, DynamicPanel>,
     last_error: Option<String>,
     ports: Vec<SerialPortDescriptor>,
@@ -52,6 +57,12 @@ enum DynamicPanel {
         owner_plugin_id: Option<String>,
         card: bool,
     },
+    Table {
+        title: String,
+        table: DataTablePanel,
+        owner_plugin_id: Option<String>,
+        card: bool,
+    },
 }
 
 impl DynamicPanel {
@@ -68,6 +79,9 @@ impl DynamicPanel {
             }
             | DynamicPanel::Gauge {
                 owner_plugin_id, ..
+            }
+            | DynamicPanel::Table {
+                owner_plugin_id, ..
             } => owner_plugin_id.as_deref(),
         }
     }
@@ -77,7 +91,8 @@ impl DynamicPanel {
             DynamicPanel::Chart { title, .. }
             | DynamicPanel::Form { title, .. }
             | DynamicPanel::Attitude { title, .. }
-            | DynamicPanel::Gauge { title, .. } => title.as_str(),
+            | DynamicPanel::Gauge { title, .. }
+            | DynamicPanel::Table { title, .. } => title.as_str(),
         }
     }
 
@@ -86,7 +101,8 @@ impl DynamicPanel {
             DynamicPanel::Chart { card, .. }
             | DynamicPanel::Form { card, .. }
             | DynamicPanel::Attitude { card, .. }
-            | DynamicPanel::Gauge { card, .. } => *card,
+            | DynamicPanel::Gauge { card, .. }
+            | DynamicPanel::Table { card, .. } => *card,
         }
     }
 }
@@ -104,6 +120,10 @@ impl DynamicPanels {
                 .subscribe_lossy_bounded(TopicFilter::exact(topics::UI_PANEL_REMOVE), UI_SUB_CAP),
             set_value_subscription: bus
                 .subscribe_lossy_bounded(TopicFilter::exact(topics::UI_FORM_SET_VALUE), UI_SUB_CAP),
+            set_values_subscription: bus.subscribe_lossy_bounded(
+                TopicFilter::exact(topics::UI_PANEL_SET_VALUES),
+                UI_SUB_CAP,
+            ),
             set_enabled_subscription: bus.subscribe_lossy_bounded(
                 TopicFilter::exact(topics::UI_FORM_SET_ENABLED),
                 UI_SUB_CAP,
@@ -120,6 +140,18 @@ impl DynamicPanels {
                 TopicFilter::exact(topics::UI_FORM_FILE_SELECTED),
                 UI_SUB_CAP,
             ),
+            table_set_rows_subscription: bus
+                .subscribe_lossy_bounded(TopicFilter::exact(topics::UI_TABLE_SET_ROWS), UI_SUB_CAP),
+            table_append_rows_subscription: bus.subscribe_lossy_bounded(
+                TopicFilter::exact(topics::UI_TABLE_APPEND_ROWS),
+                UI_SUB_CAP,
+            ),
+            table_remove_rows_subscription: bus.subscribe_lossy_bounded(
+                TopicFilter::exact(topics::UI_TABLE_REMOVE_ROWS),
+                UI_SUB_CAP,
+            ),
+            table_clear_subscription: bus
+                .subscribe_lossy_bounded(TopicFilter::exact(topics::UI_TABLE_CLEAR), UI_SUB_CAP),
             panels: BTreeMap::new(),
             last_error: None,
             ports: Vec::new(),
@@ -236,6 +268,9 @@ fn render_panel_inner(
         }
         DynamicPanel::Gauge { gauge, .. } => {
             gauge.ui(ui);
+        }
+        DynamicPanel::Table { table, .. } => {
+            table.ui(ui, id, bus);
         }
     }
 }
@@ -768,5 +803,81 @@ mod tests {
 
         // 系统面板仍存在
         assert!(panels.panels.contains_key("sys.chart"));
+    }
+
+    #[test]
+    fn batch_values_update_multiple_fields_with_one_event() {
+        let bus = DataBus::new();
+        let mut panels = DynamicPanels::new(&bus);
+        let mut manager = PanelManager::default();
+        bus.publish(Event::new(
+            topics::UI_PANEL_CREATE,
+            "plugin:a",
+            Direction::Internal,
+            Payload::Json(serde_json::json!({
+                "id":"a.form","title":"Form","kind":"form",
+                "fields":[
+                    {"id":"progress","label":"Progress","kind":"number","default":0},
+                    {"id":"status","label":"Status","kind":"text","default":"idle"}
+                ]
+            })),
+        ));
+        panels.ingest(&mut manager);
+        bus.publish(Event::new(
+            topics::UI_PANEL_SET_VALUES,
+            "plugin:a",
+            Direction::Internal,
+            Payload::Json(serde_json::json!({
+                "panel_id":"a.form","values":{"progress":100,"status":"done"}
+            })),
+        ));
+        panels.ingest(&mut manager);
+        let DynamicPanel::Form { fields, .. } = panels.panels.get("a.form").unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            fields.iter().find(|f| f.id == "progress").unwrap().value,
+            100
+        );
+        assert_eq!(
+            fields.iter().find(|f| f.id == "status").unwrap().value,
+            "done"
+        );
+    }
+
+    #[test]
+    fn table_rows_are_owned_and_mutable_by_plugin() {
+        let bus = DataBus::new();
+        let mut panels = DynamicPanels::new(&bus);
+        let mut manager = PanelManager::default();
+        bus.publish(Event::new(
+            topics::UI_PANEL_CREATE,
+            "plugin:a",
+            Direction::Internal,
+            Payload::Json(serde_json::json!({
+                "id":"a.table","title":"Rows","kind":"table",
+                "columns":[{"id":"value","title":"Value"}]
+            })),
+        ));
+        panels.ingest(&mut manager);
+        bus.publish(Event::new(
+            topics::UI_TABLE_APPEND_ROWS,
+            "plugin:a",
+            Direction::Internal,
+            Payload::Json(serde_json::json!({
+                "panel_id":"a.table","rows":[{"id":"1","value":42}]
+            })),
+        ));
+        bus.publish(Event::new(
+            topics::UI_TABLE_CLEAR,
+            "plugin:b",
+            Direction::Internal,
+            Payload::Json(serde_json::json!({"panel_id":"a.table"})),
+        ));
+        panels.ingest(&mut manager);
+        let DynamicPanel::Table { table, .. } = panels.panels.get("a.table").unwrap() else {
+            panic!()
+        };
+        assert_eq!(table.rows().len(), 1);
     }
 }

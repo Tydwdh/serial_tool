@@ -22,7 +22,20 @@
       {
         "id": "template.hello.form",
         "title": "Hello 参数",
-        "kind": "form"
+        "kind": "form",
+        "auto_apply": true,
+        "fields": [
+          { "id": "message", "label": "消息", "kind": "text", "default": "hello hardware workbench" },
+          {
+            "id": "level", "label": "日志级别", "kind": "select", "default": "info",
+            "options": [
+              { "label": "Info", "value": "info" },
+              { "label": "Warn", "value": "warn" },
+              { "label": "Error", "value": "error" }
+            ]
+          },
+          { "id": "enabled", "label": "启用输出", "kind": "checkbox", "default": true }
+        ]
       }
     ]
   }

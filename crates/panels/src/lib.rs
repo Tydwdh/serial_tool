@@ -1,5 +1,6 @@
 mod attitude;
 mod chart;
+mod data_table;
 pub mod design;
 mod dynamic;
 mod gauge;
@@ -19,6 +20,7 @@ pub(crate) const MESSAGE_EVENT_BUFFER_CAPACITY: usize = 65_536;
 
 pub use attitude::AttitudePanel;
 pub use chart::ChartPanel;
+pub use data_table::{DataTableColumn, DataTablePanel};
 pub use dynamic::DynamicPanels;
 pub use dynamic::{
     DynamicField, DynamicFieldKind, FieldFilter, FieldOption, dynamic_form_ui, parse_fields,

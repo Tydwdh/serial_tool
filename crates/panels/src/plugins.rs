@@ -57,7 +57,6 @@ pub struct MarketplaceState {
 
 pub struct PluginsPanel {
     root: String,
-    recently_disabled: Vec<String>,
     /// disable 后待重新启用的插件 ID（用于 restart）
     pending_restart: Vec<String>,
     /// 待确认卸载的插件 ID（点过一次「卸载」后进入确认态，再点「确认」才执行）
@@ -72,25 +71,12 @@ impl PluginsPanel {
     pub fn new() -> Self {
         Self {
             root: "plugins".to_owned(),
-            recently_disabled: Vec::new(),
             pending_restart: Vec::new(),
             pending_uninstall: None,
             tab: PluginTab::Installed,
             market: MarketplaceState::default(),
             market_search: String::new(),
             market_category: None,
-        }
-    }
-
-    pub fn take_recently_disabled(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.recently_disabled)
-    }
-
-    /// 由 app 在卸载/重装前 disable 插件后调用，把 id 入队，
-    /// 以便 tick_plugin_lifecycle 经 take_recently_disabled() 清理动态面板/文件授权。
-    pub fn recently_disabled_push(&mut self, id: String) {
-        if !self.recently_disabled.contains(&id) {
-            self.recently_disabled.push(id);
         }
     }
 
@@ -759,9 +745,7 @@ impl PluginsPanel {
                             .clicked()
                         {
                             match manager.disable(&summary.id) {
-                                Ok(()) => {
-                                    self.recently_disabled.push(summary.id.clone());
-                                }
+                                Ok(()) => {}
                                 Err(error) => {
                                     return Some(PluginPanelEvent::Status(error.to_string(), true));
                                 }

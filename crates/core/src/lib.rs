@@ -95,10 +95,16 @@ pub mod topics {
     pub const UI_FORM_CHANGED: &str = "ui.form.changed";
     pub const UI_FORM_ACTION: &str = "ui.form.action";
     pub const UI_FORM_SET_VALUE: &str = "ui.form.set_value";
+    pub const UI_PANEL_SET_VALUES: &str = "ui.panel.set_values";
     pub const UI_FORM_SET_ENABLED: &str = "ui.form.set_enabled";
     pub const UI_FORM_SET_VISIBLE: &str = "ui.form.set_visible";
     pub const UI_FORM_FILE_BROWSE: &str = "ui.form.file_browse";
     pub const UI_FORM_FILE_SELECTED: &str = "ui.form.file_selected";
+    pub const UI_TABLE_SET_ROWS: &str = "ui.table.set_rows";
+    pub const UI_TABLE_APPEND_ROWS: &str = "ui.table.append_rows";
+    pub const UI_TABLE_REMOVE_ROWS: &str = "ui.table.remove_rows";
+    pub const UI_TABLE_CLEAR: &str = "ui.table.clear";
+    pub const UI_TABLE_SELECTION_CHANGED: &str = "ui.table.selection_changed";
     pub const UI_CONTRIBUTION_SET_VALUE: &str = "ui.contribution.set_value";
     pub const UI_SET_STATUS: &str = "ui.set.status";
     pub const PLUGIN_COMMAND_EXECUTE: &str = "plugin.command.execute";

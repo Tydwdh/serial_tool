@@ -80,6 +80,95 @@ pub struct TestReportStore {
 
 pub type TestManager = TestReportStore;
 
+/// 串口插件的端到端场景。JSON 文件可直接交给
+/// `tool-extension` 的 `plugin_scenario` 示例运行。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SerialPluginScenario {
+    pub name: String,
+    pub plugin_id: String,
+    #[serde(default = "default_virtual_port")]
+    pub port: String,
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+    pub steps: Vec<SerialScenarioStep>,
+}
+
+fn default_virtual_port() -> String {
+    "TEST".to_owned()
+}
+fn default_timeout_ms() -> u64 {
+    1_000
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum SerialScenarioStep {
+    Rx {
+        #[serde(flatten)]
+        data: ScenarioData,
+    },
+    Execute {
+        command: String,
+        #[serde(default)]
+        input: String,
+        #[serde(default)]
+        payload: serde_json::Value,
+    },
+    ExpectTx {
+        #[serde(flatten)]
+        data: ScenarioData,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    ExpectNoTx {
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    ExpectEvent {
+        topic: String,
+        #[serde(default)]
+        payload: Option<serde_json::Value>,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    Wait {
+        ms: u64,
+    },
+    Cancel {
+        command: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ScenarioData {
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub hex: Option<String>,
+}
+
+impl ScenarioData {
+    pub fn bytes(&self) -> Result<Vec<u8>, String> {
+        match (&self.text, &self.hex) {
+            (Some(text), None) => Ok(text.as_bytes().to_vec()),
+            (None, Some(hex)) => {
+                let compact: String = hex.chars().filter(|c| !c.is_whitespace()).collect();
+                if !compact.len().is_multiple_of(2) {
+                    return Err("hex data must contain complete bytes".to_owned());
+                }
+                (0..compact.len())
+                    .step_by(2)
+                    .map(|index| {
+                        u8::from_str_radix(&compact[index..index + 2], 16)
+                            .map_err(|e| e.to_string())
+                    })
+                    .collect()
+            }
+            _ => Err("scenario data requires exactly one of text or hex".to_owned()),
+        }
+    }
+}
+
 impl TestReportStore {
     pub fn new(bus: &DataBus) -> Self {
         Self {

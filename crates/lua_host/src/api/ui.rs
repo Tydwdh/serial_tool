@@ -1,7 +1,8 @@
-//! `ctx.ui.*` — UI 面板 API（create_chart/form/attitude/gauge + remove + set_value + set_enabled + set_visible）。
+//! `ctx.ui.*` — 动态面板创建与状态更新 API。
 
 use mlua::{Lua, Table, Value};
 use serde_json::Map;
+use std::collections::BTreeSet;
 
 use tool_core::{Direction, Event, Payload, topics};
 use tool_databus::DataBus;
@@ -13,6 +14,7 @@ pub(crate) fn create_ui_api(
     bus: DataBus,
     source: String,
     plugin_id: String,
+    declared_panel_ids: &BTreeSet<String>,
 ) -> mlua::Result<Table> {
     let table = lua.create_table()?;
 
@@ -21,15 +23,24 @@ pub(crate) fn create_ui_api(
         ("create_form", "form"),
         ("create_attitude", "attitude"),
         ("create_gauge", "gauge"),
+        ("create_table", "table"),
     ] {
         let bus = bus.clone();
         let source = source.clone();
         let pid = plugin_id.clone();
+        let static_ids = declared_panel_ids.clone();
 
         table.set(
             name,
             lua.create_function(move |_lua, config: Value| {
                 let mut config = ensure_json_object(lua_value_to_json(config)?, name)?;
+                if let Some(id) = config.get("id").and_then(serde_json::Value::as_str)
+                    && static_ids.contains(id)
+                {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "panel '{id}' is declared in plugin.json and is managed by the host"
+                    )));
+                }
 
                 config.insert(
                     "kind".to_owned(),
@@ -57,10 +68,16 @@ pub(crate) fn create_ui_api(
 
     let bus_for_remove = bus.clone();
     let source_for_remove = source.clone();
+    let static_ids_for_remove = declared_panel_ids.clone();
 
     table.set(
         "remove_panel",
         lua.create_function(move |_lua, panel_id: String| {
+            if static_ids_for_remove.contains(&panel_id) {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "panel '{panel_id}' is declared in plugin.json and is managed by the host"
+                )));
+            }
             bus_for_remove.publish(Event::new(
                 topics::UI_PANEL_REMOVE,
                 source_for_remove.clone(),
@@ -68,6 +85,65 @@ pub(crate) fn create_ui_api(
                 Payload::Json(serde_json::json!({ "id": panel_id })),
             ));
 
+            Ok(())
+        })?,
+    )?;
+
+    // ctx.ui.set_values(panel_id, { field = value, ... })：单事件批量更新。
+    let bus_values = bus.clone();
+    let src_values = source.clone();
+    table.set(
+        "set_values",
+        lua.create_function(move |_lua, (panel_id, values): (String, Value)| {
+            let values = ensure_json_object(lua_value_to_json(values)?, "set_values")?;
+            bus_values.publish(Event::new(
+                topics::UI_PANEL_SET_VALUES,
+                src_values.clone(),
+                Direction::Internal,
+                Payload::Json(serde_json::json!({
+                    "panel_id": panel_id,
+                    "values": values,
+                })),
+            ));
+            Ok(())
+        })?,
+    )?;
+
+    for (name, topic) in [
+        ("table_set_rows", topics::UI_TABLE_SET_ROWS),
+        ("table_append_rows", topics::UI_TABLE_APPEND_ROWS),
+        ("table_remove_rows", topics::UI_TABLE_REMOVE_ROWS),
+    ] {
+        let op_bus = bus.clone();
+        let op_source = source.clone();
+        table.set(
+            name,
+            lua.create_function(move |_lua, (panel_id, rows): (String, Value)| {
+                op_bus.publish(Event::new(
+                    topic,
+                    op_source.clone(),
+                    Direction::Internal,
+                    Payload::Json(serde_json::json!({
+                        "panel_id": panel_id,
+                        "rows": lua_value_to_json(rows).unwrap_or(serde_json::Value::Null),
+                    })),
+                ));
+                Ok(())
+            })?,
+        )?;
+    }
+
+    let clear_bus = bus.clone();
+    let clear_source = source.clone();
+    table.set(
+        "table_clear",
+        lua.create_function(move |_lua, panel_id: String| {
+            clear_bus.publish(Event::new(
+                topics::UI_TABLE_CLEAR,
+                clear_source.clone(),
+                Direction::Internal,
+                Payload::Json(serde_json::json!({ "panel_id": panel_id })),
+            ));
             Ok(())
         })?,
     )?;
@@ -82,16 +158,21 @@ pub(crate) fn create_ui_api(
                 .into_iter()
                 .rev()
                 .find(|event| {
-                    event.topic == topics::UI_PANEL_CREATE
+                    (event.topic == topics::UI_PANEL_CREATE
+                        || event.topic == topics::UI_PANEL_REMOVE)
                         && match &event.payload {
                             Payload::Json(value) => {
-                                value.get("id").and_then(|value| value.as_str()) == Some(&panel_id)
+                                value
+                                    .get("id")
+                                    .or_else(|| value.get("panel_id"))
+                                    .and_then(|value| value.as_str())
+                                    == Some(&panel_id)
                             }
                             _ => false,
                         }
                 })
                 .and_then(|event| match event.payload {
-                    Payload::Json(value) => Some(value),
+                    Payload::Json(value) if event.topic == topics::UI_PANEL_CREATE => Some(value),
                     _ => None,
                 })
                 .unwrap_or(serde_json::Value::Null);

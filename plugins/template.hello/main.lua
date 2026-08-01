@@ -20,35 +20,9 @@ ctx.log.info("Hello 插件已启动: " .. tostring(ctx.plugin.id))
 ctx.log.info("hw.utils demo: format_size(4096) = " .. u.format_size(4096))
 ctx.log.info("hw.codec demo: to_hex('AB') = " .. c.to_hex("AB"))
 
-ctx.ui.create_form({
-    id = PANEL_ID,
-    title = "Hello 参数",
-    auto_apply = true,
-    fields = {
-        {
-            id = "message",
-            label = "消息",
-            kind = "text",
-            default = ctx.session.get("message") or "hello hardware workbench"
-        },
-        {
-            id = "level",
-            label = "日志级别",
-            kind = "select",
-            default = ctx.session.get("level") or "info",
-            options = {
-                { label = "Info", value = "info" },
-                { label = "Warn", value = "warn" },
-                { label = "Error", value = "error" }
-            }
-        },
-        {
-            id = "enabled",
-            label = "启用输出",
-            kind = "checkbox",
-            default = true
-        }
-    }
+ctx.ui.set_values(PANEL_ID, {
+    message = ctx.session.get("message") or "hello hardware workbench",
+    level = ctx.session.get("level") or "info"
 })
 
 local function log_by_level(level, message)
@@ -80,6 +54,5 @@ ctx.bus.on("ui.form.changed", function(event)
 end)
 
 on_disable(function()
-    ctx.ui.remove_panel(PANEL_ID)
     ctx.log.info("Hello 插件已停止")
 end)

@@ -3,7 +3,7 @@
 //! 从 `lib.rs` 抽出的纯数据结构，供 `PluginManager` 与外部消费。
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 pub const CURRENT_PLUGIN_API_VERSION: &str = "0.1";
@@ -83,6 +83,8 @@ impl PluginManifest {
         }
         if self.runtime.trim().is_empty() {
             errors.push("plugin runtime 不能为空".to_owned());
+        } else if !crate::spec::RUNTIMES.contains(&self.runtime.as_str()) {
+            errors.push(format!("不支持的 runtime '{}'", self.runtime));
         }
         if self.live_main().trim().is_empty() {
             errors.push("plugin live main 不能为空".to_owned());
@@ -108,6 +110,18 @@ impl PluginManifest {
             if !ui_ids.insert(item.id.as_str()) {
                 errors.push(format!("重复 ui id '{}'", item.id));
             }
+            if !crate::spec::UI_SLOTS.contains(&item.slot.as_str()) {
+                errors.push(format!(
+                    "ui '{}' 使用了不支持的 slot '{}'",
+                    item.id, item.slot
+                ));
+            }
+            if !crate::spec::UI_KINDS.contains(&item.kind.as_str()) {
+                errors.push(format!(
+                    "ui '{}' 使用了不支持的 kind '{}'",
+                    item.id, item.kind
+                ));
+            }
 
             if let Some(command) = item
                 .command
@@ -130,6 +144,21 @@ impl PluginManifest {
             }
             if !panel_ids.insert(panel.id.as_str()) {
                 errors.push(format!("重复 panel id '{}'", panel.id));
+            }
+            if !crate::spec::PANEL_KINDS.contains(&panel.kind.as_str()) {
+                errors.push(format!(
+                    "panel '{}' 使用了不支持的 kind '{}'",
+                    panel.id, panel.kind
+                ));
+            }
+        }
+
+        for setting in &self.contributes.settings {
+            if !crate::spec::SETTING_KINDS.contains(&setting.kind.as_str()) {
+                errors.push(format!(
+                    "setting '{}' 使用了不支持的 kind '{}'",
+                    setting.id, setting.kind
+                ));
             }
         }
 
@@ -328,13 +357,22 @@ fn default_ui_contribution_kind() -> String {
     "button".to_owned()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PluginPanelContribution {
     pub id: String,
     pub title: String,
 
-    #[serde(default)]
+    #[serde(default = "default_panel_kind")]
     pub kind: String,
+
+    /// 面板类型专属配置。宿主会把这些字段原样合并进
+    /// `ui.panel.create`，因此声明式面板与动态面板使用同一协议。
+    #[serde(flatten)]
+    pub config: BTreeMap<String, serde_json::Value>,
+}
+
+fn default_panel_kind() -> String {
+    "chart".to_owned()
 }
 
 fn default_setting_kind() -> String {

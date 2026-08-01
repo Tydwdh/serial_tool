@@ -4443,6 +4443,7 @@ dependencies = [
  "tool-core",
  "tool-databus",
  "tool-lua-host",
+ "tool-testing",
  "tool-transport",
 ]
 

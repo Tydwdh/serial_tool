@@ -2,7 +2,7 @@
 
 use parking_lot::Mutex;
 use serde_json::json;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -46,6 +46,7 @@ pub struct PluginManager {
     dropped_events: u64,
     last_seen_manager_dropped: u64,
     diagnostics: Vec<PluginDiagnostic>,
+    cleanup_requests: Vec<String>,
 }
 
 impl PluginManager {
@@ -76,6 +77,7 @@ impl PluginManager {
             dropped_events: 0,
             last_seen_manager_dropped: 0,
             diagnostics: Vec::new(),
+            cleanup_requests: Vec::new(),
         }
     }
 
@@ -360,6 +362,13 @@ impl PluginManager {
             stop_flag: None,
             line_buffers: Some(self.line_buffers.clone()),
             config_store: Some(self.config_store.clone()),
+            declared_panel_ids: record
+                .manifest
+                .contributes
+                .panels
+                .iter()
+                .map(|panel| panel.id.clone())
+                .collect::<BTreeSet<_>>(),
         };
 
         let runtime = run_plugin(
@@ -380,6 +389,7 @@ impl PluginManager {
         record.last_error = None;
 
         self.lua_runtimes.insert(plugin_id.to_owned(), runtime);
+        self.publish_declared_panels(plugin_id);
 
         self.bus.publish(Event::system_log(
             LogLevel::Info,
@@ -410,31 +420,7 @@ impl PluginManager {
 
         // 清除该插件的运行时注册命令
         self.registered_commands.remove(plugin_id);
-
-        let panel_ids: Vec<String> = self
-            .records
-            .get(plugin_id)
-            .map(|record| {
-                record
-                    .manifest
-                    .contributes
-                    .panels
-                    .iter()
-                    .map(|panel| panel.id.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let source = format!("plugin:{plugin_id}");
-
-        for panel_id in panel_ids {
-            self.bus.publish(Event::new(
-                topics::UI_PANEL_REMOVE,
-                source.clone(),
-                Direction::Internal,
-                Payload::Json(serde_json::json!({ "id": panel_id })),
-            ));
-        }
+        self.request_cleanup(plugin_id);
 
         self.bus.publish(Event::system_log(
             LogLevel::Info,
@@ -714,7 +700,70 @@ impl PluginManager {
 
             // 运行时结束后清除注册命令
             self.registered_commands.remove(id.as_str());
+            self.request_cleanup(id);
         }
+    }
+
+    fn publish_declared_panels(&self, plugin_id: &str) {
+        let Some(record) = self.records.get(plugin_id) else {
+            return;
+        };
+        let source = format!("plugin:{plugin_id}");
+        for panel in &record.manifest.contributes.panels {
+            let mut payload = serde_json::Map::new();
+            payload.insert("id".to_owned(), serde_json::json!(panel.id));
+            payload.insert("title".to_owned(), serde_json::json!(panel.title));
+            payload.insert("kind".to_owned(), serde_json::json!(panel.kind));
+            payload.extend(panel.config.clone());
+            self.bus.publish(Event::new(
+                topics::UI_PANEL_CREATE,
+                source.clone(),
+                Direction::Internal,
+                Payload::Json(serde_json::Value::Object(payload)),
+            ));
+        }
+    }
+
+    fn request_cleanup(&mut self, plugin_id: &str) {
+        let newly_requested = !self.cleanup_requests.iter().any(|id| id == plugin_id);
+        if newly_requested {
+            self.cleanup_requests.push(plugin_id.to_owned());
+        }
+        if newly_requested {
+            let panel_ids: Vec<String> = self
+                .records
+                .get(plugin_id)
+                .map(|record| {
+                    record
+                        .manifest
+                        .contributes
+                        .panels
+                        .iter()
+                        .map(|panel| panel.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            for panel_id in panel_ids {
+                self.bus.publish(Event::new(
+                    topics::UI_PANEL_REMOVE,
+                    format!("plugin:{plugin_id}"),
+                    Direction::Internal,
+                    Payload::Json(serde_json::json!({ "id": panel_id })),
+                ));
+            }
+        }
+        let prefix = format!("{plugin_id}:");
+        self.line_buffers
+            .lock()
+            .retain(|key, _| !key.starts_with(&prefix));
+        if let Some(broker) = &self.file_broker {
+            broker.clear(plugin_id);
+        }
+    }
+
+    /// 取出由宿主统一回收 UI、文件授权等资源的插件 ID。
+    pub fn take_cleanup_requests(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.cleanup_requests)
     }
 
     fn handle_command_registered(&mut self, event: &Event) {
@@ -1202,6 +1251,56 @@ ctx.log.info("registered")
             "registered_commands should be cleared after disable"
         );
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn host_creates_declared_panels_and_requests_cleanup() {
+        let root = create_custom_plugin(
+            "panel.lifecycle",
+            r#"{
+              "id":"panel.lifecycle","name":"Panel","version":"0.1.0",
+              "runtime":"lua","main":"main.lua","permissions":["ui","timer"],
+              "contributes":{"panels":[{
+                "id":"panel.lifecycle.form","title":"Form","kind":"form",
+                "auto_apply":true,"fields":[{"id":"value","label":"Value","kind":"number","default":1}]
+              }]}
+            }"#,
+            "ctx.timer.every(1000, function() end)",
+        );
+        let bus = DataBus::new();
+        let created = bus.subscribe(TopicFilter::exact(topics::UI_PANEL_CREATE));
+        let mut manager = PluginManager::new(bus.clone(), TransportManager::new(bus));
+        manager.discover_roots([root.clone()]).unwrap();
+        manager.enable("panel.lifecycle").unwrap();
+        let events = created.drain();
+        assert_eq!(events.len(), 1);
+        let Payload::Json(payload) = &events[0].payload else {
+            panic!()
+        };
+        assert_eq!(payload["auto_apply"], true);
+        assert_eq!(payload["fields"][0]["id"], "value");
+
+        manager.disable("panel.lifecycle").unwrap();
+        assert_eq!(manager.take_cleanup_requests(), vec!["panel.lifecycle"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn natural_runtime_end_also_requests_cleanup() {
+        let root = create_test_plugin("panel.finished", "ctx.log.info('done')");
+        let bus = DataBus::new();
+        let mut manager = PluginManager::new(bus.clone(), TransportManager::new(bus));
+        manager.discover_roots([root.clone()]).unwrap();
+        manager.enable("panel.finished").unwrap();
+        for _ in 0..50 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            manager.reap_finished();
+            if !manager.cleanup_requests.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(manager.take_cleanup_requests(), vec!["panel.finished"]);
         let _ = fs::remove_dir_all(root);
     }
 

@@ -949,6 +949,7 @@ fn run_script_blocking(
         stop_flag: None,
         line_buffers: None,
         config_store: None,
+        declared_panel_ids: Default::default(),
     };
     install_ctx(&lua, bus, transport, &config, &test_services)?;
     install_budget_hook(&lua, config.timeout_ms, stop)?;
@@ -1041,6 +1042,7 @@ fn install_ctx(
                 bus.clone(),
                 config.source.clone(),
                 host_services.plugin_id.clone(),
+                &host_services.declared_panel_ids,
             )?,
         )?;
     }
@@ -1249,6 +1251,7 @@ mod tests {
             stop_flag: None,
             line_buffers: None,
             config_store: None,
+            declared_panel_ids: Default::default(),
         };
 
         let runtime = run_plugin(
@@ -1326,6 +1329,7 @@ assert(type(ctx.serial.write_line_and_expect) == "function", type(ctx.serial.wri
             stop_flag: None,
             line_buffers: Some(Arc::new(ParkingMutex::new(HashMap::new()))),
             config_store: None,
+            declared_panel_ids: Default::default(),
         };
 
         let _runtime = run_plugin(

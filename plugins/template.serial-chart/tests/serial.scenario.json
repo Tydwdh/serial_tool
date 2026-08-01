@@ -1,0 +1,16 @@
+{
+  "name": "串口 JSON 解析",
+  "plugin_id": "template.serial-chart",
+  "port": "TEST",
+  "timeout_ms": 500,
+  "steps": [
+    { "action": "rx", "text": "{\"seq\":1,\"value\":12.3,\"target\":50.0}\n" },
+    {
+      "action": "expect_event",
+      "topic": "protocol.template.sample",
+      "payload": { "t": 1, "value": 12.3, "target": 50.0, "received": 1 }
+    },
+    { "action": "rx", "text": "invalid\n" },
+    { "action": "expect_no_tx", "timeout_ms": 50 }
+  ]
+}

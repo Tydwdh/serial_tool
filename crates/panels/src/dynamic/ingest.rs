@@ -7,7 +7,7 @@
 use super::DynamicPanel;
 use super::form_render::publish_form_changed;
 use super::schema::{DynamicField, parse_fields};
-use crate::{AttitudePanel, ChartPanel, GaugePanel, PanelKind, PanelManager};
+use crate::{AttitudePanel, ChartPanel, DataTablePanel, GaugePanel, PanelKind, PanelManager};
 use serde_json::Value;
 use tool_core::{Event, LogLevel, Payload, topics};
 
@@ -54,6 +54,9 @@ impl super::DynamicPanels {
             self.handle_field_update(event, |field, value| {
                 field.value = value;
             });
+        }
+        for event in self.set_values_subscription.drain_limited(500) {
+            self.handle_values_update(event);
         }
         for event in self.set_enabled_subscription.drain_limited(500) {
             self.handle_field_update(event, |field, val| {
@@ -104,6 +107,19 @@ impl super::DynamicPanels {
                     }
                 }
             }
+        }
+
+        for event in self.table_set_rows_subscription.drain_limited(500) {
+            self.handle_table_rows(event, TableOperation::Set);
+        }
+        for event in self.table_append_rows_subscription.drain_limited(500) {
+            self.handle_table_rows(event, TableOperation::Append);
+        }
+        for event in self.table_remove_rows_subscription.drain_limited(500) {
+            self.handle_table_rows(event, TableOperation::Remove);
+        }
+        for event in self.table_clear_subscription.drain_limited(500) {
+            self.handle_table_rows(event, TableOperation::Clear);
         }
     }
 
@@ -185,6 +201,71 @@ impl super::DynamicPanels {
             self.last_error = Some(msg.clone());
             self.bus
                 .publish(Event::system_log(LogLevel::Warn, "ui.dynamic", msg));
+        }
+    }
+
+    fn handle_values_update(&mut self, event: Event) {
+        let source = event_source_for_owner(&event).to_owned();
+        let Payload::Json(value) = event.payload else {
+            return;
+        };
+        let panel_id = value.get("panel_id").and_then(Value::as_str).unwrap_or("");
+        let Some(values) = value.get("values").and_then(Value::as_object) else {
+            return;
+        };
+        if !self.is_allowed(panel_id, &source) {
+            self.bus.publish(Event::system_log(
+                LogLevel::Warn,
+                "ui.dynamic",
+                format!("set values for '{panel_id}' rejected: source '{source}' not allowed"),
+            ));
+            return;
+        }
+        if let Some(panel) = self.panels.get_mut(panel_id) {
+            match panel {
+                DynamicPanel::Form { fields, .. } => {
+                    for field in fields {
+                        if let Some(value) = values.get(&field.id) {
+                            field.value = value.clone();
+                        }
+                    }
+                }
+                DynamicPanel::Gauge { gauge, .. } => {
+                    if let Some(value) = values.get("value").and_then(Value::as_f64) {
+                        gauge.set_value(value);
+                    }
+                    if let Some(status) = values.get("status").and_then(Value::as_str) {
+                        gauge.set_status(status.to_owned());
+                    }
+                }
+                DynamicPanel::Table { table, .. } => {
+                    if let Some(rows) = values.get("rows") {
+                        table.set_rows(rows.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn handle_table_rows(&mut self, event: Event, operation: TableOperation) {
+        let source = event_source_for_owner(&event).to_owned();
+        let Payload::Json(value) = event.payload else {
+            return;
+        };
+        let panel_id = value.get("panel_id").and_then(Value::as_str).unwrap_or("");
+        if !self.is_allowed(panel_id, &source) {
+            return;
+        }
+        let Some(DynamicPanel::Table { table, .. }) = self.panels.get_mut(panel_id) else {
+            return;
+        };
+        let rows = value.get("rows").cloned().unwrap_or(Value::Array(vec![]));
+        match operation {
+            TableOperation::Set => table.set_rows(rows),
+            TableOperation::Append => table.append_rows(rows),
+            TableOperation::Remove => table.remove_rows(rows),
+            TableOperation::Clear => table.clear(),
         }
     }
 
@@ -296,6 +377,12 @@ impl super::DynamicPanels {
                     card,
                 }
             }
+            "table" => DynamicPanel::Table {
+                title,
+                table: DataTablePanel::from_config(object)?,
+                owner_plugin_id,
+                card,
+            },
             other => return Err(format!("不支持的动态面板类型 '{other}'")),
         };
 
@@ -358,4 +445,12 @@ impl super::DynamicPanels {
 
         Ok(Some(id))
     }
+}
+
+#[derive(Clone, Copy)]
+enum TableOperation {
+    Set,
+    Append,
+    Remove,
+    Clear,
 }

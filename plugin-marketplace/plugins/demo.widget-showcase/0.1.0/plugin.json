@@ -19,11 +19,48 @@
   },
   "contributes": {
     "panels": [
-      { "id": "showcase.chart", "title": "正弦波图表", "kind": "chart" },
-      { "id": "showcase.gauge-temp", "title": "温度仪表", "kind": "gauge" },
-      { "id": "showcase.gauge-voltage", "title": "电压仪表", "kind": "gauge" },
-      { "id": "showcase.attitude", "title": "姿态指示器", "kind": "attitude" },
-      { "id": "showcase.form", "title": "参数控制", "kind": "form" }
+      {
+        "id": "showcase.chart", "title": "正弦波图表", "kind": "chart",
+        "topic": "widget.showcase.chart.sample", "card": true
+      },
+      {
+        "id": "showcase.gauge-temp", "title": "温度", "kind": "gauge",
+        "topic": "widget.showcase.temperature", "min": 0, "max": 100,
+        "unit": "°C", "label": "传感器温度", "card": true,
+        "zones": [
+          { "from": 0, "to": 60, "color": "green" },
+          { "from": 60, "to": 80, "color": "yellow" },
+          { "from": 80, "to": 100, "color": "red" }
+        ]
+      },
+      {
+        "id": "showcase.gauge-voltage", "title": "电压", "kind": "gauge",
+        "topic": "widget.showcase.voltage", "min": 0, "max": 5,
+        "unit": "V", "label": "输入电压", "card": true,
+        "zones": [
+          { "from": 3.0, "to": 3.6, "color": "green" },
+          { "from": 2.5, "to": 3.0, "color": "yellow" },
+          { "from": 0, "to": 2.5, "color": "red" },
+          { "from": 3.6, "to": 5.0, "color": "red" }
+        ]
+      },
+      {
+        "id": "showcase.attitude", "title": "姿态指示器", "kind": "attitude",
+        "topic": "widget.showcase.attitude", "card": true
+      },
+      {
+        "id": "showcase.form", "title": "参数控制", "kind": "form",
+        "auto_apply": true, "card": true,
+        "fields": [
+          { "id": "freq", "label": "频率 (Hz)", "kind": "slider", "min": 0.1, "max": 5.0, "step": 0.1, "default": 1.0 },
+          { "id": "amplitude", "label": "振幅", "kind": "slider", "min": 0.1, "max": 3.0, "step": 0.1, "default": 1.0 },
+          { "id": "temp_offset", "label": "温度偏移 (°C)", "kind": "slider", "min": 0, "max": 100, "step": 1, "default": 50.0 },
+          { "id": "voltage_offset", "label": "电压偏移 (V)", "kind": "slider", "min": 0, "max": 5, "step": 0.1, "default": 3.3 },
+          { "kind": "separator" },
+          { "id": "status", "label": "运行状态", "kind": "status", "default": { "text": "运行中", "level": "running" } },
+          { "id": "samples", "label": "已生成样本", "kind": "label", "default": "0" }
+        ]
+      }
     ]
   }
 }

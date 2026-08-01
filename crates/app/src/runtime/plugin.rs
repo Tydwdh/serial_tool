@@ -97,7 +97,11 @@ impl WorkbenchApp {
         self.poll_dialog_requests();
         self.handle_file_browse_requests();
 
-        for plugin_id in self.plugins_panel.take_recently_disabled() {
+        self.plugin_manager.process_pending();
+        self.dynamic_panels.ingest(&mut self.panels);
+        self.process_contribution_set_value();
+
+        for plugin_id in self.plugin_manager.take_cleanup_requests() {
             let removed = self.dynamic_panels.remove_by_plugin(&plugin_id);
             for id in &removed {
                 self.detached_dynamic_panels.remove(id);
@@ -105,12 +109,12 @@ impl WorkbenchApp {
                     .close_tab(tool_panels::PanelKind::Dynamic(id.clone()));
             }
             self.file_broker.clear(&plugin_id);
+            let prefix = format!("{plugin_id}:");
+            self.contribution_states
+                .retain(|key, _| !key.starts_with(&prefix));
         }
 
-        self.dynamic_panels.ingest(&mut self.panels);
         let _terminal_ingested = self.terminal_panel.ingest_pending();
-        self.plugin_manager.process_pending();
-        self.process_contribution_set_value();
     }
 
     /// 处理插件通过 ctx.ui.set_contribution_value 对 UI contribution 的状态更新。

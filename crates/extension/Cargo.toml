@@ -20,3 +20,4 @@ tool-core = { path = "../core" }
 tool-databus = { path = "../databus" }
 tool-lua-host = { path = "../lua_host" }
 tool-transport = { path = "../transport" }
+tool-testing = { path = "../testing" }
