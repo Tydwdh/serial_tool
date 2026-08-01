@@ -17,6 +17,8 @@ use tool_extension::{
 use tool_marketplace::{Registry, RegistryPlugin};
 
 const TWO_COLUMN_PLUGIN_WIDTH: f32 = 980.0;
+const TWO_COLUMN_CARD_GAP: f32 = 10.0;
+const TWO_COLUMN_INSTALLED_CARD_MIN_HEIGHT: f32 = 360.0;
 
 /// 插件面板顶部 tab。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -318,19 +320,47 @@ impl PluginsPanel {
             |ui| -> Option<PluginPanelEvent> {
                 let mut row_status: Option<PluginPanelEvent> = None;
                 if plugin_column_count(ui.available_width()) == 2 {
-                    ui.columns(2, |columns| {
-                        for (index, summary) in summaries.into_iter().enumerate() {
-                            let column = &mut columns[index % 2];
-                            let event = self.plugin_row(column, manager, summary);
-                            if row_status.is_none() {
-                                row_status = event;
+                    let card_width =
+                        ((ui.available_width() - TWO_COLUMN_CARD_GAP) / 2.0).max(320.0);
+                    let mut summaries = summaries.into_iter();
+                    while let Some(left) = summaries.next() {
+                        let right = summaries.next();
+                        ui.horizontal_top(|ui| {
+                            ui.spacing_mut().item_spacing.x = TWO_COLUMN_CARD_GAP;
+                            ui.vertical(|ui| {
+                                ui.set_width(card_width);
+                                let event = self.plugin_row(
+                                    ui,
+                                    manager,
+                                    left,
+                                    Some(TWO_COLUMN_INSTALLED_CARD_MIN_HEIGHT),
+                                );
+                                if row_status.is_none() {
+                                    row_status = event;
+                                }
+                            });
+                            if let Some(right) = right {
+                                ui.vertical(|ui| {
+                                    ui.set_width(card_width);
+                                    let event = self.plugin_row(
+                                        ui,
+                                        manager,
+                                        right,
+                                        Some(TWO_COLUMN_INSTALLED_CARD_MIN_HEIGHT),
+                                    );
+                                    if row_status.is_none() {
+                                        row_status = event;
+                                    }
+                                });
+                            } else {
+                                ui.allocate_space(egui::vec2(card_width, 0.0));
                             }
-                            column.add_space(10.0);
-                        }
-                    });
+                        });
+                        ui.add_space(TWO_COLUMN_CARD_GAP);
+                    }
                 } else {
                     for summary in summaries {
-                        let event = self.plugin_row(ui, manager, summary);
+                        let event = self.plugin_row(ui, manager, summary, None);
                         if row_status.is_none() {
                             row_status = event;
                         }
@@ -495,13 +525,28 @@ impl PluginsPanel {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 if plugin_column_count(ui.available_width()) == 2 {
-                    ui.columns(2, |columns| {
-                        for (index, plugin) in visible_plugins.into_iter().enumerate() {
-                            let column = &mut columns[index % 2];
-                            self.market_plugin_row(column, plugin, &mut events);
-                            column.add_space(10.0);
-                        }
-                    });
+                    let card_width =
+                        ((ui.available_width() - TWO_COLUMN_CARD_GAP) / 2.0).max(320.0);
+                    let mut plugins = visible_plugins.into_iter();
+                    while let Some(left) = plugins.next() {
+                        let right = plugins.next();
+                        ui.horizontal_top(|ui| {
+                            ui.spacing_mut().item_spacing.x = TWO_COLUMN_CARD_GAP;
+                            ui.vertical(|ui| {
+                                ui.set_width(card_width);
+                                self.market_plugin_row(ui, left, &mut events);
+                            });
+                            if let Some(right) = right {
+                                ui.vertical(|ui| {
+                                    ui.set_width(card_width);
+                                    self.market_plugin_row(ui, right, &mut events);
+                                });
+                            } else {
+                                ui.allocate_space(egui::vec2(card_width, 0.0));
+                            }
+                        });
+                        ui.add_space(TWO_COLUMN_CARD_GAP);
+                    }
                 } else {
                     for plugin in visible_plugins {
                         self.market_plugin_row(ui, plugin, &mut events);
@@ -601,10 +646,14 @@ impl PluginsPanel {
         ui: &mut egui::Ui,
         manager: &mut PluginManager,
         summary: PluginSummary,
+        min_height: Option<f32>,
     ) -> Option<PluginPanelEvent> {
         design::card()
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
+                if let Some(min_height) = min_height {
+                    ui.set_min_height(min_height);
+                }
 
                 // 标题行
                 ui.horizontal_wrapped(|ui| {
