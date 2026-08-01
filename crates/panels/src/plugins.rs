@@ -277,6 +277,7 @@ impl PluginsPanel {
             let inactive = summaries.len().saturating_sub(running + failed);
             ui.add_space(8.0);
             design::card().show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
                 ui.horizontal_wrapped(|ui| {
                     design::badge(ui, format!("已发现 {}", summaries.len()), theme::cyan());
                     design::status_pill(ui, theme::green(), format!("运行 {running}"));
@@ -555,7 +556,7 @@ impl PluginsPanel {
                 });
             }
 
-            // 作者 / 大小 / 权限
+            // 作者 / 大小
             ui.horizontal_wrapped(|ui| {
                 if let Some(author) = &plugin.author {
                     ui.label("作者");
@@ -566,6 +567,8 @@ impl PluginsPanel {
                     );
                 }
                 ui.label(format!("{} 字节", plugin.size));
+            });
+            ui.horizontal_wrapped(|ui| {
                 ui.label("权限");
                 if plugin.permissions.is_empty() {
                     design::badge(ui, "无额外权限", theme::green());
@@ -635,6 +638,8 @@ impl PluginsPanel {
                             .monospace()
                             .color(theme::text_primary()),
                     );
+                });
+                ui.horizontal_wrapped(|ui| {
                     ui.label("权限");
                     if summary.permissions.is_empty() {
                         design::badge(ui, "无额外权限", theme::green());

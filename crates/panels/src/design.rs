@@ -126,15 +126,15 @@ pub fn section_header(
 }
 
 pub fn badge(ui: &mut egui::Ui, text: impl AsRef<str>, color: Color32) -> Response {
-    Frame::new()
-        .fill(color.gamma_multiply(0.14))
-        .stroke(Stroke::new(1.0, color.gamma_multiply(0.42)))
-        .corner_radius(10.0)
-        .inner_margin(egui::Margin::symmetric(8, 2))
-        .show(ui, |ui| {
-            ui.label(RichText::new(text.as_ref()).small().color(color))
-        })
-        .inner
+    ui.add(
+        egui::Button::new(RichText::new(text.as_ref()).small().color(color))
+            .sense(egui::Sense::hover())
+            .wrap_mode(egui::TextWrapMode::Extend)
+            .fill(color.gamma_multiply(0.14))
+            .stroke(Stroke::new(1.0, color.gamma_multiply(0.42)))
+            .corner_radius(10.0)
+            .min_size(egui::vec2(0.0, 24.0)),
+    )
 }
 
 pub fn status_pill(ui: &mut egui::Ui, color: Color32, text: impl AsRef<str>) -> Response {
@@ -227,6 +227,7 @@ mod tests {
     use super::*;
     use egui_kittest::{Harness, kittest::Queryable as _};
     use egui_material_icons::icons::ICON_CHECK;
+    use std::{cell::Cell, rc::Rc};
 
     #[test]
     fn primary_button_is_accessible_by_label() {
@@ -257,5 +258,28 @@ mod tests {
                 "compact toolbar lost action {label}"
             );
         }
+    }
+
+    #[test]
+    fn badge_wraps_as_one_atom_instead_of_stacking_characters() {
+        let measured = Rc::new(Cell::new(egui::Vec2::ZERO));
+        let measured_in_ui = Rc::clone(&measured);
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(240.0, 100.0))
+            .build_ui(move |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("运行时 lua API 0.1 权限");
+                    measured_in_ui.set(
+                        badge(ui, "fs.read.user_selected", Color32::LIGHT_BLUE)
+                            .rect
+                            .size(),
+                    );
+                });
+            });
+        harness.run();
+
+        let size = measured.get();
+        assert!(size.x > 80.0, "badge was compressed to {size:?}");
+        assert!(size.y <= 30.0, "badge text wrapped vertically: {size:?}");
     }
 }
