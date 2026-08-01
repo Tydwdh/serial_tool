@@ -2,6 +2,8 @@
 
 基于 Rust + egui 的桌面串口调试工具，面向硬件调试、串口数据观察、录制回放和 Lua 插件扩展。
 
+项目仓库：https://github.com/Tydwdh/serial_tool
+
 ## 主要功能
 
 - **串口通信**：可自定义波特率（含 1M/2M/3M 高速档）、数据位、停止位、校验位、DTR/RTS 控制；自动重连（拔插后自动恢复，可一键取消）。
@@ -38,7 +40,6 @@
 - 等宽字体大小（10–24px）
 - 终端合并阈值（0–100ms，同端口同方向间隔 ≤ 此值且不含换行符的连续包合并）
 - 终端/日志保留条数（500–50000）
-- 终端/发送悬浮窗默认置顶
 - 快捷键映射
 - 自动重连开关
 
@@ -53,7 +54,8 @@
 - Windows 安装器需要 Inno Setup 6
 
 ```powershell
-Set-Location "C:\Users\tyd27\Desktop\serial_tool"
+git clone https://github.com/Tydwdh/serial_tool.git
+Set-Location serial_tool
 cargo build -p hardware-workbench-app
 ```
 
@@ -97,6 +99,15 @@ installer/       Windows 安装器配置
 
 参见 [docs/README.md](docs/README.md)。
 
+## 发布与变更
+
+- [变更记录](CHANGELOG.md)
+- [v1.0.0 发布说明](docs/releases/v1.0.0.md)
+- [发布流程](docs/RELEASE.md)
+- [安装器说明](docs/INSTALLER.md)
+
 ## License
 
-MIT
+[MIT](LICENSE)。第三方组件与字体许可见
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 和
+[assets/FONT_LICENSES.md](assets/FONT_LICENSES.md)。

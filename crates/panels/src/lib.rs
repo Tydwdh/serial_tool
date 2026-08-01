@@ -102,8 +102,12 @@ pub(crate) fn next_auto_scroll_state(
     let moved_towards_bottom = offset_y > previous_offset_y + AUTO_SCROLL_OFFSET_EPSILON;
     let scrolled_towards_bottom = scroll_delta_moves_towards_bottom(scroll_delta_y);
 
-    let user_moved_away = scroll_delta_moves_away_from_bottom(scroll_delta_y) || primary_down;
-    if auto_scroll && moved_away_from_bottom && !at_bottom && user_moved_away {
+    // 滚轮向上是明确的“查看历史”意图，应立即暂停自动跟随。不能要求本帧的
+    // offset 同时发生变化：ScrollArea 会先消费滚轮输入，而且持续追加内容时
+    // offset 的绝对值也可能没有减小。
+    let wheel_moves_away = scroll_delta_moves_away_from_bottom(scroll_delta_y);
+    let dragged_away = primary_down && moved_away_from_bottom && !at_bottom;
+    if auto_scroll && (wheel_moves_away || dragged_away) {
         return false;
     }
 
@@ -239,6 +243,14 @@ mod tests {
     #[test]
     fn auto_scroll_disables_after_view_moves_away_from_bottom() {
         let next = next_auto_scroll_state(true, true, false, 24.0, 100.0, 80.0, 200.0, 100.0);
+
+        assert!(!next);
+    }
+
+    #[test]
+    fn auto_scroll_disables_immediately_on_upward_wheel_input() {
+        // 滚动容器尚未更新 offset，或内容正在追加时，向上滚动也必须立即暂停。
+        let next = next_auto_scroll_state(true, true, false, 24.0, 100.0, 100.0, 200.0, 100.0);
 
         assert!(!next);
     }

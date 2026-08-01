@@ -2,7 +2,13 @@
 name = "hardware-workbench-app"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Rust + egui hardware serial debugging workbench with Lua plugins and replay"
 
 [dependencies]
 crossbeam-channel.workspace = true

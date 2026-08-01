@@ -1,35 +1,8 @@
 {
     "$schema":  "./registry.schema.json",
     "version":  1,
-    "updated":  "2026-08-01T17:23:00.6764725Z",
+    "updated":  "2026-08-01T18:12:10.0838784Z",
     "plugins":  [
-                    {
-                        "id":  "demo.gcode-sender",
-                        "name":  "G-code Sender",
-                        "version":  "0.2.0",
-                        "api_version":  "0.1",
-                        "description":  "面向 Marlin 固件的 G-code 发送器：支持文件/单条发送、行号校验、暂停/恢复/取消、进度显示",
-                        "author":  "Tydwdh",
-                        "homepage":  "https://github.com/Tydwdh/serial_tool",
-                        "repository":  "https://github.com/Tydwdh/serial_tool",
-                        "license":  "MIT",
-                        "category":  "gcode",
-                        "icon":  null,
-                        "permissions":  [
-                                            "bus",
-                                            "log",
-                                            "serial",
-                                            "ui",
-                                            "dialog",
-                                            "fs.read.user_selected",
-                                            "task",
-                                            "config"
-                                        ],
-                        "download_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugin-marketplace/plugins/demo.gcode-sender/0.2.0/demo.gcode-sender-0.2.0.zip",
-                        "sha256":  "5955299791c0d39f1dc842727eabc999c5c59fd6a1a192e206bc58a0bea8f397",
-                        "size":  7966,
-                        "published":  "2026-07-04T20:37:29.3683732Z"
-                    },
                     {
                         "id":  "demo.widget-showcase",
                         "name":  "Widget 展示",

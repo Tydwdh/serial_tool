@@ -7,7 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use egui::{Id, Ui};
 
-use crate::theme;
+use crate::{design, theme};
+use egui_material_icons::icons::{ICON_PAUSE, ICON_VERTICAL_ALIGN_BOTTOM};
 
 const COPY_FOCUS_ID: &str = "message-copy-focus";
 const COPY_FEEDBACK_ID: &str = "copy-feedback";
@@ -192,7 +193,23 @@ impl AutoScrollState {
     }
 
     pub(crate) fn button(&mut self, ui: &mut Ui) -> bool {
-        theme::auto_scroll_button(ui, &mut self.enabled)
+        let was_enabled = self.enabled;
+        let (icon, label, tooltip) = if self.enabled {
+            (ICON_PAUSE, "暂停跟随", "暂停自动跟随最新消息")
+        } else {
+            (
+                ICON_VERTICAL_ALIGN_BOTTOM,
+                "恢复跟随",
+                "滚动到底部并继续跟随最新消息",
+            )
+        };
+        if design::button(ui, icon, label, design::ButtonKind::Secondary)
+            .on_hover_text(tooltip)
+            .clicked()
+        {
+            self.enabled = !self.enabled;
+        }
+        !was_enabled && self.enabled
     }
 
     pub(crate) fn update(
@@ -202,25 +219,25 @@ impl AutoScrollState {
         inner_rect: egui::Rect,
         content_height: f32,
         offset_y: f32,
+        scroll_delta_y: f32,
     ) {
         let pointer_inside = ui
             .input(|input| input.pointer.hover_pos())
             .is_some_and(|position| inner_rect.contains(position));
-        let smooth_scroll_y = ui.input(|input| input.smooth_scroll_delta.y);
         let primary_down = ui.input(|input| input.pointer.primary_down());
         let previous_offset_y = self.previous_offsets.get(key).copied().unwrap_or(offset_y);
         let next_enabled = crate::next_auto_scroll_state(
             self.enabled,
             pointer_inside,
             primary_down,
-            smooth_scroll_y,
+            scroll_delta_y,
             previous_offset_y,
             offset_y,
             content_height,
             inner_rect.height(),
         );
         let should_repair_stick_to_bottom = next_enabled
-            && !crate::scroll_delta_moves_away_from_bottom(smooth_scroll_y)
+            && !crate::scroll_delta_moves_away_from_bottom(scroll_delta_y)
             && !crate::scroll_is_at_bottom(offset_y, content_height, inner_rect.height());
 
         if self.enabled != next_enabled {
@@ -821,12 +838,23 @@ pub(crate) fn edge_scroll_delta(pointer_y: f32, viewport_rect: egui::Rect) -> f3
     }
 }
 
+/// `egui::ScrollArea` 在其它控件持有拖拽时不会处理滚轮。消息文本或整行选区正在
+/// 左键拖拽时，由调用方把渲染前保存的滚轮量补到 `Ui::scroll_with_delta`。
+pub(crate) fn wheel_scroll_during_selection(selection_dragging: bool, wheel_delta_y: f32) -> f32 {
+    if selection_dragging {
+        wheel_delta_y
+    } else {
+        0.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         MessageList, RowHighlight, RowSelection, TextSelectionRows,
         bulk_copy_requires_confirmation, claim_copy_focus, copy_text_with_feedback,
         edge_scroll_delta, estimated_wrapped_line_count, owns_copy_focus, take_copy_feedback,
+        wheel_scroll_during_selection,
     };
 
     #[test]
@@ -1005,5 +1033,12 @@ mod tests {
         assert!(edge_scroll_delta(105.0, viewport) > 0.0);
         assert_eq!(edge_scroll_delta(200.0, viewport), 0.0);
         assert!(edge_scroll_delta(295.0, viewport) < 0.0);
+    }
+
+    #[test]
+    fn wheel_scroll_is_forwarded_only_during_selection_drag() {
+        assert_eq!(wheel_scroll_during_selection(true, 24.0), 24.0);
+        assert_eq!(wheel_scroll_during_selection(true, -24.0), -24.0);
+        assert_eq!(wheel_scroll_during_selection(false, 24.0), 0.0);
     }
 }

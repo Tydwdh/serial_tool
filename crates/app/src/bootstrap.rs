@@ -51,8 +51,10 @@ pub fn setup_fonts(cc: &eframe::CreationContext<'_>) {
         &mut fonts,
         "emoji",
         &[
-            dir.join("assets/seguiemj.ttf"),
             PathBuf::from("C:\\Windows\\Fonts\\seguiemj.ttf"),
+            PathBuf::from("/System/Library/Fonts/Apple Color Emoji.ttc"),
+            PathBuf::from("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"),
+            PathBuf::from("/usr/share/fonts/noto-color-emoji/NotoColorEmoji.ttf"),
         ],
     );
 

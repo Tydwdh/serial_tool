@@ -1,16 +1,23 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     tags:
       - 'v*'
-      - 'V*'
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -19,7 +26,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
 
@@ -32,7 +41,23 @@ jobs:
       - name: Test
         run: cargo test --all-targets
 
+      - name: Verify release metadata
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = ($metadata.packages | Where-Object name -eq 'hardware-workbench-app').version
+          $tagVersion = '${{ github.ref_name }}' -replace '^v', ''
+          if ($version -ne $tagVersion) {
+            throw "Tag version $tagVersion does not match Cargo version $version"
+          }
+          $releaseNotes = 'docs/releases/${{ github.ref_name }}.md'
+          if (-not (Test-Path -LiteralPath $releaseNotes -PathType Leaf)) {
+            throw "Release notes not found: $releaseNotes"
+          }
+
       - name: Package portable zip
+        if: startsWith(github.ref, 'refs/tags/v')
         run: .\package.bat
 
       - name: Install Inno Setup
@@ -43,6 +68,20 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: .\installer\build-installer.ps1 -SkipPackage
 
+      - name: Generate checksums
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $files = @(
+            'dist/hardware-workbench-app.zip',
+            'dist/HardwareWorkbenchSetup.exe'
+          )
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant()
+            "$hash  $([IO.Path]::GetFileName($file))"
+          }
+          $lines | Set-Content -LiteralPath 'dist/SHA256SUMS.txt' -Encoding utf8NoBOM
+
       - name: Upload artifact
         if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
@@ -51,6 +90,7 @@ jobs:
           path: |
             dist/hardware-workbench-app.zip
             dist/HardwareWorkbenchSetup.exe
+            dist/SHA256SUMS.txt
 
   release:
     name: GitHub Release
@@ -62,7 +102,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
 
       - uses: actions/download-artifact@v4
@@ -70,13 +109,21 @@ jobs:
           name: hardware-workbench-windows
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: Hardware Workbench ${{ github.ref_name }}
+          body_path: docs/releases/${{ github.ref_name }}.md
           files: |
             hardware-workbench-app.zip
             HardwareWorkbenchSetup.exe
+            SHA256SUMS.txt
           generate_release_notes: true
+
+      - name: Checkout default branch for updater manifest
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
 
       - name: Generate and commit update.json
         run: |
@@ -88,11 +135,29 @@ jobs:
           $chinaTime = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId((Get-Date), "China Standard Time")
           $date = $chinaTime.ToString("yyyy-MM-dd")
           $downloadUrl = "https://github.com/Tydwdh/serial_tool/releases/download/$tag/hardware-workbench-app.zip"
+          $changelog = [System.Collections.Generic.List[string]]::new()
+          $inVersion = $false
+          $heading = '^## \[' + [regex]::Escape($version) + '\](?: - .*)?$'
+          foreach ($line in Get-Content -LiteralPath 'CHANGELOG.md') {
+            if ($line -match $heading) {
+              $inVersion = $true
+              continue
+            }
+            if ($inVersion -and $line -match '^## ') {
+              break
+            }
+            if ($inVersion -and $line -match '^- (.+)$') {
+              $changelog.Add($Matches[1])
+            }
+          }
+          if ($changelog.Count -eq 0) {
+            throw "No changelog entries found for $version"
+          }
           $json = @{
             version = $version
             date = $date
             download_url = $downloadUrl
-            changelog = @()
+            changelog = @($changelog)
           } | ConvertTo-Json
           $json | Out-File -FilePath "update.json" -Encoding utf8NoBOM
           Write-Host "Generated update.json:"

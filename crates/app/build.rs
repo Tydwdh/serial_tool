@@ -11,6 +11,9 @@ fn main() {
     resource.set_icon("../../assets/app-icon.ico");
     resource.set("FileDescription", "Hardware Workbench");
     resource.set("ProductName", "Hardware Workbench");
+    resource.set("CompanyName", "Tydwdh");
+    resource.set("OriginalFilename", "hardware-workbench-app.exe");
+    resource.set("LegalCopyright", "Copyright (c) 2026 Tydwdh");
 
     resource.compile().expect("failed to embed Windows icon");
 

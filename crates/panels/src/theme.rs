@@ -905,20 +905,6 @@ pub fn card_accent_bar(ui: &mut egui::Ui, color: Color32) {
     ui.add_space(6.0);
 }
 
-pub fn auto_scroll_button(ui: &mut egui::Ui, auto_scroll: &mut bool) -> bool {
-    if *auto_scroll {
-        if ui.button("⏸").on_hover_text("暂停自动滚动").clicked() {
-            *auto_scroll = false;
-        }
-        false
-    } else if ui.button("↓").on_hover_text("滚动到底部").clicked() {
-        *auto_scroll = true;
-        true
-    } else {
-        false
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -5,9 +5,9 @@
 **硬件调试工作台** (Hardware Workbench) 是一个跨平台的串口调试工具，使用 Rust + egui 构建，支持 Lua 插件系统、录制回放、多串口管理、自定义面板。
 
 - 仓库: `Tydwdh/serial_tool`
-- 版本号: `Cargo.toml` workspace `version` 字段 + `update.json`
+- 开发版本号: `Cargo.toml` workspace `version` 字段；发布成功后 CI 更新 `update.json`
 - Rust edition: 2024
-- 最低 Rust 版本: 1.96+ (与 CI 保持一致)
+- 固定 Rust 版本: 1.92.0（由 `rust-toolchain.toml` 与 CI 共同约束）
 
 ## 项目结构
 
@@ -36,10 +36,10 @@ assets/         — 字体、图标
 
 ```bash
 # Debug 构建
-cargo build
+cargo build -p hardware-workbench-app
 
 # Release 构建
-cargo build --release
+cargo build -p hardware-workbench-app --release
 
 # 检查
 cargo check --workspace
@@ -48,8 +48,8 @@ cargo check --workspace
 ### 测试
 
 ```bash
-# 运行所有测试（updater 测试需要管理员权限，在 CI 中跳过）
-cargo test --workspace --lib
+# 运行所有测试
+cargo test --workspace --all-targets
 
 # 特定 crate
 cargo test -p tool-panels --lib
@@ -72,7 +72,7 @@ cargo clippy --all-targets -- -D warnings
 
 ```bash
 # 确保所有测试通过
-cargo test --workspace --lib
+cargo test --workspace --all-targets
 
 # 确保格式正确
 cargo fmt --all --check
@@ -85,11 +85,15 @@ cargo clippy --all-targets -- -D warnings
 
 ```powershell
 # 编辑 Cargo.toml workspace.package.version
-# 例如: version = "0.7.1"
+# 例如: version = "1.0.0"
+# 同步更新 CHANGELOG.md 的版本与发布日期
+# 新增 docs/releases/v1.0.0.md，作为 GitHub Release 正文
 
-# 提交版本号变更
-git add Cargo.toml
-git commit -m "release: v0.7.1"
+# 检查并提交全部已确认的发布准备变更
+git status --short
+git diff --check
+git add -A
+git commit -m "release: v1.0.0"
 ```
 
 ### 3. 打包便携版
@@ -119,9 +123,9 @@ choco install innosetup
 ### 5. 打标签发布
 
 ```bash
-git tag v0.7.1
+git tag -a v1.0.0 -m "v1.0.0"
 git push origin main
-git push origin v0.7.1
+git push origin v1.0.0
 ```
 
 ### 6. CI 自动流程
@@ -129,11 +133,12 @@ git push origin v0.7.1
 推送 `v*` 标签后，CI 自动执行:
 
 1. **Test & Lint** — `cargo fmt --check`, `cargo clippy`, `cargo test --all-targets`
-2. **Package** — `package.bat` 生成便携版 zip
-3. **Installer** — 安装 Inno Setup, 构建 `HardwareWorkbenchSetup.exe`
-4. **Upload** — 上传两个文件到 artifact
-5. **Release** — 使用 `softprops/action-gh-release@v2` 创建 GitHub Release，自动生成 release notes
-6. **update.json** — 自动生成 `update.json` 并推回 `main` 分支
+2. **Release check** — 标签必须与 Cargo 版本一致，并存在同名发布说明
+3. **Package** — `package.bat` 生成便携版 zip
+4. **Installer** — 安装 Inno Setup, 构建 `HardwareWorkbenchSetup.exe`
+5. **Checksums** — 生成 `SHA256SUMS.txt`
+6. **Release** — 上传便携包、安装器和校验文件，以 `docs/releases/<tag>.md` 为正文并附加提交记录
+7. **update.json** — 从 CHANGELOG 提取本版条目，生成 `update.json` 并推回 `main` 分支
 
 ### 7. 发布插件（如有插件变更）
 
@@ -151,10 +156,10 @@ git push origin v0.7.1
 
 ```json
 {
-  "version": "0.7.1",
-  "date": "2026-07-06",
-  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v0.7.1/hardware-workbench-app.zip",
-  "changelog": []
+  "version": "1.0.0",
+  "date": "2026-08-02",
+  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v1.0.0/hardware-workbench-app.zip",
+  "changelog": ["将插件源码、市场索引和发布产物统一合并到主仓库维护。"]
 }
 ```
 

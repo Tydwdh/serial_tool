@@ -6,6 +6,7 @@ use crate::{
         AutoScrollState, MessageList, MessageSearch, RowHighlight, RowSelection, TextSelectionRows,
         bulk_copy_button, claim_copy_focus, copy_text_with_feedback, edge_scroll_delta,
         estimated_wrapped_line_count, owns_copy_focus, report_copy_feedback,
+        wheel_scroll_during_selection,
     },
     theme,
 };
@@ -582,10 +583,14 @@ impl TerminalPanel {
         let pointer_inside = ui
             .input(|input| input.pointer.hover_pos())
             .is_some_and(|pos| panel_rect.contains(pos));
-        let wheel_moves_towards_bottom = pointer_inside
-            && crate::scroll_delta_moves_towards_bottom(
-                ui.input(|input| input.smooth_scroll_delta.y),
-            );
+        // ScrollArea 会消费并清空 smooth_scroll_delta，必须在渲染前保存。
+        let scroll_delta_y = if pointer_inside {
+            ui.input(|input| input.smooth_scroll_delta.y)
+        } else {
+            0.0
+        };
+        let wheel_moves_towards_bottom =
+            pointer_inside && crate::scroll_delta_moves_towards_bottom(scroll_delta_y);
         let mut force_scroll_to_bottom = self.auto_scroll.take_pending(&scroll_key);
 
         ui.horizontal_wrapped(|ui| {
@@ -740,6 +745,7 @@ impl TerminalPanel {
                 show_metadata,
                 self.auto_scroll.enabled,
                 force_scroll_to_bottom,
+                scroll_delta_y,
                 self.font_size,
                 &mut self.selection,
                 &mut self.text_selection_rows,
@@ -749,7 +755,7 @@ impl TerminalPanel {
             )
         };
 
-        self.apply_render_outcome(&scroll_key, render_outcome, ui);
+        self.apply_render_outcome(&scroll_key, render_outcome, scroll_delta_y, ui);
         self.detail_popup(ui.ctx());
 
         // 高亮超时清理
@@ -761,7 +767,13 @@ impl TerminalPanel {
         }
     }
 
-    fn apply_render_outcome(&mut self, scroll_key: &str, outcome: RenderOutcome, ui: &egui::Ui) {
+    fn apply_render_outcome(
+        &mut self,
+        scroll_key: &str,
+        outcome: RenderOutcome,
+        scroll_delta_y: f32,
+        ui: &egui::Ui,
+    ) {
         if let Some(id) = outcome.pending_navigate_to_id {
             self.pending_navigate_to_id = Some(id);
         }
@@ -771,6 +783,7 @@ impl TerminalPanel {
             outcome.inner_rect,
             outcome.content_height,
             outcome.offset_y,
+            scroll_delta_y,
         );
     }
 
@@ -1136,6 +1149,7 @@ fn render_rows_view(
     show_direction: bool,
     stick_to_bottom: bool,
     force_scroll_to_bottom: bool,
+    wheel_scroll_delta_y: f32,
     font_size: f32,
     selection: &mut RowSelection,
     text_selection_rows: &mut TextSelectionRows,
@@ -1616,16 +1630,24 @@ fn render_rows_view(
                 ui.allocate_space(egui::vec2(0.0, actual_total - total_height));
             }
 
-            if text_drag_response
+            let text_selection_dragging = text_drag_response
                 .as_ref()
-                .is_some_and(|response| response.dragged_by(egui::PointerButton::Primary))
+                .is_some_and(|response| response.dragged_by(egui::PointerButton::Primary));
+            if text_selection_dragging
                 && let Some(pointer_y) =
                     ui.input(|input| input.pointer.hover_pos().map(|pos| pos.y))
             {
                 scroll_delta += edge_scroll_delta(pointer_y, viewport_rect.intersect(data_rect));
             }
 
-            // 边缘滚动
+            // egui 在左键拖选期间会阻止 ScrollArea 读取滚轮；这里仅在选择拖拽
+            // 确实生效时补回滚轮量，普通滚动仍由 ScrollArea 自己处理，避免重复。
+            scroll_delta += wheel_scroll_during_selection(
+                text_selection_dragging || selection.is_dragging(),
+                wheel_scroll_delta_y,
+            );
+
+            // 边缘滚动 / 拖选时滚轮滚动
             if scroll_delta != 0.0 {
                 ui.scroll_with_delta(egui::vec2(0.0, scroll_delta));
                 ui.ctx().request_repaint();

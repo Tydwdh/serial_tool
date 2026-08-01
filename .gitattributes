@@ -1,0 +1,17 @@
+* text=auto eol=lf
+
+*.rs text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.lua text eol=lf
+*.iss text eol=crlf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+
+*.ico binary
+*.png binary
+*.ttf binary
+*.zip binary

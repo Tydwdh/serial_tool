@@ -16,6 +16,7 @@ use tool_panels::{
 };
 
 const SETTINGS_NAV_BUTTON_SIZE: egui::Vec2 = egui::vec2(136.0, 32.0);
+const REPOSITORY_URL: &str = env!("CARGO_PKG_REPOSITORY");
 const SETTINGS_NAV_ITEMS: [(usize, egui_material_icons::MaterialIcon, &str); 5] = [
     (0, ICON_SETTINGS, "常规"),
     (1, ICON_DATA_USAGE, "连接与数据"),
@@ -387,8 +388,10 @@ impl WorkbenchApp {
                 ui.set_min_width(ui.available_width());
                 design::section_header(ui, ICON_INFO, "关于");
                 ui.separator();
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label(format!("硬件调试工作台 v{}", env!("CARGO_PKG_VERSION")));
+                    ui.hyperlink_to(REPOSITORY_URL, REPOSITORY_URL)
+                        .on_hover_text("打开项目仓库");
                     if ui.small_button("复制版本号").clicked() {
                         copy_text_with_feedback(
                             ui,

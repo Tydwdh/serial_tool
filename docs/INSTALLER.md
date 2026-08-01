@@ -10,7 +10,7 @@
 Windows PowerShell 5.1：
 
 ```powershell
-Set-Location "C:\Users\tyd27\Desktop\tool"
+Set-Location <仓库目录>
 .\package.bat
 ```
 
@@ -39,7 +39,7 @@ dist\hardware-workbench-app.zip
 Windows PowerShell 5.1：
 
 ```powershell
-Set-Location "C:\Users\tyd27\Desktop\tool"
+Set-Location <仓库目录>
 .\installer\build-installer.ps1
 ```
 
@@ -68,9 +68,9 @@ dist\HardwareWorkbenchSetup.exe
 Windows PowerShell 5.1：
 
 ```powershell
-Set-Location "C:\Users\tyd27\Desktop\tool"
-git tag -a v0.1.1 -m "v0.1.1"
-git push origin v0.1.1
+Set-Location <仓库目录>
+git tag -a v1.0.0 -m "v1.0.0"
+git push origin v1.0.0
 ```
 
 ## 安装位置
@@ -111,6 +111,7 @@ git push origin v0.1.1
 
 - 安装目录中的程序文件。
 - 安装目录中的 `logs\`。
+- 安装目录中的用户插件与自定义主题。
 - `%APPDATA%\HardwareWorkbench\workspace.json`。
 - `%APPDATA%\HardwareWorkbench\workspace.json.backup`。
 - `%APPDATA%\HardwareWorkbench\plugin-config\`。

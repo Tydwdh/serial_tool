@@ -8,7 +8,11 @@
 AppId={{9C06F7D9-4E3B-45CF-8C3A-4373D6F83C79}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
-AppPublisher=Hardware Workbench
+VersionInfoVersion={#MyAppVersion}
+AppPublisher=Tydwdh
+AppPublisherURL=https://github.com/Tydwdh/serial_tool
+AppSupportURL=https://github.com/Tydwdh/serial_tool/issues
+AppUpdatesURL=https://github.com/Tydwdh/serial_tool/releases
 DefaultDirName={localappdata}\Programs\HardwareWorkbench
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
@@ -19,12 +23,16 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=lowest
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\assets\app-icon.ico
+LicenseFile=..\LICENSE
 CloseApplications=yes
 RestartApplications=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
+Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
@@ -54,4 +62,6 @@ Type: dirifempty; Name: "{userappdata}\HardwareWorkbench"
 Type: files; Name: "{app}\workspace.json"
 Type: files; Name: "{app}\workspace.json.backup"
 Type: filesandordirs; Name: "{app}\plugin-config"
+Type: filesandordirs; Name: "{app}\plugins"
+Type: filesandordirs; Name: "{app}\themes"
 Type: filesandordirs; Name: "{app}\logs"

@@ -35,10 +35,25 @@ if %ERRORLEVEL% neq 0 (
     exit /b %ERRORLEVEL%
 )
 
-for %%D in (assets docs) do (
-    if exist "%%D" xcopy "%%D" "%OUT_DIR%\%%D\" /E /I /Q /Y >nul
+mkdir "%OUT_DIR%\assets" >nul 2>nul
+for %%F in (
+    JetBrainsMonoNerdFontMono-Regular.ttf
+    NotoSansSC-VF.ttf
+    app-icon.ico
+    FONT_LICENSES.md
+    OFL-1.1.txt
+) do (
+    if exist "assets\%%F" copy "assets\%%F" "%OUT_DIR%\assets\%%F" >nul
 )
+
+if exist "docs" xcopy "docs" "%OUT_DIR%\docs\" /E /I /Q /Y >nul
 if exist "assets\themes" xcopy "assets\themes" "%OUT_DIR%\themes\" /E /I /Q /Y >nul
+
+for %%F in (README.md CHANGELOG.md LICENSE THIRD_PARTY_NOTICES.md) do (
+    if exist "%%F" copy "%%F" "%OUT_DIR%\%%F" >nul
+)
+mkdir "%OUT_DIR%\licenses" >nul 2>nul
+if exist "vendor\egui_tiles\LICENSE-MIT" copy "vendor\egui_tiles\LICENSE-MIT" "%OUT_DIR%\licenses\egui_tiles-LICENSE-MIT" >nul
 
 mkdir "%OUT_DIR%\plugins" >nul 2>nul
 if exist "plugins\plugin.schema.json" copy "plugins\plugin.schema.json" "%OUT_DIR%\plugins\plugin.schema.json" >nul
