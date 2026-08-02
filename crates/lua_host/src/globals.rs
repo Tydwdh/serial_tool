@@ -24,6 +24,7 @@ pub const YIELD_KIND: &str = "kind";
 pub const YIELD_PORT: &str = "port";
 pub const YIELD_TIMEOUT_MS: &str = "timeout_ms";
 pub const YIELD_DEADLINE_MS: &str = "deadline_ms";
+pub const YIELD_CONTINUE_RESETS_TIMEOUT: &str = "continue_resets_timeout";
 
 // ── yield_op.kind 枚举值（生产端 api::serial/api::task 与消费端 process_tasks 共用） ──
 pub const YIELD_READ_LINE: &str = "read_line";

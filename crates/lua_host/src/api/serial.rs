@@ -10,8 +10,9 @@ use tool_transport::{TransportManager, serial_topics};
 
 use crate::convert::{json_to_lua_value, lua_value_to_serial_config};
 use crate::globals::{
-    CURRENT_TASK_ID, EXPECT_ACTION, EXPECT_PATTERN, PLUGIN_TASKS, TASK_YIELD_OP, YIELD_DEADLINE_MS,
-    YIELD_KIND, YIELD_PORT, YIELD_READ_LINE, YIELD_TIMEOUT_MS, YIELD_WRITE_LINE_AND_EXPECT,
+    CURRENT_TASK_ID, EXPECT_ACTION, EXPECT_PATTERN, PLUGIN_TASKS, TASK_YIELD_OP,
+    YIELD_CONTINUE_RESETS_TIMEOUT, YIELD_DEADLINE_MS, YIELD_KIND, YIELD_PORT, YIELD_READ_LINE,
+    YIELD_TIMEOUT_MS, YIELD_WRITE_LINE_AND_EXPECT,
 };
 use crate::host_services::{LuaHostServices, line_buffer_key};
 
@@ -447,6 +448,8 @@ pub(crate) fn create_serial_api(
                 .canonical_open_port_name(&port)
                 .unwrap_or(port);
             let timeout_ms: u64 = opts.get("timeout_ms").unwrap_or(300_000);
+            let continue_resets_timeout: bool =
+                opts.get("continue_resets_timeout").unwrap_or(false);
             let delimiter: String = opts.get("delimiter").unwrap_or_else(|_| "\n".to_owned());
             if delimiter != "\n" {
                 return Err(mlua::Error::RuntimeError(
@@ -584,6 +587,7 @@ pub(crate) fn create_serial_api(
             yield_data.set(YIELD_PORT, port.as_str())?;
             yield_data.set("delimiter", delimiter.as_str())?;
             yield_data.set(YIELD_TIMEOUT_MS, timeout_ms)?;
+            yield_data.set(YIELD_CONTINUE_RESETS_TIMEOUT, continue_resets_timeout)?;
             yield_data.set(
                 YIELD_DEADLINE_MS,
                 tool_core::now_timestamp_ms() + timeout_ms,

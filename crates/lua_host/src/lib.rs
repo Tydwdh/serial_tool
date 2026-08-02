@@ -1200,6 +1200,28 @@ mod tests {
     use tool_transport::serial_rx_event;
 
     #[test]
+    fn bundled_gcode_sender_lua_tests() {
+        let script_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/gcode-sender/tests/main_test.lua")
+            .canonicalize()
+            .expect("resolve gcode-sender Lua test path");
+        let source = std::fs::read_to_string(&script_path).expect("read gcode-sender Lua tests");
+
+        let lua = Lua::new();
+        let arg = lua.create_table().expect("create Lua arg table");
+        arg.set(0, script_path.to_string_lossy().as_ref())
+            .expect("set Lua script path");
+        lua.globals()
+            .set("arg", arg)
+            .expect("install Lua arg table");
+
+        lua.load(&source)
+            .set_name(script_path.to_string_lossy().as_ref())
+            .exec()
+            .expect("gcode-sender Lua tests failed");
+    }
+
+    #[test]
     fn lua_log_reaches_databus() {
         let bus = DataBus::new();
         let transport = TransportManager::new(bus.clone());
@@ -1382,6 +1404,89 @@ ctx.log.info("reader-ready")
             }
         }
         assert!(saw_read, "ctx.serial.read_line did not receive internal RX");
+    }
+
+    #[test]
+    fn serial_continue_response_can_reset_inactivity_timeout() {
+        let bus = DataBus::new();
+        let logs = bus.subscribe(TopicFilter::prefix("log."));
+        let transport = TransportManager::new(bus.clone());
+        let virtual_port = transport
+            .open_virtual_serial("COM1")
+            .expect("open virtual serial");
+        let host_services = LuaHostServices {
+            plugin_root: None,
+            plugin_id: "busy-plugin".to_owned(),
+            dialog_sender: None,
+            file_broker: None,
+            stop_flag: None,
+            line_buffers: Some(Arc::new(ParkingMutex::new(HashMap::new()))),
+            config_store: None,
+            declared_panel_ids: Default::default(),
+        };
+
+        let _runtime = run_plugin(
+            r#"
+ctx.task.start({ id = "sender" }, function()
+    local response = ctx.serial.write_line_and_expect("COM1", "M105", {
+        timeout_ms = 400,
+        continue_resets_timeout = true,
+        patterns = {
+            { name = "busy", pattern = "busy", action = "continue" },
+            { name = "ok", pattern = "^ok", action = "return" },
+        },
+    })
+    if response.err then
+        ctx.log.error("expect:" .. response.err)
+    else
+        ctx.log.info("expect:" .. response.result.name)
+    end
+end)
+ctx.log.info("sender-ready")
+"#
+            .to_owned(),
+            LuaRunConfig {
+                script_name: "continue-timeout.lua".to_owned(),
+                timeout_ms: 5_000,
+                source: "plugin:busy-plugin".to_owned(),
+                context: json!({}),
+                permissions: vec!["serial".to_owned(), "task".to_owned(), "log".to_owned()],
+            },
+            bus,
+            transport,
+            host_services,
+        )
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut saw_ready = false;
+        while Instant::now() < deadline {
+            if let Ok(event) = logs.recv_timeout(Duration::from_millis(50))
+                && event.payload.text_lossy().contains("sender-ready")
+            {
+                saw_ready = true;
+                break;
+            }
+        }
+        assert!(saw_ready, "plugin did not start expect task");
+
+        thread::sleep(Duration::from_millis(250));
+        virtual_port.inject_rx(b"echo:busy: processing\n".to_vec());
+        thread::sleep(Duration::from_millis(250));
+        virtual_port.inject_rx(b"ok\n".to_vec());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut result = None;
+        while Instant::now() < deadline {
+            if let Ok(event) = logs.recv_timeout(Duration::from_millis(50)) {
+                let text = event.payload.text_lossy();
+                if text.contains("expect:") {
+                    result = Some(text);
+                    break;
+                }
+            }
+        }
+        assert_eq!(result.as_deref(), Some("expect:ok"));
     }
 
     #[test]

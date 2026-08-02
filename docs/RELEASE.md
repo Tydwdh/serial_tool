@@ -145,7 +145,7 @@ git push origin v1.0.0
 ```powershell
 .\plugin-marketplace\scripts\publish.ps1 `
   -PluginId gcode-sender `
-  -Version 0.3.0
+  -Version 0.4.0
 ```
 
 插件源码、市场索引和版本化 ZIP 均在本仓库维护。脚本默认从

@@ -4,8 +4,8 @@ use crate::LuaRunConfig;
 use crate::api::serial::match_pat;
 use crate::globals::{
     CURRENT_TASK_ID, PLUGIN_DISABLE, PLUGIN_TASKS, TASK_CANCELLED, TASK_FINISHED, TASK_YIELD_OP,
-    YIELD_DEADLINE_MS, YIELD_KIND, YIELD_PORT, YIELD_READ_LINE, YIELD_SLEEP, YIELD_WAIT_PAUSED,
-    YIELD_WRITE_LINE_AND_EXPECT,
+    YIELD_CONTINUE_RESETS_TIMEOUT, YIELD_DEADLINE_MS, YIELD_KIND, YIELD_PORT, YIELD_READ_LINE,
+    YIELD_SLEEP, YIELD_TIMEOUT_MS, YIELD_WAIT_PAUSED, YIELD_WRITE_LINE_AND_EXPECT,
 };
 use crate::host_services::{LuaHostServices, line_buffer_key};
 use mlua::{Function, Lua, Table, Thread, Value};
@@ -186,6 +186,19 @@ pub(crate) fn process_tasks(
                                         if action == "continue" {
                                             let _ = state
                                                 .set("status", format!("设备忙: {pname}: {line}"));
+                                            if op
+                                                .get::<bool>(YIELD_CONTINUE_RESETS_TIMEOUT)
+                                                .unwrap_or(false)
+                                            {
+                                                let timeout_ms: u64 =
+                                                    op.get(YIELD_TIMEOUT_MS).unwrap_or(0);
+                                                if timeout_ms > 0 {
+                                                    let _ = op.set(
+                                                        YIELD_DEADLINE_MS,
+                                                        now_ms.saturating_add(timeout_ms),
+                                                    );
+                                                }
+                                            }
                                             break;
                                         }
                                         matched = Some((

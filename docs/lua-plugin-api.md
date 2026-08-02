@@ -239,6 +239,8 @@ end
 ```lua
 local resp = ctx.serial.write_line_and_expect("COM3", "M105", {
   timeout_ms = 3000,
+  -- 可选：收到 action="continue" 的响应时刷新超时，适合设备 busy/keepalive。
+  continue_resets_timeout = true,
   patterns = {
     { name = "ok", pattern = "ok", action = "return" },
     { name = "busy", pattern = "busy", action = "continue" },
@@ -252,6 +254,9 @@ elseif resp.result then
   ctx.log.info(resp.result.name .. ": " .. resp.result.line)
 end
 ```
+
+`continue_resets_timeout` 默认为 `false`。启用后，匹配到
+`action = "continue"` 的响应会把等待截止时间延后一个 `timeout_ms`，取消任务仍会立即结束等待。
 
 ## ctx.dialog
 
