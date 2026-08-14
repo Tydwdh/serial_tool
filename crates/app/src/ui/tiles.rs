@@ -65,6 +65,10 @@ impl WorkbenchApp {
                     .show(ui, |ui| self.settings_panel(ui));
             }
             PanelKind::Terminal => {
+                // 每帧同步端口别名：别名变更可能发生在 device_panel / settings_panel 等多处，
+                // 渲染前统一注入最简单可靠（别名数量少，clone 开销可忽略）。
+                self.terminal_panel
+                    .set_port_aliases(&self.serial.port_aliases);
                 self.terminal_panel.ui(ui);
             }
             PanelKind::Sender => {

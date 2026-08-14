@@ -363,6 +363,13 @@ impl WorkbenchApp {
             return;
         }
 
+        // 网络端口连接中：取消连接（worker 正在异步 connect）
+        if self.transport.status_port(name).connecting {
+            self.transport.close_port(name);
+            self.set_status_force(StatusLevel::Info, format!("已取消 {name} 的连接"));
+            return;
+        }
+
         // 未打开：切换 selected_port（恢复该端口的配置档案）后打开
         let old = self.serial.selected_port.clone();
         if old.as_deref() != Some(name) {

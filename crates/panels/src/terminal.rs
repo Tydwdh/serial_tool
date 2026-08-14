@@ -50,6 +50,21 @@ fn short_port_display(port: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// 端口列的显示名：配置了别名则显示别名，否则回退到短显示（IPv4 后两段）。
+/// 仅用于界面显示，CSV/JSONL 导出与回放仍使用完整端口名。
+fn port_display_name<'b>(
+    port: &'b str,
+    port_aliases: &'b std::collections::HashMap<String, String>,
+) -> std::borrow::Cow<'b, str> {
+    if let Some(alias) = port_aliases.get(port)
+        && !alias.trim().is_empty()
+    {
+        std::borrow::Cow::Borrowed(alias.as_str())
+    } else {
+        short_port_display(port)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalExportFormat {
     Txt,
@@ -65,6 +80,8 @@ const NAV_FADE: f64 = 0.3;
 pub struct TerminalPanel {
     subscription: RingSubscription,
     ports: BTreeMap<String, PortData>,
+    /// 端口别名（app 层注入，渲染端口列时优先显示）。
+    port_aliases: std::collections::HashMap<String, String>,
 
     show_rx: bool,
     show_tx: bool,
@@ -324,6 +341,7 @@ impl TerminalPanel {
                 MESSAGE_EVENT_BUFFER_CAPACITY,
             ),
             ports: BTreeMap::new(),
+            port_aliases: std::collections::HashMap::new(),
 
             show_rx: true,
             show_tx: true,
@@ -405,6 +423,11 @@ impl TerminalPanel {
     pub fn set_max_entries(&mut self, max_entries: usize) {
         self.max_entries = max_entries.max(100);
         self.enforce_max_entries();
+    }
+
+    /// 同步端口别名（app 层在别名变更后调用）。
+    pub fn set_port_aliases(&mut self, aliases: &std::collections::HashMap<String, String>) {
+        self.port_aliases = aliases.clone();
     }
 
     fn enforce_max_entries(&mut self) {
@@ -765,6 +788,7 @@ impl TerminalPanel {
                 force_scroll_to_bottom,
                 scroll_delta_y,
                 self.font_size,
+                &self.port_aliases,
                 &mut self.selection,
                 &mut self.text_selection_rows,
                 empty_hint,
@@ -1169,6 +1193,7 @@ fn render_rows_view(
     force_scroll_to_bottom: bool,
     wheel_scroll_delta_y: f32,
     font_size: f32,
+    port_aliases: &std::collections::HashMap<String, String>,
     selection: &mut RowSelection,
     text_selection_rows: &mut TextSelectionRows,
     empty_hint: &str,
@@ -1523,7 +1548,7 @@ fn render_rows_view(
                         label_painter.text(
                             egui::pos2(x, label_y),
                             egui::Align2::LEFT_CENTER,
-                            short_port_display(port),
+                            port_display_name(port, port_aliases),
                             font_id.clone(),
                             theme::yellow(),
                         );
@@ -2199,6 +2224,27 @@ mod tests {
         assert_eq!(short_port_display("/dev/ttyUSB0"), "/dev/ttyUSB0");
         // 非 IPv4（含字母的主机名）不截断
         assert_eq!(short_port_display("klipper.local:7125"), "klipper.local:7125");
+    }
+
+    #[test]
+    fn port_display_name_prefers_alias() {
+        let mut aliases = std::collections::HashMap::new();
+        aliases.insert("192.168.1.100:7125".to_owned(), "主控板".to_owned());
+        assert_eq!(port_display_name("192.168.1.100:7125", &aliases), "主控板");
+    }
+
+    #[test]
+    fn port_display_name_falls_back_to_short() {
+        let aliases = std::collections::HashMap::new();
+        assert_eq!(port_display_name("192.168.1.100:7125", &aliases), "1.100");
+        assert_eq!(port_display_name("COM3", &aliases), "COM3");
+    }
+
+    #[test]
+    fn port_display_name_ignores_blank_alias() {
+        let mut aliases = std::collections::HashMap::new();
+        aliases.insert("COM3".to_owned(), "  ".to_owned());
+        assert_eq!(port_display_name("COM3", &aliases), "COM3");
     }
 
     #[test]

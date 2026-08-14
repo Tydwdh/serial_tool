@@ -246,15 +246,27 @@ impl WorkbenchApp {
                 {
                     self.set_status_force(StatusLevel::Warn, format!("{name} 已存在，点击圆点连接"));
                 } else {
-                    self.serial.network_ports.push(cfg);
+                    self.serial.network_ports.push(cfg.clone());
                     if let Err(e) = self.save_config() {
                         log::warn!("save_config failed: {e}");
                     }
                     self.refresh_ports_silent();
-                    self.set_status_force(
-                        StatusLevel::Info,
-                        format!("已添加网络端口 {name}，点击圆点连接"),
-                    );
+                    // 添加即连接：异步建立 WebSocket，UI 进入“连接中”过渡态。
+                    match self.transport.open_network_serial(cfg) {
+                        Ok(_) => {
+                            self.serial.selected_port = Some(name.clone());
+                            self.set_status_force(
+                                StatusLevel::Info,
+                                format!("正在连接 {name}..."),
+                            );
+                        }
+                        Err(e) => {
+                            self.set_status_force(
+                                StatusLevel::Error,
+                                format!("连接 {name} 失败：{e}"),
+                            );
+                        }
+                    }
                 }
                 self.serial.selected_port = Some(name);
             }
@@ -462,16 +474,21 @@ impl WorkbenchApp {
 
                             ui.horizontal(|ui| {
                                 ui.add_space(16.0);
-                                let port_open = self.transport.status_port(&name).open;
+                                let status = self.transport.status_port(&name);
+                                let port_open = status.open;
+                                let connecting = status.connecting;
                                 let pending_reconnect = self
                                     .serial
                                     .pending_reconnect
                                     .as_ref()
                                     .is_some_and(|p| p.port_name == name);
                                 // 端口状态按钮：带文字 + 颜色，加大命中区，色盲友好。
-                                // ●开(绿)=已开→点击关闭，○关(红)=未开→点击打开，⟳连(黄)=重连中→点击取消。
+                                // ●开(绿)=已开→点击关闭，○关(红)=未开→点击打开，
+                                // ⟳连(黄)=重连中/连接中→点击取消。
                                 let (icon, text, color, tooltip) = if pending_reconnect {
                                     ("⟳", "连", theme::yellow(), "重连中，点击取消")
+                                } else if connecting {
+                                    ("⟳", "连", theme::yellow(), "连接中，点击取消")
                                 } else if port_open {
                                     ("●", "开", theme::green(), "已打开，点击关闭")
                                 } else {

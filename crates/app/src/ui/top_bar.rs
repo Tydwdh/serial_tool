@@ -139,16 +139,24 @@ impl WorkbenchApp {
                         self.switch_port_selection(before.as_deref(), new);
                     }
                 }
-                let selected_open = self
+                let selected_status = self
                     .serial
                     .selected_port
                     .as_deref()
-                    .is_some_and(|port| self.transport.status_port(port).open);
+                    .map(|port| self.transport.status_port(port))
+                    .unwrap_or_else(tool_transport::TransportStatus::closed);
+                let selected_open = selected_status.open;
+                let selected_connecting = selected_status.connecting;
 
                 if selected_open {
                     if serial_action_button(ui, ICON_REFRESH, "重连").clicked() {
                         self.reconnect_selected_port();
                     }
+                } else if selected_connecting {
+                    // 连接中：按钮禁用，防止重复打开
+                    ui.add_enabled_ui(false, |ui| {
+                        serial_action_button(ui, ICON_POWER_SETTINGS_NEW, "连接中");
+                    });
                 } else if serial_action_button(ui, ICON_POWER_SETTINGS_NEW, "打开").clicked() {
                     self.open_selected_port();
                 }

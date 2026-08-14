@@ -227,6 +227,9 @@ pub struct TransportStatus {
     pub open: bool,
     pub port_name: Option<String>,
     pub baud_rate: Option<u32>,
+    /// 网络模拟串口连接中（异步连接尚未完成）。
+    #[serde(default)]
+    pub connecting: bool,
 }
 
 impl TransportStatus {
@@ -235,6 +238,7 @@ impl TransportStatus {
             open: false,
             port_name: None,
             baud_rate: None,
+            connecting: false,
         }
     }
 }
@@ -287,6 +291,9 @@ impl VirtualSerialPort {
 
 struct PortHandle {
     config: SerialConfig,
+    /// 网络模拟串口连接中标记：worker 异步连接完成前为 true。
+    /// 真实串口连接是同步的，恒为 false。
+    connecting: Arc<AtomicBool>,
     writer: Sender<Vec<u8>>,
     dtr_rts_tx: Sender<DtrRtsCommand>,
     #[cfg(windows)]
@@ -514,6 +521,7 @@ impl TransportManager {
             config.port_name.clone(),
             PortHandle {
                 config: config.clone(),
+                connecting: Arc::new(AtomicBool::new(false)),
                 writer,
                 dtr_rts_tx,
                 #[cfg(windows)]
@@ -586,6 +594,7 @@ impl TransportManager {
             port_name.clone(),
             PortHandle {
                 config: config.clone(),
+                connecting: Arc::new(AtomicBool::new(false)),
                 writer,
                 dtr_rts_tx,
                 #[cfg(windows)]
@@ -640,8 +649,10 @@ impl TransportManager {
         let (dtr_rts_tx, _dtr_rts_rx) = bounded::<DtrRtsCommand>(16);
         let stop = Arc::new(AtomicBool::new(false));
         let alive = Arc::new(AtomicBool::new(true));
+        let connecting = Arc::new(AtomicBool::new(true));
         let thread_stop = Arc::clone(&stop);
         let thread_alive = Arc::clone(&alive);
+        let thread_connecting = Arc::clone(&connecting);
         let thread_bus = self.bus.clone();
         let source = format!("serial:{port_name}");
         let thread_source = source.clone();
@@ -653,6 +664,7 @@ impl TransportManager {
             write_rx,
             thread_stop,
             thread_alive,
+            thread_connecting,
             thread_bus,
             thread_source,
             thread_waker,
@@ -661,12 +673,13 @@ impl TransportManager {
         self.ports.lock().insert(
             port_name.clone(),
             PortHandle {
-                // 网络端口把“波特率”位置复用作服务器端口，供状态栏/日志显示。
+                // 网络端口把“波特率”位置复用作服务器端口，供日志显示。
                 config: SerialConfig {
                     port_name: port_name.clone(),
                     baud_rate: config.port as u32,
                     ..SerialConfig::default()
                 },
+                connecting,
                 writer,
                 dtr_rts_tx,
                 #[cfg(windows)]
@@ -856,11 +869,15 @@ impl TransportManager {
         let key = Self::resolve_open_port_name_locked(&guard, port_name)
             .unwrap_or_else(|| port_name.to_owned());
         match guard.get(&key) {
-            Some(w) if w.alive.load(Ordering::Relaxed) => TransportStatus {
-                open: true,
-                port_name: Some(w.config.port_name.clone()),
-                baud_rate: Some(w.config.baud_rate),
-            },
+            Some(w) if w.alive.load(Ordering::Relaxed) => {
+                let connecting = w.connecting.load(Ordering::Relaxed);
+                TransportStatus {
+                    open: !connecting,
+                    port_name: Some(w.config.port_name.clone()),
+                    baud_rate: Some(w.config.baud_rate),
+                    connecting,
+                }
+            }
             _ => TransportStatus::closed(),
         }
     }
@@ -873,10 +890,12 @@ impl TransportManager {
             .values()
             .map(|w| {
                 if w.alive.load(Ordering::Relaxed) {
+                    let connecting = w.connecting.load(Ordering::Relaxed);
                     TransportStatus {
-                        open: true,
+                        open: !connecting,
                         port_name: Some(w.config.port_name.clone()),
                         baud_rate: Some(w.config.baud_rate),
+                        connecting,
                     }
                 } else {
                     TransportStatus::closed()
@@ -1632,6 +1651,7 @@ mod transport_tests {
             "COM3".to_owned(),
             PortHandle {
                 config: SerialConfig::default(),
+                connecting: Arc::new(AtomicBool::new(false)),
                 writer: bounded(1).0,
                 dtr_rts_tx: bounded(1).0,
                 #[cfg(windows)]
@@ -1654,6 +1674,7 @@ mod transport_tests {
             "COM3".to_owned(),
             PortHandle {
                 config: SerialConfig::default(),
+                connecting: Arc::new(AtomicBool::new(false)),
                 writer: bounded(1).0,
                 dtr_rts_tx: bounded(1).0,
                 #[cfg(windows)]
@@ -1708,6 +1729,7 @@ mod transport_tests {
     fn make_test_handle(alive: bool) -> PortHandle {
         PortHandle {
             config: SerialConfig::default(),
+            connecting: Arc::new(AtomicBool::new(false)),
             writer: bounded::<Vec<u8>>(1).0,
             dtr_rts_tx: bounded::<DtrRtsCommand>(1).0,
             #[cfg(windows)]

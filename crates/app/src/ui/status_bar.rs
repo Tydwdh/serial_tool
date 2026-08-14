@@ -22,14 +22,28 @@ impl WorkbenchApp {
             let (dot_color, label) =
                 if let (Some(p), Some(b)) = (self.serial.selected_port.clone(), st.baud_rate) {
                     let label = self.serial.port_label(&p);
-                    (
-                        if st.open {
-                            theme::green()
-                        } else {
-                            theme::text_secondary()
-                        },
-                        format!("{label} @ {b}"),
-                    )
+                    if st.connecting {
+                        (
+                            theme::yellow(),
+                            format!("{label} 连接中"),
+                        )
+                    } else {
+                        // 网络模拟串口：波特率字段复用作服务器端口，不显示数字波特率。
+                        let is_network = self
+                            .serial
+                            .network_ports
+                            .iter()
+                            .any(|n| n.display_name() == p);
+                        let suffix = if is_network { "网络".to_owned() } else { format!("{b}") };
+                        (
+                            if st.open {
+                                theme::green()
+                            } else {
+                                theme::text_secondary()
+                            },
+                            format!("{label} @ {suffix}"),
+                        )
+                    }
                 } else {
                     (theme::text_secondary(), "串口已关闭".into())
                 };

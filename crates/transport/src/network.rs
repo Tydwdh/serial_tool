@@ -63,17 +63,28 @@ fn parse_gcode_response(text: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_network_worker(
     config: NetworkSerialConfig,
     write_rx: Receiver<Vec<u8>>,
     stop: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
+    connecting: Arc<AtomicBool>,
     bus: DataBus,
     source: String,
     waker: Option<Arc<dyn RepaintWaker>>,
 ) -> TransportResult<JoinHandle<()>> {
     let join = thread::spawn(move || {
-        network_worker_loop(config, write_rx, stop, alive, bus, source, waker);
+        network_worker_loop(
+            config,
+            write_rx,
+            stop,
+            alive,
+            connecting,
+            bus,
+            source,
+            waker,
+        );
     });
     Ok(join)
 }
@@ -84,6 +95,7 @@ fn network_worker_loop(
     write_rx: Receiver<Vec<u8>>,
     stop: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
+    connecting: Arc<AtomicBool>,
     bus: DataBus,
     source: String,
     waker: Option<Arc<dyn RepaintWaker>>,
@@ -98,43 +110,52 @@ fn network_worker_loop(
 
     // 带超时建立 TCP 连接：拒绝时立即失败；无响应（如 Windows 端口释放延迟）
     // 最多等待 2 秒，避免 worker 永久挂起导致端口无法关闭。
-    let connect_error = || {
+    // 所有失败分支保留具体错误原因，便于用户排障。
+    let connect_failed = |reason: String| {
         bus.publish(Event::system_log(
             LogLevel::Error,
             "transport.network",
-            format!("{port_name} 连接失败"),
+            format!("{port_name} 连接失败：{reason}"),
         ));
+        connecting.store(false, Ordering::Release);
         alive.store(false, Ordering::Release);
     };
     let addr = match (config.host.as_str(), config.port).to_socket_addrs() {
         Ok(mut addrs) => match addrs.next() {
             Some(addr) => addr,
             None => {
-                connect_error();
+                connect_failed(format!("无法解析主机名 {}", config.host));
                 return;
             }
         },
-        Err(_) => {
-            connect_error();
+        Err(error) => {
+            connect_failed(format!("DNS 解析失败：{error}"));
             return;
         }
     };
     let tcp = match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
         Ok(tcp) => tcp,
-        Err(_) => {
-            connect_error();
+        Err(error) => {
+            connect_failed(format!("TCP 连接失败：{error}"));
             return;
         }
     };
+    // 连接期间用户点击取消：直接退出
+    if stop.load(Ordering::Acquire) {
+        alive.store(false, Ordering::Release);
+        return;
+    }
 
     // 建立 WebSocket 连接（握手失败同样走失败分支）
     let mut ws = match tungstenite::client(&url, tcp) {
         Ok((ws, _)) => ws,
-        Err(_) => {
-            connect_error();
+        Err(error) => {
+            connect_failed(format!("WebSocket 握手失败：{error}"));
             return;
         }
     };
+    // 连接成功：清除连接中标记
+    connecting.store(false, Ordering::Release);
 
     // 给底层 TCP 设置读超时，让 read() 周期性返回以便及时响应关闭请求。
     let _ = ws
