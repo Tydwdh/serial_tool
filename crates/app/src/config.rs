@@ -5,6 +5,7 @@ use tool_core::{
     now_timestamp_ms,
 };
 use tool_recorder::RecordMode;
+use tool_transport::NetworkSerialConfig;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -74,6 +75,9 @@ pub(crate) struct PersistedConfig {
     /// 市场与更新使用的可选 HTTP/SOCKS 代理地址；为空时自动使用系统/环境代理。
     #[serde(default)]
     pub(crate) network_proxy_url: Option<String>,
+    /// 网络模拟串口列表（WebSocket + JSON-RPC gcode 桥，Nexus Prime 等 Klipper 服务器）。
+    #[serde(default)]
+    pub(crate) network_ports: Vec<NetworkSerialConfig>,
 }
 
 fn default_terminal_merge_window_ms() -> u64 {
@@ -344,6 +348,7 @@ impl WorkbenchApp {
             command_usage_order: self.command_palette.usage_order.clone(),
             network_proxy_url: (!self.network_proxy_url.trim().is_empty())
                 .then(|| self.network_proxy_url.trim().to_owned()),
+            network_ports: self.serial.network_ports.clone(),
         }
     }
 
@@ -385,6 +390,7 @@ impl WorkbenchApp {
         self.bottom_log_panel.set_max_entries(cfg.log_max_entries);
         self.command_palette.usage_order = cfg.command_usage_order;
         self.network_proxy_url = cfg.network_proxy_url.unwrap_or_default();
+        self.serial.network_ports = cfg.network_ports.clone();
         self.send.send_history = cfg
             .send_history
             .iter()

@@ -224,6 +224,12 @@ pub(crate) struct SerialUiState {
     pub(crate) port_groups: std::collections::HashMap<String, String>,
     pub(crate) port_profiles: std::collections::HashMap<String, crate::config::PortProfile>,
     pub(crate) top_bar_serial_collapsed: bool,
+    /// 网络模拟串口列表（WebSocket + JSON-RPC gcode 桥），持久化到配置。
+    pub(crate) network_ports: Vec<tool_transport::NetworkSerialConfig>,
+    /// “网络端口”连接表单的主机输入。
+    pub(crate) network_host: String,
+    /// “网络端口”连接表单的端口输入。
+    pub(crate) network_port: String,
 }
 
 impl SerialUiState {
@@ -252,6 +258,9 @@ impl Default for SerialUiState {
             port_groups: std::collections::HashMap::new(),
             port_profiles: std::collections::HashMap::new(),
             top_bar_serial_collapsed: false,
+            network_ports: Vec::new(),
+            network_host: String::new(),
+            network_port: "7125".to_owned(),
         }
     }
 }

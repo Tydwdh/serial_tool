@@ -183,7 +183,17 @@ impl WorkbenchApp {
         let old_selected = self.serial.selected_port.clone();
 
         match self.transport.list_serial_ports() {
-            Ok(new_ports) => {
+            Ok(mut new_ports) => {
+                // 网络模拟串口（WebSocket + JSON-RPC gcode 桥）作为固定端口并入列表：
+                // 与系统串口一起排序、分组、别名、开关，表现完全一致。
+                new_ports.extend(self.serial.network_ports.iter().map(|net| {
+                    tool_transport::SerialPortDescriptor {
+                        port_name: net.display_name(),
+                        port_type: tool_transport::PortType::Network,
+                    }
+                }));
+                new_ports.sort_by_key(|port| tool_transport::natural_sort_key(&port.port_name));
+
                 let new_names: BTreeSet<String> = new_ports
                     .iter()
                     .map(|port| port.port_name.clone())
@@ -384,6 +394,19 @@ impl WorkbenchApp {
         if !self.serial.ports.iter().any(|port| port.port_name == p) {
             return Err(format!("{p} 不存在"));
         }
+        // 网络模拟串口：走 WebSocket + JSON-RPC gcode 桥
+        if let Some(net) = self
+            .serial
+            .network_ports
+            .iter()
+            .find(|net| net.display_name() == p)
+        {
+            self.transport
+                .open_network_serial(net.clone())
+                .map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+
         let baud_rate = self
             .serial
             .baud_rate

@@ -32,6 +32,24 @@ const COL_GAP: f32 = 3.0;
 const PREVIEW_COL_MIN_WIDTH: f32 = 80.0;
 const COPY_OWNER: &str = "terminal";
 
+/// 终端端口列的短显示名：IPv4 地址 + 端口（如 `192.168.1.100:7125`）
+/// 只显示 IP 后两段（`1.100`），避免长端口名占据接收区视野；
+/// 其余端口名（COM3、虚拟端口等）原样返回。
+/// 仅用于界面显示，CSV/JSONL 导出与回放仍使用完整端口名。
+fn short_port_display(port: &str) -> std::borrow::Cow<'_, str> {
+    let host = port.rsplit_once(':').map(|(h, _)| h).unwrap_or(port);
+    let segments: Vec<&str> = host.split('.').collect();
+    if segments.len() == 4 && segments.iter().all(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())) {
+        std::borrow::Cow::Owned(format!(
+            "{}.{}",
+            segments[segments.len() - 2],
+            segments[segments.len() - 1]
+        ))
+    } else {
+        std::borrow::Cow::Borrowed(port)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalExportFormat {
     Txt,
@@ -1505,7 +1523,7 @@ fn render_rows_view(
                         label_painter.text(
                             egui::pos2(x, label_y),
                             egui::Align2::LEFT_CENTER,
-                            port,
+                            short_port_display(port),
                             font_id.clone(),
                             theme::yellow(),
                         );
@@ -2167,6 +2185,21 @@ mod tests {
     use super::*;
     use tool_core::Payload;
     use tool_databus::DataBus;
+
+    #[test]
+    fn short_port_display_trims_ipv4_port_to_last_two_octets() {
+        assert_eq!(short_port_display("192.168.1.100:7125"), "1.100");
+        assert_eq!(short_port_display("10.0.0.5:7125"), "0.5");
+        assert_eq!(short_port_display("192.168.100.250:4408"), "100.250");
+    }
+
+    #[test]
+    fn short_port_display_keeps_other_port_names() {
+        assert_eq!(short_port_display("COM3"), "COM3");
+        assert_eq!(short_port_display("/dev/ttyUSB0"), "/dev/ttyUSB0");
+        // 非 IPv4（含字母的主机名）不截断
+        assert_eq!(short_port_display("klipper.local:7125"), "klipper.local:7125");
+    }
 
     #[test]
     fn ingest_serial_rx_keeps_received_entry() {

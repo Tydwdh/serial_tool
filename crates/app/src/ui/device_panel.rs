@@ -204,6 +204,62 @@ impl WorkbenchApp {
             design::section_header(ui, ICON_CABLE, "可用端口");
             ui.separator();
 
+            // ── 网络模拟串口（Nexus Prime 等 Klipper 服务器，WebSocket + JSON-RPC gcode 桥）──
+            let mut add_network: Option<tool_transport::NetworkSerialConfig> = None;
+            ui.horizontal(|ui| {
+                ui.label("网络");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.serial.network_host)
+                        .desired_width(150.0)
+                        .hint_text("IP 或主机名"),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.serial.network_port)
+                        .desired_width(56.0)
+                        .hint_text("7125"),
+                );
+                if ui.button("连接").clicked() {
+                    let host = self.serial.network_host.trim().to_owned();
+                    if host.is_empty() {
+                        self.set_status(StatusLevel::Error, "请输入服务器 IP 或主机名");
+                    } else {
+                        match self.serial.network_port.trim().parse::<u16>() {
+                            Ok(port) if port > 0 => {
+                                add_network = Some(tool_transport::NetworkSerialConfig {
+                                    host,
+                                    port,
+                                    api_key: None,
+                                });
+                            }
+                            _ => self.set_status(StatusLevel::Error, "端口格式错误（1-65535）"),
+                        }
+                    }
+                }
+            });
+            if let Some(cfg) = add_network {
+                let name = cfg.display_name();
+                if self
+                    .serial
+                    .network_ports
+                    .iter()
+                    .any(|n| n.display_name() == name)
+                {
+                    self.set_status_force(StatusLevel::Warn, format!("{name} 已存在，点击圆点连接"));
+                } else {
+                    self.serial.network_ports.push(cfg);
+                    if let Err(e) = self.save_config() {
+                        log::warn!("save_config failed: {e}");
+                    }
+                    self.refresh_ports_silent();
+                    self.set_status_force(
+                        StatusLevel::Info,
+                        format!("已添加网络端口 {name}，点击圆点连接"),
+                    );
+                }
+                self.serial.selected_port = Some(name);
+            }
+            ui.separator();
+
             // 显示已打开但不在系统端口列表中的 stale 连接
             let transport_open = self.transport.open_ports();
             if !transport_open.is_empty() {
@@ -280,6 +336,8 @@ impl WorkbenchApp {
             // 圆点点击切换开/关：ScrollArea 闭包持有 &self.serial 不可变借用，
             // 无法在其中 &mut self，故收集到闭包外统一处理。
             let mut toggled_port: Option<String> = None;
+            // 网络模拟串口的移除请求（同样在闭包外处理）。
+            let mut removed_network: Option<String> = None;
 
             // 新建分组（通过 ComboBox 触发）
             let new_group_state_id = ui.make_persistent_id("port-new-group-active");
@@ -436,6 +494,18 @@ impl WorkbenchApp {
                                 ui.monospace(&name);
                                 ui.label(port.port_type.to_string());
 
+                                // 网络模拟串口：提供移除入口（仅 Network 类型）
+                                if matches!(
+                                    port.port_type,
+                                    tool_transport::PortType::Network
+                                ) && ui
+                                    .small_button("×")
+                                    .on_hover_text("移除网络端口")
+                                    .clicked()
+                                {
+                                    removed_network = Some(name.clone());
+                                }
+
                                 // 别名
                                 ui.label("别名");
                                 let resp = ui.add(
@@ -554,6 +624,22 @@ impl WorkbenchApp {
             // 圆点点击：在 ScrollArea 闭包外处理（避免与 &self.serial 不可变借用冲突）。
             if let Some(name) = toggled_port {
                 self.toggle_port_by_name(&name);
+            }
+
+            // 移除网络端口：从配置列表删除、关闭连接、清空选择。
+            if let Some(name) = removed_network {
+                self.serial
+                    .network_ports
+                    .retain(|n| n.display_name() != name);
+                self.transport.close_port(&name);
+                if self.serial.selected_port.as_deref() == Some(name.as_str()) {
+                    self.serial.selected_port = None;
+                }
+                if let Err(e) = self.save_config() {
+                    log::warn!("save_config failed: {e}");
+                }
+                self.refresh_ports_silent();
+                self.set_status_force(StatusLevel::Info, format!("{name} 已移除"));
             }
 
             // ── 应用变更 ──

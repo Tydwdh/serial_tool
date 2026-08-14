@@ -305,6 +305,12 @@ impl WorkbenchApp {
                     .map(|c| c.port_profiles.clone())
                     .unwrap_or_default(),
                 top_bar_serial_collapsed: false,
+                network_ports: config
+                    .as_ref()
+                    .map(|c| c.network_ports.clone())
+                    .unwrap_or_default(),
+                network_host: String::new(),
+                network_port: "7125".to_owned(),
             },
             recorder_path: config
                 .as_ref()

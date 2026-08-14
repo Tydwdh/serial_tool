@@ -18,6 +18,7 @@ serde.workspace = true
 serde_json.workspace = true
 serialport.workspace = true
 thiserror.workspace = true
+tungstenite = "0.30"
 tool-core = { path = "../core" }
 tool-databus = { path = "../databus" }
 

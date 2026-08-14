@@ -13,6 +13,9 @@ use std::time::Duration;
 use thiserror::Error;
 use tool_core::{Direction, Event, LogLevel, Payload};
 
+mod network;
+pub use network::NetworkSerialConfig;
+
 #[cfg(windows)]
 mod windows_native;
 
@@ -175,6 +178,9 @@ pub enum PortType {
     /// PCI 串口。
     #[serde(rename = "pci")]
     Pci,
+    /// 网络模拟串口（WebSocket + JSON-RPC gcode 桥，Nexus Prime 等 Klipper 服务器）。
+    #[serde(rename = "network")]
+    Network,
     /// 未知类型。
     #[default]
     #[serde(rename = "unknown")]
@@ -193,6 +199,7 @@ impl std::fmt::Display for PortType {
             }
             Self::Bluetooth => write!(f, "Bluetooth"),
             Self::Pci => write!(f, "PCI"),
+            Self::Network => write!(f, "网络"),
             Self::Unknown => write!(f, ""),
         }
     }
@@ -602,6 +609,92 @@ impl TransportManager {
             bus: self.bus.clone(),
             port_name,
         })
+    }
+
+    // ── 网络模拟串口（WebSocket + JSON-RPC gcode 桥）──
+
+    /// 打开一个网络模拟串口：通过 WebSocket 连接 Nexus Prime（Klipper/Moonraker 系）
+    /// 服务器，发送内容作为 `printer.gcode.script` 执行，`notify_gcode_response`
+    /// 推送作为 RX 字节流发布。端口名使用 `host:port`，如 `192.168.1.100:7125`。
+    ///
+    /// 打开成功后与真实串口完全一致地接入 DataBus（TX/RX 事件、生命周期事件），
+    /// 终端 / 发送器 / 录制 / 回放无需任何改动即可复用。
+    pub fn open_network_serial(&self, config: NetworkSerialConfig) -> TransportResult<String> {
+        self.reap_closing();
+        let port_name = config.display_name();
+
+        // 同名已在打开：直接成功
+        {
+            let guard = self.ports.lock();
+            if let Some(existing) = guard.get(&port_name)
+                && existing.alive.load(Ordering::Acquire)
+            {
+                return Ok(port_name);
+            }
+        }
+
+        // 配置变化时：同步等待旧 worker 退出再打开
+        self.close_port_blocking(&port_name, Duration::from_millis(100))?;
+
+        let (writer, write_rx) = bounded::<Vec<u8>>(1024);
+        let (dtr_rts_tx, _dtr_rts_rx) = bounded::<DtrRtsCommand>(16);
+        let stop = Arc::new(AtomicBool::new(false));
+        let alive = Arc::new(AtomicBool::new(true));
+        let thread_stop = Arc::clone(&stop);
+        let thread_alive = Arc::clone(&alive);
+        let thread_bus = self.bus.clone();
+        let source = format!("serial:{port_name}");
+        let thread_source = source.clone();
+        // 取 UI 重绘唤醒器（app 层注入），传给 worker 在 publish 后调用。
+        let thread_waker = self.repaint_waker.lock().clone();
+
+        let join = network::spawn_network_worker(
+            config.clone(),
+            write_rx,
+            thread_stop,
+            thread_alive,
+            thread_bus,
+            thread_source,
+            thread_waker,
+        )?;
+
+        self.ports.lock().insert(
+            port_name.clone(),
+            PortHandle {
+                // 网络端口把“波特率”位置复用作服务器端口，供状态栏/日志显示。
+                config: SerialConfig {
+                    port_name: port_name.clone(),
+                    baud_rate: config.port as u32,
+                    ..SerialConfig::default()
+                },
+                writer,
+                dtr_rts_tx,
+                #[cfg(windows)]
+                wake: None,
+                stop,
+                alive,
+                join: Some(join),
+            },
+        );
+
+        self.bus.publish(Event::system_log(
+            LogLevel::Info,
+            "transport.network",
+            format!("已连接 {port_name}"),
+        ));
+
+        // 发布结构化生命周期事件，供插件监听
+        self.bus.publish(Event::new(
+            tool_core::topics::SERIAL_OPENED,
+            source,
+            Direction::Internal,
+            Payload::Json(serde_json::json!({
+                "port": port_name,
+                "network": true,
+            })),
+        ));
+
+        Ok(port_name)
     }
 
     // ── 关闭所有端口（同步，供 shutdown 使用）──
@@ -1124,7 +1217,7 @@ fn parse_byte(token: &str) -> TransportResult<u8> {
         .map_err(|_| TransportError::InvalidHex(format!("'{token}' is not hex")))
 }
 
-fn natural_sort_key(name: &str) -> (String, u64) {
+pub fn natural_sort_key(name: &str) -> (String, u64) {
     let prefix: String = name.chars().take_while(|c| !c.is_ascii_digit()).collect();
     let number: u64 = name
         .chars()
