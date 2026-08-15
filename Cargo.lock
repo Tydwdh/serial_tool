@@ -4534,7 +4534,6 @@ version = "1.0.0"
 dependencies = [
  "crossbeam-channel",
  "dirs-next",
- "log",
  "parking_lot",
  "serde",
  "serde_json",

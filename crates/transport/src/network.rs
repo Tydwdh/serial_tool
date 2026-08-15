@@ -50,9 +50,7 @@ impl NetworkSerialConfig {
 /// 只处理 `notify_gcode_response` 推送，其余 notify（状态/进程统计等）一律忽略。
 fn parse_gcode_response(text: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
-    if value.get("method").and_then(serde_json::Value::as_str)
-        != Some("notify_gcode_response")
-    {
+    if value.get("method").and_then(serde_json::Value::as_str) != Some("notify_gcode_response") {
         return None;
     }
     value
@@ -76,14 +74,7 @@ pub(crate) fn spawn_network_worker(
 ) -> TransportResult<JoinHandle<()>> {
     let join = thread::spawn(move || {
         network_worker_loop(
-            config,
-            write_rx,
-            stop,
-            alive,
-            connecting,
-            bus,
-            source,
-            waker,
+            config, write_rx, stop, alive, connecting, bus, source, waker,
         );
     });
     Ok(join)
@@ -252,8 +243,7 @@ mod tests {
 
     #[test]
     fn ignores_status_update() {
-        let msg =
-            r#"{"jsonrpc":"2.0","method":"notify_status_update","params":[{"print_stats":{"state":"printing"}}]}"#;
+        let msg = r#"{"jsonrpc":"2.0","method":"notify_status_update","params":[{"print_stats":{"state":"printing"}}]}"#;
         assert_eq!(parse_gcode_response(msg), None);
     }
 

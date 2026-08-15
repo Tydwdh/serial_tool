@@ -244,7 +244,10 @@ impl WorkbenchApp {
                     .iter()
                     .any(|n| n.display_name() == name)
                 {
-                    self.set_status_force(StatusLevel::Warn, format!("{name} 已存在，点击圆点连接"));
+                    self.set_status_force(
+                        StatusLevel::Warn,
+                        format!("{name} 已存在，点击圆点连接"),
+                    );
                 } else {
                     self.serial.network_ports.push(cfg.clone());
                     if let Err(e) = self.save_config() {
@@ -255,10 +258,7 @@ impl WorkbenchApp {
                     match self.transport.open_network_serial(cfg) {
                         Ok(_) => {
                             self.serial.selected_port = Some(name.clone());
-                            self.set_status_force(
-                                StatusLevel::Info,
-                                format!("正在连接 {name}..."),
-                            );
+                            self.set_status_force(StatusLevel::Info, format!("正在连接 {name}..."));
                         }
                         Err(e) => {
                             self.set_status_force(
@@ -512,13 +512,8 @@ impl WorkbenchApp {
                                 ui.label(port.port_type.to_string());
 
                                 // 网络模拟串口：提供移除入口（仅 Network 类型）
-                                if matches!(
-                                    port.port_type,
-                                    tool_transport::PortType::Network
-                                ) && ui
-                                    .small_button("×")
-                                    .on_hover_text("移除网络端口")
-                                    .clicked()
+                                if matches!(port.port_type, tool_transport::PortType::Network)
+                                    && ui.small_button("×").on_hover_text("移除网络端口").clicked()
                                 {
                                     removed_network = Some(name.clone());
                                 }

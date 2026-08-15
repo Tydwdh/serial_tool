@@ -39,7 +39,11 @@ const COPY_OWNER: &str = "terminal";
 fn short_port_display(port: &str) -> std::borrow::Cow<'_, str> {
     let host = port.rsplit_once(':').map(|(h, _)| h).unwrap_or(port);
     let segments: Vec<&str> = host.split('.').collect();
-    if segments.len() == 4 && segments.iter().all(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())) {
+    if segments.len() == 4
+        && segments
+            .iter()
+            .all(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+    {
         std::borrow::Cow::Owned(format!(
             "{}.{}",
             segments[segments.len() - 2],
@@ -2223,7 +2227,10 @@ mod tests {
         assert_eq!(short_port_display("COM3"), "COM3");
         assert_eq!(short_port_display("/dev/ttyUSB0"), "/dev/ttyUSB0");
         // 非 IPv4（含字母的主机名）不截断
-        assert_eq!(short_port_display("klipper.local:7125"), "klipper.local:7125");
+        assert_eq!(
+            short_port_display("klipper.local:7125"),
+            "klipper.local:7125"
+        );
     }
 
     #[test]
