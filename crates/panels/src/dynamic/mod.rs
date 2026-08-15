@@ -182,6 +182,11 @@ impl DynamicPanels {
         self.panels.get(id).map(|panel| panel.title())
     }
 
+    /// 当前所有动态面板 id（供注册表同步面板定义）。
+    pub fn ids(&self) -> impl Iterator<Item = &str> {
+        self.panels.keys().map(String::as_str)
+    }
+
     pub fn count(&self) -> usize {
         self.panels.len()
     }
@@ -278,7 +283,7 @@ fn render_panel_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PanelKind, PanelManager};
+    use crate::{PanelId, PanelManager};
     use tool_core::{Direction, Event, Payload};
 
     #[test]
@@ -303,11 +308,7 @@ mod tests {
 
         assert_eq!(panels.count(), 1);
         assert_eq!(panels.title("pid-chart"), Some("PID Chart"));
-        assert!(
-            manager
-                .tabs()
-                .contains(&PanelKind::Dynamic("pid-chart".to_owned()))
-        );
+        assert!(manager.tabs().contains(&PanelId::dynamic("pid-chart")));
     }
 
     #[test]
@@ -374,11 +375,7 @@ mod tests {
 
         assert_eq!(panels.count(), 1);
         assert_eq!(panels.title("pid-form"), Some("PID Form"));
-        assert!(
-            manager
-                .tabs()
-                .contains(&PanelKind::Dynamic("pid-form".to_owned()))
-        );
+        assert!(manager.tabs().contains(&PanelId::dynamic("pid-form")));
     }
 
     #[test]
@@ -403,11 +400,7 @@ mod tests {
 
         assert_eq!(panels.count(), 1);
         assert_eq!(panels.title("imu-attitude"), Some("IMU Attitude"));
-        assert!(
-            manager
-                .tabs()
-                .contains(&PanelKind::Dynamic("imu-attitude".to_owned()))
-        );
+        assert!(manager.tabs().contains(&PanelId::dynamic("imu-attitude")));
     }
 
     #[test]
@@ -587,11 +580,7 @@ mod tests {
         panels.ingest(&mut manager);
 
         assert_eq!(panels.count(), 0);
-        assert!(
-            !manager
-                .tabs()
-                .contains(&PanelKind::Dynamic("pid-chart".to_owned()))
-        );
+        assert!(!manager.tabs().contains(&PanelId::dynamic("pid-chart")));
     }
 
     #[test]

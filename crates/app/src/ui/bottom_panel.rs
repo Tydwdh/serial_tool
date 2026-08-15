@@ -87,11 +87,11 @@ impl WorkbenchApp {
 
     // ── 对外入口：两种工作区布局都走同一核心方法 ──
 
-    pub(super) fn send_panel_horizontal(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn send_panel_horizontal(&mut self, ui: &mut egui::Ui) {
         self.send_panel_body(ui, SendLayout::Horizontal);
     }
 
-    pub(super) fn send_panel_vertical(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn send_panel_vertical(&mut self, ui: &mut egui::Ui) {
         self.send_panel_body(ui, SendLayout::Vertical);
     }
 

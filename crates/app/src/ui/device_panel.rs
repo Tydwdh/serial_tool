@@ -12,7 +12,7 @@ use tool_panels::{design, theme};
 use tool_recorder::RecordMode;
 
 impl WorkbenchApp {
-    pub(super) fn device_panel(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn device_panel(&mut self, ui: &mut egui::Ui) {
         // ── 串口参数 ──
         design::card().show(ui, |ui| {
             ui.set_min_width(ui.available_width());

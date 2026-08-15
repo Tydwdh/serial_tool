@@ -7,7 +7,7 @@
 use super::DynamicPanel;
 use super::form_render::publish_form_changed;
 use super::schema::{DynamicField, parse_fields};
-use crate::{AttitudePanel, ChartPanel, DataTablePanel, GaugePanel, PanelKind, PanelManager};
+use crate::{AttitudePanel, ChartPanel, DataTablePanel, GaugePanel, PanelId, PanelManager};
 use serde_json::Value;
 use tool_core::{Event, LogLevel, Payload, topics};
 
@@ -26,7 +26,7 @@ impl super::DynamicPanels {
                 // 插件主动创建面板时立即显示并聚焦；同一插件的多个面板自动分组。
                 Ok(Some(id)) => {
                     let owner = self.panel_owner(&id).map(str::to_owned);
-                    let pane = PanelKind::Dynamic(id);
+                    let pane = PanelId::dynamic(&id);
                     if let Some(owner) = owner {
                         panel_manager.open_plugin_tab(pane, &owner);
                     } else {
@@ -42,7 +42,7 @@ impl super::DynamicPanels {
             match self.remove_from_event(event) {
                 Ok(Some(id)) => {
                     self.panels.remove(&id);
-                    panel_manager.close_tab(PanelKind::Dynamic(id));
+                    panel_manager.close_tab(PanelId::dynamic(&id));
                 }
                 Ok(None) => {}
                 Err(error) => self.last_error = Some(error),

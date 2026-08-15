@@ -104,13 +104,15 @@ impl WorkbenchApp {
         let summaries = self.plugin_summaries().to_vec();
         self.commands.rebuild_plugin_commands(&summaries);
         self.dynamic_panels.ingest(&mut self.panels);
+        // 插件动态面板并入统一 PanelRegistry（内置面板同表），须在 ingest 之后。
+        self.panel_registry
+            .sync_dynamic_panels(&self.dynamic_panels);
         self.process_contribution_set_value();
 
         for plugin_id in self.plugin_manager.take_cleanup_requests() {
             let removed = self.dynamic_panels.remove_by_plugin(&plugin_id);
             for id in &removed {
-                self.panels
-                    .close_tab(tool_panels::PanelKind::Dynamic(id.clone()));
+                self.panels.close_tab(tool_panels::PanelId::dynamic(id));
             }
             self.file_broker.clear(&plugin_id);
             let prefix = format!("{plugin_id}:");

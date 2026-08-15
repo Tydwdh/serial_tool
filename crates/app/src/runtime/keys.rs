@@ -2,7 +2,7 @@ use crate::app::WorkbenchApp;
 use crate::keymap::KeyBinding;
 use crate::state::StatusLevel;
 use eframe::egui;
-use tool_panels::PanelKind;
+use tool_panels::{PANEL_SETTINGS, PanelId};
 
 impl WorkbenchApp {
     pub(super) fn handle_keys(&mut self, ctx: &egui::Context) {
@@ -47,7 +47,10 @@ impl WorkbenchApp {
             return;
         }
         // 离开设置页时取消录制。这里看 dock 的实际可见面板，而不是可能滞后的 active_tab。
-        if !self.panels.is_panel_visible(&PanelKind::Settings) {
+        if !self
+            .panels
+            .is_panel_visible(&PanelId::builtin(PANEL_SETTINGS))
+        {
             self.key_recording = None;
             return;
         }

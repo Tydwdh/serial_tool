@@ -52,6 +52,8 @@ pub(crate) struct WorkbenchApp {
     pub(crate) keymap: crate::keymap::Keymap,
     /// 统一命令注册表（内置 + 插件命令）
     pub(crate) commands: crate::command_registry::CommandRegistry,
+    /// 统一面板注册表（内置 + 插件动态面板）
+    pub(crate) panel_registry: crate::panel_registry::PanelRegistry,
     /// 当前帧触发的快捷键命令 ID（handle_keys/命令面板设置，tick 执行）
     pub(crate) pending_command: Option<String>,
     /// 快捷键录制状态：点击"录制"后等待用户按键（命令 ID）
@@ -350,6 +352,7 @@ impl WorkbenchApp {
                 .map(|c| c.keymap.clone())
                 .unwrap_or_default(),
             commands: crate::command_registry::CommandRegistry::builtin(),
+            panel_registry: crate::panel_registry::PanelRegistry::builtin(),
             pending_command: None,
             key_recording: None,
             command_palette: Default::default(),

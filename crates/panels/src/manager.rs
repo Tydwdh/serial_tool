@@ -1,62 +1,130 @@
-use egui_material_icons::{
-    MaterialIcon,
-    icons::{
-        ICON_CABLE, ICON_EXTENSION, ICON_HISTORY, ICON_SEND, ICON_SETTINGS, ICON_TERMINAL,
-        ICON_USB, ICON_VIEW_IN_AR,
-    },
-};
 use egui_tiles::{Container, Tile, TileId, Tiles, Tree};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 
-/// 面板种类。左侧栏（= Center 标签栏）、底部、右侧三个停靠区共用同一套 PanelKind。
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum PanelKind {
-    #[default]
-    Devices,
-    Replay,
-    Plugins,
-    Settings,
-    Terminal,
-    Sender,
-    Logs,
-    Dynamic(String),
+/// 面板标识（布局树中的 pane 类型）。
+///
+/// 所有面板——内置与插件动态面板——统一为字符串 ID：
+///
+/// - 内置面板：`"devices"`、`"terminal"` 等（见 `PANEL_*` 常量）；
+/// - 插件动态面板：`"dynamic:<id>"` 前缀，与内置 id 空间隔离。
+///
+/// # 配置兼容
+///
+/// 旧版 `PanelKind` 枚举序列化为 `"devices"` 或 `{"dynamic": "abc"}`，
+/// 本类型反序列化时同时接受这两种旧格式，`workspace.json` 无需迁移。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PanelId(String);
+
+/// 内置面板 ID。与旧版 `PanelKind` 的 snake_case 序列化格式完全一致，
+/// 保证旧配置可直接加载。
+pub const PANEL_DEVICES: &str = "devices";
+pub const PANEL_REPLAY: &str = "replay";
+pub const PANEL_PLUGINS: &str = "plugins";
+pub const PANEL_SETTINGS: &str = "settings";
+pub const PANEL_TERMINAL: &str = "terminal";
+pub const PANEL_SENDER: &str = "sender";
+pub const PANEL_LOGS: &str = "logs";
+
+/// 内置面板 ID 全集（顺序即默认布局顺序）。
+pub const PANEL_BUILTIN: [&str; 7] = [
+    PANEL_DEVICES,
+    PANEL_REPLAY,
+    PANEL_PLUGINS,
+    PANEL_SETTINGS,
+    PANEL_TERMINAL,
+    PANEL_SENDER,
+    PANEL_LOGS,
+];
+
+/// 动态面板 ID 前缀，与内置面板 id 空间隔离。
+const DYNAMIC_PREFIX: &str = "dynamic:";
+
+impl PanelId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// 内置面板 ID（校验通过内置白名单）。
+    pub fn builtin(id: &str) -> Self {
+        debug_assert!(
+            PANEL_BUILTIN.contains(&id),
+            "unknown builtin panel id: {id}"
+        );
+        Self(id.to_owned())
+    }
+
+    /// 插件动态面板 ID：加 `dynamic:` 前缀与内置面板隔离。
+    pub fn dynamic(id: &str) -> Self {
+        Self(format!("{DYNAMIC_PREFIX}{id}"))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_dynamic(&self) -> bool {
+        self.0.starts_with(DYNAMIC_PREFIX)
+    }
+
+    /// 动态面板的裸 id（去掉 `dynamic:` 前缀），供 DynamicPanels 查询。
+    pub fn dynamic_suffix(&self) -> Option<&str> {
+        self.0.strip_prefix(DYNAMIC_PREFIX)
+    }
+
+    /// 是否为内置面板。
+    pub fn is_builtin(&self) -> bool {
+        PANEL_BUILTIN.contains(&self.0.as_str())
+    }
 }
 
-impl PanelKind {
-    pub fn title(&self) -> String {
-        match self {
-            Self::Devices => "设备".to_owned(),
-            Self::Replay => "回放".to_owned(),
-            Self::Plugins => "插件".to_owned(),
-            Self::Settings => "设置".to_owned(),
-            Self::Terminal => "接收".to_owned(),
-            Self::Sender => "发送器".to_owned(),
-            Self::Logs => "日志".to_owned(),
-            Self::Dynamic(id) => id.clone(),
-        }
+impl std::fmt::Display for PanelId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
+}
 
-    /// 标签栏使用的统一 Material Symbol。
-    pub fn icon(&self) -> MaterialIcon {
-        match self {
-            Self::Devices => ICON_USB,
-            Self::Replay => ICON_HISTORY,
-            Self::Plugins => ICON_EXTENSION,
-            Self::Settings => ICON_SETTINGS,
-            Self::Terminal => ICON_TERMINAL,
-            Self::Sender => ICON_SEND,
-            Self::Logs => ICON_VIEW_IN_AR,
-            Self::Dynamic(_) => ICON_CABLE,
-        }
+impl Serialize for PanelId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
     }
+}
 
-    pub fn dynamic_id(&self) -> Option<&str> {
-        match self {
-            Self::Dynamic(id) => Some(id),
-            _ => None,
+impl<'de> Deserialize<'de> for PanelId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct PanelIdVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for PanelIdVisitor {
+            type Value = PanelId;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a panel id string or legacy {\"dynamic\": ...} object")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(PanelId(value.to_owned()))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                // 旧版 PanelKind::Dynamic(String) 序列化为 {"dynamic": "abc"}。
+                // 迁移为 "dynamic:abc"，与运行时新生成格式一致。
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "dynamic" {
+                        let id: String = map.next_value()?;
+                        return Ok(PanelId::dynamic(&id));
+                    }
+                    let _: serde::de::IgnoredAny = map.next_value()?;
+                }
+                Err(serde::de::Error::custom(
+                    "panel id object must have a \"dynamic\" key",
+                ))
+            }
         }
+
+        deserializer.deserialize_any(PanelIdVisitor)
     }
 }
 
@@ -70,12 +138,12 @@ pub enum DockArea {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct DockStack {
-    pub tabs: Vec<PanelKind>,
-    pub active: Option<PanelKind>,
+    pub tabs: Vec<PanelId>,
+    pub active: Option<PanelId>,
 }
 
 impl DockStack {
-    pub fn open(&mut self, kind: PanelKind) {
+    pub fn open(&mut self, kind: PanelId) {
         if !self.tabs.contains(&kind) {
             self.tabs.push(kind.clone());
         }
@@ -83,7 +151,7 @@ impl DockStack {
     }
 
     /// 添加标签但不切换焦点（后台创建面板时使用）
-    pub fn add_inactive(&mut self, kind: PanelKind) {
+    pub fn add_inactive(&mut self, kind: PanelId) {
         if !self.tabs.contains(&kind) {
             self.tabs.push(kind.clone());
         }
@@ -92,7 +160,7 @@ impl DockStack {
         }
     }
 
-    pub fn close(&mut self, kind: &PanelKind) {
+    pub fn close(&mut self, kind: &PanelId) {
         // 找到关闭位置，优先选择相邻的 tab 而非最后一个
         let closed_pos = self.tabs.iter().position(|tab| tab == kind);
         self.tabs.retain(|tab| tab != kind);
@@ -107,17 +175,17 @@ impl DockStack {
         }
     }
 
-    pub fn remove(&mut self, kind: &PanelKind) -> bool {
+    pub fn remove(&mut self, kind: &PanelId) -> bool {
         let old_len = self.tabs.len();
         self.close(kind);
         old_len != self.tabs.len()
     }
 
-    pub fn contains(&self, kind: &PanelKind) -> bool {
+    pub fn contains(&self, kind: &PanelId) -> bool {
         self.tabs.contains(kind)
     }
 
-    pub fn active_or_first(&self) -> Option<PanelKind> {
+    pub fn active_or_first(&self) -> Option<PanelId> {
         self.active
             .clone()
             .filter(|kind| self.tabs.contains(kind))
@@ -125,17 +193,13 @@ impl DockStack {
     }
 
     pub(crate) fn discard_dynamic_tabs(&mut self) {
-        self.tabs.retain(|kind| kind.dynamic_id().is_none());
-        if self
-            .active
-            .as_ref()
-            .is_some_and(|kind| kind.dynamic_id().is_some())
-        {
+        self.tabs.retain(|kind| !kind.is_dynamic());
+        if self.active.as_ref().is_some_and(PanelId::is_dynamic) {
             self.active = self.tabs.last().cloned();
         }
     }
 
-    pub fn reorder(&mut self, kind: &PanelKind, mut insert_index: usize) -> bool {
+    pub fn reorder(&mut self, kind: &PanelId, mut insert_index: usize) -> bool {
         let Some(source_index) = self.tabs.iter().position(|tab| tab == kind) else {
             return false;
         };
@@ -192,7 +256,7 @@ pub struct DockLayout {
 /// 使顶部工具栏和快捷键仍能快速显示/隐藏底部、右侧区域。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TilesLayout {
-    pub tree: Tree<PanelKind>,
+    pub tree: Tree<PanelId>,
     pub main_tabs: TileId,
     pub bottom_tabs: TileId,
     pub right_tabs: TileId,
@@ -205,7 +269,7 @@ pub struct TilesLayout {
 }
 
 impl TilesLayout {
-    fn pane_ids(tiles: &mut Tiles<PanelKind>, panes: &[PanelKind]) -> Vec<TileId> {
+    fn pane_ids(tiles: &mut Tiles<PanelId>, panes: &[PanelId]) -> Vec<TileId> {
         panes
             .iter()
             .cloned()
@@ -218,12 +282,16 @@ impl TilesLayout {
         let mut tiles = Tiles::default();
 
         let center = if dock.center.tabs.is_empty() {
-            vec![PanelKind::Devices]
+            vec![PanelId::builtin(PANEL_DEVICES)]
         } else {
             dock.center.tabs.clone()
         };
         let bottom = if dock.bottom.tabs.is_empty() {
-            vec![PanelKind::Terminal, PanelKind::Logs, PanelKind::Sender]
+            vec![
+                PanelId::builtin(PANEL_TERMINAL),
+                PanelId::builtin(PANEL_LOGS),
+                PanelId::builtin(PANEL_SENDER),
+            ]
         } else {
             dock.bottom.tabs.clone()
         };
@@ -293,7 +361,7 @@ impl TilesLayout {
         self.tree.tiles.get(self.right_tabs).is_some() && self.tree.is_visible(self.right_tabs)
     }
 
-    pub fn select_pane(&mut self, kind: &PanelKind) -> bool {
+    pub fn select_pane(&mut self, kind: &PanelId) -> bool {
         let Some(id) = self.tree.tiles.find_pane(kind) else {
             return false;
         };
@@ -309,7 +377,7 @@ impl TilesLayout {
         selected
     }
 
-    pub fn add_to_main_tabs(&mut self, kind: PanelKind, activate: bool) {
+    pub fn add_to_main_tabs(&mut self, kind: PanelId, activate: bool) {
         if let Some(id) = self.tree.tiles.find_pane(&kind) {
             if activate {
                 self.select_pane(&kind);
@@ -330,8 +398,8 @@ impl TilesLayout {
 
     /// 打开由插件拥有的动态面板。第一个面板保持独立；同一插件创建第二个
     /// 面板时，自动建立父标签容器，将两个面板作为子标签收纳其中。
-    pub fn add_to_plugin_tabs(&mut self, kind: PanelKind, plugin_id: &str) {
-        let Some(panel_id) = kind.dynamic_id().map(str::to_owned) else {
+    pub fn add_to_plugin_tabs(&mut self, kind: PanelId, plugin_id: &str) {
+        let Some(panel_id) = kind.dynamic_suffix().map(str::to_owned) else {
             self.add_to_main_tabs(kind, true);
             return;
         };
@@ -357,7 +425,7 @@ impl TilesLayout {
             .plugin_panel_owners
             .iter()
             .find(|(_, owner)| owner.as_str() == plugin_id)
-            .and_then(|(id, _)| self.tree.tiles.find_pane(&PanelKind::Dynamic(id.clone())));
+            .and_then(|(id, _)| self.tree.tiles.find_pane(&PanelId::dynamic(id)));
 
         let new_pane = self.tree.tiles.insert_pane(kind.clone());
         self.plugin_panel_owners
@@ -446,9 +514,9 @@ impl TilesLayout {
         main_tabs
     }
 
-    pub fn remove_pane(&mut self, kind: &PanelKind) {
+    pub fn remove_pane(&mut self, kind: &PanelId) {
         let plugin_id = kind
-            .dynamic_id()
+            .dynamic_suffix()
             .and_then(|id| self.plugin_panel_owners.remove(id));
         if let Some(id) = self.tree.tiles.find_pane(kind) {
             self.tree.remove_recursively(id);
@@ -464,7 +532,7 @@ impl TilesLayout {
             .tiles
             .iter()
             .filter_map(|(id, tile)| match tile {
-                Tile::Pane(kind) if kind.dynamic_id().is_some() => Some(*id),
+                Tile::Pane(kind) if kind.is_dynamic() => Some(*id),
                 _ => None,
             })
             .collect();
@@ -526,7 +594,7 @@ impl TilesLayout {
         self.plugin_panel_owners.retain(|panel_id, _| {
             self.tree
                 .tiles
-                .find_pane(&PanelKind::Dynamic(panel_id.clone()))
+                .find_pane(&PanelId::dynamic(panel_id))
                 .is_some()
         });
 
@@ -541,8 +609,12 @@ impl TilesLayout {
                 && tabs.children.iter().all(|child_id| {
                     matches!(
                         self.tree.tiles.get(*child_id),
-                        Some(Tile::Pane(PanelKind::Dynamic(panel_id)))
-                            if self.plugin_panel_owners.get(panel_id) == Some(plugin_id)
+                        Some(Tile::Pane(panel_id))
+                            if panel_id.is_dynamic()
+                                && self
+                                    .plugin_panel_owners
+                                    .get(panel_id.dynamic_suffix().unwrap_or(""))
+                                    == Some(plugin_id)
                     )
                 })
         });
@@ -550,7 +622,7 @@ impl TilesLayout {
         owners_before != self.plugin_panel_owners.len() || groups_before != self.plugin_groups.len()
     }
 
-    pub fn is_pane_visible(&self, kind: &PanelKind) -> bool {
+    pub fn is_pane_visible(&self, kind: &PanelId) -> bool {
         self.tree
             .tiles
             .find_pane(kind)
@@ -561,16 +633,16 @@ impl TilesLayout {
 impl Default for DockLayout {
     fn default() -> Self {
         let mut center = DockStack::default();
-        center.open(PanelKind::Devices);
-        center.open(PanelKind::Replay);
-        center.open(PanelKind::Plugins);
-        center.open(PanelKind::Settings);
+        center.open(PanelId::builtin(PANEL_DEVICES));
+        center.open(PanelId::builtin(PANEL_REPLAY));
+        center.open(PanelId::builtin(PANEL_PLUGINS));
+        center.open(PanelId::builtin(PANEL_SETTINGS));
 
         let mut bottom = DockStack::default();
-        bottom.open(PanelKind::Terminal);
-        bottom.open(PanelKind::Logs);
-        bottom.open(PanelKind::Sender);
-        bottom.active = Some(PanelKind::Terminal);
+        bottom.open(PanelId::builtin(PANEL_TERMINAL));
+        bottom.open(PanelId::builtin(PANEL_LOGS));
+        bottom.open(PanelId::builtin(PANEL_SENDER));
+        bottom.active = Some(PanelId::builtin(PANEL_TERMINAL));
 
         Self {
             bottom_visible: true,
@@ -601,7 +673,7 @@ impl DockLayout {
         }
     }
 
-    pub fn move_panel(&mut self, kind: PanelKind, to: DockArea) {
+    pub fn move_panel(&mut self, kind: PanelId, to: DockArea) {
         self.center.remove(&kind);
         self.bottom.remove(&kind);
         self.right.remove(&kind);
@@ -615,7 +687,7 @@ impl DockLayout {
     }
 
     /// 移动面板到目标停靠区的指定位置。
-    pub fn insert_panel_at(&mut self, kind: PanelKind, to: DockArea, index: usize) {
+    pub fn insert_panel_at(&mut self, kind: PanelId, to: DockArea, index: usize) {
         self.center.remove(&kind);
         self.bottom.remove(&kind);
         self.right.remove(&kind);
@@ -631,7 +703,7 @@ impl DockLayout {
         }
     }
 
-    pub fn all_tabs(&self) -> Vec<PanelKind> {
+    pub fn all_tabs(&self) -> Vec<PanelId> {
         self.center
             .tabs
             .iter()
@@ -649,7 +721,10 @@ impl DockLayout {
 
     pub fn normalize_tool_layout(&mut self) {
         // 工具面板不允许留在 Center：如果被放在 Center，移到底部
-        for kind in [PanelKind::Terminal, PanelKind::Logs] {
+        for kind in [
+            PanelId::builtin(PANEL_TERMINAL),
+            PanelId::builtin(PANEL_LOGS),
+        ] {
             if self.center.remove(&kind) {
                 if !self.bottom.contains(&kind) && !self.right.contains(&kind) {
                     self.bottom.open(kind);
@@ -659,16 +734,22 @@ impl DockLayout {
         }
 
         // Sender 不允许在 Center stack 中存在
-        self.center.remove(&PanelKind::Sender);
+        self.center.remove(&PanelId::builtin(PANEL_SENDER));
 
         // Sender 如果没有在任何区域，默认放到底部
-        if !self.bottom.contains(&PanelKind::Sender) && !self.right.contains(&PanelKind::Sender) {
-            self.bottom.open(PanelKind::Sender);
+        if !self.bottom.contains(&PanelId::builtin(PANEL_SENDER))
+            && !self.right.contains(&PanelId::builtin(PANEL_SENDER))
+        {
+            self.bottom.open(PanelId::builtin(PANEL_SENDER));
         }
 
         // 确保功能面板（回放、插件、设置）至少在一个停靠区中存在。
         // 避免旧版配置文件或异常重置后用户看不到这些核心功能入口。
-        for kind in [PanelKind::Replay, PanelKind::Plugins, PanelKind::Settings] {
+        for kind in [
+            PanelId::builtin(PANEL_REPLAY),
+            PanelId::builtin(PANEL_PLUGINS),
+            PanelId::builtin(PANEL_SETTINGS),
+        ] {
             if !self.center.contains(&kind)
                 && !self.bottom.contains(&kind)
                 && !self.right.contains(&kind)
@@ -700,7 +781,7 @@ impl DockLayout {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PanelManager {
-    pub active_tab: PanelKind,
+    pub active_tab: PanelId,
     #[serde(default)]
     pub inspector_visible: bool, // legacy: ignored, kept for old workspace compatibility
     #[serde(default)]
@@ -713,7 +794,7 @@ pub struct PanelManager {
 impl Default for PanelManager {
     fn default() -> Self {
         Self {
-            active_tab: PanelKind::Devices,
+            active_tab: PanelId::builtin(PANEL_DEVICES),
             inspector_visible: false,
             dock: DockLayout::default(),
             tiles: None,
@@ -734,7 +815,7 @@ impl PanelManager {
     pub fn reset_tiles_layout(&mut self) {
         // 布局重置不等于关闭插件：保留当前运行期动态面板及其插件归属，
         // 在默认布局中重新建立它们，避免用户恢复布局后找不到插件窗口。
-        let dynamic_panels: Vec<(PanelKind, Option<String>)> = self
+        let dynamic_panels: Vec<(PanelId, Option<String>)> = self
             .tiles
             .as_ref()
             .map(|layout| {
@@ -743,9 +824,12 @@ impl PanelManager {
                     .tiles
                     .iter()
                     .filter_map(|(_, tile)| match tile {
-                        Tile::Pane(kind @ PanelKind::Dynamic(panel_id)) => Some((
+                        Tile::Pane(kind) if kind.is_dynamic() => Some((
                             kind.clone(),
-                            layout.plugin_panel_owners.get(panel_id).cloned(),
+                            layout
+                                .plugin_panel_owners
+                                .get(kind.dynamic_suffix().unwrap_or(""))
+                                .cloned(),
                         )),
                         _ => None,
                     })
@@ -763,9 +847,9 @@ impl PanelManager {
                     layout.add_to_main_tabs(kind, false);
                 }
             }
-            layout.select_pane(&PanelKind::Devices);
+            layout.select_pane(&PanelId::builtin(PANEL_DEVICES));
         }
-        self.active_tab = PanelKind::Devices;
+        self.active_tab = PanelId::builtin(PANEL_DEVICES);
     }
 
     pub fn bottom_visible(&mut self) -> bool {
@@ -789,7 +873,7 @@ impl PanelManager {
     }
 
     /// 从 dock 的所有 stack 中派生 tabs 列表（唯一真相来源）
-    pub fn tabs(&self) -> Vec<PanelKind> {
+    pub fn tabs(&self) -> Vec<PanelId> {
         if let Some(tiles) = self.tiles.as_ref() {
             return tiles
                 .tree
@@ -805,17 +889,17 @@ impl PanelManager {
     }
 
     /// 切换 Center 标签栏的激活面板（左侧栏点击）。
-    pub fn select_center_panel(&mut self, kind: PanelKind) {
+    pub fn select_center_panel(&mut self, kind: PanelId) {
         self.active_tab = kind.clone();
         self.ensure_tiles_layout().select_pane(&kind);
     }
 
-    pub fn open_tab(&mut self, kind: PanelKind) {
+    pub fn open_tab(&mut self, kind: PanelId) {
         self.active_tab = kind.clone();
         self.ensure_tiles_layout().add_to_main_tabs(kind, true);
     }
 
-    pub fn open_plugin_tab(&mut self, kind: PanelKind, plugin_id: &str) {
+    pub fn open_plugin_tab(&mut self, kind: PanelId, plugin_id: &str) {
         self.active_tab = kind.clone();
         self.ensure_tiles_layout()
             .add_to_plugin_tabs(kind, plugin_id);
@@ -826,11 +910,16 @@ impl PanelManager {
         if let Some(kind) = self.dock.center.active_or_first() {
             self.active_tab = kind;
         } else {
-            self.active_tab = self.dock.all_tabs().first().cloned().unwrap_or_default();
+            self.active_tab = self
+                .dock
+                .all_tabs()
+                .first()
+                .cloned()
+                .unwrap_or_else(|| PanelId::builtin(PANEL_DEVICES));
         }
     }
 
-    pub fn is_panel_visible(&self, kind: &PanelKind) -> bool {
+    pub fn is_panel_visible(&self, kind: &PanelId) -> bool {
         if let Some(tiles) = self.tiles.as_ref() {
             return tiles.is_pane_visible(kind);
         }
@@ -840,22 +929,20 @@ impl PanelManager {
             || (self.dock.right_visible && self.dock.right.active_or_first().as_ref() == Some(kind))
     }
 
-    pub fn close_tab(&mut self, kind: PanelKind) {
+    pub fn close_tab(&mut self, kind: PanelId) {
         if self.tiles.is_some() {
             let fallback = self
                 .tiles
                 .as_ref()
                 .and_then(|layout| {
                     layout.tree.tiles.iter().find_map(|(_, tile)| match tile {
-                        Tile::Pane(candidate)
-                            if candidate != &kind && candidate.dynamic_id().is_some() =>
-                        {
+                        Tile::Pane(candidate) if candidate != &kind && candidate.is_dynamic() => {
                             Some(candidate.clone())
                         }
                         _ => None,
                     })
                 })
-                .unwrap_or(PanelKind::Devices);
+                .unwrap_or_else(|| PanelId::builtin(PANEL_DEVICES));
             self.ensure_tiles_layout().remove_pane(&kind);
             if self.active_tab == kind {
                 self.active_tab = fallback;
@@ -882,7 +969,7 @@ impl PanelManager {
                 .find(|candidate| *candidate != &kind)
                 .cloned()
                 .or_else(|| self.dock.all_tabs().first().cloned())
-                .unwrap_or_default();
+                .unwrap_or_else(|| PanelId::builtin(PANEL_DEVICES));
         }
         self.dock.center.remove(&kind);
         self.dock.bottom.remove(&kind);
@@ -890,22 +977,22 @@ impl PanelManager {
     }
 
     pub fn active_dynamic_id(&self) -> Option<&str> {
-        self.active_tab.dynamic_id()
+        self.active_tab.dynamic_suffix()
     }
 
     pub fn discard_dynamic_tabs(&mut self) {
         if let Some(tiles) = self.tiles.as_mut() {
             tiles.discard_dynamic_panes();
         }
-        if self.active_tab.dynamic_id().is_some() {
+        if self.active_tab.is_dynamic() {
             self.active_tab = self
                 .dock
                 .center
                 .tabs
                 .iter()
-                .find(|k| k.dynamic_id().is_none())
+                .find(|k| !k.is_dynamic())
                 .cloned()
-                .unwrap_or_default();
+                .unwrap_or_else(|| PanelId::builtin(PANEL_DEVICES));
         }
         self.dock.discard_dynamic_tabs();
     }
@@ -914,7 +1001,10 @@ impl PanelManager {
     pub fn sync_tabs_from_dock(&mut self) {
         let all_tabs = self.dock.all_tabs();
         if !all_tabs.contains(&self.active_tab) {
-            self.active_tab = all_tabs.first().cloned().unwrap_or_default();
+            self.active_tab = all_tabs
+                .first()
+                .cloned()
+                .unwrap_or_else(|| PanelId::builtin(PANEL_DEVICES));
         }
         self.sync_active_tab_from_center();
     }
@@ -927,19 +1017,22 @@ mod tests {
     #[test]
     fn select_center_panel_switches_active() {
         let mut manager = PanelManager::default();
-        manager.dock.center.open(PanelKind::Replay);
+        manager.dock.center.open(PanelId::builtin(PANEL_REPLAY));
 
-        manager.select_center_panel(PanelKind::Replay);
+        manager.select_center_panel(PanelId::builtin(PANEL_REPLAY));
 
-        assert_eq!(manager.active_tab, PanelKind::Replay);
-        assert_eq!(manager.dock.center.active, Some(PanelKind::Replay));
+        assert_eq!(manager.active_tab, PanelId::builtin(PANEL_REPLAY));
+        assert_eq!(
+            manager.dock.center.active,
+            Some(PanelId::builtin(PANEL_REPLAY))
+        );
     }
 
     #[test]
     fn closing_active_dynamic_falls_back_to_previous_dynamic() {
         let mut manager = PanelManager::default();
-        let first = PanelKind::Dynamic("a".to_owned());
-        let second = PanelKind::Dynamic("b".to_owned());
+        let first = PanelId::dynamic("a");
+        let second = PanelId::dynamic("b");
         manager.open_tab(first.clone());
         manager.open_tab(second.clone());
 
@@ -951,39 +1044,39 @@ mod tests {
     #[test]
     fn discard_dynamic_tabs_removes_transient_state() {
         let mut manager = PanelManager::default();
-        manager.open_tab(PanelKind::Dynamic("runtime".to_owned()));
+        manager.open_tab(PanelId::dynamic("runtime"));
 
         manager.discard_dynamic_tabs();
 
-        assert!(!manager.tabs().iter().any(|k| k.dynamic_id().is_some()));
+        assert!(!manager.tabs().iter().any(|k| k.is_dynamic()));
         assert!(manager.active_dynamic_id().is_none());
     }
 
     #[test]
     fn sync_tabs_from_dock_uses_center_active_panel() {
         let mut manager = PanelManager {
-            active_tab: PanelKind::Devices,
+            active_tab: PanelId::builtin(PANEL_DEVICES),
             ..Default::default()
         };
-        manager.dock.center.open(PanelKind::Settings);
+        manager.dock.center.open(PanelId::builtin(PANEL_SETTINGS));
 
         manager.sync_tabs_from_dock();
 
-        assert_eq!(manager.active_tab, PanelKind::Settings);
+        assert_eq!(manager.active_tab, PanelId::builtin(PANEL_SETTINGS));
     }
 
     #[test]
     fn is_panel_visible_checks_active_dock_stacks() {
         let mut manager = PanelManager::default();
-        manager.dock.center.open(PanelKind::Settings);
+        manager.dock.center.open(PanelId::builtin(PANEL_SETTINGS));
         manager.dock.bottom_visible = true;
-        manager.dock.bottom.open(PanelKind::Logs);
+        manager.dock.bottom.open(PanelId::builtin(PANEL_LOGS));
         manager.dock.right_visible = false;
-        manager.dock.right.open(PanelKind::Terminal);
+        manager.dock.right.open(PanelId::builtin(PANEL_TERMINAL));
 
-        assert!(manager.is_panel_visible(&PanelKind::Settings));
-        assert!(manager.is_panel_visible(&PanelKind::Logs));
-        assert!(!manager.is_panel_visible(&PanelKind::Terminal));
+        assert!(manager.is_panel_visible(&PanelId::builtin(PANEL_SETTINGS)));
+        assert!(manager.is_panel_visible(&PanelId::builtin(PANEL_LOGS)));
+        assert!(!manager.is_panel_visible(&PanelId::builtin(PANEL_TERMINAL)));
     }
 
     #[test]
@@ -991,20 +1084,32 @@ mod tests {
         let mut manager = PanelManager::default();
         manager.dock.bottom_visible = false;
         manager.dock.right_visible = true;
-        manager.dock.right.open(PanelKind::Logs);
+        manager.dock.right.open(PanelId::builtin(PANEL_LOGS));
 
         let layout = manager.ensure_tiles_layout();
 
         assert!(!layout.bottom_visible());
         assert!(layout.right_visible());
-        assert!(layout.tree.tiles.find_pane(&PanelKind::Devices).is_some());
-        assert!(layout.tree.tiles.find_pane(&PanelKind::Logs).is_some());
+        assert!(
+            layout
+                .tree
+                .tiles
+                .find_pane(&PanelId::builtin(PANEL_DEVICES))
+                .is_some()
+        );
+        assert!(
+            layout
+                .tree
+                .tiles
+                .find_pane(&PanelId::builtin(PANEL_LOGS))
+                .is_some()
+        );
     }
 
     #[test]
     fn dynamic_pane_is_added_to_and_removed_from_tiles() {
         let mut manager = PanelManager::default();
-        let dynamic = PanelKind::Dynamic("runtime".to_owned());
+        let dynamic = PanelId::dynamic("runtime");
 
         manager.open_tab(dynamic.clone());
         assert!(
@@ -1036,7 +1141,7 @@ mod tests {
             .tree
             .remove_recursively(removed_main_tabs);
 
-        let dynamic = PanelKind::Dynamic("runtime".to_owned());
+        let dynamic = PanelId::dynamic("runtime");
         manager.open_tab(dynamic.clone());
         assert_eq!(manager.active_tab, dynamic);
 
@@ -1052,9 +1157,9 @@ mod tests {
     #[test]
     fn plugin_dynamic_panes_group_and_collapse_back_to_one_pane() {
         let mut manager = PanelManager::default();
-        let first = PanelKind::Dynamic("demo.chart".to_owned());
-        let second = PanelKind::Dynamic("demo.form".to_owned());
-        let third = PanelKind::Dynamic("demo.gauge".to_owned());
+        let first = PanelId::dynamic("demo.chart");
+        let second = PanelId::dynamic("demo.form");
+        let third = PanelId::dynamic("demo.gauge");
 
         manager.open_plugin_tab(first.clone(), "demo");
         manager.open_plugin_tab(second.clone(), "demo");
@@ -1087,8 +1192,8 @@ mod tests {
     #[test]
     fn dragging_a_plugin_panel_out_clears_the_automatic_group_label() {
         let mut manager = PanelManager::default();
-        let first = PanelKind::Dynamic("demo.chart".to_owned());
-        let second = PanelKind::Dynamic("demo.form".to_owned());
+        let first = PanelId::dynamic("demo.chart");
+        let second = PanelId::dynamic("demo.form");
         manager.open_plugin_tab(first.clone(), "demo");
         manager.open_plugin_tab(second.clone(), "demo");
 
@@ -1117,8 +1222,8 @@ mod tests {
     #[test]
     fn resetting_layout_preserves_running_plugin_panels() {
         let mut manager = PanelManager::default();
-        let first = PanelKind::Dynamic("demo.chart".to_owned());
-        let second = PanelKind::Dynamic("demo.form".to_owned());
+        let first = PanelId::dynamic("demo.chart");
+        let second = PanelId::dynamic("demo.form");
         manager.open_plugin_tab(first.clone(), "demo");
         manager.open_plugin_tab(second.clone(), "demo");
 
@@ -1135,6 +1240,31 @@ mod tests {
             Some("demo")
         );
         assert!(layout.plugin_groups.contains_key("demo"));
-        assert_eq!(manager.active_tab, PanelKind::Devices);
+        assert_eq!(manager.active_tab, PanelId::builtin(PANEL_DEVICES));
+    }
+
+    #[test]
+    fn panel_id_accepts_legacy_dynamic_object() {
+        // 旧版 PanelKind::Dynamic("abc") 序列化为 {"dynamic":"abc"}
+        let restored: PanelId = serde_json::from_str(r#"{"dynamic":"abc"}"#).unwrap();
+        assert_eq!(restored, PanelId::dynamic("abc"));
+        assert!(restored.is_dynamic());
+        assert_eq!(restored.dynamic_suffix(), Some("abc"));
+    }
+
+    #[test]
+    fn panel_id_accepts_plain_string() {
+        let restored: PanelId = serde_json::from_str(r#""devices""#).unwrap();
+        assert_eq!(restored, PanelId::builtin(PANEL_DEVICES));
+        assert!(restored.is_builtin());
+    }
+
+    #[test]
+    fn panel_id_round_trips_as_plain_string() {
+        let id = PanelId::dynamic("abc");
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, r#""dynamic:abc""#);
+        let restored: PanelId = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, id);
     }
 }

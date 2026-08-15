@@ -7,6 +7,7 @@ mod command_registry;
 mod commands;
 mod config;
 mod keymap;
+mod panel_registry;
 mod panels_ops;
 pub(crate) mod replay_task;
 mod runtime;

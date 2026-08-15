@@ -38,7 +38,7 @@ fn settings_nav_button(
 }
 
 impl WorkbenchApp {
-    pub(super) fn settings_panel(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn settings_panel(&mut self, ui: &mut egui::Ui) {
         let nav_id = ui.id().with("settings_category");
         let mut category = ui
             .ctx()

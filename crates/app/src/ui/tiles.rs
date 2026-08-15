@@ -1,7 +1,8 @@
 //! 基于 `egui_tiles` 的工作区布局与面板渲染。
 //!
-//! 布局树只保存 `PanelKind`，所有业务状态仍由 `WorkbenchApp` 持有；因此用户拖拽、
-//! 拆分或合并面板不会影响串口、录制和插件运行时状态。
+//! 布局树只保存 `PanelId`，面板元数据与渲染统一由 `PanelRegistry` 提供；
+//! 所有业务状态仍由 `WorkbenchApp` 持有；因此用户拖拽、拆分或合并面板
+//! 不会影响串口、录制和插件运行时状态。
 
 use crate::app::WorkbenchApp;
 use crate::state::StatusLevel;
@@ -10,7 +11,7 @@ use egui_tiles::{
     Behavior, Container, ContainerKind, DragPreview, EditAction, ResizeState,
     SimplificationOptions, TabState, Tile, TileId, Tiles, UiResponse,
 };
-use tool_panels::{PanelKind, PluginPanelEvent, theme};
+use tool_panels::{PanelId, PluginPanelEvent, theme};
 
 impl WorkbenchApp {
     pub(super) fn tiles_ui(&mut self, ui: &mut egui::Ui) {
@@ -39,57 +40,25 @@ impl WorkbenchApp {
         }
     }
 
-    fn tile_panel_body(&mut self, ui: &mut egui::Ui, kind: &PanelKind) {
-        self.panels.active_tab = kind.clone();
-        match kind {
-            PanelKind::Devices => {
-                egui::ScrollArea::vertical()
-                    .id_salt("scroll-devices")
-                    .show(ui, |ui| self.device_panel(ui));
-            }
-            PanelKind::Replay => {
-                egui::ScrollArea::vertical()
-                    .id_salt("scroll-replay")
-                    .show(ui, |ui| self.replay_panel.ui(ui));
-            }
-            PanelKind::Plugins => {
-                let events = egui::ScrollArea::vertical()
-                    .id_salt("scroll-plugins")
-                    .show(ui, |ui| self.plugins_panel.ui(ui, &mut self.plugin_manager))
-                    .inner;
-                self.handle_plugin_panel_events(events);
-            }
-            PanelKind::Settings => {
-                egui::ScrollArea::vertical()
-                    .id_salt("scroll-settings")
-                    .show(ui, |ui| self.settings_panel(ui));
-            }
-            PanelKind::Terminal => {
-                // 每帧同步端口别名：别名变更可能发生在 device_panel / settings_panel 等多处，
-                // 渲染前统一注入最简单可靠（别名数量少，clone 开销可忽略）。
-                self.terminal_panel
-                    .set_port_aliases(&self.serial.port_aliases);
-                self.terminal_panel.ui(ui);
-            }
-            PanelKind::Sender => {
-                if ui.available_width() < 420.0 {
-                    self.send_panel_vertical(ui);
+    fn tile_panel_body(&mut self, ui: &mut egui::Ui, id: &PanelId) {
+        self.panels.active_tab = id.clone();
+        match self.panel_registry.render_for(id) {
+            Some(crate::panel_registry::PanelRender::Builtin(f)) => f(self, ui),
+            Some(crate::panel_registry::PanelRender::Dynamic { suffix }) => {
+                if self.dynamic_panels.contains(&suffix) {
+                    let _ = egui::ScrollArea::vertical()
+                        .show(ui, |ui| self.dynamic_panels.ui_body(ui, &suffix));
                 } else {
-                    self.send_panel_horizontal(ui);
+                    ui.colored_label(theme::red(), format!("动态面板不存在：{suffix}"));
                 }
             }
-            PanelKind::Logs => self.bottom_log_panel.ui(ui),
-            PanelKind::Dynamic(id) => {
-                if self.dynamic_panels.contains(id) {
-                    egui::ScrollArea::vertical().show(ui, |ui| self.dynamic_panels.ui_body(ui, id));
-                } else {
-                    ui.colored_label(theme::red(), format!("动态面板不存在：{id}"));
-                }
+            None => {
+                ui.colored_label(theme::red(), format!("面板不存在：{id}"));
             }
         }
     }
 
-    fn handle_plugin_panel_events(&mut self, events: Vec<PluginPanelEvent>) {
+    pub(crate) fn handle_plugin_panel_events(&mut self, events: Vec<PluginPanelEvent>) {
         for event in events {
             match event {
                 PluginPanelEvent::Status(message, is_error) => {
@@ -115,11 +84,8 @@ impl WorkbenchApp {
         }
     }
 
-    pub(super) fn panel_title(&self, kind: &PanelKind) -> String {
-        match kind {
-            PanelKind::Dynamic(id) => self.dynamic_panels.title(id).unwrap_or(id).to_owned(),
-            _ => kind.title(),
-        }
+    pub(super) fn panel_title(&self, id: &PanelId) -> String {
+        self.panel_registry.title(id)
     }
 }
 
@@ -127,8 +93,8 @@ struct WorkbenchTiles<'a> {
     app: &'a mut WorkbenchApp,
 }
 
-impl Behavior<PanelKind> for WorkbenchTiles<'_> {
-    fn pane_ui(&mut self, ui: &mut egui::Ui, _tile_id: TileId, pane: &mut PanelKind) -> UiResponse {
+impl Behavior<PanelId> for WorkbenchTiles<'_> {
+    fn pane_ui(&mut self, ui: &mut egui::Ui, _tile_id: TileId, pane: &mut PanelId) -> UiResponse {
         self.app.tile_panel_body(ui, pane);
         UiResponse::None
     }
@@ -137,15 +103,16 @@ impl Behavior<PanelKind> for WorkbenchTiles<'_> {
         egui::CursorIcon::Default
     }
 
-    fn tab_title_for_pane(&mut self, pane: &PanelKind) -> egui::WidgetText {
-        format!("{} {}", pane.icon().codepoint, self.app.panel_title(pane)).into()
+    fn tab_title_for_pane(&mut self, pane: &PanelId) -> egui::WidgetText {
+        format!(
+            "{} {}",
+            self.app.panel_registry.icon(pane).codepoint,
+            self.app.panel_title(pane)
+        )
+        .into()
     }
 
-    fn tab_title_for_tile(
-        &mut self,
-        tiles: &Tiles<PanelKind>,
-        tile_id: TileId,
-    ) -> egui::WidgetText {
+    fn tab_title_for_tile(&mut self, tiles: &Tiles<PanelId>, tile_id: TileId) -> egui::WidgetText {
         if let Some(plugin_id) = self.app.panels.plugin_group_id(tile_id) {
             return format!(
                 "{} {plugin_id}",
@@ -187,7 +154,7 @@ impl Behavior<PanelKind> for WorkbenchTiles<'_> {
     fn tab_bg_color(
         &self,
         _visuals: &egui::Visuals,
-        _tiles: &Tiles<PanelKind>,
+        _tiles: &Tiles<PanelId>,
         _tile_id: TileId,
         state: &TabState,
     ) -> egui::Color32 {
@@ -201,7 +168,7 @@ impl Behavior<PanelKind> for WorkbenchTiles<'_> {
     fn tab_outline_stroke(
         &self,
         _visuals: &egui::Visuals,
-        _tiles: &Tiles<PanelKind>,
+        _tiles: &Tiles<PanelId>,
         _tile_id: TileId,
         state: &TabState,
     ) -> egui::Stroke {
@@ -229,7 +196,7 @@ impl Behavior<PanelKind> for WorkbenchTiles<'_> {
     fn tab_text_color(
         &self,
         _visuals: &egui::Visuals,
-        _tiles: &Tiles<PanelKind>,
+        _tiles: &Tiles<PanelId>,
         _tile_id: TileId,
         state: &TabState,
     ) -> egui::Color32 {
@@ -240,9 +207,11 @@ impl Behavior<PanelKind> for WorkbenchTiles<'_> {
         }
     }
 
-    fn retain_pane(&mut self, pane: &PanelKind) -> bool {
-        pane.dynamic_id()
-            .is_none_or(|id| self.app.dynamic_panels.contains(id))
+    fn retain_pane(&mut self, pane: &PanelId) -> bool {
+        !pane.is_dynamic()
+            || pane
+                .dynamic_suffix()
+                .is_some_and(|id| self.app.dynamic_panels.contains(id))
     }
 
     fn on_edit(&mut self, _action: EditAction) {
