@@ -1,13 +1,15 @@
-//! 命令面板（Ctrl+K）：搜索内置 Action 与插件命令。
+//! 命令面板（Ctrl+K）：搜索并执行统一命令（内置 + 插件）。
 //!
-//! 支持鼠标悬浮高亮、点击执行，以及键盘 ↑↓ 选择、Enter 确认。
+//! 候选列表来自 [`crate::command_registry::CommandRegistry`]，快捷键、命令
+//! 面板、插件命令共用同一份命令元数据与执行入口。支持鼠标悬浮高亮、点击
+//! 执行，以及键盘 ↑↓ 选择、Enter 确认。
 
 use crate::app::WorkbenchApp;
-use crate::keymap::Action;
+use crate::command_registry::{CMD_COMMAND_PALETTE, CommandCategory};
 use eframe::egui;
 use egui_material_icons::{
     MaterialIcon,
-    icons::{ICON_BOLT, ICON_EXTENSION, ICON_SEARCH, ICON_SEARCH_OFF},
+    icons::{ICON_SEARCH, ICON_SEARCH_OFF},
 };
 use tool_panels::{design, theme};
 
@@ -22,17 +24,11 @@ pub(crate) struct CommandPaletteState {
 
 /// 命令面板的一条候选。
 struct CommandEntry {
+    id: String,
     icon: MaterialIcon,
     label: String,
     shortcut: String,
-    kind: CommandKind,
-}
-
-enum CommandKind {
-    /// 内置 Action（执行走 execute_action）。
-    Action(Action),
-    /// 插件命令。
-    PluginCommand(String, String),
+    category: CommandCategory,
 }
 
 impl WorkbenchApp {
@@ -47,36 +43,26 @@ impl WorkbenchApp {
             return;
         }
 
-        // 构建候选列表
+        // 构建候选列表：统一命令注册表（内置 + 插件命令同表）
         let mut entries: Vec<CommandEntry> = Vec::new();
 
-        for action in Action::ALL {
-            if matches!(action, Action::CommandPalette) {
+        for command in self.commands.all() {
+            if command.id == CMD_COMMAND_PALETTE {
                 continue;
             }
             let shortcut = self
                 .keymap
-                .get_bindings(action)
+                .get_bindings(&command.id)
                 .first()
                 .map(|b| b.display())
                 .unwrap_or_default();
             entries.push(CommandEntry {
-                icon: ICON_BOLT,
-                label: action.label(),
+                id: command.id.clone(),
+                icon: command.icon,
+                label: command.title.clone(),
                 shortcut,
-                kind: CommandKind::Action(action.clone()),
+                category: command.category,
             });
-        }
-
-        for summary in self.plugin_summaries() {
-            for cmd in &summary.contributes.commands {
-                entries.push(CommandEntry {
-                    icon: ICON_EXTENSION,
-                    label: format!("{}: {}", summary.name, cmd.title),
-                    shortcut: String::new(),
-                    kind: CommandKind::PluginCommand(summary.id.clone(), cmd.id.clone()),
-                });
-            }
         }
 
         // 过滤
@@ -85,15 +71,17 @@ impl WorkbenchApp {
             entries.retain(|e| e.label.to_lowercase().contains(&query));
         }
 
-        // 按最近使用排序：usage_order 中 position 越小的排越前面。
-        // 未使用的条目排最后。
+        // 排序：先按分类分组，组内按最近使用（usage_order 中 position 越小越靠前）。
+        // 未使用的条目排组内最后（保持注册顺序，稳定排序）。
         entries.sort_by_key(|e| {
-            self.command_palette
+            let usage = self
+                .command_palette
                 .usage_order
                 .iter()
                 .position(|u| u == &e.label)
                 .map(|p| p as i32)
-                .unwrap_or(i32::MAX)
+                .unwrap_or(i32::MAX);
+            (e.category, usage)
         });
 
         // 键盘导航：搜索文字变化时重置选中到第一项
@@ -136,7 +124,7 @@ impl WorkbenchApp {
             }
         }
 
-        let mut action_to_run: Option<(CommandKind, String)> = None;
+        let mut command_to_run: Option<(String, String)> = None;
         let mut close_after = false;
         let mut hovered_idx: Option<usize> = None;
 
@@ -190,7 +178,20 @@ impl WorkbenchApp {
                             design::empty_state(ui, ICON_SEARCH_OFF, "无匹配命令");
                         }
 
+                        // 分类 header：分组变化时渲染一次
+                        let mut last_category: Option<CommandCategory> = None;
                         for (i, entry) in entries.iter().enumerate() {
+                            if last_category != Some(entry.category) {
+                                last_category = Some(entry.category);
+                                ui.add_space(6.0);
+                                ui.label(
+                                    egui::RichText::new(entry.category.title())
+                                        .small()
+                                        .color(theme::text_secondary()),
+                                );
+                                ui.add_space(2.0);
+                            }
+
                             let is_selected = self.command_palette.selected == Some(i);
 
                             let row_id = ui.id().with(("cp_row", i));
@@ -214,8 +215,8 @@ impl WorkbenchApp {
                                         ui.painter().rect_filled(rect, 3.0, color);
                                     }
                                     if resp.clicked() {
-                                        action_to_run =
-                                            Some((clone_kind(&entry.kind), entry.label.clone()));
+                                        command_to_run =
+                                            Some((entry.id.clone(), entry.label.clone()));
                                         close_after = true;
                                     }
 
@@ -286,47 +287,29 @@ impl WorkbenchApp {
         if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
             if let Some(idx) = self.command_palette.selected {
                 if idx < entries.len() {
-                    action_to_run =
-                        Some((clone_kind(&entries[idx].kind), entries[idx].label.clone()));
+                    command_to_run = Some((entries[idx].id.clone(), entries[idx].label.clone()));
                     close_after = true;
                 }
             } else if !query_empty && !entries.is_empty() {
-                action_to_run = Some((clone_kind(&entries[0].kind), entries[0].label.clone()));
+                command_to_run = Some((entries[0].id.clone(), entries[0].label.clone()));
                 close_after = true;
             }
         }
 
-        if let Some((kind, key)) = action_to_run {
+        if let Some((command_id, key)) = command_to_run {
             // 记录使用：key 移到最前
             self.command_palette.usage_order.retain(|u| u != &key);
             self.command_palette.usage_order.insert(0, key);
             close_after = true;
 
-            self.run_command_kind(kind);
+            // 与快捷键一致：统一经 pending_command 在下一帧 tick_pre_ui 执行，
+            // 避免在 UI 渲染中途变更状态。内置/插件命令都走同一入口。
+            self.pending_command = Some(command_id);
         }
 
         if close_after {
             self.command_palette.open = false;
             self.command_palette.selected = None;
         }
-    }
-
-    fn run_command_kind(&mut self, kind: CommandKind) {
-        match kind {
-            CommandKind::Action(action) => {
-                self.pending_action = Some(action);
-            }
-            CommandKind::PluginCommand(plugin_id, command_id) => {
-                self.publish_plugin_command_action(&plugin_id, &command_id);
-            }
-        }
-    }
-}
-
-/// 克隆 CommandKind（避免在点击响应中持有 entries 的引用）。
-fn clone_kind(kind: &CommandKind) -> CommandKind {
-    match kind {
-        CommandKind::Action(a) => CommandKind::Action(a.clone()),
-        CommandKind::PluginCommand(p, c) => CommandKind::PluginCommand(p.clone(), c.clone()),
     }
 }

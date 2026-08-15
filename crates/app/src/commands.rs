@@ -133,6 +133,38 @@ impl WorkbenchApp {
         self.notifications.push("general", level, text);
     }
 
+    // ── 内置命令 handler（由 CommandRegistry 注册）──
+
+    /// `$Send`：目标端口打开且输入非空时发送。
+    pub(crate) fn cmd_send_if_ready(&mut self) {
+        if self.send_target_port_open() && !self.send.input.trim().is_empty() {
+            self.do_send();
+        }
+    }
+
+    /// `$AddBookmark`：录制中时添加标记点。
+    pub(crate) fn cmd_add_bookmark_if_recording(&mut self) {
+        if self.recorder.is_running() {
+            self.recorder.add_bookmark("");
+        }
+    }
+
+    /// `$ToggleRightDock`：切换右侧边栏并持久化。
+    pub(crate) fn cmd_toggle_right_dock(&mut self) {
+        let visible = self.panels.right_visible();
+        self.panels.set_right_visible(!visible);
+        if let Err(e) = self.save_config() {
+            log::warn!("save_config failed: {e}")
+        };
+    }
+
+    /// `$CommandPalette`：切换命令面板开关。
+    pub(crate) fn cmd_toggle_command_palette(&mut self) {
+        self.command_palette.open = !self.command_palette.open;
+        self.command_palette.query.clear();
+        self.command_palette.selected = None;
+    }
+
     /// 切换串口时：保存旧端口设置到 profile，从 profile 恢复新端口设置。
     pub(crate) fn switch_port_selection(&mut self, old_port: Option<&str>, new_port: &str) {
         // 保存旧端口配置

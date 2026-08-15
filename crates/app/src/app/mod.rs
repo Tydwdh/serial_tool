@@ -50,10 +50,12 @@ pub(crate) struct WorkbenchApp {
     pub(crate) periodic_send: crate::runtime::periodic_send::PeriodicSendState,
     /// 可配置快捷键映射
     pub(crate) keymap: crate::keymap::Keymap,
-    /// 当前帧触发的快捷键动作（handle_keys 设置，tick 执行）
-    pub(crate) pending_action: Option<crate::keymap::Action>,
-    /// 快捷键录制状态：点击"录制"后等待用户按键
-    pub(crate) key_recording: Option<crate::keymap::Action>,
+    /// 统一命令注册表（内置 + 插件命令）
+    pub(crate) commands: crate::command_registry::CommandRegistry,
+    /// 当前帧触发的快捷键命令 ID（handle_keys/命令面板设置，tick 执行）
+    pub(crate) pending_command: Option<String>,
+    /// 快捷键录制状态：点击"录制"后等待用户按键（命令 ID）
+    pub(crate) key_recording: Option<String>,
     /// 命令面板状态（搜索、选中、使用顺序）
     pub(crate) command_palette: crate::ui::command_palette::CommandPaletteState,
     /// 自动更新状态
@@ -347,7 +349,8 @@ impl WorkbenchApp {
                 .as_ref()
                 .map(|c| c.keymap.clone())
                 .unwrap_or_default(),
-            pending_action: None,
+            commands: crate::command_registry::CommandRegistry::builtin(),
+            pending_command: None,
             key_recording: None,
             command_palette: Default::default(),
             update_state: UpdateState::default(),

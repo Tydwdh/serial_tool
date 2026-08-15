@@ -155,7 +155,7 @@ impl WorkbenchApp {
             self.send.error = None;
         }
 
-        // Ctrl+Enter 发送统一由 keymap(Action::Send → handle_keys)处理,
+        // Ctrl+Enter 发送统一由 keymap($Send → handle_keys)处理,
         // 不在此处重复检测,避免同帧双重触发 do_send 导致重复发送。
     }
 

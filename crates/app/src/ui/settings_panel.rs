@@ -445,24 +445,13 @@ impl WorkbenchApp {
         });
     }
 
-    /// 快捷键编辑器：表格展示所有动作及其绑定，支持录制新快捷键。
+    /// 快捷键编辑器：表格展示所有命令及其绑定，支持录制新快捷键。
     fn render_keymap_editor(&mut self, ui: &mut egui::Ui) {
-        use crate::keymap::{Action, Keymap};
+        use crate::keymap::Keymap;
 
-        // 收集所有可配置的动作：内置 + 插件命令
-        // 用帧级缓存避免重复全量 clone manifest + 命令对账（命令面板/插件面板可能同帧也读了）。
-        let plugin_summaries: Vec<tool_extension::PluginSummary> = self
-            .plugin_summaries()
-            .iter()
-            .filter(|s| {
-                matches!(
-                    s.state,
-                    tool_extension::PluginState::Enabled | tool_extension::PluginState::Running
-                )
-            })
-            .cloned()
-            .collect();
-        let all_actions = Action::all_with_plugins(&plugin_summaries);
+        // 所有可配置的命令：内置 + 插件命令（统一 CommandRegistry）。
+        // 命令元数据由 tick_plugin_lifecycle 随插件启停同步，此处直接读取。
+        let all_commands: Vec<crate::command_registry::Command> = self.commands.all().to_vec();
 
         TableBuilder::new(ui)
             .striped(true)
@@ -484,13 +473,12 @@ impl WorkbenchApp {
                 }
             })
             .body(|mut body| {
-                for action in &all_actions {
-                    let bindings = self.keymap.get_bindings(action).to_vec();
-                    let action_label = action.label_with_plugins(&plugin_summaries);
-                    let is_recording = self.key_recording.as_ref() == Some(action);
+                for command in &all_commands {
+                    let bindings = self.keymap.get_bindings(&command.id).to_vec();
+                    let is_recording = self.key_recording.as_ref() == Some(&command.id);
                     body.row(32.0, |mut row| {
                         row.col(|ui| {
-                            ui.label(&action_label);
+                            ui.label(&command.title);
                         });
                         row.col(|ui| {
                             if bindings.is_empty() {
@@ -507,7 +495,7 @@ impl WorkbenchApp {
                             } else if design::button(ui, ICON_KEYBOARD, "录制", ButtonKind::Ghost)
                                 .clicked()
                             {
-                                self.key_recording = Some(action.clone());
+                                self.key_recording = Some(command.id.clone());
                             }
                         });
                         row.col(|ui| {
@@ -515,7 +503,7 @@ impl WorkbenchApp {
                                 && design::button(ui, ICON_RESTART_ALT, "清除", ButtonKind::Ghost)
                                     .clicked()
                             {
-                                self.keymap.set_bindings(action, vec![]);
+                                self.keymap.set_bindings(&command.id, vec![]);
                                 if let Err(e) = self.save_config() {
                                     log::warn!("save_config failed: {e}")
                                 };

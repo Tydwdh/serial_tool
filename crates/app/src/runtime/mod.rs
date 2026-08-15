@@ -29,7 +29,7 @@ impl WorkbenchApp {
         self.tick_plugin_lifecycle();
         self.sync_marketplace_installed_ids();
         self.handle_keys(ctx);
-        self.flush_pending_action();
+        self.flush_pending_command();
         self.tick_key_recording(ctx);
         self.tick_port_refresh(ctx);
         self.tick_periodic_send(ctx);

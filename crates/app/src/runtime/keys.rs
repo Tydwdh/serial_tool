@@ -1,5 +1,5 @@
 use crate::app::WorkbenchApp;
-use crate::keymap::{Action, KeyBinding};
+use crate::keymap::KeyBinding;
 use crate::state::StatusLevel;
 use eframe::egui;
 use tool_panels::PanelKind;
@@ -11,7 +11,7 @@ impl WorkbenchApp {
             return;
         }
         let keymap = self.keymap.clone();
-        let mut triggered: Option<Action> = None;
+        let mut triggered: Option<String> = None;
 
         ctx.input(|i| {
             for (key, bindings) in &keymap.bindings {
@@ -21,61 +21,23 @@ impl WorkbenchApp {
                             && i.modifiers.shift == binding.shift
                             && i.modifiers.alt == binding.alt;
                         if mods_match && i.key_pressed(egui_key) {
-                            triggered = Action::from_key(key);
+                            // key 即命令 ID（内置 `$` 前缀或 `plugin_id:command_id`）
+                            triggered = Some(key.clone());
                         }
                     }
                 }
             }
         });
 
-        if let Some(action) = triggered {
-            self.pending_action = Some(action);
+        if let Some(command_id) = triggered {
+            self.pending_command = Some(command_id);
         }
     }
 
-    /// 执行当前帧触发的快捷键动作（在 tick_pre_ui 中调用）。
-    pub(super) fn flush_pending_action(&mut self) {
-        if let Some(action) = self.pending_action.take() {
-            self.execute_action(action);
-        }
-    }
-
-    /// 执行快捷键对应的操作。
-    fn execute_action(&mut self, action: Action) {
-        match action {
-            Action::RefreshPorts => self.refresh_ports(),
-            Action::OpenPort => self.toggle_selected_port(),
-            Action::ToggleBottomPanel => self.toggle_bottom_panel(),
-            Action::ToggleRightDock => {
-                let visible = self.panels.right_visible();
-                self.panels.set_right_visible(!visible);
-                if let Err(e) = self.save_config() {
-                    log::warn!("save_config failed: {e}")
-                };
-            }
-            Action::Send => {
-                if self.send_target_port_open() && !self.send.input.trim().is_empty() {
-                    self.do_send();
-                }
-            }
-            Action::StartRecording => self.start_or_stop_recording(),
-            Action::ReconnectPort => self.reconnect_selected_port(),
-            Action::AddBookmark => {
-                if self.recorder.is_running() {
-                    self.recorder.add_bookmark("");
-                }
-            }
-            Action::CommandPalette => {
-                self.command_palette.open = !self.command_palette.open;
-                self.command_palette.query.clear();
-                self.command_palette.selected = None;
-            }
-            Action::ClearTerminal => {
-                self.terminal_panel.clear();
-            }
-            Action::PluginCommand(plugin_id, command_id) => {
-                self.publish_plugin_command_action(&plugin_id, &command_id);
-            }
+    /// 执行当前帧触发的快捷键命令（在 tick_pre_ui 中调用）。
+    pub(super) fn flush_pending_command(&mut self) {
+        if let Some(command_id) = self.pending_command.take() {
+            self.execute_command(&command_id);
         }
     }
 
@@ -98,7 +60,7 @@ impl WorkbenchApp {
         if let Some((key_name, modifiers)) = Self::capture_key_for_recording(ctx) {
             // SAFETY: tick_key_recording starts by checking key_recording.is_none() and returns
             // early, and there's no async yield point between that guard and here.
-            let action = self
+            let command_id = self
                 .key_recording
                 .take()
                 .expect("key_recording was checked non-None above");
@@ -106,23 +68,20 @@ impl WorkbenchApp {
                 KeyBinding::new(&key_name, modifiers.ctrl, modifiers.shift, modifiers.alt);
 
             self.keymap.remove_binding_everywhere(&new_binding);
-            let mut bindings = self.keymap.get_bindings(&action);
+            let mut bindings = self.keymap.get_bindings(&command_id);
             bindings.retain(|b| {
                 !(b.ctrl == new_binding.ctrl
                     && b.shift == new_binding.shift
                     && b.alt == new_binding.alt)
             });
             bindings.push(new_binding);
-            self.keymap.set_bindings(&action, bindings);
+            self.keymap.set_bindings(&command_id, bindings);
             if let Err(e) = self.save_config() {
                 log::warn!("save_config failed: {e}")
             };
             self.set_status_force(
                 StatusLevel::Info,
-                format!(
-                    "{} 快捷键已更新",
-                    action.label_with_plugins(self.plugin_summaries())
-                ),
+                format!("{} 快捷键已更新", self.command_label(&command_id)),
             );
         }
     }

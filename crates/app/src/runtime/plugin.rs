@@ -98,6 +98,11 @@ impl WorkbenchApp {
         self.handle_file_browse_requests();
 
         self.plugin_manager.process_pending();
+        // 插件命令并入统一 CommandRegistry（内置命令同表）。
+        // 先 clone summaries 再重建，避免 plugin_summaries 的 &self 借用与
+        // &mut self.commands 冲突。
+        let summaries = self.plugin_summaries().to_vec();
+        self.commands.rebuild_plugin_commands(&summaries);
         self.dynamic_panels.ingest(&mut self.panels);
         self.process_contribution_set_value();
 

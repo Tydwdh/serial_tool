@@ -3,6 +3,7 @@
 
 mod app;
 mod bootstrap;
+mod command_registry;
 mod commands;
 mod config;
 mod keymap;
