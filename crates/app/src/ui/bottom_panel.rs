@@ -722,12 +722,12 @@ impl WorkbenchApp {
             ui.add_space(2.0);
 
             // 过滤后的条目（克隆，避免遍历与删除/发送同时持有引用）
-            let query = self.send.history_search.to_lowercase();
+            let query = tool_panels::SearchQuery::new(&self.send.history_search, false);
             let entries: Vec<String> = self
                 .send
                 .send_history
                 .iter()
-                .filter(|item| query.is_empty() || item.to_lowercase().contains(&query))
+                .filter(|item| query.is_empty() || query.matches(item))
                 .take(MAX_SEND_HISTORY)
                 .cloned()
                 .collect();

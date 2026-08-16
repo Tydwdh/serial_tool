@@ -12,9 +12,13 @@ name = "tool_panels"
 path = "src/lib.rs"
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 egui.workspace = true
 egui_material_icons.workspace = true
 egui_tiles.workspace = true
+log.workspace = true
+open.workspace = true
+regex = "1"
 serde.workspace = true
 serde_json.workspace = true
 tool-core = { path = "../core" }
@@ -23,8 +27,6 @@ tool-extension = { path = "../extension" }
 tool-marketplace = { path = "../marketplace" }
 tool-recorder = { path = "../recorder" }
 tool-transport = { path = "../transport" }
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-open.workspace = true
 
 [dev-dependencies]
 egui_kittest = "0.35"

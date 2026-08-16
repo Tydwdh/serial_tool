@@ -8,6 +8,7 @@ mod log;
 mod manager;
 mod plugins;
 mod replay;
+mod search;
 mod table;
 mod terminal;
 pub mod theme;
@@ -33,6 +34,7 @@ pub use manager::{
 };
 pub use plugins::{MarketplaceState, PluginPanelEvent, PluginTab, PluginsPanel};
 pub use replay::ReplayPanel;
+pub use search::SearchQuery;
 pub use table::{RowSelection, copy_text_with_feedback, take_copy_feedback};
 pub use terminal::{TerminalExportFormat, TerminalPanel};
 

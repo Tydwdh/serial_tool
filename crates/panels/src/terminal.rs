@@ -486,8 +486,8 @@ impl TerminalPanel {
         }
     }
 
-    /// 返回用于匹配的搜索词：大小写敏感时保留原样，否则转小写。
-    fn search_query(&self) -> String {
+    /// 编译当前搜索词（普通词字面量 / `re:` 前缀正则）。
+    fn search_query(&self) -> crate::search::SearchQuery {
         self.search.query()
     }
 
@@ -499,7 +499,6 @@ impl TerminalPanel {
             self.show_rx,
             self.show_tx,
             &search_key,
-            self.search.case_sensitive,
             self.show_hex,
             self.show_raw,
         )
@@ -746,7 +745,7 @@ impl TerminalPanel {
         }
 
         let render_outcome = {
-            // 预计算搜索查询：大小写敏感时保留原样，否则转小写（避免渲染循环中重复分配）。
+            // 预编译搜索查询：普通词字面量 / re: 正则（避免渲染循环中重复编译）。
             let search_key = self.search_query();
 
             // 每个端口队列自身有序，用 k 路归并保持 DataBus 发布顺序；复杂度为
@@ -757,7 +756,6 @@ impl TerminalPanel {
                 self.show_rx,
                 self.show_tx,
                 &search_key,
-                self.search.case_sensitive,
                 self.show_hex,
                 self.show_raw,
             );
@@ -1015,8 +1013,7 @@ fn collect_visible_rows_merged<'a>(
     port_filter: Option<&str>,
     show_rx: bool,
     show_tx: bool,
-    search_key: &str,
-    case_sensitive: bool,
+    search: &crate::search::SearchQuery,
     show_hex: bool,
     show_raw: bool,
 ) -> Vec<VisibleRow<'a>> {
@@ -1049,9 +1046,7 @@ fn collect_visible_rows_merged<'a>(
             .expect("heap entries always have a current terminal entry");
         if entry_visible(entry.direction, show_rx, show_tx) {
             let row = VisibleRow::from_entry(Some(streams[index].0), entry);
-            if search_key.is_empty()
-                || row_matches_search(&row, search_key, case_sensitive, show_hex, show_raw)
-            {
+            if search.is_empty() || row_matches_search(&row, search, show_hex, show_raw) {
                 rows.push(row);
             }
         }
@@ -2109,31 +2104,24 @@ fn build_selected_data_text<'a>(
 
 fn row_matches_search(
     row: &VisibleRow<'_>,
-    search_key: &str,
-    case_sensitive: bool,
+    search: &crate::search::SearchQuery,
     show_hex: bool,
     show_raw: bool,
 ) -> bool {
-    if search_key.is_empty() {
+    if search.is_empty() {
         return true;
     }
-    let contains = |haystack: &str| -> bool {
-        if case_sensitive {
-            haystack.contains(search_key)
-        } else {
-            haystack.to_lowercase().contains(search_key)
-        }
-    };
+    let hit = |haystack: &str| search.matches(haystack);
     // 根据显示模式搜索对应字段：
     // - HEX 模式：搜索 hex_text
     // - 原始模式：搜索 raw_text
     // - 文本模式：搜索 raw_text 和 display_text
     if show_hex {
-        contains(row.hex_text.as_ref())
+        hit(row.hex_text.as_ref())
     } else if show_raw {
-        contains(row.raw_text.as_ref())
+        hit(row.raw_text.as_ref())
     } else {
-        contains(row.raw_text.as_ref()) || contains(row.display_text.as_ref())
+        hit(row.raw_text.as_ref()) || hit(row.display_text.as_ref())
     }
 }
 

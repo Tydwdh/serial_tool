@@ -113,31 +113,23 @@ impl MessageSearch {
         !self.text.trim().is_empty()
     }
 
-    pub(crate) fn query(&self) -> String {
-        let query = self.text.trim();
-        if self.case_sensitive {
-            query.to_owned()
-        } else {
-            query.to_lowercase()
-        }
+    /// 编译当前搜索词（普通词字面量 / `re:` 前缀正则）。
+    pub(crate) fn query(&self) -> crate::search::SearchQuery {
+        crate::search::SearchQuery::new(&self.text, self.case_sensitive)
     }
 
-    pub(crate) fn matches(&self, haystack: &str, query: &str) -> bool {
-        if query.is_empty() {
-            true
-        } else if self.case_sensitive {
-            haystack.contains(query)
-        } else {
-            haystack.to_lowercase().contains(query)
-        }
+    pub(crate) fn matches(&self, haystack: &str, query: &crate::search::SearchQuery) -> bool {
+        query.is_empty() || query.matches(haystack)
     }
 
     pub(crate) fn toolbar(&mut self, ui: &mut Ui, desired_width: f32, hint: &str, case_hint: &str) {
-        let search_response = ui.add(
-            egui::TextEdit::singleline(&mut self.text)
-                .desired_width(desired_width)
-                .hint_text(hint),
-        );
+        let search_response = ui
+            .add(
+                egui::TextEdit::singleline(&mut self.text)
+                    .desired_width(desired_width)
+                    .hint_text(hint),
+            )
+            .on_hover_text("支持正则：以 re: 开头（如 re:^ok\\d+）；否则按字面量搜索");
         if search_response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.clear();
             search_response.surrender_focus();

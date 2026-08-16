@@ -457,7 +457,7 @@ impl PluginsPanel {
             return events;
         }
 
-        let query = self.market_search.trim().to_lowercase();
+        let query = crate::search::SearchQuery::new(&self.market_search, false);
         let visible_plugins: Vec<&RegistryPlugin> = reg
             .plugins
             .iter()
@@ -467,16 +467,16 @@ impl PluginsPanel {
                     .as_ref()
                     .is_none_or(|category| plugin.category.as_ref() == Some(category));
                 let query_matches = query.is_empty()
-                    || plugin.name.to_lowercase().contains(&query)
-                    || plugin.id.to_lowercase().contains(&query)
+                    || query.matches(&plugin.name)
+                    || query.matches(&plugin.id)
                     || plugin
                         .description
                         .as_deref()
-                        .is_some_and(|text| text.to_lowercase().contains(&query))
+                        .is_some_and(|text| query.matches(text))
                     || plugin
                         .author
                         .as_deref()
-                        .is_some_and(|text| text.to_lowercase().contains(&query));
+                        .is_some_and(|text| query.matches(text));
                 category_matches && query_matches
             })
             .collect();

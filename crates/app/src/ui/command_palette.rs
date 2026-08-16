@@ -65,10 +65,10 @@ impl WorkbenchApp {
             });
         }
 
-        // 过滤
-        let query = self.command_palette.query.to_lowercase();
+        // 过滤（普通词字面量 / re: 正则）
+        let query = tool_panels::SearchQuery::new(&self.command_palette.query, false);
         if !query.is_empty() {
-            entries.retain(|e| e.label.to_lowercase().contains(&query));
+            entries.retain(|e| query.matches(&e.label));
         }
 
         // 排序：先按分类分组，组内按最近使用（usage_order 中 position 越小越靠前）。
