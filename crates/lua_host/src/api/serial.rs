@@ -18,13 +18,20 @@ use crate::host_services::{LuaHostServices, line_buffer_key};
 
 /// 简单 Lua pattern 匹配：支持 `^` 锚点和子串匹配。
 ///
-/// `^xxx`：行首匹配。部分固件（如某些 Marlin 分支）会在每行响应前加一个
-/// `(数字)` 调试/时间戳前缀（如 `(0.00000)ok*43`）。为兼容这类固件，`^` 锚定
-/// 会先跳过行首一个可选的 `(...)` 前缀（以 `(` 开头、`)` 结尾、内部无换行），
-/// 再做 starts_with。行首无 `(` 时行为不变，向后兼容。
+/// 响应模式匹配。三种形态：
 ///
-/// 无 `^`：子串匹配（contains）。
+/// - `re:<regex>`：正则匹配（Rust regex 语法）。同样先跳过行首可选的 `(...)`
+///   前缀再做匹配；正则内自行用 `^`/`$` 锚定。编译结果按模式字符串缓存。
+/// - `^xxx`：行首匹配。部分固件（如某些 Marlin 分支）会在每行响应前加一个
+///   `(数字)` 调试/时间戳前缀（如 `(0.00000)ok*43`）。为兼容这类固件，`^` 锚定
+///   会先跳过行首一个可选的 `(...)` 前缀（以 `(` 开头、`)` 结尾、内部无换行），
+///   再做 starts_with。行首无 `(` 时行为不变，向后兼容。
+/// - 无前缀：子串匹配（contains）。
 pub(crate) fn match_pat(line: &str, pat: &str) -> bool {
+    if let Some(regex) = pat.strip_prefix("re:") {
+        let after_prefix = strip_leading_paren_prefix(line);
+        return compile_cached_regex(regex).is_some_and(|re| re.is_match(after_prefix));
+    }
     if let Some(suffix) = pat.strip_prefix('^') {
         // 跳过行首可选的 (...) 前缀，兼容带 (0.00000) 前缀的固件响应。
         let after_prefix = strip_leading_paren_prefix(line);
@@ -32,6 +39,33 @@ pub(crate) fn match_pat(line: &str, pat: &str) -> bool {
     } else {
         line.contains(pat)
     }
+}
+
+/// 按模式字符串缓存编译结果；非法正则返回 None（并记录一次警告）。
+fn compile_cached_regex(pattern: &str) -> Option<&'static regex::Regex> {
+    use std::sync::{Mutex, OnceLock};
+
+    static CACHE: OnceLock<
+        Mutex<std::collections::HashMap<String, Option<&'static regex::Regex>>>,
+    > = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut map = cache.lock().expect("regex cache poisoned");
+    if let Some(entry) = map.get(pattern) {
+        return *entry;
+    }
+    let compiled = match regex::Regex::new(pattern) {
+        Ok(re) => {
+            // Box::leak 返回 &'static mut，显式收窄为 &'static 共享引用后缓存。
+            let leaked: &'static regex::Regex = Box::leak(Box::new(re));
+            Some(leaked)
+        }
+        Err(e) => {
+            log::warn!("serial expect: invalid regex pattern {pattern:?}: {e}");
+            None
+        }
+    };
+    map.insert(pattern.to_owned(), compiled);
+    *map.get(pattern).expect("inserted entry exists")
 }
 
 /// 若 `line` 以 `(...)` 开头（`(` 到第一个 `)`，内部无换行），返回去掉该前缀
@@ -717,5 +751,35 @@ mod tests {
     fn match_pat_paren_prefix_no_close_is_left_as_is() {
         // 行首 ( 但无 )：不当作前缀，原样 starts_with（必然不匹配 ^ok）
         assert!(!match_pat("(unclosed ok", "^ok"));
+    }
+
+    #[test]
+    fn match_pat_regex_prefix() {
+        // re: 前缀走正则（Rust regex 语法），自动跳过 (...) 前缀后匹配
+        assert!(match_pat("done", "re:^done$"));
+        assert!(!match_pat("DONE", "re:^done$")); // regex 默认区分大小写
+        assert!(match_pat("(0.00000)done", "re:^done$"));
+        assert!(match_pat("M105 ok 12.3", "re:\\d+\\.\\d+"));
+        assert!(!match_pat("M105 ok 12.3", "re:^error"));
+        assert!(!match_pat("rookie ok", "re:^ok"));
+    }
+
+    #[test]
+    fn match_pat_regex_skips_paren_prefix() {
+        assert!(match_pat("(1.234)ok", "re:^ok"));
+        assert!(!match_pat("(1.234)rookie", "re:^ok"));
+        assert!(match_pat("(1.234)Error:Line Number", "re:^Error"));
+    }
+
+    #[test]
+    fn match_pat_invalid_regex_returns_false() {
+        // 非法正则不 panic，按不匹配处理
+        assert!(!match_pat("anything", "re:["));
+    }
+
+    #[test]
+    fn match_pat_regex_ignore_case_flag() {
+        // (?i) 内联标志可用
+        assert!(match_pat("DONE", "re:(?i)^done$"));
     }
 }

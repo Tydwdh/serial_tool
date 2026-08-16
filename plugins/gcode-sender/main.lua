@@ -17,11 +17,13 @@ local COMMAND = {
 local DEFAULTS = {
     default_setup_gcode = "",
     append_program_end = false,
+    omit_line_numbers = false,
     ack_timeout_ms = 300000,
     start_timeout_ms = 3000,
     eof_delay_ms = 1000,
     error_followup_ms = 2000,
-    max_marlin_line_bytes = 96,
+    custom_success_patterns = "",
+    custom_error_patterns = "",
     max_retries = 3,
 }
 
@@ -45,16 +47,30 @@ local function bounded_int(key, minimum, maximum)
     return math.max(minimum, math.min(maximum, value))
 end
 
+-- 将 textarea 多行内容拆成正则列表；空行与 # 注释行忽略。
+local function parse_pattern_lines(text)
+    local result = {}
+    for line in tostring(text or ""):gmatch("[^\r\n]+") do
+        local pat = trim(line)
+        if pat ~= "" and not pat:match("^#") then
+            result[#result + 1] = pat
+        end
+    end
+    return result
+end
+
 -- 读取设置快照（一次调用，避免每行重复查 config）
 local function settings()
     return {
         setup_gcode = trim(sget("default_setup_gcode")),
         append_program_end = sget("append_program_end") == true,
+        omit_line_numbers = sget("omit_line_numbers") == true,
         ack_timeout_ms = bounded_int("ack_timeout_ms", 1000, 600000),
         start_timeout_ms = bounded_int("start_timeout_ms", 500, 30000),
         eof_delay_ms = bounded_int("eof_delay_ms", 0, 10000),
         error_followup_ms = bounded_int("error_followup_ms", 100, 10000),
-        max_line_bytes = bounded_int("max_marlin_line_bytes", 32, 256),
+        success_patterns = parse_pattern_lines(sget("custom_success_patterns")),
+        error_patterns = parse_pattern_lines(sget("custom_error_patterns")),
         max_retries = bounded_int("max_retries", 0, 20),
     }
 end
@@ -225,8 +241,6 @@ local function new_entry_builder(s)
         settings = s,
         entries = {},
         skipped_m110 = 0,
-        invalid_lines = {},
-        invalid_count = 0,
         last_clean = "",
         content_count = 0,
     }
@@ -267,21 +281,16 @@ local function append_clean_entry(builder, raw_line, origin, source_line, is_con
     end
     builder.last_clean = clean
     local no = #builder.entries + 1
-    local wire = checksum_line(clean, no)
-    if #wire > builder.settings.max_line_bytes then
-        builder.invalid_count = builder.invalid_count + 1
-        if #builder.invalid_lines < 5 then
-            builder.invalid_lines[#builder.invalid_lines + 1] = {
-                location = origin_label(origin, source_line),
-                bytes = #wire,
-                source = clean,
-            }
-        end
-        return
+    -- omit_line_numbers：发送原始行（依赖固件无校验模式）；否则加行号与校验和。
+    local wire
+    if builder.settings.omit_line_numbers then
+        wire = clean
+    else
+        wire = checksum_line(clean, no)
     end
 
     builder.entries[#builder.entries + 1] = {
-        no = no,
+        no = builder.settings.omit_line_numbers and nil or no,
         source = clean,
         wire = wire,
         origin = origin,
@@ -309,24 +318,6 @@ local function finish_entries(builder)
         log("debug", "跳过输入中的 M110: " .. builder.skipped_m110 .. " 行")
     end
     return builder
-end
-
-local function report_preflight(builder, task)
-    if builder.invalid_count == 0 then
-        return true
-    end
-
-    for _, item in ipairs(builder.invalid_lines) do
-        log("error", string.format("%s过长 (%dB > %dB): %s",
-            item.location, item.bytes, builder.settings.max_line_bytes, item.source))
-    end
-    if builder.invalid_count > #builder.invalid_lines then
-        log("error", string.format("另有 %d 行过长", builder.invalid_count - #builder.invalid_lines))
-    end
-    log("error", string.format("预检失败：共 %d 行超过 Marlin 行长限制，未发送任何命令",
-        builder.invalid_count))
-    task:set_status("存在超长 G-code，未发送")
-    return false
 end
 
 local function entries_from_text(text, s)
@@ -391,6 +382,31 @@ end
 
 -- ── single line send ──
 
+---@param s table 设置快照（含 success_patterns / error_patterns）
+---@return table patterns 表：内置 RESPONSE_PATTERNS + 用户自定义正则（re: 前缀）
+local function response_patterns(s)
+    local patterns = {}
+    for _, item in ipairs(RESPONSE_PATTERNS) do
+        patterns[#patterns + 1] = item
+    end
+    -- 用户自定义成功/错误正则：命中即视为 ok / error，走既有分支逻辑。
+    for _, re in ipairs(s.success_patterns) do
+        patterns[#patterns + 1] = {
+            name = "ok",
+            pattern = "re:" .. re,
+            action = "return",
+        }
+    end
+    for _, re in ipairs(s.error_patterns) do
+        patterns[#patterns + 1] = {
+            name = "error",
+            pattern = "re:" .. re,
+            action = "return",
+        }
+    end
+    return patterns
+end
+
 ---@param port string
 ---@param wire string
 ---@param s table
@@ -404,7 +420,7 @@ local function send_and_wait(port, wire, s, task, timeout_ms)
         timeout_ms = timeout_ms or s.ack_timeout_ms,
         continue_resets_timeout = true,
         flush_before_send = false,
-        patterns = RESPONSE_PATTERNS,
+        patterns = response_patterns(s),
     })
 
     if task:is_cancelled() or resp.err == "cancelled" then
@@ -518,16 +534,21 @@ local function run_entries(port, entries, s, task)
 
     ctx.serial.flush_rx(port)
 
-    if not send_start_command(port, s, task) then
-        task:set_status("行号同步失败")
-        return
+    -- 无校验模式（omit_line_numbers）没有行号体系，无需 M110 同步。
+    if not s.omit_line_numbers then
+        if not send_start_command(port, s, task) then
+            task:set_status("行号同步失败")
+            return
+        end
     end
 
-    -- 构建行号→索引用 map（一次性）
+    -- 构建行号→索引用 map（一次性）；无校验模式没有行号，无需构建
     local index_by_no = {}
-    for i, e in ipairs(entries) do
-        if e.no then
-            index_by_no[e.no] = i
+    if not s.omit_line_numbers then
+        for i, e in ipairs(entries) do
+            if e.no then
+                index_by_no[e.no] = i
+            end
         end
     end
 
@@ -572,6 +593,13 @@ local function run_entries(port, entries, s, task)
                 text = string.format("已确认 %d/%d", max_done, total)
             })
         elseif result.kind == "resend" then
+            if s.omit_line_numbers then
+                -- 无校验模式没有行号体系，无法定位重传位置，只能停止。
+                task:set_status("设备请求重传但未启用行号校验")
+                log("error", string.format("无校验模式下收到重传请求（%s）: %s",
+                    label, result.line or ""))
+                return
+            end
             if result.no == total + 1 then
                 -- ACK 丢失后重发最后一行时，Marlin 可能告知下一期待序号。
                 pos = total + 1
@@ -673,9 +701,6 @@ local function start_task(port, prepare)
             if builder.content_count == 0 then
                 task:set_status("没有可发送的 G-code")
                 log("warn", "输入中没有可发送的 G-code")
-                return
-            end
-            if not report_preflight(builder, task) then
                 return
             end
             run_entries(port, builder.entries, s, task)

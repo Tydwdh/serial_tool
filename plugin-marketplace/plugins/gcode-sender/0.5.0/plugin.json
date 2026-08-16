@@ -2,7 +2,7 @@
   "$schema": "../plugin.schema.json",
   "id": "gcode-sender",
   "name": "G-code Sender",
-  "version": "0.6.0",
+  "version": "0.5.0",
   "api_version": "0.1",
   "runtime": "lua",
   "main": "main.lua",
@@ -104,18 +104,14 @@
         "description": "收到 Error 后继续读取响应的时间"
       },
       {
-        "id": "custom_success_patterns",
-        "title": "自定义成功匹配（正则）",
-        "kind": "textarea",
-        "default": "",
-        "description": "每行一个正则（Rust regex 语法），命中即视为命令执行成功，即使设备不回 ok。示例：^done$、completed。空行与 # 开头的行忽略"
-      },
-      {
-        "id": "custom_error_patterns",
-        "title": "自定义错误匹配（正则）",
-        "kind": "textarea",
-        "default": "",
-        "description": "每行一个正则（Rust regex 语法），命中即视为设备错误并停止发送。示例：thermal runaway、(?i)^!!。空行与 # 开头的行忽略"
+        "id": "max_marlin_line_bytes",
+        "title": "最大行长度 (字节)",
+        "kind": "number",
+        "default": 96,
+        "min": 32,
+        "max": 256,
+        "step": 8,
+        "description": "包含行号和校验和后的最大行长；任一行超限会阻止整个作业发送"
       },
       {
         "id": "max_retries",

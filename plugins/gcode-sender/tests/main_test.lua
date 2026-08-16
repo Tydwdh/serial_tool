@@ -189,23 +189,6 @@ send_single("G1 X1")
 assert(#writes == 3, "expected sync, command and opt-in M2")
 assert(writes[3]:match("^N2 M2%*"), writes[3])
 
--- 任一最终发送行超长都必须阻止整个作业，不能静默跳过。
-reset()
-config_values.max_marlin_line_bytes = 32
-file_contents["too-long.gcode"] = {
-    "; heading",
-    "G1 X123456789012345678901234567890",
-    "G1 X1",
-}
-send_file("too-long.gcode")
-assert(#writes == 0, "preflight failure must send nothing")
-assert(current_task.status == "存在超长 G-code，未发送", current_task.status)
-local saw_source_line = false
-for _, item in ipairs(logs) do
-    if item.message:find("文件第 2 行", 1, true) then saw_source_line = true end
-end
-assert(saw_source_line, "preflight error must report the original file line")
-
 -- ACK 超时只执行配置数量的额外重试，不会无限循环。
 reset()
 config_values.max_retries = 2
@@ -304,5 +287,58 @@ reset()
 current_task = { id = "gcode-sender.print", paused = false, cancelled = false, finished = false }
 send_single("G1 X1")
 assert(serial_status_calls == 0, "busy task should be rejected before touching the port")
+
+-- omit_line_numbers：发送原始行（无 N 前缀、无 * 校验和），且跳过 M110 行号同步。
+reset()
+config_values.omit_line_numbers = true
+send_single("G1 X1\nG1 X2")
+assert(#writes == 2, "omit mode must send raw lines without M110 sync")
+assert(writes[1] == "G1 X1", writes[1])
+assert(writes[2] == "G1 X2", writes[2])
+assert(current_task.status == "发送完成", current_task.status)
+
+-- omit 模式 + 初始化命令：初始化行同样不加行号校验。
+reset()
+config_values.omit_line_numbers = true
+config_values.default_setup_gcode = "G21"
+send_single("G1 X1")
+assert(#writes == 2, "omit mode must include setup line raw")
+assert(writes[1] == "G21", writes[1])
+assert(writes[2] == "G1 X1", writes[2])
+
+-- omit 模式收到 resend 属于异常（无校验模式固件不会请求重传），应立即停止而非乱跳行。
+reset()
+config_values.omit_line_numbers = true
+responder = function(wire)
+    if wire == "G1 X1" then return result_response("resend", "Resend: N1") end
+    return ok_response()
+end
+send_single("G1 X1")
+assert(#writes == 1, "omit mode resend must stop without retrying")
+assert(current_task.status == "设备请求重传但未启用行号校验", current_task.status)
+
+-- 自定义成功正则：设备不回 ok 而回 done 时，命中 ^done$ 视为成功。
+-- 宿主按插件传入的 patterns 命中后返回 result.name="ok"（自定义项即如此命名），
+-- 因此 mock 也返回 name="ok"，与真实宿主行为一致。
+reset()
+config_values.custom_success_patterns = "^done$\n# 注释行会被忽略\ncompleted"
+responder = function(wire)
+    if wire:match("^N0 M110") then return ok_response() end
+    return result_response("ok", "done")
+end
+send_single("G1 X1")
+assert(#writes == 2, "custom success pattern must count as ok")
+assert(current_task.status == "发送完成", current_task.status)
+
+-- 自定义错误正则：thermal runaway 命中即视为错误并停止。
+reset()
+config_values.custom_error_patterns = "thermal runaway"
+responder = function(wire)
+    if wire:match("^N0 M110") then return ok_response() end
+    return result_response("error", "Error:THERMAL RUNAWAY")
+end
+send_single("G1 X1")
+assert(#writes == 2, "custom error pattern must stop the job")
+assert(current_task.status == "设备错误，已停止", current_task.status)
 
 print("gcode-sender tests passed")

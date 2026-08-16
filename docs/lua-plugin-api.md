@@ -258,6 +258,24 @@ end
 `continue_resets_timeout` 默认为 `false`。启用后，匹配到
 `action = "continue"` 的响应会把等待截止时间延后一个 `timeout_ms`，取消任务仍会立即结束等待。
 
+### patterns 匹配规则
+
+每条 pattern 支持三种形态（与设备响应匹配）：
+
+- **`re:<regex>`**：正则匹配（Rust regex 语法，区分大小写；可用 `(?i)` 内联标志忽略大小写）。
+  同样会先跳过行首可选的 `(数字)` 时间戳前缀，再对剩余部分做匹配；锚定用正则自身的 `^`/`$`。
+  非法正则不匹配任何行（宿主会记录一条 warning）。
+- **`^xxx`**：行首匹配（跳过行首可选的 `(数字)` 前缀后做 `starts_with`）。
+- **无前缀**：子串匹配（`contains`）。
+
+```lua
+patterns = {
+  { name = "ok",    pattern = "re:^ok\\b", action = "return" },
+  { name = "busy",  pattern = "busy",        action = "continue" },
+  { name = "error", pattern = "re:^[Ee]rror", action = "return" }
+}
+```
+
 ## ctx.dialog
 
 需要权限：`dialog`
