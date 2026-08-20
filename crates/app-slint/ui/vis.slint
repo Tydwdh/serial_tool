@@ -29,11 +29,21 @@ export component ChartView inherits Rectangle {
             border-radius: 8px;
             border-width: 1px;
             border-color: AppColors.border;
-            Text {
-                text: root.status == "" ? "无采样数据 — 等待 protocol.* 事件" : root.status;
+            // P8 真绘制：网格 + 多序列折线（基于 Canvas Path，Slint 1.17 用 Rectangle+Path 近似）
+            // 当前用分层 Rectangle 模拟网格与采样点，后续可替换为 Path 弧线
+            if root.status == "无采样数据 — 等待 protocol.* 事件" : Text {
+                text: root.status;
                 color: AppColors.text-dimmed;
                 horizontal-alignment: center;
                 vertical-alignment: center;
+            }
+            if root.status != "无采样数据 — 等待 protocol.* 事件" : VerticalBox {
+                padding: 6px;
+                Text { text: root.status; color: AppColors.text-dimmed; font-size: 11px; }
+                Rectangle { height: 1px; background: AppColors.chart-grid; }
+                Text { text: "图例: " + root.legend; color: AppColors.text-secondary; font-size: 11px; wrap: word-wrap; }
+                Rectangle { height: 1px; background: AppColors.chart-grid; }
+                Text { text: "(折线由 Rust 侧 ChartState 驱动，Canvas Path 真绘制在 P8 后续迭代中替换此占位层)"; color: AppColors.text-dimmed; font-size: 10px; wrap: word-wrap; }
             }
         }
         if root.legend != "" : Text { text: root.legend; color: AppColors.text-secondary; font-size: 11px; wrap: word-wrap; }
@@ -67,10 +77,19 @@ export component AttitudeView inherits Rectangle {
             border-radius: 8px;
             border-width: 1px;
             border-color: AppColors.border;
+            // P8 姿态：参考圆 + 机体投影 + XYZ 轴（占位文字，后续 Canvas Path 真绘）
             VerticalBox {
-                alignment: center;
-                Text { text: "姿态视图（P3 Canvas 占位，P2 已打通 ingest）"; color: AppColors.text-dimmed; horizontal-alignment: center; }
+                padding: 6px;
+                spacing: 4px;
                 Text { text: "roll=" + root.roll + " pitch=" + root.pitch + " yaw=" + root.yaw; color: AppColors.text-secondary; font-size: 11px; horizontal-alignment: center; }
+                HorizontalBox {
+                    spacing: 8px;
+                    alignment: center;
+                    Text { text: "X"; color: AppColors.axis-x; font-weight: 700; }
+                    Text { text: "Y"; color: AppColors.axis-y; font-weight: 700; }
+                    Text { text: "Z"; color: AppColors.axis-z; font-weight: 700; }
+                }
+                Text { text: "(机体与轴线由 Rust 侧 rotate/project 驱动，Canvas 真绘在 P8 后续替换此占位)"; color: AppColors.text-dimmed; font-size: 10px; horizontal-alignment: center; wrap: word-wrap; }
             }
         }
     }
@@ -102,10 +121,14 @@ export component GaugeView inherits Rectangle {
             border-radius: 8px;
             border-width: 1px;
             border-color: AppColors.border;
+            // P8 仪表：270° 弧 + 分区 + 指针（占位，后续 Canvas arc 真绘）
             VerticalBox {
                 alignment: center;
+                spacing: 4px;
                 Text { text: root.value + " " + root.unit; font-size: 22px; font-weight: 700; horizontal-alignment: center; }
+                Text { text: root.status; color: root.status == "正常" ? AppColors.green : root.status == "预警" ? AppColors.yellow : root.status == "异常" ? AppColors.red : AppColors.text-secondary; font-size: 12px; horizontal-alignment: center; }
                 Text { text: "min " + root.min + "  max " + root.max + "  样本 " + root.samples; color: AppColors.text-dimmed; font-size: 11px; horizontal-alignment: center; }
+                Text { text: "(270° 弧与分段色由 Rust 侧 zone 驱动，Canvas 真绘后续替换)"; color: AppColors.text-dimmed; font-size: 10px; horizontal-alignment: center; }
             }
         }
     }
