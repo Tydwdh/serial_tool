@@ -19,6 +19,10 @@ slint = "1.17"
 tool-core = { path = "../core" }
 tool-databus = { path = "../databus" }
 tool-transport = { path = "../transport" }
+tool-panels = { path = "../panels" }
+tool-recorder = { path = "../recorder" }
+egui = { workspace = true }
+env_logger = "0.11"
 log = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -1,4 +1,5 @@
 import { Button, LineEdit, ListView, VerticalBox, HorizontalBox, GroupBox } from "std-widgets.slint";
+import { AppColors } from "palette.slint";
 
 export component AppWindow inherits Window {
     title: "硬件调试工作台 — Slint 预览 (POC)";
@@ -10,6 +11,7 @@ export component AppWindow inherits Window {
 
     // 状态（后续对接 tool-transport / databus）
     in-out property <string> status-text: "Slint 壳已就绪 — 后续在此对接 core/databus/transport";
+    in-out property <string> status-level: "info";
     in-out property <string> rx-preview: "[POC] 终端预览：此处将展示串口/网络串口 RX 流";
     in-out property <string> tx-input: "";
     in-out property <string> log-preview: "[POC] 日志预览";
@@ -18,6 +20,7 @@ export component AppWindow inherits Window {
     // 回调（Rust 侧绑定）
     callback tx-send(string);
     callback open-config-folder();
+    callback change-theme(string);
     callback request-close();
 
     VerticalBox {
@@ -60,20 +63,22 @@ export component AppWindow inherits Window {
                 VerticalBox {
                     spacing: 6px;
                     Rectangle {
-                        background: #0f1115;
+                        background: AppColors.bg-secondary;
                         border-radius: 8px;
+                        border-width: 1px;
+                        border-color: AppColors.border;
                         vertical-stretch: 1;
                         VerticalBox {
                             padding: 10px;
                             Text {
                                 text: root.rx-preview;
-                                color: #d6e2ff;
+                                color: AppColors.text-primary;
                                 font-size: 12px;
                                 wrap: word-wrap;
                             }
                             Text {
                                 text: "提示：真实数据流在 tool-transport → tool-databus → 事件总线，Slint 侧通过 callback/timer 订阅即可。";
-                                color: #8aa0c8;
+                                color: AppColors.text-secondary;
                                 font-size: 11px;
                                 wrap: word-wrap;
                             }

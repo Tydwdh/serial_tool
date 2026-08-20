@@ -1,0 +1,60 @@
+import { AppColors } from "palette.slint";
+
+// 通用：卡片容器（对齐设计规范 8px 圆角、边框、阴影淡化用 Rectangle 边框模拟）
+export component Card inherits Rectangle {
+    in property <string> title;
+    in property <length> pad: 12px;
+    in property <bool> elevated: false;
+    background: AppColors.bg-card;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: AppColors.border;
+
+    VerticalBox {
+        padding: root.pad;
+        spacing: 8px;
+        if root.title != "" : Text {
+            text: root.title;
+            font-size: 12px;
+            font-weight: 700;
+            color: AppColors.text-primary;
+        }
+        @children
+    }
+}
+
+export component StatusPill inherits Rectangle {
+    in property <string> text;
+    in property <color> bg: AppColors.blue-bg;
+    in property <color> fg: AppColors.text-white;
+    height: 22px;
+    border-radius: 11px;
+    background: root.bg;
+    HorizontalBox {
+        padding-left: 8px;
+        padding-right: 8px;
+        Text {
+            text: root.text;
+            font-size: 10px;
+            color: root.fg;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component SectionHeader inherits HorizontalBox {
+    in property <string> title;
+    in property <string> subtitle;
+    spacing: 8px;
+    Text {
+        text: root.title;
+        font-size: 13px;
+        font-weight: 700;
+        color: AppColors.text-primary;
+    }
+    if root.subtitle != "" : Text {
+        text: root.subtitle;
+        font-size: 11px;
+        color: AppColors.text-secondary;
+    }
+}

@@ -1,0 +1,74 @@
+// 全局调色板：对齐 assets/themes/*.json + tool-panels/theme.rs 的语义色
+// 由 Rust 侧 load_theme_file / set_active_theme 批量写入，Slint 侧只读
+
+export global AppColors {
+    // 背景层级
+    in-out property <color> bg-deep: #21252b;
+    in-out property <color> bg-primary: #23272f;
+    in-out property <color> bg-secondary: #1c2026;
+    in-out property <color> bg-tertiary: #2b313c;
+    in-out property <color> bg-card: #262b35;
+    in-out property <color> bg-input: #1f242d;
+    in-out property <color> bg-hover: #313844;
+    in-out property <color> bg-selection: #67769660;
+
+    // 边框/分隔
+    in-out property <color> border: #272d37;
+    in-out property <color> border-light: #303844;
+    in-out property <color> separator: #303844;
+    in-out property <color> separator-strong: #465264;
+
+    // 文本
+    in-out property <color> text-primary: #cdd3de;
+    in-out property <color> text-secondary: #919aa8;
+    in-out property <color> text-dimmed: #78808c;
+    in-out property <color> text-white: #e8ecf3;
+
+    // 语义色
+    in-out property <color> red: #ed6c73;
+    in-out property <color> green: #89b46c;
+    in-out property <color> yellow: #d2a65a;
+    in-out property <color> blue: #508cd2;
+    in-out property <color> purple: #af6cc8;
+    in-out property <color> cyan: #489eaa;
+    in-out property <color> orange: #d28c50;
+
+    // 半透明背景（通知/徽标）
+    in-out property <color> red-bg: #ed6c7346;
+    in-out property <color> green-bg: #89b46c46;
+    in-out property <color> yellow-bg: #d2a65a46;
+    in-out property <color> blue-bg: #508cd246;
+    in-out property <color> purple-bg: #af6cc846;
+    in-out property <color> cyan-bg: #489eaa46;
+    in-out property <color> orange-bg: #d28c5046;
+
+    // 控件 / Tab
+    in-out property <color> tab-bar-bg: #21252b;
+    in-out property <color> tab-bar-border: transparent;
+    in-out property <color> tab-active-bg: #282c34;
+    in-out property <color> tab-active-border: transparent;
+    in-out property <color> tab-active-text: #dcdcdc;
+    in-out property <color> tab-inactive-bg: #21252b;
+    in-out property <color> tab-inactive-text: #9da5b4;
+    in-out property <color> toggle-selected-bg: #2c5884;
+    in-out property <color> toggle-selected-text: #e8ecf3;
+    in-out property <color> toggle-selected-border: #508cd2;
+
+    // 图表/姿态/仪表
+    in-out property <color> chart-bg: #1c2026;
+    in-out property <color> chart-grid: #2b313c;
+    in-out property <color> chart-crosshair: #465264;
+    in-out property <color> chart-tooltip-bg: #1c2026;
+    in-out property <color> attitude-bg: #1c2026;
+    in-out property <color> attitude-body: #d2a65a;
+    in-out property <color> attitude-body-edge: #d28c50;
+    in-out property <color> axis-x: #ed6c73;
+    in-out property <color> axis-y: #89b46c;
+    in-out property <color> axis-z: #508cd2;
+    in-out property <color> gauge-bg: #1c2026;
+    in-out property <color> gauge-arc: #303844;
+    in-out property <color> gauge-value: #489eaa;
+
+    // 通用：是否深色（由 Rust 写入，供 Slint 分支）
+    in-out property <bool> is-dark: true;
+}
