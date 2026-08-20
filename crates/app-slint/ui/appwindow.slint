@@ -1,0 +1,157 @@
+import { Button, LineEdit, ListView, VerticalBox, HorizontalBox, GroupBox } from "std-widgets.slint";
+
+export component AppWindow inherits Window {
+    title: "硬件调试工作台 — Slint 预览 (POC)";
+    preferred-width: 1100px;
+    preferred-height: 720px;
+    min-width: 900px;
+    min-height: 520px;
+    icon: @image-url("../../app/../../assets/app-icon-256.png");
+
+    // 状态（后续对接 tool-transport / databus）
+    in-out property <string> status-text: "Slint 壳已就绪 — 后续在此对接 core/databus/transport";
+    in-out property <string> rx-preview: "[POC] 终端预览：此处将展示串口/网络串口 RX 流";
+    in-out property <string> tx-input: "";
+    in-out property <string> log-preview: "[POC] 日志预览";
+    in-out property <int> launch-count: 0;
+
+    // 回调（Rust 侧绑定）
+    callback tx-send(string);
+    callback open-config-folder();
+    callback request-close();
+
+    VerticalBox {
+        padding: 12px;
+        spacing: 10px;
+
+        // 顶部状态栏
+        HorizontalBox {
+            spacing: 8px;
+            alignment: start;
+            Text {
+                text: "Slint 分支";
+                font-size: 15px;
+                font-weight: 700;
+            }
+            Text {
+                text: "·";
+                color: #888;
+            }
+            Text {
+                text: root.status-text;
+                color: #555;
+                font-size: 12px;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Button {
+                text: "打开配置目录";
+                clicked => { root.open-config-folder(); }
+            }
+        }
+
+        // 中部：左 终端 / 右 控制
+        HorizontalBox {
+            spacing: 12px;
+
+            GroupBox {
+                title: "终端 (POC — 只做展示，不接真串口)";
+                vertical-stretch: 1;
+                horizontal-stretch: 1;
+                VerticalBox {
+                    spacing: 6px;
+                    Rectangle {
+                        background: #0f1115;
+                        border-radius: 8px;
+                        vertical-stretch: 1;
+                        VerticalBox {
+                            padding: 10px;
+                            Text {
+                                text: root.rx-preview;
+                                color: #d6e2ff;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: "提示：真实数据流在 tool-transport → tool-databus → 事件总线，Slint 侧通过 callback/timer 订阅即可。";
+                                color: #8aa0c8;
+                                font-size: 11px;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                    HorizontalBox {
+                        spacing: 8px;
+                        LineEdit {
+                            placeholder-text: "输入要发送的内容（POC，不真发）";
+                            text <=> root.tx-input;
+                            horizontal-stretch: 1;
+                            accepted(text) => { root.tx-send(text); }
+                        }
+                        Button {
+                            text: "发送";
+                            primary: true;
+                            clicked => { root.tx-send(root.tx-input); }
+                        }
+                    }
+                }
+            }
+
+            VerticalBox {
+                spacing: 10px;
+                width: 360px;
+
+                GroupBox {
+                    title: "控制";
+                    VerticalBox {
+                        spacing: 8px;
+                        Button {
+                            text: "模拟一次发送 (计数+1)";
+                            clicked => { root.tx-send(root.tx-input); }
+                        }
+                        Text {
+                            text: "已触发: " + root.launch-count + " 次";
+                            font-size: 12px;
+                            color: #444;
+                        }
+                    }
+                }
+
+                GroupBox {
+                    title: "日志 (POC)";
+                    vertical-stretch: 1;
+                    ListView {
+                        vertical-stretch: 1;
+                        for _i in 6 : Rectangle {
+                            height: 28px;
+                            Text {
+                                text: root.log-preview + " #" + _i;
+                                font-size: 11px;
+                                color: #333;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                GroupBox {
+                    title: "说明";
+                    Text {
+                        text: "本窗口为 app-slint 最小可跑空壳。\n• 已加入 workspace，不影响 crates/app (egui)。\n• 已引入 tool-core/databus/transport 依赖，后续可复用。\n• 样式: fluent，可后续换自定义主题。";
+                        font-size: 11px;
+                        color: #555;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+
+        HorizontalBox {
+            alignment: end;
+            Text {
+                text: "分支: slint  |  crates/app-slint  |  cargo run -p hardware-workbench-app-slint";
+                font-size: 10px;
+                color: #888;
+            }
+        }
+    }
+}

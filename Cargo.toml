@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/app",
+    "crates/app-slint",
     "crates/core",
     "crates/databus",
     "crates/extension",

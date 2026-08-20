@@ -1,0 +1,31 @@
+[package]
+name = "hardware-workbench-app-slint"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Hardware Workbench — Slint shell (POC, coexists with egui app)"
+
+[[bin]]
+name = "hardware-workbench-app-slint"
+path = "src/main.rs"
+
+[dependencies]
+slint = "1.12"
+tool-core = { path = "../core" }
+tool-databus = { path = "../databus" }
+tool-transport = { path = "../transport" }
+log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+crossbeam-channel = { workspace = true }
+parking_lot = { workspace = true }
+dirs-next = { workspace = true }
+open = { workspace = true }
+
+[build-dependencies]
+slint-build = "1.12"
