@@ -1,0 +1,72 @@
+import { HorizontalBox, VerticalBox } from "std-widgets.slint";
+import { AppColors } from "palette.slint";
+
+// Chart 真绘制：基于 Path 的折线与网格（P8）
+// Rust 侧通过 chart-points 属性注入归一化坐标（0..1），Slint 侧 Path 按容器尺寸还原
+export component ChartCanvas inherits Rectangle {
+    in-out property <string> status: "";
+    in-out property <[[float]]> series-points: []; // 每序列一组 [x0,y0,x1,y1,...] 归一化
+    in-out property <[color]> series-colors: [];
+    background: AppColors.chart-bg;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: AppColors.border;
+    height: 280px;
+
+    // 占位实现：P8 先用分层文字承载，后续切 Path 时此处替换为 for 循环 Path
+    if status == "无采样数据 — 等待 protocol.* 事件" : Text {
+        text: status;
+        color: AppColors.text-dimmed;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    if status != "无采样数据 — 等待 protocol.* 事件" : VerticalBox {
+        padding: 6px;
+        Text { text: status; color: AppColors.text-dimmed; font-size: 11px; }
+        Rectangle { height: 1px; background: AppColors.chart-grid; }
+        // 待接入：for pts in series-points: Path { stroke: series-colors[idx]; MoveTo ... LineTo ... }
+        Text { text: "ChartCanvas 已就绪 — 点集 " + series-points.length + " 序列，待 Path 真绘制接入"; color: AppColors.text-secondary; font-size: 10px; wrap: word-wrap; }
+    }
+}
+
+export component GaugeCanvas inherits Rectangle {
+    in-out property <float> value: 0;
+    in-out property <float> min: 0;
+    in-out property <float> max: 100;
+    in-out property <string> status: "—";
+    in-out property <string> unit: "";
+    background: AppColors.gauge-bg;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: AppColors.border;
+    height: 200px;
+
+    // 占位：P8 后续用 Path arc 270° 60段 + 指针 line
+    VerticalBox {
+        alignment: center;
+        spacing: 4px;
+        Text { text: value + " " + unit; font-size: 22px; font-weight: 700; horizontal-alignment: center; }
+        Text { text: status; color: status == "正常" ? AppColors.green : status == "预警" ? AppColors.yellow : status == "异常" ? AppColors.red : AppColors.text-secondary; font-size: 12px; horizontal-alignment: center; }
+        Text { text: "270° 弧将在此用 Path 真绘制（已就绪 gauge-angle/polar-point 数学层）"; color: AppColors.text-dimmed; font-size: 10px; horizontal-alignment: center; }
+    }
+}
+
+export component AttitudeCanvas inherits Rectangle {
+    in-out property <float> roll: 0;
+    in-out property <float> pitch: 0;
+    in-out property <float> yaw: 0;
+    in-out property <int> samples: 0;
+    background: AppColors.attitude-bg;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: AppColors.border;
+    height: 320px;
+
+    VerticalBox {
+        padding: 6px;
+        spacing: 4px;
+        Text { text: "roll=" + roll + " pitch=" + pitch + " yaw=" + yaw + " 样本 " + samples; color: AppColors.text-secondary; font-size: 11px; horizontal-alignment: center; }
+        HorizontalBox { spacing: 8px; alignment: center; Text { text: "X"; color: AppColors.axis-x; font-weight: 700; } Text { text: "Y"; color: AppColors.axis-y; font-weight: 700; } Text { text: "Z"; color: AppColors.axis-z; font-weight: 700; } }
+        Text { text: "AttitudeCanvas 已就绪 — rotate/project 已在 canvas_math.rs 就绪，待 Path 真绘制接入"; color: AppColors.text-dimmed; font-size: 10px; horizontal-alignment: center; wrap: word-wrap; }
+    }
+}
