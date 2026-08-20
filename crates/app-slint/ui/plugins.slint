@@ -1,4 +1,4 @@
-import { Button, GroupBox, LineEdit, VerticalBox, HorizontalBox, TabWidget, ProgressIndicator } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, GroupBox, LineEdit, Slider, VerticalBox, HorizontalBox, TabWidget, ProgressIndicator } from "std-widgets.slint";
 import { AppColors } from "palette.slint";
 
 export struct PluginRow { id: string, name: string, version: string, state: string, enabled: bool }
@@ -91,10 +91,13 @@ export component PluginsView inherits Rectangle {
     }
 }
 
+export struct DynamicFieldRow { id: string, label: string, kind: string, value: string, visible: bool, enabled: bool, options: [string] }
+
 export component DynamicFormView inherits Rectangle {
     in-out property <string> panel-id: "";
     in-out property <string> title: "";
-    in-out property <string> fields-json: "[]";
+    in-out property <[DynamicFieldRow]> fields: [];
+    in-out property <string> fields-json: "[]"; // 兼容旧链路，回退展示
     callback field-changed(string, string);
     callback field-action(string);
 
@@ -102,15 +105,30 @@ export component DynamicFormView inherits Rectangle {
         padding: 8px;
         spacing: 8px;
         Text { text: root.title == "" ? "动态面板" : root.title; font-weight: 700; }
-        // P9：按 DynamicFieldKind 细化占位，后续逐 kind 替换为真实 Slint 控件
-        GroupBox {
-            title: "表单字段 (P9 占位 — 13 种 kind)";
-            VerticalBox {
+        if root.fields.length > 0 : VerticalBox {
+            spacing: 8px;
+            for f in root.fields : VerticalBox {
                 spacing: 4px;
-                Text { text: "Text / Number / Boolean / Select / Slider / Button / TextArea / File / Progress / Status / Separator / Label / Serial"; color: AppColors.text-secondary; font-size: 10px; wrap: word-wrap; }
-                Text { text: root.fields-json; color: AppColors.text-dimmed; font-size: 10px; wrap: word-wrap; }
+                if f.visible : HorizontalBox {
+                    spacing: 8px;
+                    Text { text: f.label; width: 96px; vertical-alignment: center; color: f.enabled ? AppColors.text-primary : AppColors.text-dimmed; }
+                    if f.kind == "separator" : Rectangle { height: 1px; background: AppColors.separator; horizontal-stretch: 1; }
+                    if f.kind == "label" : Text { text: f.value; color: AppColors.text-secondary; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; }
+                    if f.kind == "text" : LineEdit { text: f.value; enabled: f.enabled; horizontal-stretch: 1; edited(v) => { root.field-changed(f.id, v); } }
+                    if f.kind == "number" : LineEdit { text: f.value; enabled: f.enabled; horizontal-stretch: 1; edited(v) => { root.field-changed(f.id, v); } }
+                    if f.kind == "textarea" : LineEdit { text: f.value; enabled: f.enabled; horizontal-stretch: 1; edited(v) => { root.field-changed(f.id, v); } }
+                    if f.kind == "boolean" : CheckBox { checked: f.value == "true"; enabled: f.enabled; toggled => { root.field-changed(f.id, self.checked ? "true" : "false"); } }
+                    if f.kind == "select" : ComboBox { model: f.options; current-value: f.value; enabled: f.enabled; selected(v) => { root.field-changed(f.id, v); } horizontal-stretch: 1; }
+                    if f.kind == "serial" : ComboBox { model: f.options; current-value: f.value; enabled: f.enabled; selected(v) => { root.field-changed(f.id, v); } horizontal-stretch: 1; }
+                    if f.kind == "slider" : Slider { value: f.value == "" ? 0 : 0; enabled: f.enabled; changed(v) => { root.field-changed(f.id, v); } horizontal-stretch: 1; }
+                    if f.kind == "button" : Button { text: f.label == "" ? "执行" : f.label; enabled: f.enabled; clicked => { root.field-action(f.id); } }
+                    if f.kind == "file" : HorizontalBox { spacing: 6px; LineEdit { text: f.value; enabled: f.enabled; horizontal-stretch: 1; } Button { text: "浏览"; enabled: f.enabled; clicked => { root.field-action(f.id); } } }
+                    if f.kind == "progress" : ProgressIndicator { progress: f.value == "" ? 0 : 0; }
+                    if f.kind == "status" : Text { text: f.value; color: AppColors.text-secondary; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; }
+                }
             }
         }
-        Text { text: "字段变更将通过 DynamicPanels::set_value 往返 DataBus → 插件（P9 已打通链路，P10 接真控件）"; color: AppColors.text-dimmed; font-size: 10px; wrap: word-wrap; }
+        if root.fields.length == 0 : Text { text: "暂无字段 — 等待插件 ui.panel.create"; color: AppColors.text-dimmed; font-size: 11px; }
+        if root.fields-json != "[]" : Text { text: root.fields-json; color: AppColors.text-dimmed; font-size: 10px; wrap: word-wrap; }
     }
 }
