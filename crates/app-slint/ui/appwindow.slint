@@ -1,7 +1,7 @@
 import { Button, LineEdit, ListView, TabWidget, VerticalBox, HorizontalBox, GroupBox } from "std-widgets.slint";
 import { ChartView, AttitudeView, GaugeView } from "vis.slint";
 import { PluginsView, DynamicFormView } from "plugins.slint";
-import { TerminalView, LogView, DeviceView, SenderView } from "terminal.slint";
+import { TermRow, LogRow, TerminalView, LogView, DeviceView, SenderView } from "terminal.slint";
 import { SettingsView } from "settings.slint";
 import { AppColors } from "palette.slint";
 
@@ -76,6 +76,8 @@ export component AppWindow inherits Window {
     callback dynamic-field-changed(string, string);
     callback dynamic-field-action(string);
     // Terminal/Log/Device/Sender
+    in-out property <[TermRow]> term-rows: [];
+    in-out property <[LogRow]> log-rows: [];
     in-out property <[string]> term-ports: [];
     in-out property <string> term-port-filter: "";
     in-out property <bool> term-show-rx: true;
@@ -183,6 +185,7 @@ export component AppWindow inherits Window {
             Tab {
                 title: "终端";
                 TerminalView {
+                    rows: root.term-rows;
                     ports: root.term-ports;
                     port-filter: root.term-port-filter;
                     show-rx: root.term-show-rx;
@@ -210,6 +213,7 @@ export component AppWindow inherits Window {
             Tab {
                 title: "日志";
                 LogView {
+                    rows: root.log-rows;
                     search: root.log-search;
                     search-case: root.log-search-case;
                     level-filter: root.log-level;

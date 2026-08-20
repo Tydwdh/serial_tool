@@ -274,7 +274,7 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // P5 定时：Terminal/Log ingest + Device 轮询 + Sender 同步到窗口
+    // P5/P7 定时：Terminal/Log ingest + Device/Sender 同步到窗口（含真 rows 模型）
     {
         let win_weak = window.as_weak();
         let term = terminal.clone();
@@ -287,28 +287,62 @@ fn main() -> Result<(), slint::PlatformError> {
             term.borrow_mut().ingest();
             logs.borrow_mut().ingest();
             if let Some(w) = win_weak.upgrade() {
-                // Terminal 行（裁剪到 200 行避免 Slint 单次过重）
-                let rows = term.borrow().visible_rows();
-                let dropped = term.borrow().dropped_count();
+                // Terminal：裁剪后 200 行 + 状态 + ports
+                let (rows, dropped, truncated, ports) = {
+                    let t = term.borrow();
+                    let mut rows = t.visible_rows();
+                    if rows.len() > 200 {
+                        rows = rows.into_iter().rev().take(200).rev().collect();
+                    }
+                    (rows, t.dropped_count(), t.truncated, t.ports_list())
+                };
                 let status = if dropped > 0 {
                     format!("丢弃 {dropped} 条")
-                } else if term.borrow().truncated {
+                } else if truncated {
                     "已截断".to_owned()
                 } else {
                     format!("{} 行", rows.len())
                 };
-                let term_rows: Vec<slint::ModelRc<slint::SharedString>> = Vec::new();
-                let _ = &term_rows;
-                // Slint 行模型：通过 callback 拉取，这里先用状态同步，P5 后续接 StandardListView Model
+                let term_rows: Vec<TermRow> = rows
+                    .into_iter()
+                    .map(|r| TermRow {
+                        id: r.id as i32,
+                        ts: r.ts.into(),
+                        port: r.port.into(),
+                        dir: r.dir.into(),
+                        preview: r.preview.into(),
+                        selected: r.selected,
+                    })
+                    .collect();
+                w.set_term_rows(slint::ModelRc::from(term_rows.as_slice()));
                 w.set_term_status(status.into());
-                w.set_term_ports(slint::ModelRc::from(term.borrow().ports_list().into_iter().map(|s| s.into()).collect::<Vec<slint::SharedString>>().as_slice()));
-                // Log
-                let lrows = logs.borrow().visible_rows();
-                let lstatus = if logs.borrow().dropped_count() > 0 {
-                    format!("丢弃 {}", logs.borrow().dropped_count())
+                w.set_term_ports(slint::ModelRc::from(ports.into_iter().map(|s| s.into()).collect::<Vec<slint::SharedString>>().as_slice()));
+                // Log：裁剪 200 行
+                let (lrows, l_dropped) = {
+                    let l = logs.borrow();
+                    let mut rows = l.visible_rows();
+                    if rows.len() > 200 {
+                        rows = rows.into_iter().rev().take(200).rev().collect();
+                    }
+                    let d = l.dropped_count();
+                    (rows, d)
+                };
+                let lstatus = if l_dropped > 0 {
+                    format!("丢弃 {l_dropped}")
                 } else {
                     format!("{} 条", lrows.len())
                 };
+                let log_rows: Vec<LogRow> = lrows
+                    .into_iter()
+                    .map(|e| LogRow {
+                        id: e.id as i32,
+                        ts: e.ts.into(),
+                        level: format!("{}", e.level).into(),
+                        source: e.source.into(),
+                        text: e.text.into(),
+                    })
+                    .collect();
+                w.set_log_rows(slint::ModelRc::from(log_rows.as_slice()));
                 w.set_log_status(lstatus.into());
                 // Device
                 let d = dev.borrow();

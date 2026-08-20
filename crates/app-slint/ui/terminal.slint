@@ -57,14 +57,14 @@ export component TerminalView inherits Rectangle {
             Button { text: root.search-case ? "Aa*" : "Aa"; clicked => { root.toggle-search-case(); } }
             if root.status != "" : Text { text: root.status; color: AppColors.text-dimmed; font-size: 11px; vertical-alignment: center; }
         }
-        // 行列表（后续可换虚拟化 StandardListView）
+        // 行列表：P7 接真实 rows 模型（后续虚拟化 StandardListView）
         Rectangle {
             background: AppColors.bg-secondary;
             border-radius: 8px;
             border-width: 1px;
             border-color: AppColors.border;
             vertical-stretch: 1;
-            if root.rows.length == 0 : Text { text: "暂无数据"; color: AppColors.text-dimmed; horizontal-alignment: center; vertical-alignment: center; }
+            if root.rows.length == 0 : Text { text: root.status == "" ? "暂无数据 — 等待串口 RX/TX" : root.status; color: AppColors.text-dimmed; horizontal-alignment: center; vertical-alignment: center; }
             if root.rows.length > 0 : VerticalBox {
                 spacing: 1px;
                 padding: 4px;
