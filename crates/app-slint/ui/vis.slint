@@ -1,0 +1,112 @@
+import { Button, GroupBox, HorizontalBox, VerticalBox } from "std-widgets.slint";
+import { AppColors } from "palette.slint";
+
+// Chart：当前用占位+图例，后续接 Canvas 绘制（复用 chart.rs 映射逻辑）
+export component ChartView inherits Rectangle {
+    in-out property <string> title: "折线图";
+    in-out property <bool> paused: false;
+    in-out property <bool> auto-scale: true;
+    in-out property <string> legend: "";
+    in-out property <string> status: "";
+    in-out property <int> window-size: 600;
+    callback toggle-paused();
+    callback toggle-auto-scale();
+    callback clear();
+
+    VerticalBox {
+        padding: 8px;
+        spacing: 8px;
+        HorizontalBox {
+            spacing: 8px;
+            Button { text: root.paused ? "继续" : "暂停"; clicked => { root.toggle-paused(); } }
+            Button { text: root.auto-scale ? "自动:开" : "自动:关"; clicked => { root.toggle-auto-scale(); } }
+            Button { text: "清空"; clicked => { root.clear(); } }
+            Text { text: "窗口 " + root.window-size; color: AppColors.text-dimmed; vertical-alignment: center; }
+        }
+        Rectangle {
+            height: 280px;
+            background: AppColors.chart-bg;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: AppColors.border;
+            Text {
+                text: root.status == "" ? "无采样数据 — 等待 protocol.* 事件" : root.status;
+                color: AppColors.text-dimmed;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        if root.legend != "" : Text { text: root.legend; color: AppColors.text-secondary; font-size: 11px; wrap: word-wrap; }
+    }
+}
+
+export component AttitudeView inherits Rectangle {
+    in-out property <float> roll: 0;
+    in-out property <float> pitch: 0;
+    in-out property <float> yaw: 0;
+    in-out property <int> samples: 0;
+    in-out property <string> source: "none";
+    callback clear();
+
+    VerticalBox {
+        padding: 8px;
+        spacing: 8px;
+        HorizontalBox {
+            spacing: 8px;
+            Text { text: "横滚 " + root.roll; font-size: 11px; }
+            Text { text: "俯仰 " + root.pitch; font-size: 11px; }
+            Text { text: "偏航 " + root.yaw; font-size: 11px; }
+            Text { text: "样本 " + root.samples; color: AppColors.text-dimmed; font-size: 11px; }
+            Text { text: "来源 " + root.source; color: AppColors.text-dimmed; font-size: 11px; }
+            Rectangle { horizontal-stretch: 1; }
+            Button { text: "清空"; clicked => { root.clear(); } }
+        }
+        Rectangle {
+            height: 320px;
+            background: AppColors.attitude-bg;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: AppColors.border;
+            VerticalBox {
+                alignment: center;
+                Text { text: "姿态视图（P3 Canvas 占位，P2 已打通 ingest）"; color: AppColors.text-dimmed; horizontal-alignment: center; }
+                Text { text: "roll=" + root.roll + " pitch=" + root.pitch + " yaw=" + root.yaw; color: AppColors.text-secondary; font-size: 11px; horizontal-alignment: center; }
+            }
+        }
+    }
+}
+
+export component GaugeView inherits Rectangle {
+    in-out property <float> value: 0;
+    in-out property <float> min: 0;
+    in-out property <float> max: 100;
+    in-out property <string> unit: "";
+    in-out property <string> label: "";
+    in-out property <string> status: "—";
+    in-out property <int> samples: 0;
+    callback clear();
+
+    VerticalBox {
+        padding: 8px;
+        spacing: 8px;
+        HorizontalBox {
+            spacing: 8px;
+            Text { text: root.label == "" ? "仪表" : root.label; font-weight: 700; }
+            Text { text: root.status; color: AppColors.text-secondary; }
+            Rectangle { horizontal-stretch: 1; }
+            Button { text: "清空"; clicked => { root.clear(); } }
+        }
+        Rectangle {
+            height: 200px;
+            background: AppColors.gauge-bg;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: AppColors.border;
+            VerticalBox {
+                alignment: center;
+                Text { text: root.value + " " + root.unit; font-size: 22px; font-weight: 700; horizontal-alignment: center; }
+                Text { text: "min " + root.min + "  max " + root.max + "  样本 " + root.samples; color: AppColors.text-dimmed; font-size: 11px; horizontal-alignment: center; }
+            }
+        }
+    }
+}

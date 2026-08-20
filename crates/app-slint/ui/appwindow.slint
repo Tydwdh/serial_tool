@@ -1,4 +1,5 @@
 import { Button, LineEdit, ListView, TabWidget, VerticalBox, HorizontalBox, GroupBox } from "std-widgets.slint";
+import { ChartView, AttitudeView, GaugeView } from "vis.slint";
 import { AppColors } from "palette.slint";
 
 export component AppWindow inherits Window {
@@ -48,6 +49,28 @@ export component AppWindow inherits Window {
     callback replay-next();
     callback replay-set-speed(float);
     callback replay-set-step(int);
+    // Vis
+    in-out property <bool> chart-paused: false;
+    in-out property <bool> chart-auto: true;
+    in-out property <string> chart-legend: "";
+    in-out property <string> chart-status: "";
+    in-out property <float> att-roll: 0;
+    in-out property <float> att-pitch: 0;
+    in-out property <float> att-yaw: 0;
+    in-out property <int> att-samples: 0;
+    in-out property <string> att-source: "none";
+    in-out property <float> gauge-value: 0;
+    in-out property <float> gauge-min: 0;
+    in-out property <float> gauge-max: 100;
+    in-out property <string> gauge-unit: "";
+    in-out property <string> gauge-label: "";
+    in-out property <string> gauge-status: "—";
+    in-out property <int> gauge-samples: 0;
+    callback chart-toggle-paused();
+    callback chart-toggle-auto();
+    callback chart-clear();
+    callback att-clear();
+    callback gauge-clear();
     callback request-close();
 
     VerticalBox {
@@ -186,6 +209,42 @@ export component AppWindow inherits Window {
                         Text { text: (root.replay-progress * 100) + "%"; color: AppColors.text-dimmed; font-size: 11px; }
                     }
                     Text { text: "倍速: " + root.replay-speed + "x  循环:" + (root.replay-loop ? "开" : "关") + "  步长:" + root.replay-step; color: AppColors.text-secondary; font-size: 11px; }
+                }
+            }
+            Tab {
+                title: "图表";
+                ChartView {
+                    paused: root.chart-paused;
+                    auto-scale: root.chart-auto;
+                    legend: root.chart-legend;
+                    status: root.chart-status;
+                    toggle-paused => { root.chart-toggle-paused(); }
+                    toggle-auto-scale => { root.chart-toggle-auto(); }
+                    clear => { root.chart-clear(); }
+                }
+            }
+            Tab {
+                title: "姿态";
+                AttitudeView {
+                    roll: root.att-roll;
+                    pitch: root.att-pitch;
+                    yaw: root.att-yaw;
+                    samples: root.att-samples;
+                    source: root.att-source;
+                    clear => { root.att-clear(); }
+                }
+            }
+            Tab {
+                title: "仪表";
+                GaugeView {
+                    value: root.gauge-value;
+                    min: root.gauge-min;
+                    max: root.gauge-max;
+                    unit: root.gauge-unit;
+                    label: root.gauge-label;
+                    status: root.gauge-status;
+                    samples: root.gauge-samples;
+                    clear => { root.gauge-clear(); }
                 }
             }
             Tab {

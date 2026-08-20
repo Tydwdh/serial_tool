@@ -7,6 +7,7 @@ mod search;
 mod state;
 mod table_model;
 mod theme_bridge;
+mod vis_state;
 
 slint::include_modules!();
 
@@ -23,6 +24,13 @@ fn main() -> Result<(), slint::PlatformError> {
     let bus = app_state.bus.clone();
     let replay = Arc::new(RefCell::new(replay_state::ReplayUiState::new(&bus)));
     let replay_for_timer = replay.clone();
+    // Vis：Chart/Attitude/Gauge 状态（共享 DataBus，Slint 定时 ingest）
+    let chart = Arc::new(RefCell::new(vis_state::ChartState::new(&bus)));
+    let chart_timer = chart.clone();
+    let attitude = Arc::new(RefCell::new(vis_state::AttitudeState::new(&bus)));
+    let attitude_timer = attitude.clone();
+    let gauge = Arc::new(RefCell::new(vis_state::GaugeState::new(&bus, "protocol.gauge.value")));
+    let gauge_timer = gauge.clone();
     let table = Arc::new(RefCell::new({
         let mut m = serde_json::Map::new();
         m.insert(
@@ -170,6 +178,90 @@ fn main() -> Result<(), slint::PlatformError> {
         let r9 = replay.clone();
         window.on_replay_set_step(move |v| {
             r9.borrow_mut().step_size = v as usize;
+        });
+    }
+
+    // Vis 定时：30Hz ingest + 同步到窗口属性
+    {
+        let win_weak = window.as_weak();
+        let c = chart_timer.clone();
+        let a = attitude_timer.clone();
+        let g = gauge_timer.clone();
+        let timer = slint::Timer::default();
+        timer.start(TimerMode::Repeated, std::time::Duration::from_millis(33), move || {
+            c.borrow_mut().ingest();
+            a.borrow_mut().ingest();
+            g.borrow_mut().ingest();
+            if let Some(w) = win_weak.upgrade() {
+                // Chart
+                let ch = c.borrow();
+                let (ymin, ymax) = ch.bounds_y();
+                let legend = if ch.series.is_empty() {
+                    "".to_owned()
+                } else {
+                    ch.series
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let dropped = ch.subscription_dropped();
+                let status = if ch.paused {
+                    format!("已暂停（丢弃 {}）", ch.dropped_while_paused)
+                } else if dropped > 0 {
+                    format!("队列溢出丢弃 {dropped} 条")
+                } else if ch.series.is_empty() {
+                    "无采样数据 — 等待 protocol.* 事件".to_owned()
+                } else {
+                    format!("Y [{:.1}, {:.1}] 窗口 {}", ymin, ymax, ch.sample_window)
+                };
+                w.set_chart_paused(ch.paused);
+                w.set_chart_auto(ch.auto_scale);
+                w.set_chart_legend(legend.into());
+                w.set_chart_status(status.into());
+                // Attitude
+                let at = a.borrow();
+                w.set_att_roll(at.roll as f32);
+                w.set_att_pitch(at.pitch as f32);
+                w.set_att_yaw(at.yaw as f32);
+                w.set_att_samples(at.samples as i32);
+                w.set_att_source(at.last_source.clone().into());
+                // Gauge
+                let ga = g.borrow();
+                w.set_gauge_value(ga.value as f32);
+                w.set_gauge_min(ga.min as f32);
+                w.set_gauge_max(ga.max as f32);
+                w.set_gauge_unit(ga.unit.clone().into());
+                w.set_gauge_label(ga.label.clone().into());
+                w.set_gauge_status(ga.status_text().into());
+                w.set_gauge_samples(ga.samples as i32);
+            }
+        });
+        std::mem::forget(timer);
+    }
+    // Chart/Attitude/Gauge 操作
+    {
+        let c = chart.clone();
+        let win_weak = window.as_weak();
+        let _ = &win_weak;
+        window.on_chart_toggle_paused(move || {
+            c.borrow_mut().paused = !c.borrow().paused;
+        });
+        let c2 = chart.clone();
+        window.on_chart_toggle_auto(move || {
+            c2.borrow_mut().auto_scale = !c2.borrow().auto_scale;
+        });
+        let c3 = chart.clone();
+        window.on_chart_clear(move || {
+            c3.borrow_mut().clear();
+        });
+        let a2 = attitude.clone();
+        window.on_att_clear(move || {
+            a2.borrow_mut().clear();
+        });
+        let g2 = gauge.clone();
+        window.on_gauge_clear(move || {
+            g2.borrow_mut().clear();
         });
     }
 
