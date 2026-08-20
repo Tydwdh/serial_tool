@@ -26,6 +26,7 @@ tool-marketplace = { path = "../marketplace" }
 tool-lua-host = { path = "../lua_host" }
 egui = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+arboard = "3"
 regex = "1"
 rfd = "0.17"
 env_logger = "0.11"

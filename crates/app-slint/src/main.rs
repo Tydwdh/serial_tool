@@ -384,8 +384,12 @@ fn main() -> Result<(), slint::PlatformError> {
         let t9 = terminal.clone();
         window.on_term_copy_selected(move || {
             let txt = t9.borrow().export_visible_text();
-            let _ = slint::platform::Clipboard::default();
-            // 使用 open 剪贴板回退：写入临时文件提示（P5 简化）
+            let mut clip = arboard::Clipboard::new().ok();
+            if let Some(c) = clip.as_mut() {
+                let _ = c.set_text(txt.clone());
+            } else {
+                let _ = slint::platform::Clipboard::default();
+            }
             log::info!("copy selected: {} chars", txt.len());
         });
         let t10 = terminal.clone();

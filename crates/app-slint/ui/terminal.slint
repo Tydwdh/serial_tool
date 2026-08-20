@@ -1,4 +1,4 @@
-import { Button, LineEdit, HorizontalBox, VerticalBox, GroupBox, CheckBox, ComboBox } from "std-widgets.slint";
+import { Button, LineEdit, ListView, HorizontalBox, VerticalBox, GroupBox, CheckBox, ComboBox } from "std-widgets.slint";
 import { AppColors } from "palette.slint";
 
 export struct TermRow { id: int, ts: string, port: string, dir: string, preview: string, selected: bool }
@@ -57,7 +57,7 @@ export component TerminalView inherits Rectangle {
             Button { text: root.search-case ? "Aa*" : "Aa"; clicked => { root.toggle-search-case(); } }
             if root.status != "" : Text { text: root.status; color: AppColors.text-dimmed; font-size: 11px; vertical-alignment: center; }
         }
-        // 行列表：P7 接真实 rows 模型（后续虚拟化 StandardListView）
+        // 行列表：P7+ 真虚拟化（StandardListView）+ 选择高亮
         Rectangle {
             background: AppColors.bg-secondary;
             border-radius: 8px;
@@ -65,11 +65,9 @@ export component TerminalView inherits Rectangle {
             border-color: AppColors.border;
             vertical-stretch: 1;
             if root.rows.length == 0 : Text { text: root.status == "" ? "暂无数据 — 等待串口 RX/TX" : root.status; color: AppColors.text-dimmed; horizontal-alignment: center; vertical-alignment: center; }
-            if root.rows.length > 0 : VerticalBox {
-                spacing: 1px;
-                padding: 4px;
+            if root.rows.length > 0 : ListView {
                 for row in root.rows : Rectangle {
-                    height: 20px;
+                    height: 22px;
                     background: row.selected ? AppColors.bg-selection : transparent;
                     border-radius: 4px;
                     HorizontalBox {
@@ -121,11 +119,9 @@ export component LogView inherits Rectangle {
             border-color: AppColors.border;
             vertical-stretch: 1;
             if root.rows.length == 0 : Text { text: "暂无日志"; color: AppColors.text-dimmed; horizontal-alignment: center; vertical-alignment: center; }
-            if root.rows.length > 0 : VerticalBox {
-                spacing: 1px;
-                padding: 4px;
+            if root.rows.length > 0 : ListView {
                 for row in root.rows : Rectangle {
-                    height: 20px;
+                    height: 22px;
                     HorizontalBox {
                         spacing: 6px;
                         padding-left: 4px;
