@@ -15,7 +15,7 @@ name = "hardware-workbench-app-slint"
 path = "src/main.rs"
 
 [dependencies]
-slint = "1.12"
+slint = "1.17"
 tool-core = { path = "../core" }
 tool-databus = { path = "../databus" }
 tool-transport = { path = "../transport" }
@@ -28,4 +28,4 @@ dirs-next = { workspace = true }
 open = { workspace = true }
 
 [build-dependencies]
-slint-build = "1.12"
+slint-build = "1.17"
