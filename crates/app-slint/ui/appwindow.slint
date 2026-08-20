@@ -2,6 +2,7 @@ import { Button, LineEdit, ListView, TabWidget, VerticalBox, HorizontalBox, Grou
 import { ChartView, AttitudeView, GaugeView } from "vis.slint";
 import { PluginsView, DynamicFormView } from "plugins.slint";
 import { TerminalView, LogView, DeviceView, SenderView } from "terminal.slint";
+import { SettingsView } from "settings.slint";
 import { AppColors } from "palette.slint";
 
 export component AppWindow inherits Window {
@@ -12,25 +13,10 @@ export component AppWindow inherits Window {
     min-height: 520px;
     icon: @image-url("../../app/../../assets/app-icon-256.png");
 
-    // 状态（后续对接 tool-transport / databus）
-    in-out property <string> status-text: "Slint 壳已就绪 — 后续在此对接 core/databus/transport";
+    in-out property <string> status-text: "就绪";
     in-out property <string> status-level: "info";
-    in-out property <string> rx-preview: "[POC] 终端预览：此处将展示串口/网络串口 RX 流";
-    in-out property <string> tx-input: "";
-    in-out property <string> log-preview: "[POC] 日志预览";
-    in-out property <int> launch-count: 0;
-
-    // 状态：搜索与表格
-    in-out property <string> search-text: "";
-    in-out property <bool> search-case: false;
     in-out property <string> table-empty: "无数据";
-
-    // 回调（Rust 侧绑定）
-    callback tx-send(string);
     callback open-config-folder();
-    callback change-theme(string);
-    callback search-changed(string);
-    callback toggle-search-case();
     callback table-sort(string);
     callback table-select(string);
     // Replay
@@ -142,6 +128,24 @@ export component AppWindow inherits Window {
     callback sender-send();
     callback sender-toggle-hex();
     callback sender-ending-changed(string);
+    // Settings
+    in-out property <int> settings-tab: 0;
+    in-out property <string> settings-theme-name: "One Dark Pro";
+    in-out property <[string]> settings-theme-options: [];
+    in-out property <string> settings-recorder-path: "logs/session.jsonl";
+    in-out property <string> settings-proxy: "";
+    in-out property <float> settings-font-size: 13;
+    in-out property <int> settings-term-merge: 5;
+    in-out property <int> settings-term-max: 50000;
+    in-out property <int> settings-log-max: 50000;
+    in-out property <string> settings-status: "";
+    callback settings-theme-changed(string);
+    callback settings-open-theme-folder();
+    callback settings-pick-recorder();
+    callback settings-save();
+    callback settings-reset-layout();
+    callback settings-font-changed(float);
+    callback settings-proxy-changed(string);
     callback request-close();
 
     VerticalBox {
@@ -350,6 +354,28 @@ export component AppWindow inherits Window {
                             Text { text: root.table-empty; color: AppColors.text-dimmed; }
                         }
                     }
+                }
+            }
+            Tab {
+                title: "设置";
+                SettingsView {
+                    tab: root.settings-tab;
+                    theme-name: root.settings-theme-name;
+                    theme-options: root.settings-theme-options;
+                    recorder-path: root.settings-recorder-path;
+                    proxy-url: root.settings-proxy;
+                    font-size: root.settings-font-size;
+                    term-merge-ms: root.settings-term-merge;
+                    term-max: root.settings-term-max;
+                    log-max: root.settings-log-max;
+                    status: root.settings-status;
+                    theme-changed(v) => { root.settings-theme-changed(v); }
+                    open-theme-folder => { root.settings-open-theme-folder(); }
+                    pick-recorder-path => { root.settings-pick-recorder(); }
+                    save => { root.settings-save(); }
+                    reset-layout => { root.settings-reset-layout(); }
+                    font-size-changed(v) => { root.settings-font-changed(v); }
+                    proxy-changed(v) => { root.settings-proxy-changed(v); }
                 }
             }
         }

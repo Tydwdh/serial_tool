@@ -6,6 +6,7 @@ mod device_state;
 mod replay_state;
 mod search;
 mod sender_state;
+mod settings_state;
 mod state;
 mod table_model;
 mod terminal_state;
@@ -62,11 +63,26 @@ fn main() -> Result<(), slint::PlatformError> {
         table_model::DataTableState::from_config(&m).unwrap()
     }));
     let search_state = Arc::new(RefCell::new((String::new(), false))); // (query, case_sensitive)
+    // Settings
+    let settings = Arc::new(RefCell::new(crate::settings_state::SettingsState::from_config(&app_state.config, theme_dir.clone())));
 
     let window = AppWindow::new()?;
 
     // 主题：初始化 + 写入 Palette global
     theme_bridge::load_initial_theme(&window, &theme_dir, stored_theme.as_deref());
+    // Settings 初始同步到窗口
+    {
+        let s = settings.borrow();
+        window.set_settings_theme_name(s.theme_name.clone().into());
+        window.set_settings_theme_options(slint::ModelRc::from(s.theme_options.iter().map(|x| slint::SharedString::from(x.clone())).collect::<Vec<_>>().as_slice()));
+        window.set_settings_recorder_path(s.recorder_path.clone().into());
+        window.set_settings_proxy(s.proxy_url.clone().into());
+        window.set_settings_font_size(s.font_size);
+        window.set_settings_term_merge(s.term_merge_ms as i32);
+        window.set_settings_term_max(s.term_max as i32);
+        window.set_settings_log_max(s.log_max as i32);
+        window.set_settings_status(s.status.clone().into());
+    }
 
     // Replay 定时：16ms 驱动 tick_playback + 进度同步
     {
@@ -95,34 +111,6 @@ fn main() -> Result<(), slint::PlatformError> {
             },
         );
         std::mem::forget(timer);
-    }
-
-    // 搜索：re: 正则 + 大小写
-    {
-        let win_weak = window.as_weak();
-        let ss = search_state.clone();
-        let st = app_state.clone();
-        window.on_search_changed(move |text| {
-            ss.borrow_mut().0 = text.to_string();
-            let (q, cs) = ss.borrow().clone();
-            let query = search::SearchQuery::new(&q, cs);
-            // 演示：用 rx-preview 过滤示意（真实终端在 P5 接 MessageList）
-            if !query.is_empty() {
-                st.push_status(state::StatusLevel::Info, format!("搜索：{q} (命中演示)"));
-            }
-            if let Some(w) = win_weak.upgrade() {
-                w.set_search_text(text);
-            }
-        });
-        let win_weak2 = window.as_weak();
-        let ss2 = search_state.clone();
-        window.on_toggle_search_case(move || {
-            let mut s = ss2.borrow_mut();
-            s.1 = !s.1;
-            if let Some(w) = win_weak2.upgrade() {
-                w.set_search_case(s.1);
-            }
-        });
     }
 
     // DataTable：排序/选择
@@ -443,34 +431,6 @@ fn main() -> Result<(), slint::PlatformError> {
         std::mem::forget(timer);
     }
 
-    // TX 模拟：计数 + 回显 + 通知
-    {
-        let win_weak = window.as_weak();
-        let st = app_state.clone();
-        window.on_tx_send(move |text| {
-            if let Some(w) = win_weak.upgrade() {
-                let trimmed = text.trim().to_string();
-                let count = w.get_launch_count() + 1;
-                w.set_launch_count(count);
-                if trimmed.is_empty() {
-                    st.push_status(state::StatusLevel::Warn, format!("第 {count} 次：输入为空"));
-                    w.set_rx_preview(
-                        format!("{}\n[提示 {count}] 输入为空，未发送", w.get_rx_preview()).into(),
-                    );
-                } else {
-                    st.push_status(
-                        state::StatusLevel::Info,
-                        format!("第 {count} 次发送(模拟)：{trimmed}"),
-                    );
-                    w.set_rx_preview(
-                        format!("{}\n[TX 模拟 {count}] {trimmed}", w.get_rx_preview()).into(),
-                    );
-                }
-                w.set_log_preview(format!("模拟发送 #{count}").into());
-            }
-        });
-    }
-
     // 打开配置目录
     {
         let win_weak = window.as_weak();
@@ -493,37 +453,61 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // 主题切换（P1：下拉选择内置/自定义主题并持久化）
+    // Settings 回调
     {
-        let win_weak = window.as_weak();
+        let s = settings.clone();
         let st = app_state.clone();
-        window.on_change_theme(move |theme_file| {
-            let path = if theme_file.is_empty() {
-                None
-            } else {
-                Some(std::path::PathBuf::from(theme_file.to_string()))
-            };
-            if let Some(p) = path.as_deref() {
-                if p.exists() {
-                    let _ = tool_panels::theme::load_theme_file(p);
-                    if let Some(t) = tool_panels::theme::builtin_theme_for_path(p) {
+        let win_weak = window.as_weak();
+        window.on_settings_theme_changed(move |name| {
+            s.borrow_mut().theme_name = name.to_string();
+            // 尝试按名称查找主题文件并应用
+            let dir = st.theme_dir.clone();
+            for (path, tname) in tool_panels::theme::discover_theme_files(&dir) {
+                if tname == name.as_str() {
+                    let _ = tool_panels::theme::load_theme_file(&path);
+                    if let Some(t) = tool_panels::theme::builtin_theme_for_path(&path) {
                         tool_panels::theme::set_active_theme(t);
                     }
-                    let rel = p
-                        .strip_prefix(&st.theme_dir)
-                        .unwrap_or(p)
-                        .display()
-                        .to_string();
+                    let rel = path.strip_prefix(&dir).unwrap_or(&path).display().to_string();
                     let mut cfg = st.build_snapshot();
                     cfg.theme_path = Some(rel);
                     let _ = crate::config::save_config_snapshot(&cfg);
-                    st.push_status(state::StatusLevel::Info, format!("已切换主题：{}", p.display()));
+                    break;
                 }
             }
             if let Some(w) = win_weak.upgrade() {
                 theme_bridge::apply_palette_from_panels(&w);
             }
         });
+        let s2 = settings.clone();
+        window.on_settings_open_theme_folder(move || { let _ = open::that(&s2.borrow().theme_dir); });
+        let s3 = settings.clone();
+        let win_weak3 = window.as_weak();
+        window.on_settings_pick_recorder(move || {
+            if let Some(p) = rfd::FileDialog::new().add_filter("JSONL", &["jsonl"]).save_file() {
+                let s = crate::config::ensure_jsonl_extension(p).display().to_string();
+                s3.borrow_mut().recorder_path = s.clone();
+                if let Some(w) = win_weak3.upgrade() { w.set_settings_recorder_path(s.into()); }
+            }
+        });
+        let s4 = settings.clone();
+        let st4 = app_state.clone();
+        let win_weak4 = window.as_weak();
+        window.on_settings_save(move || {
+            let mut cfg = st4.build_snapshot();
+            s4.borrow().apply_to_config(&mut cfg);
+            match crate::config::save_config_snapshot(&cfg) {
+                Ok(()) => { s4.borrow_mut().status = "已保存".to_owned(); if let Some(w) = win_weak4.upgrade() { w.set_settings_status("已保存".into()); } st4.push_status(state::StatusLevel::Info, "已保存设置"); }
+                Err(e) => { s4.borrow_mut().status = e.clone(); if let Some(w) = win_weak4.upgrade() { w.set_settings_status(e.clone().into()); } }
+            }
+        });
+        let s5 = settings.clone();
+        window.on_settings_reset_layout(move || { s5.borrow_mut().status = "已重置布局（下次启动生效）".to_owned(); });
+        let s6 = settings.clone();
+        let win_weak6 = window.as_weak();
+        window.on_settings_font_changed(move |v| { s6.borrow_mut().font_size = v.clamp(10.0, 24.0); if let Some(w) = win_weak6.upgrade() { w.set_settings_font_size(s6.borrow().font_size); } });
+        let s7 = settings.clone();
+        window.on_settings_proxy_changed(move |v| { s7.borrow_mut().proxy_url = v.to_string(); });
     }
 
     if app_state.config_migrated {

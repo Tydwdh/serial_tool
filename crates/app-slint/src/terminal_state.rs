@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use tool_core::{Direction, Event, Payload};
 use tool_databus::{DataBus, RingSubscription, TopicFilter};
-use tool_transport::serial_topics;
+
 
 use crate::search::SearchQuery;
 
