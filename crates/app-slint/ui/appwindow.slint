@@ -1,4 +1,4 @@
-import { Button, LineEdit, ListView, VerticalBox, HorizontalBox, GroupBox } from "std-widgets.slint";
+import { Button, LineEdit, ListView, TabWidget, VerticalBox, HorizontalBox, GroupBox } from "std-widgets.slint";
 import { AppColors } from "palette.slint";
 
 export component AppWindow inherits Window {
@@ -17,10 +17,37 @@ export component AppWindow inherits Window {
     in-out property <string> log-preview: "[POC] 日志预览";
     in-out property <int> launch-count: 0;
 
+    // 状态：搜索与表格
+    in-out property <string> search-text: "";
+    in-out property <bool> search-case: false;
+    in-out property <string> table-empty: "无数据";
+
     // 回调（Rust 侧绑定）
     callback tx-send(string);
     callback open-config-folder();
     callback change-theme(string);
+    callback search-changed(string);
+    callback toggle-search-case();
+    callback table-sort(string);
+    callback table-select(string);
+    // Replay
+    in-out property <string> replay-path: "logs/session.jsonl";
+    in-out property <string> replay-message: "";
+    in-out property <string> replay-status: "";
+    in-out property <float> replay-progress: 0;
+    in-out property <float> replay-speed: 1;
+    in-out property <bool> replay-loop: false;
+    in-out property <int> replay-step: 1;
+    in-out property <bool> replay-playing: false;
+    callback replay-pick-file();
+    callback replay-load();
+    callback replay-play();
+    callback replay-pause();
+    callback replay-stop();
+    callback replay-prev();
+    callback replay-next();
+    callback replay-set-speed(float);
+    callback replay-set-step(int);
     callback request-close();
 
     VerticalBox {
@@ -52,99 +79,127 @@ export component AppWindow inherits Window {
             }
         }
 
-        // 中部：左 终端 / 右 控制
-        HorizontalBox {
-            spacing: 12px;
-
-            GroupBox {
-                title: "终端 (POC — 只做展示，不接真串口)";
-                vertical-stretch: 1;
-                horizontal-stretch: 1;
-                VerticalBox {
-                    spacing: 6px;
-                    Rectangle {
-                        background: AppColors.bg-secondary;
-                        border-radius: 8px;
-                        border-width: 1px;
-                        border-color: AppColors.border;
+        // 中部：Tab 承载低难面板与终端/控制（P2）
+        TabWidget {
+            vertical-stretch: 1;
+            Tab {
+                title: "终端";
+                HorizontalBox {
+                    spacing: 12px;
+                    GroupBox {
+                        title: "终端 (POC)";
                         vertical-stretch: 1;
+                        horizontal-stretch: 1;
                         VerticalBox {
-                            padding: 10px;
-                            Text {
-                                text: root.rx-preview;
-                                color: AppColors.text-primary;
-                                font-size: 12px;
-                                wrap: word-wrap;
+                            spacing: 6px;
+                            Rectangle {
+                                background: AppColors.bg-secondary;
+                                border-radius: 8px;
+                                border-width: 1px;
+                                border-color: AppColors.border;
+                                vertical-stretch: 1;
+                                VerticalBox {
+                                    padding: 10px;
+                                    Text {
+                                        text: root.rx-preview;
+                                        color: AppColors.text-primary;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+                                    Text {
+                                        text: "提示：真实数据流在 tool-transport → tool-databus → 事件总线，Slint 侧通过 callback/timer 订阅即可。";
+                                        color: AppColors.text-secondary;
+                                        font-size: 11px;
+                                        wrap: word-wrap;
+                                    }
+                                }
                             }
-                            Text {
-                                text: "提示：真实数据流在 tool-transport → tool-databus → 事件总线，Slint 侧通过 callback/timer 订阅即可。";
-                                color: AppColors.text-secondary;
-                                font-size: 11px;
-                                wrap: word-wrap;
+                            HorizontalBox {
+                                spacing: 8px;
+                                LineEdit {
+                                    placeholder-text: "输入要发送的内容（POC，不真发）";
+                                    text <=> root.tx-input;
+                                    horizontal-stretch: 1;
+                                    accepted(text) => { root.tx-send(text); }
+                                }
+                                Button {
+                                    text: "发送";
+                                    primary: true;
+                                    clicked => { root.tx-send(root.tx-input); }
+                                }
+                            }
+                            HorizontalBox {
+                                spacing: 8px;
+                                LineEdit { placeholder-text: "搜索 re:正则 或字面量"; text <=> root.search-text; horizontal-stretch: 1; edited(text) => { root.search-changed(text); } }
+                                Button { text: root.search-case ? "Aa*" : "Aa"; clicked => { root.toggle-search-case(); } }
                             }
                         }
                     }
-                    HorizontalBox {
-                        spacing: 8px;
-                        LineEdit {
-                            placeholder-text: "输入要发送的内容（POC，不真发）";
-                            text <=> root.tx-input;
-                            horizontal-stretch: 1;
-                            accepted(text) => { root.tx-send(text); }
+                    VerticalBox {
+                        spacing: 10px;
+                        width: 360px;
+                        GroupBox {
+                            title: "控制";
+                            VerticalBox {
+                                spacing: 8px;
+                                Button { text: "模拟一次发送 (计数+1)"; clicked => { root.tx-send(root.tx-input); } }
+                                Text { text: "已触发: " + root.launch-count + " 次"; font-size: 12px; color: #444; }
+                            }
                         }
-                        Button {
-                            text: "发送";
-                            primary: true;
-                            clicked => { root.tx-send(root.tx-input); }
+                        GroupBox {
+                            title: "日志 (POC)";
+                            vertical-stretch: 1;
+                            ListView {
+                                vertical-stretch: 1;
+                                for _i in 6 : Rectangle {
+                                    height: 28px;
+                                    Text { text: root.log-preview + " #" + _i; font-size: 11px; color: #333; vertical-alignment: center; }
+                                }
+                            }
                         }
                     }
                 }
             }
-
-            VerticalBox {
-                spacing: 10px;
-                width: 360px;
-
-                GroupBox {
-                    title: "控制";
-                    VerticalBox {
+            Tab {
+                title: "回放";
+                VerticalBox {
+                    spacing: 8px;
+                    HorizontalBox {
                         spacing: 8px;
-                        Button {
-                            text: "模拟一次发送 (计数+1)";
-                            clicked => { root.tx-send(root.tx-input); }
-                        }
-                        Text {
-                            text: "已触发: " + root.launch-count + " 次";
-                            font-size: 12px;
-                            color: #444;
-                        }
+                        LineEdit { text <=> root.replay-path; placeholder-text: "logs/session.jsonl"; horizontal-stretch: 1; }
+                        Button { text: "浏览"; clicked => { root.replay-pick-file(); } }
+                        Button { text: "加载"; primary: true; clicked => { root.replay-load(); } }
                     }
-                }
-
-                GroupBox {
-                    title: "日志 (POC)";
-                    vertical-stretch: 1;
-                    ListView {
-                        vertical-stretch: 1;
-                        for _i in 6 : Rectangle {
-                            height: 28px;
-                            Text {
-                                text: root.log-preview + " #" + _i;
-                                font-size: 11px;
-                                color: #333;
-                                vertical-alignment: center;
-                            }
-                        }
+                    if root.replay-message != "" : Text { text: root.replay-message; color: AppColors.text-secondary; font-size: 11px; wrap: word-wrap; }
+                    HorizontalBox {
+                        spacing: 8px;
+                        Button { text: root.replay-playing ? "暂停" : "播放"; primary: true; clicked => { root.replay-playing ? root.replay-pause() : root.replay-play(); } }
+                        Button { text: "停止"; clicked => { root.replay-stop(); } }
+                        Button { text: "上一步"; clicked => { root.replay-prev(); } }
+                        Button { text: "下一步"; clicked => { root.replay-next(); } }
                     }
+                    Text { text: root.replay-status; color: AppColors.text-dimmed; font-size: 11px; }
+                    // 进度与倍速
+                    HorizontalBox {
+                        spacing: 8px;
+                        Rectangle { height: 8px; border-radius: 4px; background: AppColors.separator; horizontal-stretch: 1; Rectangle { width: parent.width * root.replay-progress; height: 8px; background: AppColors.blue; border-radius: 4px; } }
+                        Text { text: (root.replay-progress * 100) + "%"; color: AppColors.text-dimmed; font-size: 11px; }
+                    }
+                    Text { text: "倍速: " + root.replay-speed + "x  循环:" + (root.replay-loop ? "开" : "关") + "  步长:" + root.replay-step; color: AppColors.text-secondary; font-size: 11px; }
                 }
-
-                GroupBox {
-                    title: "说明";
-                    Text {
-                        text: "本窗口为 app-slint 最小可跑空壳。\n• 已加入 workspace，不影响 crates/app (egui)。\n• 已引入 tool-core/databus/transport 依赖，后续可复用。\n• 样式: fluent，可后续换自定义主题。";
-                        font-size: 11px;
-                        color: #555;
-                        wrap: word-wrap;
+            }
+            Tab {
+                title: "数据表";
+                VerticalBox {
+                    spacing: 6px;
+                    Text { text: "声明式表格（插件/回放通用）— 排序/选择已打通，P2 用静态示例"; color: AppColors.text-secondary; font-size: 11px; wrap: word-wrap; }
+                    GroupBox {
+                        title: "示例表";
+                        VerticalBox {
+                            spacing: 4px;
+                            HorizontalBox { spacing: 6px; Button { text: "ID ↑/↓"; clicked => { root.table-sort("id"); } } Button { text: "值 ↑/↓"; clicked => { root.table-sort("value"); } } }
+                            Text { text: root.table-empty; color: AppColors.text-dimmed; }
+                        }
                     }
                 }
             }

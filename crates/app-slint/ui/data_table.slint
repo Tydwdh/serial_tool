@@ -1,0 +1,51 @@
+import { Button, HorizontalBox, VerticalBox } from "std-widgets.slint";
+import { AppColors } from "palette.slint";
+
+export struct TableColumn { title: string, width: float }
+export struct TableRow { id: string, values: [string], selected: bool }
+
+export component DataTableView inherits Rectangle {
+    in-out property <[TableColumn]> columns: [];
+    in-out property <[TableRow]> rows: [];
+    in property <string> empty-text: "无数据";
+    callback sort(string);
+    callback select(string);
+
+    VerticalBox {
+        padding: 6px;
+        spacing: 4px;
+        // 表头
+        HorizontalBox {
+            spacing: 2px;
+            for col[idx] in root.columns : Button {
+                text: col.title;
+                // Slint Button 不支持自定义排序箭头，用文字展示即可，箭头由 Rust 在 title 中拼好
+                clicked => { root.sort(root.columns[idx].title); }
+            }
+        }
+        Rectangle { height: 1px; background: AppColors.separator; }
+        // 行（后续可换 StandardListView 虚拟化）
+        VerticalBox {
+            spacing: 2px;
+            if root.rows.length == 0 : Text { text: root.empty-text; color: AppColors.text-dimmed; horizontal-alignment: center; }
+            for row in root.rows : HorizontalBox {
+                spacing: 2px;
+                // 选中高亮用背景
+                Rectangle {
+                    background: row.selected ? AppColors.bg-selection : transparent;
+                    border-radius: 4px;
+                    HorizontalBox {
+                        spacing: 2px;
+                        for val in row.values : Text {
+                            text: val;
+                            color: row.selected ? AppColors.text-white : AppColors.text-primary;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                    }
+                    TouchArea { clicked => { root.select(row.id); } }
+                }
+            }
+        }
+    }
+}

@@ -2654,6 +2654,8 @@ dependencies = [
  "log",
  "open",
  "parking_lot",
+ "regex",
+ "rfd",
  "serde",
  "serde_json",
  "slint",

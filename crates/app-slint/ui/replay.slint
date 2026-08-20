@@ -1,0 +1,91 @@
+import { Button, GroupBox, LineEdit, VerticalBox, HorizontalBox, ProgressIndicator, ComboBox } from "std-widgets.slint";
+import { AppColors } from "palette.slint";
+
+export component ReplayView inherits Rectangle {
+    in-out property <string> path: "logs/session.jsonl";
+    in-out property <string> message: "";
+    in-out property <string> status-text: "";
+    in-out property <float> progress: 0;
+    in-out property <float> speed: 1;
+    in-out property <bool> loop-enabled: false;
+    in-out property <int> step-size: 1;
+    in-out property <string> analyzer-text: "";
+    in-out property <bool> playing: false;
+    in-out property <bool> has-file: false;
+
+    callback pick-file();
+    callback load();
+    callback play();
+    callback pause();
+    callback stop();
+    callback prev();
+    callback next();
+    callback set-speed(float);
+    callback set-step-size(int);
+    callback seek(float);
+
+    VerticalBox {
+        spacing: 10px;
+        padding: 8px;
+
+        GroupBox {
+            title: "回放文件";
+            VerticalBox {
+                spacing: 8px;
+                HorizontalBox {
+                    spacing: 8px;
+                    LineEdit {
+                        text <=> root.path;
+                        placeholder-text: "logs/session.jsonl";
+                        horizontal-stretch: 1;
+                    }
+                    Button { text: "浏览"; clicked => { root.pick-file(); } }
+                    Button { text: "加载"; primary: true; clicked => { root.load(); } }
+                }
+                if root.message != "" : Text { text: root.message; color: AppColors.text-secondary; font-size: 11px; wrap: word-wrap; }
+            }
+        }
+
+        GroupBox {
+            title: "播放控制";
+            VerticalBox {
+                spacing: 8px;
+                HorizontalBox {
+                    spacing: 8px;
+                    Button { text: root.playing ? "暂停" : "播放"; primary: true; clicked => { root.playing ? root.pause() : root.play(); } }
+                    Button { text: "停止"; clicked => { root.stop(); } }
+                    Button { text: "上一步"; clicked => { root.prev(); } }
+                    Button { text: "下一步"; clicked => { root.next(); } }
+                }
+                HorizontalBox {
+                    spacing: 8px;
+                    Text { text: "进度"; vertical-alignment: center; color: AppColors.text-secondary; }
+                    ProgressIndicator { progress: root.progress; horizontal-stretch: 1; }
+                    Text { text: (root.progress * 100) + "%"; color: AppColors.text-dimmed; }
+                }
+                HorizontalBox {
+                    spacing: 8px;
+                    Text { text: "倍速"; vertical-alignment: center; }
+                    ComboBox {
+                        model: ["0.25x", "0.5x", "1x", "2x", "4x", "8x"];
+                        current-value: root.speed + "x";
+                        selected => { root.set-speed(current-value == "0.25x" ? 0.25 : current-value == "0.5x" ? 0.5 : current-value == "1x" ? 1 : current-value == "2x" ? 2 : current-value == "4x" ? 4 : 8); }
+                    }
+                    Text { text: "步长"; vertical-alignment: center; }
+                    ComboBox {
+                        model: ["1", "5", "10", "50"];
+                        current-value: root.step-size;
+                        selected => { root.set-step-size(current-value == "1" ? 1 : current-value == "5" ? 5 : current-value == "10" ? 10 : 50); }
+                    }
+                    Text { text: root.loop-enabled ? "循环:开" : "循环:关"; color: root.loop-enabled ? AppColors.green : AppColors.text-dimmed; }
+                }
+                if root.status-text != "" : Text { text: root.status-text; color: AppColors.text-secondary; font-size: 11px; }
+            }
+        }
+
+        if root.analyzer-text != "" : GroupBox {
+            title: "Analyzer";
+            Text { text: root.analyzer-text; font-size: 11px; color: AppColors.text-secondary; wrap: word-wrap; }
+        }
+    }
+}
