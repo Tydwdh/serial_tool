@@ -94,7 +94,7 @@ export component PluginsView inherits Rectangle {
 export component DynamicFormView inherits Rectangle {
     in-out property <string> panel-id: "";
     in-out property <string> title: "";
-    in-out property <string> fields-json: "[]"; // 由 Rust 序列化传入，Slint 侧占位展示
+    in-out property <string> fields-json: "[]";
     callback field-changed(string, string);
     callback field-action(string);
 
@@ -102,7 +102,15 @@ export component DynamicFormView inherits Rectangle {
         padding: 8px;
         spacing: 8px;
         Text { text: root.title == "" ? "动态面板" : root.title; font-weight: 700; }
-        Text { text: "字段（P4 占位，后续逐 kind 渲染 Text/Select/Slider/Button 等 13 种）"; color: AppColors.text-dimmed; font-size: 11px; wrap: word-wrap; }
-        Text { text: root.fields-json; color: AppColors.text-secondary; font-size: 10px; wrap: word-wrap; }
+        // P9：按 DynamicFieldKind 细化占位，后续逐 kind 替换为真实 Slint 控件
+        GroupBox {
+            title: "表单字段 (P9 占位 — 13 种 kind)";
+            VerticalBox {
+                spacing: 4px;
+                Text { text: "Text / Number / Boolean / Select / Slider / Button / TextArea / File / Progress / Status / Separator / Label / Serial"; color: AppColors.text-secondary; font-size: 10px; wrap: word-wrap; }
+                Text { text: root.fields-json; color: AppColors.text-dimmed; font-size: 10px; wrap: word-wrap; }
+            }
+        }
+        Text { text: "字段变更将通过 DynamicPanels::set_value 往返 DataBus → 插件（P9 已打通链路，P10 接真控件）"; color: AppColors.text-dimmed; font-size: 10px; wrap: word-wrap; }
     }
 }
