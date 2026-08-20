@@ -62,7 +62,6 @@ fn main() -> Result<(), slint::PlatformError> {
         m.insert("rows".to_owned(), serde_json::json!([{"id":"1","value":42},{"id":"2","value":7}]));
         table_model::DataTableState::from_config(&m).unwrap()
     }));
-    let search_state = Arc::new(RefCell::new((String::new(), false))); // (query, case_sensitive)
     // Settings
     let settings = Arc::new(RefCell::new(crate::settings_state::SettingsState::from_config(&app_state.config, theme_dir.clone())));
 
