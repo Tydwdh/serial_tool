@@ -1,5 +1,6 @@
 import { Button, LineEdit, ListView, TabWidget, VerticalBox, HorizontalBox, GroupBox } from "std-widgets.slint";
 import { ChartView, AttitudeView, GaugeView } from "vis.slint";
+import { PluginsView, DynamicFormView } from "plugins.slint";
 import { AppColors } from "palette.slint";
 
 export component AppWindow inherits Window {
@@ -71,6 +72,22 @@ export component AppWindow inherits Window {
     callback chart-clear();
     callback att-clear();
     callback gauge-clear();
+    // Plugins / Dynamic
+    in-out property <int> plugin-tab: 0;
+    in-out property <string> plugin-search: "";
+    in-out property <string> plugin-market-search: "";
+    in-out property <string> plugin-summary: "";
+    in-out property <string> plugin-market-error: "";
+    in-out property <bool> plugin-market-refreshing: false;
+    callback plugin-refresh-market();
+    callback plugin-install(string);
+    callback plugin-toggle(string);
+    callback plugin-uninstall(string);
+    callback plugin-restart(string);
+    in-out property <string> dynamic-title: "";
+    in-out property <string> dynamic-fields-json: "[]";
+    callback dynamic-field-changed(string, string);
+    callback dynamic-field-action(string);
     callback request-close();
 
     VerticalBox {
@@ -245,6 +262,31 @@ export component AppWindow inherits Window {
                     status: root.gauge-status;
                     samples: root.gauge-samples;
                     clear => { root.gauge-clear(); }
+                }
+            }
+            Tab {
+                title: "插件";
+                PluginsView {
+                    tab: root.plugin-tab;
+                    search: root.plugin-search;
+                    market-search: root.plugin-market-search;
+                    summary: root.plugin-summary;
+                    market-error: root.plugin-market-error;
+                    market-refreshing: root.plugin-market-refreshing;
+                    refresh-market => { root.plugin-refresh-market(); }
+                    install(id) => { root.plugin-install(id); }
+                    toggle(id) => { root.plugin-toggle(id); }
+                    uninstall(id) => { root.plugin-uninstall(id); }
+                    restart(id) => { root.plugin-restart(id); }
+                }
+            }
+            Tab {
+                title: "动态面板";
+                DynamicFormView {
+                    title: root.dynamic-title;
+                    fields-json: root.dynamic-fields-json;
+                    field-changed(id, val) => { root.dynamic-field-changed(id, val); }
+                    field-action(id) => { root.dynamic-field-action(id); }
                 }
             }
             Tab {

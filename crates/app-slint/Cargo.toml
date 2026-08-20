@@ -21,6 +21,9 @@ tool-databus = { path = "../databus" }
 tool-transport = { path = "../transport" }
 tool-panels = { path = "../panels" }
 tool-recorder = { path = "../recorder" }
+tool-extension = { path = "../extension" }
+tool-marketplace = { path = "../marketplace" }
+tool-lua-host = { path = "../lua_host" }
 egui = { workspace = true }
 regex = "1"
 rfd = "0.17"
