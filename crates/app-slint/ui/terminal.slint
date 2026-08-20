@@ -1,0 +1,213 @@
+import { Button, LineEdit, HorizontalBox, VerticalBox, GroupBox, CheckBox, ComboBox } from "std-widgets.slint";
+import { AppColors } from "palette.slint";
+
+export struct TermRow { id: int, ts: string, port: string, dir: string, preview: string, selected: bool }
+export struct LogRow { id: int, ts: string, level: string, source: string, text: string }
+
+export component TerminalView inherits Rectangle {
+    in-out property <string> port-filter: "";
+    in-out property <[string]> ports: [];
+    in-out property <[TermRow]> rows: [];
+    in-out property <bool> show-rx: true;
+    in-out property <bool> show-tx: true;
+    in-out property <bool> show-hex: false;
+    in-out property <bool> show-raw: false;
+    in-out property <string> search: "";
+    in-out property <bool> search-case: false;
+    in-out property <int> max-entries: 50000;
+    in-out property <string> status: "";
+    callback toggle-rx();
+    callback toggle-tx();
+    callback toggle-hex();
+    callback toggle-raw();
+    callback search-changed(string);
+    callback toggle-search-case();
+    callback port-changed(string);
+    callback clear();
+    callback export-txt();
+    callback export-csv();
+    callback export-json();
+    callback select-row(int);
+    callback copy-selected();
+
+    VerticalBox {
+        padding: 6px;
+        spacing: 6px;
+        HorizontalBox {
+            spacing: 6px;
+            CheckBox { text: "RX"; checked: root.show-rx; toggled => { root.toggle-rx(); } }
+            CheckBox { text: "TX"; checked: root.show-tx; toggled => { root.toggle-tx(); } }
+            CheckBox { text: "HEX"; checked: root.show-hex; toggled => { root.toggle-hex(); } }
+            CheckBox { text: "RAW"; checked: root.show-raw; toggled => { root.toggle-raw(); } }
+            ComboBox {
+                model: root.ports;
+                current-value: root.port-filter == "" ? "全部端口" : root.port-filter;
+                selected(value) => { root.port-changed(value == "全部端口" ? "" : value); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Button { text: "清空"; clicked => { root.clear(); } }
+            Button { text: "复制选中"; clicked => { root.copy-selected(); } }
+            Button { text: "导出 TXT"; clicked => { root.export-txt(); } }
+            Button { text: "导出 CSV"; clicked => { root.export-csv(); } }
+            Button { text: "导出 JSON"; clicked => { root.export-json(); } }
+        }
+        HorizontalBox {
+            spacing: 6px;
+            LineEdit { placeholder-text: "搜索 re:正则 或字面量"; text <=> root.search; horizontal-stretch: 1; edited(t) => { root.search-changed(t); } }
+            Button { text: root.search-case ? "Aa*" : "Aa"; clicked => { root.toggle-search-case(); } }
+            if root.status != "" : Text { text: root.status; color: AppColors.text-dimmed; font-size: 11px; vertical-alignment: center; }
+        }
+        // 行列表（后续可换虚拟化 StandardListView）
+        Rectangle {
+            background: AppColors.bg-secondary;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: AppColors.border;
+            vertical-stretch: 1;
+            if root.rows.length == 0 : Text { text: "暂无数据"; color: AppColors.text-dimmed; horizontal-alignment: center; vertical-alignment: center; }
+            if root.rows.length > 0 : VerticalBox {
+                spacing: 1px;
+                padding: 4px;
+                for row in root.rows : Rectangle {
+                    height: 20px;
+                    background: row.selected ? AppColors.bg-selection : transparent;
+                    border-radius: 4px;
+                    HorizontalBox {
+                        spacing: 6px;
+                        padding-left: 4px;
+                        Text { text: row.ts; color: AppColors.text-dimmed; font-size: 11px; width: 90px; }
+                        Text { text: row.port; color: AppColors.text-secondary; font-size: 11px; width: 64px; }
+                        Text { text: row.dir; color: row.dir == "RX" ? AppColors.green : AppColors.blue; font-size: 11px; width: 26px; }
+                        Text { text: row.preview; color: row.selected ? AppColors.text-white : AppColors.text-primary; font-size: 11px; horizontal-stretch: 1; overflow: elide; }
+                    }
+                    TouchArea { clicked => { root.select-row(row.id); } }
+                }
+            }
+        }
+    }
+}
+
+export component LogView inherits Rectangle {
+    in-out property <[LogRow]> rows: [];
+    in-out property <string> search: "";
+    in-out property <bool> search-case: false;
+    in-out property <string> level-filter: "info";
+    in-out property <string> status: "";
+    callback search-changed(string);
+    callback toggle-search-case();
+    callback level-changed(string);
+    callback clear();
+    callback select-row(int);
+
+    VerticalBox {
+        padding: 6px;
+        spacing: 6px;
+        HorizontalBox {
+            spacing: 6px;
+            ComboBox {
+                model: ["trace", "debug", "info", "warn", "error"];
+                current-value: root.level-filter;
+                selected(v) => { root.level-changed(v); }
+            }
+            LineEdit { placeholder-text: "搜索"; text <=> root.search; horizontal-stretch: 1; edited(t) => { root.search-changed(t); } }
+            Button { text: root.search-case ? "Aa*" : "Aa"; clicked => { root.toggle-search-case(); } }
+            Button { text: "清空"; clicked => { root.clear(); } }
+        }
+        if root.status != "" : Text { text: root.status; color: AppColors.text-dimmed; font-size: 11px; }
+        Rectangle {
+            background: AppColors.bg-secondary;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: AppColors.border;
+            vertical-stretch: 1;
+            if root.rows.length == 0 : Text { text: "暂无日志"; color: AppColors.text-dimmed; horizontal-alignment: center; vertical-alignment: center; }
+            if root.rows.length > 0 : VerticalBox {
+                spacing: 1px;
+                padding: 4px;
+                for row in root.rows : Rectangle {
+                    height: 20px;
+                    HorizontalBox {
+                        spacing: 6px;
+                        padding-left: 4px;
+                        Text { text: row.ts; color: AppColors.text-dimmed; font-size: 11px; width: 90px; }
+                        Text { text: row.level; color: AppColors.text-secondary; font-size: 11px; width: 46px; }
+                        Text { text: row.source; color: AppColors.text-secondary; font-size: 11px; width: 96px; overflow: elide; }
+                        Text { text: row.text; color: AppColors.text-primary; font-size: 11px; horizontal-stretch: 1; overflow: elide; }
+                    }
+                    TouchArea { clicked => { root.select-row(row.id); } }
+                }
+            }
+        }
+    }
+}
+
+export component DeviceView inherits Rectangle {
+    in-out property <string> selected-port: "";
+    in-out property <[string]> ports: [];
+    in-out property <string> baud: "115200";
+    in-out property <string> data-bits: "8";
+    in-out property <string> stop-bits: "1";
+    in-out property <string> parity: "none";
+    in-out property <bool> dtr: true;
+    in-out property <bool> rts: true;
+    in-out property <string> status: "";
+    callback refresh();
+    callback open();
+    callback close();
+    callback port-changed(string);
+    callback baud-changed(string);
+    callback dtr-toggled();
+    callback rts-toggled();
+
+    VerticalBox {
+        padding: 8px;
+        spacing: 8px;
+        HorizontalBox {
+            spacing: 8px;
+            ComboBox { model: root.ports; current-value: root.selected-port == "" ? "选择端口" : root.selected-port; selected(v) => { root.port-changed(v); } horizontal-stretch: 1; }
+            Button { text: "刷新"; clicked => { root.refresh(); } }
+            Button { text: "打开"; primary: true; clicked => { root.open(); } }
+            Button { text: "关闭"; clicked => { root.close(); } }
+        }
+        HorizontalBox {
+            spacing: 8px;
+            Text { text: "波特率"; vertical-alignment: center; }
+            LineEdit { text <=> root.baud; edited(t) => { root.baud-changed(t); } width: 110px; }
+            Text { text: "数据位 " + root.data-bits; vertical-alignment: center; }
+            Text { text: "停止位 " + root.stop-bits; vertical-alignment: center; }
+            Text { text: "校验 " + root.parity; vertical-alignment: center; }
+        }
+        HorizontalBox {
+            spacing: 8px;
+            Button { text: root.dtr ? "DTR:高" : "DTR:低"; clicked => { root.dtr-toggled(); } }
+            Button { text: root.rts ? "RTS:高" : "RTS:低"; clicked => { root.rts-toggled(); } }
+            if root.status != "" : Text { text: root.status; color: AppColors.text-secondary; font-size: 11px; vertical-alignment: center; }
+        }
+    }
+}
+
+export component SenderView inherits Rectangle {
+    in-out property <string> input: "";
+    in-out property <bool> hex-mode: false;
+    in-out property <string> line-ending: "无";
+    in-out property <string> error: "";
+    in-out property <string> target-port: "";
+    callback send();
+    callback toggle-hex();
+    callback line-ending-changed(string);
+    callback history-selected(string);
+
+    VerticalBox {
+        padding: 8px;
+        spacing: 8px;
+        HorizontalBox {
+            spacing: 8px;
+            LineEdit { placeholder-text: "输入要发送的内容"; text <=> root.input; horizontal-stretch: 1; }
+            Button { text: root.hex-mode ? "HEX:开" : "HEX:关"; clicked => { root.toggle-hex(); } }
+            ComboBox { model: ["无", "LF", "CR", "CRLF"]; current-value: root.line-ending; selected(v) => { root.line-ending-changed(v); } width: 72px; }
+            Button { text: "发送"; primary: true; clicked => { root.send(); } }
+        }
+        if root.error != "" : Text { text: root.error; color: AppColors.red; font-size: 11px; wrap: word-wrap; }
+        Text { text: "目标端口: " + (root.target-port == "" ? "未选择" : root.target-port); color: AppColors.text-dimmed; font-size: 11px; }
+    }
+}

@@ -1,6 +1,7 @@
 import { Button, LineEdit, ListView, TabWidget, VerticalBox, HorizontalBox, GroupBox } from "std-widgets.slint";
 import { ChartView, AttitudeView, GaugeView } from "vis.slint";
 import { PluginsView, DynamicFormView } from "plugins.slint";
+import { TerminalView, LogView, DeviceView, SenderView } from "terminal.slint";
 import { AppColors } from "palette.slint";
 
 export component AppWindow inherits Window {
@@ -88,6 +89,59 @@ export component AppWindow inherits Window {
     in-out property <string> dynamic-fields-json: "[]";
     callback dynamic-field-changed(string, string);
     callback dynamic-field-action(string);
+    // Terminal/Log/Device/Sender
+    in-out property <[string]> term-ports: [];
+    in-out property <string> term-port-filter: "";
+    in-out property <bool> term-show-rx: true;
+    in-out property <bool> term-show-tx: true;
+    in-out property <bool> term-show-hex: false;
+    in-out property <bool> term-show-raw: false;
+    in-out property <string> term-search: "";
+    in-out property <bool> term-search-case: false;
+    in-out property <string> term-status: "";
+    in-out property <string> log-search: "";
+    in-out property <bool> log-search-case: false;
+    in-out property <string> log-level: "info";
+    in-out property <string> log-status: "";
+    in-out property <[string]> device-ports: [];
+    in-out property <string> device-selected: "";
+    in-out property <string> device-baud: "115200";
+    in-out property <string> device-status: "";
+    in-out property <bool> device-dtr: true;
+    in-out property <bool> device-rts: true;
+    in-out property <string> sender-input: "";
+    in-out property <bool> sender-hex: false;
+    in-out property <string> sender-ending: "无";
+    in-out property <string> sender-error: "";
+    in-out property <string> sender-target: "";
+    callback term-toggle-rx();
+    callback term-toggle-tx();
+    callback term-toggle-hex();
+    callback term-toggle-raw();
+    callback term-search-changed(string);
+    callback term-toggle-search-case();
+    callback term-port-changed(string);
+    callback term-clear();
+    callback term-export-txt();
+    callback term-export-csv();
+    callback term-export-json();
+    callback term-select-row(int);
+    callback term-copy-selected();
+    callback log-search-changed(string);
+    callback log-toggle-search-case();
+    callback log-level-changed(string);
+    callback log-clear();
+    callback log-select-row(int);
+    callback device-refresh();
+    callback device-open();
+    callback device-close();
+    callback device-port-changed(string);
+    callback device-baud-changed(string);
+    callback device-dtr-toggled();
+    callback device-rts-toggled();
+    callback sender-send();
+    callback sender-toggle-hex();
+    callback sender-ending-changed(string);
     callback request-close();
 
     VerticalBox {
@@ -124,80 +178,74 @@ export component AppWindow inherits Window {
             vertical-stretch: 1;
             Tab {
                 title: "终端";
-                HorizontalBox {
-                    spacing: 12px;
-                    GroupBox {
-                        title: "终端 (POC)";
-                        vertical-stretch: 1;
-                        horizontal-stretch: 1;
-                        VerticalBox {
-                            spacing: 6px;
-                            Rectangle {
-                                background: AppColors.bg-secondary;
-                                border-radius: 8px;
-                                border-width: 1px;
-                                border-color: AppColors.border;
-                                vertical-stretch: 1;
-                                VerticalBox {
-                                    padding: 10px;
-                                    Text {
-                                        text: root.rx-preview;
-                                        color: AppColors.text-primary;
-                                        font-size: 12px;
-                                        wrap: word-wrap;
-                                    }
-                                    Text {
-                                        text: "提示：真实数据流在 tool-transport → tool-databus → 事件总线，Slint 侧通过 callback/timer 订阅即可。";
-                                        color: AppColors.text-secondary;
-                                        font-size: 11px;
-                                        wrap: word-wrap;
-                                    }
-                                }
-                            }
-                            HorizontalBox {
-                                spacing: 8px;
-                                LineEdit {
-                                    placeholder-text: "输入要发送的内容（POC，不真发）";
-                                    text <=> root.tx-input;
-                                    horizontal-stretch: 1;
-                                    accepted(text) => { root.tx-send(text); }
-                                }
-                                Button {
-                                    text: "发送";
-                                    primary: true;
-                                    clicked => { root.tx-send(root.tx-input); }
-                                }
-                            }
-                            HorizontalBox {
-                                spacing: 8px;
-                                LineEdit { placeholder-text: "搜索 re:正则 或字面量"; text <=> root.search-text; horizontal-stretch: 1; edited(text) => { root.search-changed(text); } }
-                                Button { text: root.search-case ? "Aa*" : "Aa"; clicked => { root.toggle-search-case(); } }
-                            }
-                        }
-                    }
-                    VerticalBox {
-                        spacing: 10px;
-                        width: 360px;
-                        GroupBox {
-                            title: "控制";
-                            VerticalBox {
-                                spacing: 8px;
-                                Button { text: "模拟一次发送 (计数+1)"; clicked => { root.tx-send(root.tx-input); } }
-                                Text { text: "已触发: " + root.launch-count + " 次"; font-size: 12px; color: #444; }
-                            }
-                        }
-                        GroupBox {
-                            title: "日志 (POC)";
-                            vertical-stretch: 1;
-                            ListView {
-                                vertical-stretch: 1;
-                                for _i in 6 : Rectangle {
-                                    height: 28px;
-                                    Text { text: root.log-preview + " #" + _i; font-size: 11px; color: #333; vertical-alignment: center; }
-                                }
-                            }
-                        }
-                    }
+                TerminalView {
+                    ports: root.term-ports;
+                    port-filter: root.term-port-filter;
+                    show-rx: root.term-show-rx;
+                    show-tx: root.term-show-tx;
+                    show-hex: root.term-show-hex;
+                    show-raw: root.term-show-raw;
+                    search: root.term-search;
+                    search-case: root.term-search-case;
+                    status: root.term-status;
+                    toggle-rx => { root.term-toggle-rx(); }
+                    toggle-tx => { root.term-toggle-tx(); }
+                    toggle-hex => { root.term-toggle-hex(); }
+                    toggle-raw => { root.term-toggle-raw(); }
+                    search-changed(t) => { root.term-search-changed(t); }
+                    toggle-search-case => { root.term-toggle-search-case(); }
+                    port-changed(v) => { root.term-port-changed(v); }
+                    clear => { root.term-clear(); }
+                    export-txt => { root.term-export-txt(); }
+                    export-csv => { root.term-export-csv(); }
+                    export-json => { root.term-export-json(); }
+                    select-row(id) => { root.term-select-row(id); }
+                    copy-selected => { root.term-copy-selected(); }
+                }
+            }
+            Tab {
+                title: "日志";
+                LogView {
+                    search: root.log-search;
+                    search-case: root.log-search-case;
+                    level-filter: root.log-level;
+                    status: root.log-status;
+                    search-changed(t) => { root.log-search-changed(t); }
+                    toggle-search-case => { root.log-toggle-search-case(); }
+                    level-changed(v) => { root.log-level-changed(v); }
+                    clear => { root.log-clear(); }
+                    select-row(id) => { root.log-select-row(id); }
+                }
+            }
+            Tab {
+                title: "设备";
+                DeviceView {
+                    ports: root.device-ports;
+                    selected-port: root.device-selected;
+                    baud: root.device-baud;
+                    status: root.device-status;
+                    dtr: root.device-dtr;
+                    rts: root.device-rts;
+                    refresh => { root.device-refresh(); }
+                    open => { root.device-open(); }
+                    close => { root.device-close(); }
+                    port-changed(v) => { root.device-port-changed(v); }
+                    baud-changed(v) => { root.device-baud-changed(v); }
+                    dtr-toggled => { root.device-dtr-toggled(); }
+                    rts-toggled => { root.device-rts-toggled(); }
+                }
+            }
+            Tab {
+                title: "发送";
+                SenderView {
+                    input: root.sender-input;
+                    hex-mode: root.sender-hex;
+                    line-ending: root.sender-ending;
+                    error: root.sender-error;
+                    target-port: root.sender-target;
+                    send => { root.sender-send(); }
+                    toggle-hex => { root.sender-toggle-hex(); }
+                    line-ending-changed(v) => { root.sender-ending-changed(v); }
                 }
             }
             Tab {

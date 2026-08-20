@@ -2647,6 +2647,7 @@ dependencies = [
 name = "hardware-workbench-app-slint"
 version = "1.0.0"
 dependencies = [
+ "chrono",
  "crossbeam-channel",
  "dirs-next",
  "egui",
