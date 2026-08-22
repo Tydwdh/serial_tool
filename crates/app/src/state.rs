@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tool_transport::{SerialConfig, SerialPortDescriptor};
+use tool_transport::SerialPortDescriptor;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) enum StatusLevel {
@@ -199,10 +199,10 @@ impl Default for SendUiState {
 }
 
 /// 待重连的串口信息（拔出后自动重连用）。
+/// 重连时使用当前 UI 串口配置，故仅记录端口名。
 #[derive(Clone)]
 pub(crate) struct PendingReconnect {
     pub(crate) port_name: String,
-    pub(crate) config: SerialConfig,
     pub(crate) attempts: u32,
     pub(crate) next_try_at: f64,
 }

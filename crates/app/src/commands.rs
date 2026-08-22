@@ -249,14 +249,6 @@ impl WorkbenchApp {
                 if !selected_still_exists {
                     let selected_val = self.serial.selected_port.clone();
                     if let Some(ref selected) = selected_val {
-                        // 保存配置快照（在 reap_dead_ports 移除 handle 前）
-                        let snapshot = SerialConfig {
-                            port_name: selected.clone(),
-                            baud_rate: self.serial.baud_rate.parse().unwrap_or(115200),
-                            data_bits: parse_data_bits(&self.serial.data_bits),
-                            stop_bits: parse_stop_bits(&self.serial.stop_bits),
-                            parity: parse_parity(&self.serial.parity),
-                        };
                         if self.transport.status_port(selected).open {
                             self.set_status_force(
                                 StatusLevel::Warn,
@@ -269,10 +261,10 @@ impl WorkbenchApp {
                                 format!("{selected} 已拔出或不可用"),
                             );
                         }
+                        // 记录待重连端口名（重连时使用当前 UI 配置，故无需保存快照）
                         if self.serial.auto_reconnect {
                             self.serial.pending_reconnect = Some(PendingReconnect {
                                 port_name: selected.clone(),
-                                config: snapshot,
                                 attempts: 0,
                                 next_try_at: 0.0,
                             });
@@ -310,7 +302,17 @@ impl WorkbenchApp {
                             };
                             pending.next_try_at = now + backoff_ms as f64 / 1000.0;
 
-                            match self.transport.open_serial(pending.config.clone()) {
+                            // 使用当前 UI 配置重连，避免沿用拔出的旧快照（用户在断开期间
+                            // 调整波特率等设置后，恢复时应使用新值）。端口名用 pending 确保障本匹配。
+                            let reconnect_config = SerialConfig {
+                                port_name: pending.port_name.clone(),
+                                baud_rate: self.serial.baud_rate.parse().unwrap_or(115200),
+                                data_bits: parse_data_bits(&self.serial.data_bits),
+                                stop_bits: parse_stop_bits(&self.serial.stop_bits),
+                                parity: parse_parity(&self.serial.parity),
+                            };
+
+                            match self.transport.open_serial(reconnect_config) {
                                 Ok(()) => {
                                     self.serial.selected_port = Some(pending.port_name.clone());
                                     self.serial.pending_reconnect = None;

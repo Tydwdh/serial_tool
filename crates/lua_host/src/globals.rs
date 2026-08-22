@@ -29,6 +29,7 @@ pub const YIELD_CONTINUE_RESETS_TIMEOUT: &str = "continue_resets_timeout";
 // ── yield_op.kind 枚举值（生产端 api::serial/api::task 与消费端 process_tasks 共用） ──
 pub const YIELD_READ_LINE: &str = "read_line";
 pub const YIELD_WRITE_LINE_AND_EXPECT: &str = "write_line_and_expect";
+pub const YIELD_EXPECT: &str = "expect";
 pub const YIELD_SLEEP: &str = "sleep";
 pub const YIELD_WAIT_PAUSED: &str = "wait_paused";
 

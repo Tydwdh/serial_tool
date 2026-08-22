@@ -159,6 +159,8 @@ ctx.serial.close()
 ctx.serial.close_port("COM3")
 ```
 
+`close()` 只关闭当前插件通过 `ctx.serial.open` 打开的端口，不会误关用户在主界面手动打开的串口。
+
 ### send_to / send_hex_to
 
 向指定端口发送文本或十六进制。十六进制字符串支持空格分隔，如 `"01 02 0A FF"`。
@@ -182,6 +184,8 @@ local ports = ctx.serial.open_ports()     -- 当前已打开的端口名列表
 ```lua
 local line = ctx.serial.expect("READY", 1000)
 ```
+
+在 `ctx.task` 协程内调用时，`expect` 会以协程 yield 方式等待，不会阻塞插件的事件循环；在顶层（非任务）上下文则同步等待到超时。
 
 多串口同时打开时，建议指定端口：
 

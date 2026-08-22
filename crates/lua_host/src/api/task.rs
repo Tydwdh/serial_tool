@@ -4,8 +4,8 @@ use crate::LuaRunConfig;
 use crate::api::serial::match_pat;
 use crate::globals::{
     CURRENT_TASK_ID, PLUGIN_DISABLE, PLUGIN_TASKS, TASK_CANCELLED, TASK_FINISHED, TASK_YIELD_OP,
-    YIELD_CONTINUE_RESETS_TIMEOUT, YIELD_DEADLINE_MS, YIELD_KIND, YIELD_PORT, YIELD_READ_LINE,
-    YIELD_SLEEP, YIELD_TIMEOUT_MS, YIELD_WAIT_PAUSED, YIELD_WRITE_LINE_AND_EXPECT,
+    YIELD_CONTINUE_RESETS_TIMEOUT, YIELD_DEADLINE_MS, YIELD_EXPECT, YIELD_KIND, YIELD_PORT,
+    YIELD_READ_LINE, YIELD_SLEEP, YIELD_TIMEOUT_MS, YIELD_WAIT_PAUSED, YIELD_WRITE_LINE_AND_EXPECT,
 };
 use crate::host_services::{LuaHostServices, line_buffer_key};
 use mlua::{Function, Lua, Table, Thread, Value};
@@ -76,6 +76,15 @@ pub(crate) fn process_tasks(
                                 .unwrap_or(Value::Nil),
                         );
                     }
+                    YIELD_EXPECT => {
+                        let _ = state.set("_expect_result", Value::Nil);
+                        let _ = state.set(
+                            "_expect_err",
+                            lua.create_string("cancelled")
+                                .map(Value::String)
+                                .unwrap_or(Value::Nil),
+                        );
+                    }
                     _ => {
                         // sleep / wait_paused / unknown: 直接恢复
                     }
@@ -132,6 +141,49 @@ pub(crate) fn process_tasks(
                             }
                         } else {
                             continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                YIELD_EXPECT => {
+                    let port: String = op.get(YIELD_PORT).unwrap_or_default();
+                    let pattern: String = op.get("pattern").unwrap_or_default();
+                    let deadline_ms: u64 = op.get(YIELD_DEADLINE_MS).unwrap_or(0);
+                    if deadline_ms > 0 && now_ms > deadline_ms {
+                        let _ = state.set("_expect_result", Value::Nil);
+                        let _ = state.set(
+                            "_expect_err",
+                            lua.create_string("timeout")
+                                .map(Value::String)
+                                .unwrap_or(Value::Nil),
+                        );
+                    } else if let Some(ref map) = host_services.line_buffers {
+                        let key = line_buffer_key(&host_services.plugin_id, &port);
+                        let mut map_lock = map.lock();
+                        let matched = if let Some(buffer) = map_lock.get_mut(&key) {
+                            let mut found: Option<String> = None;
+                            while let Some(line) = buffer.next_line() {
+                                if line.contains(&pattern) {
+                                    found = Some(line);
+                                    break;
+                                }
+                            }
+                            found
+                        } else {
+                            continue;
+                        };
+                        match matched {
+                            Some(line) => {
+                                let _ = state.set(
+                                    "_expect_result",
+                                    lua.create_string(&line)
+                                        .map(Value::String)
+                                        .unwrap_or(Value::Nil),
+                                );
+                                let _ = state.set("_expect_err", Value::Nil);
+                            }
+                            None => continue,
                         }
                     } else {
                         continue;
@@ -394,21 +446,26 @@ fn create_task_methods_table(lua: &Lua) -> mlua::Result<Table> {
         "log",
         lua.create_function(|lua, (task, level, message): (Table, String, String)| {
             let state = get_state_for_task(lua, &task)?;
-            let logs: Table = state.get("logs").unwrap_or_else(|_| {
-                lua.create_table().unwrap_or_else(|e| {
-                    log::error!("task:log create_table failed: {e}; log entries will be lost");
-                    // 降级：复用 globals 表作为临时容器（日志会丢失，但任务不会崩溃）
-                    lua.globals()
-                })
-            });
-            let idx = logs.raw_len() + 1;
             let entry = lua.create_table()?;
             entry.set("level", level)?;
             entry.set("message", message)?;
             entry.set("timestamp_ms", tool_core::now_timestamp_ms())?;
-            logs.set(idx, entry)?;
-            let _ = state.set("logs", logs);
-            Ok(())
+            if let Ok(logs) = state.get::<Table>("logs") {
+                let idx = logs.raw_len() + 1;
+                logs.set(idx, entry)?;
+                Ok(())
+            } else {
+                // 防御降级：极端情况下建表失败则向调用方报告错误，绝不污染全局命名空间。
+                let logs = lua.create_table().map_err(|e| {
+                    mlua::Error::RuntimeError(format!(
+                        "task:log create_table failed: {e}; log entries will be lost"
+                    ))
+                })?;
+                let idx = logs.raw_len() + 1;
+                logs.set(idx, entry)?;
+                let _ = state.set("logs", logs);
+                Ok(())
+            }
         })?,
     )?;
 

@@ -11,8 +11,8 @@ use tool_transport::{TransportManager, serial_topics};
 use crate::convert::{json_to_lua_value, lua_value_to_serial_config};
 use crate::globals::{
     CURRENT_TASK_ID, EXPECT_ACTION, EXPECT_PATTERN, PLUGIN_TASKS, TASK_YIELD_OP,
-    YIELD_CONTINUE_RESETS_TIMEOUT, YIELD_DEADLINE_MS, YIELD_KIND, YIELD_PORT, YIELD_READ_LINE,
-    YIELD_TIMEOUT_MS, YIELD_WRITE_LINE_AND_EXPECT,
+    YIELD_CONTINUE_RESETS_TIMEOUT, YIELD_DEADLINE_MS, YIELD_EXPECT, YIELD_KIND, YIELD_PORT,
+    YIELD_READ_LINE, YIELD_TIMEOUT_MS, YIELD_WRITE_LINE_AND_EXPECT,
 };
 use crate::host_services::{LuaHostServices, line_buffer_key};
 
@@ -42,14 +42,23 @@ pub(crate) fn match_pat(line: &str, pat: &str) -> bool {
 }
 
 /// 按模式字符串缓存编译结果；非法正则返回 None（并记录一次警告）。
+///
+/// 缓存有上限（[`REGEX_CACHE_MAX_ENTRIES`]），超限时清空重建，避免 Lua 插件
+/// 用可变的 pattern 拼接导致无界内存增长。
 fn compile_cached_regex(pattern: &str) -> Option<&'static regex::Regex> {
     use std::sync::{Mutex, OnceLock};
+
+    /// 缓存条目上限。达到后整个清空（保证有界），由插件正常使用的 pattern 数量远小于此。
+    const REGEX_CACHE_MAX_ENTRIES: usize = 256;
 
     static CACHE: OnceLock<
         Mutex<std::collections::HashMap<String, Option<&'static regex::Regex>>>,
     > = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
     let mut map = cache.lock().expect("regex cache poisoned");
+    if map.len() >= REGEX_CACHE_MAX_ENTRIES {
+        map.clear();
+    }
     if let Some(entry) = map.get(pattern) {
         return *entry;
     }
@@ -66,6 +75,12 @@ fn compile_cached_regex(pattern: &str) -> Option<&'static regex::Regex> {
     };
     map.insert(pattern.to_owned(), compiled);
     *map.get(pattern).expect("inserted entry exists")
+}
+
+/// 端口名大小写不敏感比较（Windows 串口号 `com3` / `COM3` 视为同一端口）。
+/// 事件 metadata 里的端口名来自 worker（真实大小写），而 Lua 侧可能传入小写。
+fn same_port(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
 }
 
 /// 若 `line` 以 `(...)` 开头（`(` 到第一个 `)`，内部无换行），返回去掉该前缀
@@ -116,6 +131,60 @@ fn poll_until_match(
     }
 }
 
+/// 当前是否在 ctx.task 协程内（依据 CURRENT_TASK_ID 是否为空）。
+fn current_task_id(lua: &Lua) -> String {
+    lua.globals()
+        .get::<String>(CURRENT_TASK_ID)
+        .unwrap_or_default()
+}
+
+/// 在任务上下文为 expect/request 构造 yield_op，写入 task state 后返回该 op。
+fn make_expect_yield_op(
+    lua: &Lua,
+    port: &str,
+    pattern: &str,
+    timeout_ms: u64,
+) -> mlua::Result<Value> {
+    let task_id: String = current_task_id(lua);
+    if task_id.is_empty() {
+        return Err(mlua::Error::RuntimeError(
+            "ctx.serial.expect/request 必须在 ctx.task 协程内调用".into(),
+        ));
+    }
+    let op = lua.create_table()?;
+    op.set(YIELD_KIND, YIELD_EXPECT)?;
+    op.set(YIELD_PORT, port)?;
+    op.set("pattern", pattern)?;
+    // 标记为需要 coroutine.yield 的 op，供 Lua wrapper 识别。
+    op.set("__yield", true)?;
+    op.set(YIELD_TIMEOUT_MS, timeout_ms)?;
+    op.set(
+        YIELD_DEADLINE_MS,
+        tool_core::now_timestamp_ms() + timeout_ms,
+    )?;
+    let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
+    if let Ok(state) = tasks.get::<Table>(task_id.as_str()) {
+        let _ = state.set(TASK_YIELD_OP, op.clone());
+    }
+    Ok(Value::Table(op))
+}
+
+/// 不带端口的 expect：解析当前唯一打开的串口作为端口。
+fn make_expect_yield_op_with_port(
+    lua: &Lua,
+    transport: &TransportManager,
+    pattern: &str,
+    timeout_ms: u64,
+) -> mlua::Result<Value> {
+    let open = transport.open_ports();
+    let port = if open.len() == 1 {
+        open[0].clone()
+    } else {
+        String::new()
+    };
+    make_expect_yield_op(lua, &port, pattern, timeout_ms)
+}
+
 pub(crate) fn create_serial_api(
     lua: &Lua,
     bus: DataBus,
@@ -141,22 +210,34 @@ pub(crate) fn create_serial_api(
     )?;
 
     let transport_for_open = transport.clone();
+    // 记录本插件通过 ctx.serial.open 打开的端口，供 close() 只关闭自己打开的端口。
+    let opened_by_plugin: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let opened_open = opened_by_plugin.clone();
 
     table.set(
         "open",
         lua.create_function(move |_lua, config: Value| {
+            let cfg = lua_value_to_serial_config(config)?;
             transport_for_open
-                .open_serial(lua_value_to_serial_config(config)?)
-                .map_err(mlua::Error::external)
+                .open_serial(cfg.clone())
+                .map_err(mlua::Error::external)?;
+            opened_open.lock().unwrap().push(cfg.port_name);
+            Ok(())
         })?,
     )?;
 
     let transport_for_close = transport.clone();
+    let opened_close = opened_by_plugin.clone();
 
     table.set(
         "close",
         lua.create_function(move |_lua, ()| {
-            transport_for_close.close_serial();
+            // 只关闭本插件通过 ctx.serial.open 打开的端口，避免误关用户手动打开的串口。
+            let owned: Vec<String> = opened_close.lock().unwrap().drain(..).collect();
+            for port in &owned {
+                transport_for_close.close_port(port);
+            }
             Ok(())
         })?,
     )?;
@@ -219,51 +300,57 @@ pub(crate) fn create_serial_api(
     )?;
 
     // ctx.serial.expect_from(port, pattern, timeout_ms) — 端口级 API
+    // 任务上下文（CURRENT_TASK_ID 非空）→ 协程 yield；顶层/测试上下文 → 阻塞轮询。
     let expect_from_bus = bus.clone();
     let expect_from_stop = host_services.stop_flag.clone();
     let expect_from_transport = transport.clone();
     table.set(
-        "expect_from",
+        "__expect_from_inner",
         lua.create_function(
             move |lua, (port, pattern, timeout_ms): (String, String, Option<u64>)| {
                 let port = expect_from_transport
                     .canonical_open_port_name(&port)
                     .unwrap_or(port);
-                let subscription =
-                    expect_from_bus.subscribe(TopicFilter::exact(serial_topics::SERIAL_RX));
-                let deadline = Instant::now() + Duration::from_millis(timeout_ms.unwrap_or(1_000));
-
-                let result =
-                    poll_until_match(&subscription, &expect_from_stop, deadline, |event| {
-                        let event_port = event
-                            .metadata
-                            .get("port")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        if event_port != port {
-                            return None;
-                        }
-                        let text = event.payload.text_lossy();
-                        if text.contains(&pattern) {
-                            Some(text)
-                        } else {
-                            None
-                        }
-                    });
-                match result {
-                    Some(text) => Ok(Value::String(lua.create_string(&text)?)),
-                    None => Ok(Value::Nil),
+                let timeout_ms = timeout_ms.unwrap_or(1_000);
+                let blocking = current_task_id(lua).is_empty();
+                if blocking {
+                    let subscription =
+                        expect_from_bus.subscribe(TopicFilter::exact(serial_topics::SERIAL_RX));
+                    let deadline =
+                        Instant::now() + Duration::from_millis(timeout_ms);
+                    let result =
+                        poll_until_match(&subscription, &expect_from_stop, deadline, |event| {
+                            let event_port = event
+                                .metadata
+                                .get("port")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            if !same_port(event_port, &port) {
+                                return None;
+                            }
+                            let text = event.payload.text_lossy();
+                            if text.contains(&pattern) {
+                                Some(text)
+                            } else {
+                                None
+                            }
+                        });
+                    return match result {
+                        Some(text) => Ok(Value::String(lua.create_string(&text)?)),
+                        None => Ok(Value::Nil),
+                    };
                 }
+                // 任务上下文：yield，交由 process_tasks 消费行缓冲区。
+                make_expect_yield_op(lua, &port, &pattern, timeout_ms)
             },
         )?,
     )?;
 
     let expect_bus = bus.clone();
-
     let expect_transport = transport.clone();
     let expect_stop = host_services.stop_flag.clone();
     table.set(
-        "expect",
+        "__expect_inner",
         lua.create_function(move |lua, (pattern, timeout_ms): (String, Option<u64>)| {
             // 多串口打开时拒绝不带端口的 expect，避免匹配错误端口
             let open_ports = expect_transport.open_ports();
@@ -272,17 +359,24 @@ pub(crate) fn create_serial_api(
                     "多个串口已打开，请使用 ctx.serial.expect_from(port, pattern) 或 ctx.serial.request()".into(),
                 ));
             }
-            let subscription = expect_bus.subscribe(TopicFilter::exact(serial_topics::SERIAL_RX));
-            let deadline = Instant::now() + Duration::from_millis(timeout_ms.unwrap_or(1_000));
-
-            let result = poll_until_match(&subscription, &expect_stop, deadline, |event| {
-                let text = event.payload.text_lossy();
-                if text.contains(&pattern) { Some(text) } else { None }
-            });
-            match result {
-                Some(text) => Ok(Value::String(lua.create_string(&text)?)),
-                None => Ok(Value::Nil),
+            let timeout_ms = timeout_ms.unwrap_or(1_000);
+            let blocking = current_task_id(lua).is_empty();
+            if blocking {
+                let subscription =
+                    expect_bus.subscribe(TopicFilter::exact(serial_topics::SERIAL_RX));
+                let deadline =
+                    Instant::now() + Duration::from_millis(timeout_ms);
+                let result = poll_until_match(&subscription, &expect_stop, deadline, |event| {
+                    let text = event.payload.text_lossy();
+                    if text.contains(&pattern) { Some(text) } else { None }
+                });
+                return match result {
+                    Some(text) => Ok(Value::String(lua.create_string(&text)?)),
+                    None => Ok(Value::Nil),
+                };
             }
+            // 任务上下文：yield。
+            make_expect_yield_op_with_port(lua, &expect_transport, &pattern, timeout_ms)
         })?,
     )?;
 
@@ -292,43 +386,78 @@ pub(crate) fn create_serial_api(
     let rq_transport = transport.clone();
     let rq_stop = host_services.stop_flag.clone();
     table.set(
-        "request",
+        "__request_inner",
         lua.create_function(move |lua, opts: Table| {
             let port: String = opts.get("port")?;
             let tx: String = opts.get("tx")?;
             let expect: String = opts.get("expect")?;
             let timeout_ms: u64 = opts.get("timeout_ms").unwrap_or(1_000);
-
-            // 1. 先注册 subscriber
-            let subscription = rq_bus.subscribe(TopicFilter::exact(serial_topics::SERIAL_RX));
-            let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-
-            // 2. 发送
+            let blocking = current_task_id(lua).is_empty();
+            if blocking {
+                // 1. 先注册 subscriber
+                let subscription =
+                    rq_bus.subscribe(TopicFilter::exact(serial_topics::SERIAL_RX));
+                let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+                // 2. 发送
+                rq_transport
+                    .send_text_to(&port, &tx)
+                    .map_err(mlua::Error::external)?;
+                // 3. 匹配响应
+                let result = poll_until_match(&subscription, &rq_stop, deadline, |event| {
+                    let event_port = event
+                        .metadata
+                        .get("port")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if !same_port(event_port, &port) {
+                        return None;
+                    }
+                    let text = event.payload.text_lossy();
+                    if text.contains(&expect) {
+                        Some(text)
+                    } else {
+                        None
+                    }
+                });
+                return match result {
+                    Some(text) => Ok(Value::String(lua.create_string(&text)?)),
+                    None => Ok(Value::Nil),
+                };
+            }
+            // 任务上下文：yield。先发送再进入等待。
             rq_transport
                 .send_text_to(&port, &tx)
                 .map_err(mlua::Error::external)?;
+            make_expect_yield_op(lua, &port, &expect, timeout_ms)
+        })?,
+    )?;
 
-            // 3. 匹配响应
-            let result = poll_until_match(&subscription, &rq_stop, deadline, |event| {
-                let event_port = event
-                    .metadata
-                    .get("port")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if event_port != port {
-                    return None;
-                }
-                let text = event.payload.text_lossy();
-                if text.contains(&expect) {
-                    Some(text)
-                } else {
-                    None
-                }
-            });
-            match result {
-                Some(text) => Ok(Value::String(lua.create_string(&text)?)),
-                None => Ok(Value::Nil),
+    // ctx.serial.__expect_finish — 任务上下文恢复后读取 expect/request 结果。
+    table.set(
+        "__expect_finish",
+        lua.create_function(move |lua, ()| {
+            let task_id: String = current_task_id(lua);
+            if task_id.is_empty() {
+                return Err(mlua::Error::RuntimeError(
+                    "ctx.serial.expect 必须在 ctx.task 协程内使用恢复路径".into(),
+                ));
             }
+            let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
+            if let Ok(state) = tasks.get::<Table>(task_id.as_str()) {
+                let matched: Option<String> = state.get("_expect_result").ok();
+                let err: Option<String> = state.get("_expect_err").ok();
+                let _ = state.set("_expect_result", Value::Nil);
+                let _ = state.set("_expect_err", Value::Nil);
+                if let Some(text) = matched {
+                    return Ok(Value::String(lua.create_string(&text)?));
+                }
+                if err.as_deref() == Some("cancelled") {
+                    return Ok(Value::Nil);
+                }
+                // 超时或其它：返回 nil
+                return Ok(Value::Nil);
+            }
+            Ok(Value::Nil)
         })?,
     )?;
 
@@ -702,6 +831,26 @@ return function(serial)
         end
         coroutine.yield(op)
         return serial.__write_line_and_expect_finish()
+    end
+
+    -- expect / expect_from / request 的任务上下文路径：返回值可能是结果，
+    -- 也可能是一个带 __yield 标记的 op。若是 op 则 yield 然后取最终结果。
+    local function handle_expect(result)
+        if type(result) == "table" and result.__yield then
+            coroutine.yield(result)
+            return serial.__expect_finish()
+        end
+        return result
+    end
+
+    serial.expect_from = function(port, pattern, timeout_ms)
+        return handle_expect(serial.__expect_from_inner(port, pattern, timeout_ms))
+    end
+    serial.expect = function(pattern, timeout_ms)
+        return handle_expect(serial.__expect_inner(pattern, timeout_ms))
+    end
+    serial.request = function(opts)
+        return handle_expect(serial.__request_inner(opts))
     end
 end
 "#,

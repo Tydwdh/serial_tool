@@ -37,8 +37,8 @@ pub(crate) use crate::api::timer::create_timer_api;
 pub(crate) use crate::api::ui::create_ui_api;
 pub(crate) use crate::convert::{event_to_lua_table, json_to_lua_value};
 use crate::globals::{
-    PLUGIN_COMMANDS, TASK_CANCELLED, TASK_FINISHED, TASK_YIELD_OP, YIELD_DEADLINE_MS, YIELD_KIND,
-    YIELD_READ_LINE, YIELD_SLEEP, YIELD_WAIT_PAUSED, YIELD_WRITE_LINE_AND_EXPECT,
+    PLUGIN_COMMANDS, TASK_CANCELLED, TASK_FINISHED, TASK_YIELD_OP, YIELD_DEADLINE_MS, YIELD_EXPECT,
+    YIELD_KIND, YIELD_READ_LINE, YIELD_SLEEP, YIELD_WAIT_PAUSED, YIELD_WRITE_LINE_AND_EXPECT,
 };
 use crate::host_services::line_buffer_key;
 pub use config::ConfigStore;
@@ -811,6 +811,10 @@ fn next_task_wait(lua: &Lua) -> Option<Duration> {
                     next_wake_at = next_wake_at.min(deadline_ms);
                 }
             }
+            YIELD_EXPECT => {
+                let deadline_ms: u64 = op.get(YIELD_DEADLINE_MS).unwrap_or(0);
+                next_wake_at = next_wake_at.min(deadline_ms);
+            }
             YIELD_WAIT_PAUSED => {}
             _ => {}
         }
@@ -1487,6 +1491,89 @@ ctx.log.info("sender-ready")
             }
         }
         assert_eq!(result.as_deref(), Some("expect:ok"));
+    }
+
+    #[test]
+    fn serial_expect_yields_in_task_and_receives_response() {
+        // 验证 expect/expect_from 在 ctx.task 协程内走 yield 路径（不阻塞插件循环），
+        // 且能收到后续 RX 响应。
+        let bus = DataBus::new();
+        let logs = bus.subscribe(TopicFilter::prefix("log."));
+        let transport = TransportManager::new(bus.clone());
+        let virtual_port = transport
+            .open_virtual_serial("COM2")
+            .expect("open virtual serial");
+        let host_services = LuaHostServices {
+            plugin_root: None,
+            plugin_id: "expect-plugin".to_owned(),
+            dialog_sender: None,
+            file_broker: None,
+            stop_flag: None,
+            line_buffers: Some(Arc::new(ParkingMutex::new(HashMap::new()))),
+            config_store: None,
+            declared_panel_ids: Default::default(),
+        };
+
+        let _runtime = run_plugin(
+            r#"
+ctx.task.start({ id = "waiter" }, function()
+    local line = ctx.serial.expect_from("COM2", "READY", 1000)
+    if line then
+        ctx.log.info("got:" .. tostring(line))
+    else
+        ctx.log.error("timeout")
+    end
+end)
+ctx.log.info("waiter-ready")
+"#
+                .to_owned(),
+            LuaRunConfig {
+                script_name: "expect-yield.lua".to_owned(),
+                timeout_ms: 5_000,
+                source: "plugin:expect-plugin".to_owned(),
+                context: json!({}),
+                permissions: vec![
+                    "serial".to_owned(),
+                    "task".to_owned(),
+                    "log".to_owned(),
+                ],
+            },
+            bus.clone(),
+            transport,
+            host_services,
+        )
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut saw_ready = false;
+        while Instant::now() < deadline {
+            if let Ok(event) = logs.recv_timeout(Duration::from_millis(50))
+                && event.payload.text_lossy().contains("waiter-ready")
+            {
+                saw_ready = true;
+                break;
+            }
+        }
+        assert!(saw_ready, "plugin did not start expect task");
+
+        // 发送匹配的 RX；task 协程应在 yield 后收到并记录。
+        virtual_port.inject_rx(b"~ READY ~\n".to_vec());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut result = None;
+        while Instant::now() < deadline {
+            if let Ok(event) = logs.recv_timeout(Duration::from_millis(50)) {
+                let text = event.payload.text_lossy();
+                if text.contains("got:") || text.contains("timeout") {
+                    result = Some(text);
+                    break;
+                }
+            }
+        }
+        assert!(
+            result.as_deref() == Some("got:~ READY ~"),
+            "expect should yield and receive the response, got {result:?}"
+        );
     }
 
     #[test]
