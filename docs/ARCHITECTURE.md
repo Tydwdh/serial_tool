@@ -63,3 +63,36 @@ tool-core (Event/Payload/Config)
 - `Workbench` 非 `Arc<Mutex>`，`&mut self`  ownership 由 `WorkbenchApp { workbench }` 持有；未来桥接再包 `Arc<Mutex>`。
 - 同步 `dispatch` 为主，worker 仍经 `thread + channel + DataBus` 异步。
 - API 暴露 `String/Vec/enum/PathBuf` 现实 DTO，不透传 `&InternalManager`。
+
+## Application / Presentation 边界
+
+| 层 | 职责 | 代表 |
+|---|---|---|
+| Application (`tool-application`) | 行为与状态 | `Workbench::dispatch(AppCommand)->Result<CommandOutcome,AppError>` / `query_*` / `tick(now)` / `TerminalService(seq)` / `ApplicationConfig` |
+| Presentation (`tool-panels` + `app` UI) | 呈现与交互 | `TerminalPanel/LogPanel/ChartPanel + DynamicPanels` / `PanelRegistry::Builtin(fn(&mut WorkbenchApp,&mut Ui))` / `CommandPalette` / `rfd` |
+
+判定规则（todo.txt §7）：换个 UI 仍需知道即 `Application`，仅用于当前 `egui` 的 `scroll/selection/hover/dock` 即 `Presentation`.
+
+## Terminal 高频特殊处理
+
+`TerminalService` 持有 `RingSubscription(prefix("transport.serial."),65_536)`，`push_event` 做 `merge(同port同方向≤merge_window_ms且不以\n结尾则拼接)`，`enforce_limit(50_000>` 按 `seq` 最旧淘汰)，`query_terminal_since` 供 headless/Flutter 增量拉取。
+
+## WorkbenchApp 定位（收敛中）
+
+`WorkbenchApp { workbench: Workbench, panels/*, send, notifications, ... }` — `bus/transport/recorder/plugin_manager` 均经 `workbench.*` 代理，`app` 仅剩 `eframe` 生命周期、`dock/shortcuts/dialogs/themes`。剩余 `Self{ bus/transport/plugin_manager/recorder }` 字段已 `#[allow(dead_code)]` 待物理删除（下一小步）。
+
+## 验证
+
+```bash
+cargo check --workspace
+cargo test --workspace
+cargo test -p tool-application  # architecture/headless 契约
+cargo tree -p tool-application | grep -i egui  # 0 行
+rg "egui|eframe" crates/application             # 仅注释/测试
+```
+
+## 剩余工作（朝 todo.txt §69 全量达标）
+
+1. `tool-panels/Cargo.toml` 去 `tool-transport/recorder/extension/marketplace`，`ReplayPanel/PluginsPanel` 改收 `ReplayView/PluginViewState` DTO（`replay_view.rs/plugin_view.rs` 已占位）。
+2. `crates/app/Cargo.toml` 去 `tool-transport/recorder/extension/marketplace/lua_host/updater/databus` 直连，仅留 `tool-application + tool-panels + egui/eframe + open/serde`，删除 `WorkbenchApp` 重复字段。
+3. 补 `todo.txt §39` Headless 用例：`send routing/terminal bound/replay lifecycle/plugin enable-disable/event emission`。

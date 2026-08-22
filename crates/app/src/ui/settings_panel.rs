@@ -406,7 +406,7 @@ impl WorkbenchApp {
 
     fn render_config_locations(&mut self, ui: &mut egui::Ui) {
         let workspace_config = config_path();
-        let plugin_config_dir = self.plugin_manager.config_root().to_path_buf();
+        let plugin_config_dir = self.workbench.plugin_manager.config_root().to_path_buf();
 
         self.render_config_location_row(ui, "工作区配置", &workspace_config, false);
         self.render_config_location_row(ui, "插件配置", &plugin_config_dir, true);
@@ -533,7 +533,7 @@ impl WorkbenchApp {
 
     /// 渲染所有已启用插件的设置表单
     fn render_plugin_settings(&mut self, ui: &mut egui::Ui) {
-        let plugin_settings = self.plugin_manager.plugin_settings();
+        let plugin_settings = self.workbench.plugin_manager.plugin_settings();
         if plugin_settings.is_empty() {
             design::card().show(ui, |ui| {
                 design::empty_state(ui, ICON_APPS, "暂无插件设置");
@@ -542,7 +542,7 @@ impl WorkbenchApp {
         }
         for (plugin_id, plugin_name, settings) in &plugin_settings {
             // 从 ConfigStore 读取当前值，构建 DynamicField 列表
-            let config_store = self.plugin_manager.config_store();
+            let config_store = self.workbench.plugin_manager.config_store();
             let mut fields: Vec<DynamicField>;
             let mut fields_json = Vec::with_capacity(settings.len());
 
@@ -599,13 +599,21 @@ impl WorkbenchApp {
                 let panel_id = format!("{plugin_id}.settings");
 
                 // 手动渲染表单
+                let ports: Vec<tool_panels::PortItem> = self
+                    .serial
+                    .ports
+                    .iter()
+                    .map(|d| tool_panels::PortItem {
+                        port_name: d.port_name.clone(),
+                    })
+                    .collect();
                 dynamic_form_ui(
                     ui,
                     &self.bus,
                     &panel_id,
                     &mut fields,
                     true, // auto_apply
-                    &self.serial.ports,
+                    &ports,
                 );
             });
         }

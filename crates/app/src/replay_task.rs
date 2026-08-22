@@ -33,7 +33,7 @@ impl WorkbenchApp {
             return;
         }
 
-        let entries = self.plugin_manager.replay_analyzer_entries();
+        let entries = self.workbench.plugin_manager.replay_analyzer_entries();
         if entries.is_empty() {
             self.replay_panel
                 .set_analyzer_error("没有可用的 replay analyzer".to_owned());

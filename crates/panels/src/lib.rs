@@ -24,7 +24,8 @@ pub use chart::ChartPanel;
 pub use data_table::{DataTableColumn, DataTablePanel};
 pub use dynamic::DynamicPanels;
 pub use dynamic::{
-    DynamicField, DynamicFieldKind, FieldFilter, FieldOption, dynamic_form_ui, parse_fields,
+    DynamicField, DynamicFieldKind, FieldFilter, FieldOption, PortItem, dynamic_form_ui,
+    parse_fields,
 };
 pub use gauge::GaugePanel;
 pub use log::LogPanel;

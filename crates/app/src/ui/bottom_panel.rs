@@ -37,7 +37,7 @@ pub(crate) enum SendLayout {
 impl WorkbenchApp {
     /// 确保 send.target_port 指向一个已打开的端口（自动回退逻辑）。
     pub(crate) fn ensure_send_target_port(&mut self) {
-        let open_ports = self.transport.open_ports();
+        let open_ports = self.workbench.transport.open_ports();
 
         if self
             .send
@@ -49,7 +49,7 @@ impl WorkbenchApp {
                 .serial
                 .selected_port
                 .clone()
-                .filter(|p| self.transport.status_port(p).open)
+                .filter(|p| self.workbench.transport.status_port(p).open)
                 .or_else(|| open_ports.first().cloned());
         }
     }
@@ -58,11 +58,11 @@ impl WorkbenchApp {
         self.send
             .target_port
             .as_deref()
-            .is_some_and(|p| self.transport.status_port(p).open)
+            .is_some_and(|p| self.workbench.transport.status_port(p).open)
     }
 
     pub(super) fn send_target_port_combo(&mut self, ui: &mut egui::Ui, id_salt: &'static str) {
-        let open_ports: Vec<String> = self.transport.open_ports();
+        let open_ports: Vec<String> = self.workbench.transport.open_ports();
 
         egui::ComboBox::from_id_salt(id_salt)
             .width(130.0)
@@ -581,13 +581,13 @@ impl WorkbenchApp {
             .target_port
             .clone()
             .expect("target_port was checked non-None above");
-        let open = self.transport.status_port(&port).open;
+        let open = self.workbench.transport.status_port(&port).open;
 
         ui.add_enabled_ui(open, |ui| {
             let mut dtr = self.send.dtr_high;
             let dtr_resp = ui.checkbox(&mut dtr, "DTR");
             if dtr_resp.changed() {
-                match self.transport.set_dtr(&port, dtr) {
+                match self.workbench.transport.set_dtr(&port, dtr) {
                     Ok(()) => self.send.dtr_high = dtr,
                     Err(e) => self.set_status_force(StatusLevel::Error, e.to_string()),
                 }
@@ -599,7 +599,7 @@ impl WorkbenchApp {
             let mut rts = self.send.rts_high;
             let rts_resp = ui.checkbox(&mut rts, "RTS");
             if rts_resp.changed() {
-                match self.transport.set_rts(&port, rts) {
+                match self.workbench.transport.set_rts(&port, rts) {
                     Ok(()) => self.send.rts_high = rts,
                     Err(e) => self.set_status_force(StatusLevel::Error, e.to_string()),
                 }

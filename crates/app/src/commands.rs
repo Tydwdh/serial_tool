@@ -144,8 +144,8 @@ impl WorkbenchApp {
 
     /// `$AddBookmark`：录制中时添加标记点。
     pub(crate) fn cmd_add_bookmark_if_recording(&mut self) {
-        if self.recorder.is_running() {
-            self.recorder.add_bookmark("");
+        if self.workbench.recorder.is_running() {
+            self.workbench.recorder.add_bookmark("");
         }
     }
 
@@ -214,7 +214,7 @@ impl WorkbenchApp {
 
         let old_selected = self.serial.selected_port.clone();
 
-        match self.transport.list_serial_ports() {
+        match self.workbench.transport.list_serial_ports() {
             Ok(mut new_ports) => {
                 // 网络模拟串口（WebSocket + JSON-RPC gcode 桥）作为固定端口并入列表：
                 // 与系统串口一起排序、分组、别名、开关，表现完全一致。
@@ -237,7 +237,16 @@ impl WorkbenchApp {
                     old_names.difference(&new_names).cloned().collect();
 
                 self.serial.ports = new_ports;
-                self.dynamic_panels.set_ports(&self.serial.ports);
+                self.dynamic_panels.set_ports(
+                    &self
+                        .serial
+                        .ports
+                        .iter()
+                        .map(|d| tool_panels::PortItem {
+                            port_name: d.port_name.clone(),
+                        })
+                        .collect::<Vec<_>>(),
+                );
 
                 let selected_still_exists = self
                     .serial
@@ -249,7 +258,7 @@ impl WorkbenchApp {
                 if !selected_still_exists {
                     let selected_val = self.serial.selected_port.clone();
                     if let Some(ref selected) = selected_val {
-                        if self.transport.status_port(selected).open {
+                        if self.workbench.transport.status_port(selected).open {
                             self.set_status_force(
                                 StatusLevel::Warn,
                                 format!("{selected} 已打开但不在系统列表中"),
@@ -312,7 +321,7 @@ impl WorkbenchApp {
                                 parity: parse_parity(&self.serial.parity),
                             };
 
-                            match self.transport.open_serial(reconnect_config) {
+                            match self.workbench.transport.open_serial(reconnect_config) {
                                 Ok(()) => {
                                     self.serial.selected_port = Some(pending.port_name.clone());
                                     self.serial.pending_reconnect = None;
@@ -390,16 +399,16 @@ impl WorkbenchApp {
             return;
         }
 
-        if self.transport.status_port(name).open {
+        if self.workbench.transport.status_port(name).open {
             // 已打开：关闭
-            self.transport.close_port(name);
+            self.workbench.transport.close_port(name);
             self.set_status_force(StatusLevel::Info, format!("{name} 已断开"));
             return;
         }
 
         // 网络端口连接中：取消连接（worker 正在异步 connect）
-        if self.transport.status_port(name).connecting {
-            self.transport.close_port(name);
+        if self.workbench.transport.status_port(name).connecting {
+            self.workbench.transport.close_port(name);
             self.set_status_force(StatusLevel::Info, format!("已取消 {name} 的连接"));
             return;
         }
@@ -464,7 +473,10 @@ impl WorkbenchApp {
             stop_bits: parse_stop_bits(&self.serial.stop_bits),
             parity: parse_parity(&self.serial.parity),
         };
-        self.transport.open_serial(cfg).map_err(|e| e.to_string())
+        self.workbench
+            .transport
+            .open_serial(cfg)
+            .map_err(|e| e.to_string())
     }
 
     /// 真正重连：先关闭端口并等待 worker 退出，再用当前配置重新打开。
@@ -497,11 +509,15 @@ impl WorkbenchApp {
     }
 
     pub(crate) fn start_or_stop_recording(&mut self) {
-        if self.recorder.is_running() || self.recorder.is_stopping() {
-            self.recorder.stop();
+        if self.workbench.recorder.is_running() || self.workbench.recorder.is_stopping() {
+            self.workbench.recorder.stop();
             self.set_status_force(StatusLevel::Info, "正在停止录制...");
         } else {
-            match self.recorder.start(PathBuf::from(&self.recorder_path)) {
+            match self
+                .workbench
+                .recorder
+                .start(PathBuf::from(&self.recorder_path))
+            {
                 Ok(()) => {
                     self.set_status_force(StatusLevel::Info, "录制中");
                 }

@@ -96,7 +96,7 @@ impl WorkbenchApp {
                 .serial
                 .selected_port
                 .as_deref()
-                .is_some_and(|p| self.transport.status_port(p).open);
+                .is_some_and(|p| self.workbench.transport.status_port(p).open);
             let sl = if so {
                 format!(
                     "串口 ▸ {}",
@@ -143,7 +143,7 @@ impl WorkbenchApp {
                     .serial
                     .selected_port
                     .as_deref()
-                    .map(|port| self.transport.status_port(port))
+                    .map(|port| self.workbench.transport.status_port(port))
                     .unwrap_or_else(tool_transport::TransportStatus::closed);
                 let selected_open = selected_status.open;
                 let selected_connecting = selected_status.connecting;
@@ -169,7 +169,7 @@ impl WorkbenchApp {
                 if close_btn.clicked()
                     && let Some(ref port) = self.serial.selected_port
                 {
-                    self.transport.close_port(port);
+                    self.workbench.transport.close_port(port);
                     self.set_status(StatusLevel::Info, format!("{port} 已关闭"));
                 }
             } else if so {
@@ -213,7 +213,7 @@ impl WorkbenchApp {
             ui.separator();
             // ── 插件贡献：top_bar.left ──
             self.ui_contribution_slot(ui, "top_bar.left");
-            let rec = self.recorder.is_running();
+            let rec = self.workbench.recorder.is_running();
             let record_response = if rec {
                 design::button(ui, ICON_STOP, "停止录制", ButtonKind::Danger)
             } else {

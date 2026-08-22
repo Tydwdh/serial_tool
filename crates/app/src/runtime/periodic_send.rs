@@ -82,9 +82,9 @@ impl WorkbenchApp {
         let hex_mode = self.send.hex_mode;
         let line_ending = self.send.line_ending;
         let hex_strict = self.send.hex_strict;
-        let transport = self.transport.clone();
+        let transport = self.workbench.transport_clone();
         let max_count = self.send.periodic_max_count;
-        let bus = self.bus.clone();
+        let bus = self.workbench.bus.clone();
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let outcome = self.periodic_send.outcome.clone();
         let interval = std::time::Duration::from_secs_f64(interval_ms / 1000.0);

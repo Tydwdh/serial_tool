@@ -49,8 +49,12 @@ impl Drop for MarketplaceInstallJob {
 impl WorkbenchApp {
     /// 每帧把已发现的插件 id 集合回填给市场 UI，用于显示「已安装」标记。
     pub(super) fn sync_marketplace_installed_ids(&mut self) {
-        let ids: std::collections::BTreeSet<String> =
-            self.plugin_manager.plugin_ids().into_iter().collect();
+        let ids: std::collections::BTreeSet<String> = self
+            .workbench
+            .plugin_manager
+            .plugin_ids()
+            .into_iter()
+            .collect();
         self.plugins_panel.set_installed_ids(ids);
     }
 
@@ -157,12 +161,12 @@ impl WorkbenchApp {
         // 重装场景：若该插件已启用/运行，先 disable，避免 Windows 下旧文件被占用
         // 导致替换失败，也保证重装后用户重新启用才加载新代码。
         let was_active = matches!(
-            self.plugin_manager.plugin_state(&id),
+            self.workbench.plugin_manager.plugin_state(&id),
             Some(tool_extension::PluginState::Running)
                 | Some(tool_extension::PluginState::Enabled)
                 | Some(tool_extension::PluginState::Finished)
         );
-        if was_active && let Err(e) = self.plugin_manager.disable(&id) {
+        if was_active && let Err(e) = self.workbench.plugin_manager.disable(&id) {
             log::warn!("marketplace: 重装前禁用 {id} 失败（继续安装）：{e}");
         }
         // disable 后的动态面板/资源由 PluginManager 统一请求宿主回收。
@@ -209,7 +213,7 @@ impl WorkbenchApp {
     /// 重新扫描插件目录（安装成功后调用）。
     fn refresh_plugin_discovery(&mut self) {
         let plugin_dir = app_dir().join("plugins");
-        if let Err(e) = self.plugin_manager.discover_roots([plugin_dir]) {
+        if let Err(e) = self.workbench.plugin_manager.discover_roots([plugin_dir]) {
             self.log(LogLevel::Warn, format!("安装后重新扫描插件失败：{e}"));
         }
     }
@@ -227,13 +231,13 @@ impl WorkbenchApp {
 
         // 1. 先 disable（若活跃）
         let was_active = matches!(
-            self.plugin_manager.plugin_state(plugin_id),
+            self.workbench.plugin_manager.plugin_state(plugin_id),
             Some(tool_extension::PluginState::Running)
                 | Some(tool_extension::PluginState::Enabled)
                 | Some(tool_extension::PluginState::Finished)
                 | Some(tool_extension::PluginState::Failed)
         );
-        if was_active && let Err(e) = self.plugin_manager.disable(plugin_id) {
+        if was_active && let Err(e) = self.workbench.plugin_manager.disable(plugin_id) {
             log::warn!("marketplace: 卸载前禁用 {plugin_id} 失败（继续卸载）：{e}");
         }
 
@@ -263,7 +267,7 @@ impl WorkbenchApp {
         }
 
         // 3. 重新扫描：refresh 会移除已不存在的插件 record
-        if let Err(e) = self.plugin_manager.discover_roots([plugin_dir]) {
+        if let Err(e) = self.workbench.plugin_manager.discover_roots([plugin_dir]) {
             self.log(LogLevel::Warn, format!("卸载后重新扫描插件失败：{e}"));
         }
 

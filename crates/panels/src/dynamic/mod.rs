@@ -6,10 +6,14 @@ pub use form_render::dynamic_form_ui;
 pub use schema::{DynamicField, DynamicFieldKind, FieldFilter, FieldOption, parse_fields};
 
 use crate::{AttitudePanel, ChartPanel, DataTablePanel, GaugePanel, theme};
+
+#[derive(Debug, Clone)]
+pub struct PortItem {
+    pub port_name: String,
+}
 use std::collections::BTreeMap;
 use tool_core::topics;
 use tool_databus::{DataBus, Subscription, TopicFilter};
-use tool_transport::SerialPortDescriptor;
 
 pub struct DynamicPanels {
     bus: DataBus,
@@ -28,7 +32,7 @@ pub struct DynamicPanels {
     table_clear_subscription: Subscription,
     panels: BTreeMap<String, DynamicPanel>,
     last_error: Option<String>,
-    ports: Vec<SerialPortDescriptor>,
+    ports: Vec<PortItem>,
 }
 
 enum DynamicPanel {
@@ -246,7 +250,7 @@ impl DynamicPanels {
         self.last_error.as_deref()
     }
 
-    pub fn set_ports(&mut self, ports: &[SerialPortDescriptor]) {
+    pub fn set_ports(&mut self, ports: &[PortItem]) {
         self.ports = ports.to_vec();
     }
 }
@@ -257,7 +261,7 @@ fn render_panel_inner(
     ui: &mut egui::Ui,
     id: &str,
     bus: &DataBus,
-    ports: &[SerialPortDescriptor],
+    ports: &[PortItem],
 ) {
     match panel {
         DynamicPanel::Chart { chart, .. } => {

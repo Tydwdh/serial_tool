@@ -5,7 +5,7 @@ impl WorkbenchApp {
     /// 发布插件命令动作（模拟 UI 按钮点击）。
     pub(crate) fn publish_plugin_command_action(&mut self, plugin_id: &str, command_id: &str) {
         // 查找该插件的 UI contribution 信息以确定是否 record_send_input
-        let summaries = self.plugin_manager.summaries();
+        let summaries = self.workbench.plugin_manager.summaries();
         let record_send_input = summaries
             .iter()
             .find(|s| s.id == plugin_id)
@@ -55,7 +55,7 @@ impl WorkbenchApp {
             },
             "serial": {
                 "selected_port": self.serial.selected_port.clone(),
-                "open_ports": self.transport.open_ports(),
+                "open_ports": self.workbench.transport.open_ports(),
             }
         });
 
@@ -84,7 +84,7 @@ impl WorkbenchApp {
             object.insert("origin".to_owned(), serde_json::json!("host.command"));
         }
 
-        self.bus.publish(Event::new(
+        self.workbench.bus.publish(Event::new(
             topics::PLUGIN_COMMAND_EXECUTE,
             "plugin.command",
             Direction::Internal,
@@ -97,7 +97,7 @@ impl WorkbenchApp {
         self.poll_dialog_requests();
         self.handle_file_browse_requests();
 
-        self.plugin_manager.process_pending();
+        self.workbench.plugin_manager.process_pending();
         // 插件命令并入统一 CommandRegistry（内置命令同表）。
         // 先 clone summaries 再重建，避免 plugin_summaries 的 &self 借用与
         // &mut self.commands 冲突。
@@ -109,7 +109,7 @@ impl WorkbenchApp {
             .sync_dynamic_panels(&self.dynamic_panels);
         self.process_contribution_set_value();
 
-        for plugin_id in self.plugin_manager.take_cleanup_requests() {
+        for plugin_id in self.workbench.plugin_manager.take_cleanup_requests() {
             let removed = self.dynamic_panels.remove_by_plugin(&plugin_id);
             for id in &removed {
                 self.panels.close_tab(tool_panels::PanelId::dynamic(id));

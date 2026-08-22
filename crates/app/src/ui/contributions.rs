@@ -289,7 +289,7 @@ impl WorkbenchApp {
                 },
                 "serial": {
                     "selected_port": self.serial.selected_port.clone(),
-                    "open_ports": self.transport.open_ports(),
+                    "open_ports": self.workbench.transport.open_ports(),
                 }
             });
         }

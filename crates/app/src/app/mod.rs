@@ -23,9 +23,13 @@ use crate::ui::toast::ToastOverlay;
 
 pub(crate) struct WorkbenchApp {
     pub(crate) workbench: Workbench,
+    #[allow(dead_code)]
     pub(crate) bus: DataBus,
+    #[allow(dead_code)]
     pub(crate) transport: TransportManager,
+    #[allow(dead_code)]
     pub(crate) plugin_manager: PluginManager,
+    #[allow(dead_code)]
     pub(crate) recorder: JsonlRecorder,
     pub(crate) panels: PanelManager,
     pub(crate) terminal_panel: TerminalPanel,
@@ -430,7 +434,9 @@ impl WorkbenchApp {
     }
 
     pub(crate) fn log(&self, lv: LogLevel, m: impl Into<String>) {
-        self.bus.publish(Event::system_log(lv, "app", m.into()));
+        self.workbench
+            .bus
+            .publish(Event::system_log(lv, "app", m.into()));
     }
 
     /// 帧级缓存的插件 summaries。
@@ -445,7 +451,7 @@ impl WorkbenchApp {
     /// 或在循环外处理。
     pub(crate) fn plugin_summaries(&self) -> &[tool_extension::PluginSummary] {
         self.plugin_summaries_cache
-            .get_or_init(|| self.plugin_manager.summaries())
+            .get_or_init(|| self.workbench.plugin_manager.summaries())
     }
 }
 
@@ -455,8 +461,8 @@ impl Drop for WorkbenchApp {
         if let Err(e) = self.save_config() {
             log::warn!("save_config failed: {e}")
         };
-        self.recorder.stop();
-        self.transport.close_serial();
+        self.workbench.recorder.stop();
+        self.workbench.close_all_serial();
     }
 }
 

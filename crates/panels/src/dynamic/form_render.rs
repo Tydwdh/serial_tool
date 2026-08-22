@@ -3,12 +3,12 @@
 //! 从 `mod.rs` 抽出的纯 UI 渲染逻辑，约 400 行。
 
 use super::schema::{DynamicField, DynamicFieldKind, compact_number};
+use crate::dynamic::PortItem;
 use crate::theme;
 use egui::{Color32, ComboBox, DragValue, ProgressBar, RichText, Slider, TextEdit};
 use serde_json::Value;
 use tool_core::{Direction, Event, Payload, topics};
 use tool_databus::DataBus;
-use tool_transport::SerialPortDescriptor;
 
 pub fn dynamic_form_ui(
     ui: &mut egui::Ui,
@@ -16,7 +16,7 @@ pub fn dynamic_form_ui(
     panel_id: &str,
     fields: &mut [DynamicField],
     auto_apply: bool,
-    ports: &[SerialPortDescriptor],
+    ports: &[PortItem],
 ) {
     let mut changed = false;
 
@@ -316,7 +316,7 @@ pub fn dynamic_form_ui(
                             let selected_text = ports
                                 .iter()
                                 .find(|p| p.port_name == current)
-                                .map(|p| format!("{}  {}", p.port_name, p.port_type))
+                                .map(|p| p.port_name.clone())
                                 .unwrap_or_else(|| {
                                     if ports.is_empty() {
                                         "无可用串口".to_owned()
@@ -340,10 +340,7 @@ pub fn dynamic_form_ui(
                                                 .selectable_value(
                                                     &mut new_value,
                                                     port.port_name.clone(),
-                                                    format!(
-                                                        "{}  {}",
-                                                        port.port_name, port.port_type
-                                                    ),
+                                                    port.port_name.clone(),
                                                 )
                                                 .changed()
                                             {

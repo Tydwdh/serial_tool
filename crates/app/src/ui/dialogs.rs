@@ -85,7 +85,7 @@ impl WorkbenchApp {
                     );
                 }
 
-                self.bus.publish(Event::new(
+                self.workbench.bus.publish(Event::new(
                     tool_core::topics::UI_FORM_FILE_SELECTED,
                     "ui",
                     Direction::Internal,

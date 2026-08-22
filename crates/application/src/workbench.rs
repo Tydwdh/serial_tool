@@ -383,6 +383,72 @@ impl Workbench {
         }
     }
 
+    // ——— Delegation shims for WorkbenchApp migration ———
+    pub fn bus(&self) -> &DataBus {
+        &self.bus
+    }
+    pub fn bus_clone(&self) -> DataBus {
+        self.bus.clone()
+    }
+    pub fn transport_clone(&self) -> TransportManager {
+        self.transport.clone()
+    }
+    pub fn close_all_serial(&self) {
+        self.transport.close_serial();
+    }
+    pub fn recorder_is_running(&self) -> bool {
+        self.recorder.is_running()
+    }
+    pub fn recorder_is_stopping(&self) -> bool {
+        self.recorder.is_stopping()
+    }
+    pub fn recorder_is_paused(&self) -> bool {
+        self.recorder.is_paused()
+    }
+    pub fn recorder_mode(&self) -> tool_recorder::RecordMode {
+        self.recorder.mode()
+    }
+    pub fn set_recorder_mode(&mut self, m: tool_recorder::RecordMode) {
+        self.recorder.set_mode(m);
+    }
+    pub fn recorder_stats(&self) -> tool_recorder::RecorderStats {
+        self.recorder.stats()
+    }
+    pub fn recorder_current_path(&self) -> Option<std::path::PathBuf> {
+        self.recorder.current_path().map(|p| p.to_path_buf())
+    }
+    pub fn app_log(&self, lv: LogLevel, msg: impl Into<String>) {
+        self.bus
+            .publish(tool_core::Event::system_log(lv, "app", msg.into()));
+    }
+    pub fn plugin_summaries(&self) -> Vec<tool_extension::PluginSummary> {
+        self.plugin_manager.summaries()
+    }
+    pub fn plugin_diagnostics(&self) -> &[tool_extension::PluginDiagnostic] {
+        self.plugin_manager.diagnostics()
+    }
+    pub fn bus_ref(&self) -> &DataBus {
+        &self.bus
+    }
+    pub fn file_broker(&self) -> std::sync::Arc<tool_lua_host::FileAccessBroker> {
+        self._file_broker.clone()
+    }
+    pub fn dialog_receiver(&self) -> &crossbeam_channel::Receiver<tool_lua_host::DialogRequest> {
+        &self._dialog_receiver
+    }
+    pub fn replay_manager(&self) -> &ReplayManager {
+        &self.replay
+    }
+    pub fn replay_manager_mut(&mut self) -> &mut ReplayManager {
+        &mut self.replay
+    }
+    pub fn open_ports(&self) -> Vec<String> {
+        self.transport.open_ports()
+    }
+    pub fn status_port(&self, port: &str) -> tool_transport::TransportStatus {
+        self.transport.status_port(port)
+    }
+
     pub fn query_terminal_since(
         &self,
         since_seq: u64,

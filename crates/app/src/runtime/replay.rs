@@ -108,7 +108,7 @@ impl WorkbenchApp {
         self.bottom_log_panel.clear();
         self.dynamic_panels.clear_charts();
 
-        self.bus.publish(Event::new(
+        self.workbench.bus.publish(Event::new(
             "ui.replay.reset",
             "ui.replay",
             Direction::Internal,

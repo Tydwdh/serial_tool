@@ -20,9 +20,9 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{Hash, Hasher};
+use tool_core::topics as serial_topics;
 use tool_core::{Direction, Event};
 use tool_databus::{DataBus, RingSubscription, TopicFilter};
-use tool_transport::serial_topics;
 
 const TIME_COL_WIDTH: f32 = 118.0;
 const PORT_COL_WIDTH: f32 = 52.0;

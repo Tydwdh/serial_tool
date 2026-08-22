@@ -82,7 +82,7 @@ impl WorkbenchApp {
             ui.horizontal(|ui| {
                 ui.label("路径");
 
-                let recording = self.recorder.is_running();
+                let recording = self.workbench.recorder.is_running();
 
                 ui.add_enabled(
                     !recording,
@@ -105,7 +105,7 @@ impl WorkbenchApp {
                     self.recorder_path = path.display().to_string();
                 }
 
-                let stopping = self.recorder.is_stopping();
+                let stopping = self.workbench.recorder.is_stopping();
                 if stopping {
                     ui.ctx().request_repaint();
                     ui.spinner();
@@ -128,7 +128,7 @@ impl WorkbenchApp {
                     self.start_or_stop_recording();
                 }
                 if recording {
-                    let paused = self.recorder.is_paused();
+                    let paused = self.workbench.recorder.is_paused();
                     if ui
                         .add_enabled(
                             !stopping,
@@ -141,9 +141,9 @@ impl WorkbenchApp {
                         .clicked()
                     {
                         if paused {
-                            self.recorder.resume();
+                            self.workbench.recorder.resume();
                         } else {
-                            self.recorder.pause();
+                            self.workbench.recorder.pause();
                         }
                     }
                 }
@@ -151,8 +151,8 @@ impl WorkbenchApp {
 
             ui.horizontal(|ui| {
                 ui.label("模式");
-                let recording = self.recorder.is_running();
-                let mut mode = self.recorder.mode();
+                let recording = self.workbench.recorder.is_running();
+                let mut mode = self.workbench.recorder.mode();
                 ui.add_enabled_ui(!recording, |ui| {
                     egui::ComboBox::from_id_salt("record-mode")
                         .width(160.0)
@@ -163,11 +163,11 @@ impl WorkbenchApp {
                             }
                         });
                 });
-                self.recorder.set_mode(mode);
+                self.workbench.recorder.set_mode(mode);
             });
 
             // ── 录制健康状态 ──
-            let stats = self.recorder.stats();
+            let stats = self.workbench.recorder.stats();
             if stats.running || stats.stopping {
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -187,7 +187,7 @@ impl WorkbenchApp {
                     ui.label(format!("flush {} ms 前", stats.last_flush_elapsed_ms));
                 });
 
-                if let Some(path) = self.recorder.current_path() {
+                if let Some(path) = self.workbench.recorder.current_path() {
                     ui.label(format!("路径：{}", path.display()));
                 }
                 if let Some(ref error) = stats.last_error {
@@ -255,7 +255,7 @@ impl WorkbenchApp {
                     }
                     self.refresh_ports_silent();
                     // 添加即连接：异步建立 WebSocket，UI 进入“连接中”过渡态。
-                    match self.transport.open_network_serial(cfg) {
+                    match self.workbench.transport.open_network_serial(cfg) {
                         Ok(_) => {
                             self.serial.selected_port = Some(name.clone());
                             self.set_status_force(StatusLevel::Info, format!("正在连接 {name}..."));
@@ -273,7 +273,7 @@ impl WorkbenchApp {
             ui.separator();
 
             // 显示已打开但不在系统端口列表中的 stale 连接
-            let transport_open = self.transport.open_ports();
+            let transport_open = self.workbench.transport.open_ports();
             if !transport_open.is_empty() {
                 let system_names: BTreeSet<&str> = self
                     .serial
@@ -314,7 +314,7 @@ impl WorkbenchApp {
                                 .small();
                             if ui.add(btn).clicked() {
                                 if armed {
-                                    self.transport.close_port(port);
+                                    self.workbench.transport.close_port(port);
                                     self.set_status_force(
                                         StatusLevel::Info,
                                         format!("{port} 已强制关闭"),
@@ -474,7 +474,7 @@ impl WorkbenchApp {
 
                             ui.horizontal(|ui| {
                                 ui.add_space(16.0);
-                                let status = self.transport.status_port(&name);
+                                let status = self.workbench.transport.status_port(&name);
                                 let port_open = status.open;
                                 let connecting = status.connecting;
                                 let pending_reconnect = self
@@ -643,7 +643,7 @@ impl WorkbenchApp {
                 self.serial
                     .network_ports
                     .retain(|n| n.display_name() != name);
-                self.transport.close_port(&name);
+                self.workbench.transport.close_port(&name);
                 if self.serial.selected_port.as_deref() == Some(name.as_str()) {
                     self.serial.selected_port = None;
                 }
