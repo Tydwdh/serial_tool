@@ -81,20 +81,24 @@ cargo build -p hardware-workbench-app
 
 ```text
 crates/
-  app/           应用层：UI、配置、快捷键、事件循环、命令面板
+  application/   UI 无关的应用核心：Workbench + AppCommand/Query/Event（不依赖 egui）
+  app/           egui 应用壳：eframe 生命周期、dock、快捷键、对话框、主题
   core/          核心类型：Event、Payload、LogLevel
-  databus/       发布/订阅事件总线
-  transport/     串口抽象层
-  panels/        终端、日志、图表、发送器、回放等面板
+  databus/       发布/订阅事件总线（唯一 EventBus）
+  transport/     串口抽象层（本地 + 网络串口）
+  panels/        egui 呈现层面板（终端/日志/图表/回放等，纯 View）
   lua_host/      Lua 运行时、沙箱和 API 绑定
   extension/     插件发现、加载、权限控制
   recorder/      JSONL 录制与回放
   testing/       测试辅助
+  updater/       自动更新
 docs/            插件和发布文档
 plugins/         开发期插件模板与本地脚本
 plugin-marketplace/ 插件市场索引、发布脚本与版本化安装包
 installer/       Windows 安装器配置
 ```
+
+架构详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 与 [docs/architecture-refactor-baseline.md](docs/architecture-refactor-baseline.md)。
 
 ## 插件开发
 

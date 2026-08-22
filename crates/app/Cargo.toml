@@ -22,6 +22,7 @@ log.workspace = true
 open.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tool-application = { path = "../application" }
 tool-core = { path = "../core" }
 tool-databus = { path = "../databus" }
 tool-extension = { path = "../extension" }

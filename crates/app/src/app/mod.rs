@@ -5,6 +5,7 @@ use crate::state::{MAX_SEND_HISTORY, NotificationQueue, SendUiState, SerialUiSta
 use eframe::egui;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use tool_application::{ApplicationConfig, Workbench};
 use tool_core::{Event, LogLevel};
 use tool_databus::DataBus;
 use tool_extension::PluginManager;
@@ -21,6 +22,7 @@ use crate::ui::toast::ToastOverlay;
 // ── 数据结构 ──
 
 pub(crate) struct WorkbenchApp {
+    pub(crate) workbench: Workbench,
     pub(crate) bus: DataBus,
     pub(crate) transport: TransportManager,
     pub(crate) plugin_manager: PluginManager,
@@ -268,7 +270,32 @@ impl WorkbenchApp {
             send.line_ending = cfg.line_ending;
         }
 
+        let workbench = {
+            let mut w = Workbench::new(bus.clone());
+            if let Some(cfg) = config.as_ref() {
+                let ac = ApplicationConfig {
+                    selected_port: cfg.selected_port.clone(),
+                    baud_rate: cfg.baud_rate.clone(),
+                    data_bits: cfg.data_bits.clone(),
+                    stop_bits: cfg.stop_bits.clone(),
+                    parity: cfg.parity.clone(),
+                    auto_reconnect: cfg.auto_reconnect,
+                    terminal_merge_window_ms: cfg.terminal_merge_window_ms,
+                    terminal_max_entries: cfg.terminal_max_entries,
+                    log_max_entries: cfg.log_max_entries,
+                    recorder_path: cfg.recorder_path.clone(),
+                    network_ports: cfg.network_ports.clone(),
+                    port_aliases: cfg.port_aliases.clone(),
+                    port_groups: cfg.port_groups.clone(),
+                    enabled_plugins: cfg.enabled_plugins.clone(),
+                    network_proxy_url: cfg.network_proxy_url.clone(),
+                };
+                w = w.with_config(ac);
+            }
+            w
+        };
         let mut app = Self {
+            workbench,
             terminal_panel: TerminalPanel::new(&bus),
             dynamic_panels: DynamicPanels::new(&bus),
             plugins_panel: PluginsPanel::new(),

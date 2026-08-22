@@ -55,10 +55,13 @@ impl CommandCategory {
     }
 }
 
-/// 命令执行分派：内置走函数指针，插件经 EventBus 发布事件。
+/// 命令执行分派：分两类
+/// - AppCommand：业务行为，经 Workbench::dispatch
+/// - UiCommand：纯 UI 操作，直接改 WorkbenchApp
 #[derive(Clone)]
 pub(crate) enum CommandHandler {
-    Builtin(fn(&mut WorkbenchApp)),
+    App(tool_application::AppCommand),
+    Ui(fn(&mut WorkbenchApp)),
     Plugin {
         plugin_id: String,
         command_id: String,
@@ -68,7 +71,16 @@ pub(crate) enum CommandHandler {
 impl CommandHandler {
     fn run(&self, app: &mut WorkbenchApp) {
         match self {
-            Self::Builtin(handler) => handler(app),
+            Self::App(cmd) => {
+                if let Err(e) = app.workbench.dispatch(cmd.clone()) {
+                    app.notifications.push(
+                        "command",
+                        crate::state::StatusLevel::Error,
+                        e.to_string(),
+                    );
+                }
+            }
+            Self::Ui(handler) => handler(app),
             Self::Plugin {
                 plugin_id,
                 command_id,
@@ -99,7 +111,22 @@ impl Command {
             title: title.to_owned(),
             icon: ICON_BOLT,
             category,
-            handler: CommandHandler::Builtin(handler),
+            handler: CommandHandler::Ui(handler),
+        }
+    }
+
+    fn app_builtin(
+        id: &'static str,
+        title: &'static str,
+        category: CommandCategory,
+        cmd: tool_application::AppCommand,
+    ) -> Self {
+        Self {
+            id: id.to_owned(),
+            title: title.to_owned(),
+            icon: ICON_BOLT,
+            category,
+            handler: CommandHandler::App(cmd),
         }
     }
 }
@@ -114,11 +141,11 @@ impl CommandRegistry {
     /// 注册全部内置命令。
     pub(crate) fn builtin() -> Self {
         let mut registry = Self::default();
-        registry.add(Command::builtin(
+        registry.add(Command::app_builtin(
             CMD_REFRESH_PORTS,
             "刷新串口",
             CommandCategory::Serial,
-            WorkbenchApp::refresh_ports,
+            tool_application::AppCommand::RefreshPorts,
         ));
         registry.add(Command::builtin(
             CMD_OPEN_PORT,
@@ -138,23 +165,23 @@ impl CommandRegistry {
             CommandCategory::Send,
             WorkbenchApp::cmd_send_if_ready,
         ));
-        registry.add(Command::builtin(
+        registry.add(Command::app_builtin(
             CMD_CLEAR_TERMINAL,
             "清空终端",
             CommandCategory::Send,
-            |app| app.terminal_panel.clear(),
+            tool_application::AppCommand::ClearTerminal,
         ));
-        registry.add(Command::builtin(
+        registry.add(Command::app_builtin(
             CMD_START_RECORDING,
             "开始/停止录制",
             CommandCategory::Recorder,
-            WorkbenchApp::start_or_stop_recording,
+            tool_application::AppCommand::StopRecording,
         ));
-        registry.add(Command::builtin(
+        registry.add(Command::app_builtin(
             CMD_ADD_BOOKMARK,
             "添加录制标记",
             CommandCategory::Recorder,
-            WorkbenchApp::cmd_add_bookmark_if_recording,
+            tool_application::AppCommand::AddBookmark { name: None },
         ));
         registry.add(Command::builtin(
             CMD_TOGGLE_BOTTOM_PANEL,

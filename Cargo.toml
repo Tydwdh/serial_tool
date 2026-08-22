@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/app",
+    "crates/application",
     "crates/core",
     "crates/databus",
     "crates/extension",

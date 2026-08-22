@@ -1,0 +1,31 @@
+[package]
+name = "tool-application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "UI-independent application core — Workbench facade + Command/Query/Event"
+
+[lib]
+name = "tool_application"
+path = "src/lib.rs"
+
+[dependencies]
+crossbeam-channel.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tool-core = { path = "../core" }
+tool-databus = { path = "../databus" }
+tool-extension = { path = "../extension" }
+tool-marketplace = { path = "../marketplace" }
+tool-lua-host = { path = "../lua_host" }
+tool-recorder = { path = "../recorder" }
+tool-transport = { path = "../transport" }
+
+[dev-dependencies]
+tool-testing = { path = "../testing" }
