@@ -165,8 +165,7 @@ fn render_plugins(app: &mut WorkbenchApp, ui: &mut egui::Ui) {
     let events = egui::ScrollArea::vertical()
         .id_salt("scroll-plugins")
         .show(ui, |ui| {
-            app.plugins_panel
-                .ui_with_view(ui, &summaries, &diagnostics)
+            app.plugins_panel.ui_with_view(ui, &summaries, &diagnostics)
         })
         .inner;
     // pending_restart 需经 Workbench 重试（原 Panel 内直接 manager.enable(...) 已去业务）

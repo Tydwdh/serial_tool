@@ -10,10 +10,7 @@ use egui_material_icons::icons::{
     ICON_SEARCH, ICON_SHOPPING_CART, ICON_TOGGLE_OFF, ICON_TOGGLE_ON,
 };
 use std::collections::{BTreeSet, HashMap};
-use std::path::PathBuf;
-use tool_extension::{
-    PluginDiagnostic, PluginDiagnosticSeverity, PluginState, PluginSummary,
-};
+use tool_extension::{PluginDiagnostic, PluginDiagnosticSeverity, PluginState, PluginSummary};
 use tool_marketplace::{Registry, RegistryPlugin};
 
 const TWO_COLUMN_PLUGIN_WIDTH: f32 = 980.0;
@@ -133,7 +130,12 @@ impl PluginsPanel {
         self.market.registry.is_none() && self.market.error.is_none() && !self.market.refreshing
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, summaries: &[PluginSummary], diagnostics: &[PluginDiagnostic]) -> Vec<PluginPanelEvent> {
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        summaries: &[PluginSummary],
+        diagnostics: &[PluginDiagnostic],
+    ) -> Vec<PluginPanelEvent> {
         self.ui_with_view(ui, summaries, diagnostics)
     }
 
@@ -221,10 +223,8 @@ impl PluginsPanel {
                     ui.label("根目录");
                     ui.add(TextEdit::singleline(&mut self.root).desired_width(240.0));
                     if design::button(ui, ICON_REFRESH, "刷新", ButtonKind::Primary).clicked() {
-                        return Some(PluginPanelEvent::Status(
-                            "refresh_roots".to_owned(),
-                            false,
-                        ));
+                        // 实际刷新由 Workbench 处理，Panel 只发状态提示
+                        return Some(PluginPanelEvent::Status("刷新已请求".to_owned(), false));
                     }
                     if design::button(ui, ICON_FOLDER_OPEN, "打开目录", ButtonKind::Secondary)
                         .clicked()
