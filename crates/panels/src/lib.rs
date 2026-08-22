@@ -6,8 +6,10 @@ mod dynamic;
 mod gauge;
 mod log;
 mod manager;
+mod plugin_view;
 mod plugins;
 mod replay;
+mod replay_view;
 mod search;
 mod table;
 mod terminal;
@@ -33,8 +35,10 @@ pub use manager::{
     DockArea, DockLayout, DockStack, PANEL_BUILTIN, PANEL_DEVICES, PANEL_LOGS, PANEL_PLUGINS,
     PANEL_REPLAY, PANEL_SENDER, PANEL_SETTINGS, PANEL_TERMINAL, PanelId, PanelManager, TilesLayout,
 };
+pub use plugin_view::{InstalledPluginRow, PluginUiCommand, PluginViewState};
 pub use plugins::{MarketplaceState, PluginPanelEvent, PluginTab, PluginsPanel};
 pub use replay::ReplayPanel;
+pub use replay_view::{ReplayUiCommand, ReplayView};
 pub use search::SearchQuery;
 pub use table::{RowSelection, copy_text_with_feedback, take_copy_feedback};
 pub use terminal::{TerminalExportFormat, TerminalPanel};
