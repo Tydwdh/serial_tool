@@ -12,7 +12,7 @@ use egui_material_icons::icons::{
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use tool_extension::{
-    PluginDiagnostic, PluginDiagnosticSeverity, PluginManager, PluginState, PluginSummary,
+    PluginDiagnostic, PluginDiagnosticSeverity, PluginState, PluginSummary,
 };
 use tool_marketplace::{Registry, RegistryPlugin};
 
@@ -133,20 +133,18 @@ impl PluginsPanel {
         self.market.registry.is_none() && self.market.error.is_none() && !self.market.refreshing
     }
 
-    /// 渲染插件面板 UI，返回本帧产生的事件列表。
-    pub fn ui(&mut self, ui: &mut egui::Ui, manager: &mut PluginManager) -> Vec<PluginPanelEvent> {
-        let mut events = Vec::new();
+    pub fn ui(&mut self, ui: &mut egui::Ui, summaries: &[PluginSummary], diagnostics: &[PluginDiagnostic]) -> Vec<PluginPanelEvent> {
+        self.ui_with_view(ui, summaries, diagnostics)
+    }
 
-        // 重试 pending restart：上一帧 disable 后等待线程退出，现在尝试 enable
-        let pending: Vec<String> = std::mem::take(&mut self.pending_restart);
-        for id in pending {
-            if let Err(e) = manager.enable(&id) {
-                // 如果还在关闭中，放回队列下帧重试
-                if matches!(e, tool_extension::ExtensionError::Stopping(_)) {
-                    self.pending_restart.push(id);
-                }
-            }
-        }
+    /// DTO 驱动的渲染（不持有 PluginManager）。
+    pub fn ui_with_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        summaries: &[PluginSummary],
+        diagnostics: &[PluginDiagnostic],
+    ) -> Vec<PluginPanelEvent> {
+        let mut events = Vec::new();
 
         // ── tab 切换 ──
         design::elevated_card().show(ui, |ui| {
@@ -185,7 +183,7 @@ impl PluginsPanel {
 
         match self.tab {
             PluginTab::Installed => {
-                if let Some(ev) = self.installed_tab(ui, manager) {
+                if let Some(ev) = self.installed_tab_inner(ui, summaries, diagnostics) {
                     events.push(ev);
                 }
             }
@@ -197,12 +195,21 @@ impl PluginsPanel {
         events
     }
 
-    // ── 已安装 tab ──
+    pub fn take_pending_restart(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_restart)
+    }
 
-    fn installed_tab(
+    pub fn push_pending_restart(&mut self, id: String) {
+        self.pending_restart.push(id);
+    }
+
+    // ── 已安装 tab（DTO 版） ──
+
+    fn installed_tab_inner(
         &mut self,
         ui: &mut egui::Ui,
-        manager: &mut PluginManager,
+        summaries: &[PluginSummary],
+        diagnostics: &[PluginDiagnostic],
     ) -> Option<PluginPanelEvent> {
         // ── 管理 ──
         let toolbar_status = design::card()
@@ -214,17 +221,10 @@ impl PluginsPanel {
                     ui.label("根目录");
                     ui.add(TextEdit::singleline(&mut self.root).desired_width(240.0));
                     if design::button(ui, ICON_REFRESH, "刷新", ButtonKind::Primary).clicked() {
-                        match manager.discover_roots([PathBuf::from(self.root.trim())]) {
-                            Ok(count) => {
-                                return Some(PluginPanelEvent::Status(
-                                    format!("发现了 {count} 个插件"),
-                                    false,
-                                ));
-                            }
-                            Err(error) => {
-                                return Some(PluginPanelEvent::Status(error.to_string(), true));
-                            }
-                        }
+                        return Some(PluginPanelEvent::Status(
+                            "refresh_roots".to_owned(),
+                            false,
+                        ));
                     }
                     if design::button(ui, ICON_FOLDER_OPEN, "打开目录", ButtonKind::Secondary)
                         .clicked()
@@ -238,9 +238,6 @@ impl PluginsPanel {
             .inner;
 
         let status = toolbar_status;
-
-        let summaries = manager.summaries();
-        let diagnostics = manager.diagnostics();
 
         if summaries.is_empty() && diagnostics.is_empty() {
             ui.add_space(8.0);
@@ -335,7 +332,7 @@ impl PluginsPanel {
                             ui.spacing_mut().item_spacing.x = TWO_COLUMN_CARD_GAP;
                             ui.vertical(|ui| {
                                 ui.set_width(card_width);
-                                let event = self.plugin_row(ui, manager, left);
+                                let event = self.plugin_row(ui, left);
                                 if row_status.is_none() {
                                     row_status = event;
                                 }
@@ -343,7 +340,7 @@ impl PluginsPanel {
                             if let Some(right) = right {
                                 ui.vertical(|ui| {
                                     ui.set_width(card_width);
-                                    let event = self.plugin_row(ui, manager, right);
+                                    let event = self.plugin_row(ui, right);
                                     if row_status.is_none() {
                                         row_status = event;
                                     }
@@ -356,7 +353,7 @@ impl PluginsPanel {
                     }
                 } else {
                     for summary in summaries {
-                        let event = self.plugin_row(ui, manager, summary);
+                        let event = self.plugin_row(ui, summary);
                         if row_status.is_none() {
                             row_status = event;
                         }
@@ -609,8 +606,7 @@ impl PluginsPanel {
     fn plugin_row(
         &mut self,
         ui: &mut egui::Ui,
-        manager: &mut PluginManager,
-        summary: PluginSummary,
+        summary: &PluginSummary,
     ) -> Option<PluginPanelEvent> {
         design::card()
             .show(ui, |ui| {
@@ -744,22 +740,18 @@ impl PluginsPanel {
                         if design::button(ui, ICON_TOGGLE_OFF, "禁用", ButtonKind::Secondary)
                             .clicked()
                         {
-                            match manager.disable(&summary.id) {
-                                Ok(()) => {}
-                                Err(error) => {
-                                    return Some(PluginPanelEvent::Status(error.to_string(), true));
-                                }
-                            }
+                            return Some(PluginPanelEvent::Status(
+                                format!("disable:{}", summary.id),
+                                false,
+                            ));
                         }
                     } else if design::button(ui, ICON_TOGGLE_ON, "启用", ButtonKind::Primary)
                         .clicked()
                     {
-                        match manager.enable(&summary.id) {
-                            Ok(()) => {}
-                            Err(error) => {
-                                return Some(PluginPanelEvent::Status(error.to_string(), true));
-                            }
-                        }
+                        return Some(PluginPanelEvent::Status(
+                            format!("enable:{}", summary.id),
+                            false,
+                        ));
                     }
                     // 重启语义：Running/Enabled 先 disable 再 enable（走 pending_restart 队列等线程退出）；
                     // Disabled/Finished/Failed 已无运行时，直接 enable 即可重新拉起。
@@ -774,22 +766,16 @@ impl PluginsPanel {
                         .clicked()
                     {
                         if is_active {
-                            // 运行中/已启用：先停再启，走 pending_restart 等线程退出。
-                            if let Err(e) = manager.disable(&summary.id) {
-                                return Some(PluginPanelEvent::Status(
-                                    format!("禁用失败：{e}"),
-                                    true,
-                                ));
-                            }
                             self.pending_restart.push(summary.id.clone());
+                            return Some(PluginPanelEvent::Status(
+                                format!("disable:{}", summary.id),
+                                false,
+                            ));
                         } else {
-                            // Disabled/Finished/Failed：直接 enable 重新拉起。
-                            if let Err(e) = manager.enable(&summary.id) {
-                                return Some(PluginPanelEvent::Status(
-                                    format!("启用失败：{e}"),
-                                    true,
-                                ));
-                            }
+                            return Some(PluginPanelEvent::Status(
+                                format!("enable:{}", summary.id),
+                                false,
+                            ));
                         }
                     }
 

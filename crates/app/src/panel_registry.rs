@@ -159,12 +159,24 @@ fn render_replay(app: &mut WorkbenchApp, ui: &mut egui::Ui) {
 }
 
 fn render_plugins(app: &mut WorkbenchApp, ui: &mut egui::Ui) {
+    // Panel 不再持有 PluginManager，经 Workbench 的 summaries/diagnostics 构 DTO
+    let summaries = app.workbench.plugin_manager.summaries();
+    let diagnostics = app.workbench.plugin_manager.diagnostics().to_vec();
     let events = egui::ScrollArea::vertical()
         .id_salt("scroll-plugins")
         .show(ui, |ui| {
-            app.plugins_panel.ui(ui, &mut app.workbench.plugin_manager)
+            app.plugins_panel
+                .ui_with_view(ui, &summaries, &diagnostics)
         })
         .inner;
+    // pending_restart 需经 Workbench 重试（原 Panel 内直接 manager.enable(...) 已去业务）
+    for id in app.plugins_panel.take_pending_restart() {
+        if let Err(e) = app.workbench.plugin_manager.enable(&id) {
+            if matches!(e, tool_extension::ExtensionError::Stopping(_)) {
+                app.plugins_panel.push_pending_restart(id);
+            }
+        }
+    }
     app.handle_plugin_panel_events(events);
 }
 
