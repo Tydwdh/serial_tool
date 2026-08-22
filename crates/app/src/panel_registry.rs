@@ -161,7 +161,9 @@ fn render_replay(app: &mut WorkbenchApp, ui: &mut egui::Ui) {
 fn render_plugins(app: &mut WorkbenchApp, ui: &mut egui::Ui) {
     let events = egui::ScrollArea::vertical()
         .id_salt("scroll-plugins")
-        .show(ui, |ui| app.plugins_panel.ui(ui, &mut app.plugin_manager))
+        .show(ui, |ui| {
+            app.plugins_panel.ui(ui, &mut app.workbench.plugin_manager)
+        })
         .inner;
     app.handle_plugin_panel_events(events);
 }

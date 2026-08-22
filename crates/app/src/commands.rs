@@ -451,7 +451,8 @@ impl WorkbenchApp {
             .iter()
             .find(|net| net.display_name() == p)
         {
-            self.transport
+            self.workbench
+                .transport
                 .open_network_serial(net.clone())
                 .map_err(|e| e.to_string())?;
             return Ok(());
@@ -494,6 +495,7 @@ impl WorkbenchApp {
 
         // 先关闭，阻塞等待 worker 退出
         if let Err(e) = self
+            .workbench
             .transport
             .close_port_blocking(&p, Duration::from_millis(3000))
         {

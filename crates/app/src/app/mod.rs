@@ -8,13 +8,10 @@ use std::sync::Arc;
 use tool_application::{ApplicationConfig, Workbench};
 use tool_core::{Event, LogLevel};
 use tool_databus::DataBus;
-use tool_extension::PluginManager;
 use tool_lua_host::{DialogRequest, FileAccessBroker};
 use tool_panels::{
     DynamicPanels, LogPanel, PanelManager, PluginsPanel, ReplayPanel, TerminalPanel, theme,
 };
-use tool_recorder::JsonlRecorder;
-use tool_transport::TransportManager;
 
 use crate::bootstrap::{app_dir, apply_theme, setup_fonts};
 use crate::ui::toast::ToastOverlay;
@@ -23,14 +20,6 @@ use crate::ui::toast::ToastOverlay;
 
 pub(crate) struct WorkbenchApp {
     pub(crate) workbench: Workbench,
-    #[allow(dead_code)]
-    pub(crate) bus: DataBus,
-    #[allow(dead_code)]
-    pub(crate) transport: TransportManager,
-    #[allow(dead_code)]
-    pub(crate) plugin_manager: PluginManager,
-    #[allow(dead_code)]
-    pub(crate) recorder: JsonlRecorder,
     pub(crate) panels: PanelManager,
     pub(crate) terminal_panel: TerminalPanel,
     pub(crate) dynamic_panels: DynamicPanels,
@@ -135,40 +124,14 @@ impl WorkbenchApp {
         apply_theme(&cc.egui_ctx, theme::AppTheme::default());
         setup_fonts(cc);
         let bus = DataBus::new();
-        let transport = TransportManager::new(bus.clone());
-
-        // 注入 UI 重绘唤醒器：串口 worker publish RX/TX 后立即 request_repaint，
-        // 消除 80ms 轮询导致的显示延迟。has_repaint 短路防止重复唤醒风暴。
-        // egui 0.35 的 Context 无 weak()，用强引用 clone（worker 退出前 Context 保持存活，
-        // app 退出时 transport.close_serial() 先让 worker 退出，再 drop 闭包释放 Context）。
-        {
-            let ctx_strong = cc.egui_ctx.clone();
-            transport.set_repaint_waker(std::sync::Arc::new(move || {
+        // waker 注入需在 Workbench 创建前准备好闭包，创建后立即注入
+        let ctx_strong = cc.egui_ctx.clone();
+        let waker: std::sync::Arc<dyn tool_transport::RepaintWaker> =
+            std::sync::Arc::new(move || {
                 if !ctx_strong.has_requested_repaint() {
                     ctx_strong.request_repaint();
                 }
-            }));
-        }
-
-        let (dialog_sender, dialog_receiver) = crossbeam_channel::unbounded::<DialogRequest>();
-        let file_broker = Arc::new(FileAccessBroker::default());
-
-        let mut pm = PluginManager::new(bus.clone(), transport.clone());
-        pm.set_host_services(dialog_sender, file_broker.clone());
-
-        let plugin_dir = app_dir().join("plugins");
-        // 启动时清理上次安装可能残留的 <id>.old.<pid>/ 暂存目录（新版本已就位、旧目录未及删除）。
-        tool_marketplace::retire_old_plugin_dirs(&plugin_dir);
-        // 只扫安装目录（跟随 exe）。不再扫 cwd/plugins/——生产期 cwd 不可控，
-        // 且会与安装目录的同名插件冲突。
-        if let Err(e) = pm.discover_roots([plugin_dir]) {
-            bus.publish(Event::system_log(
-                LogLevel::Error,
-                "ext",
-                format!("插件发现失败：{e}"),
-            ));
-        }
-        let recorder = JsonlRecorder::new(bus.clone());
+            });
         let config_result = load_config();
         let (config, config_migrated, config_write_protected): (
             Option<PersistedConfig>,
@@ -276,6 +239,16 @@ impl WorkbenchApp {
 
         let workbench = {
             let mut w = Workbench::new(bus.clone());
+            w.transport.set_repaint_waker(waker);
+            let plugin_dir = app_dir().join("plugins");
+            tool_marketplace::retire_old_plugin_dirs(&plugin_dir);
+            if let Err(e) = w.plugin_manager.discover_roots([plugin_dir]) {
+                bus.publish(Event::system_log(
+                    LogLevel::Error,
+                    "ext",
+                    format!("插件发现失败：{e}"),
+                ));
+            }
             if let Some(cfg) = config.as_ref() {
                 let ac = ApplicationConfig {
                     selected_port: cfg.selected_port.clone(),
@@ -298,6 +271,8 @@ impl WorkbenchApp {
             }
             w
         };
+        let file_broker = workbench.file_broker();
+        let dialog_receiver = workbench.dialog_receiver().clone();
         let mut app = Self {
             workbench,
             terminal_panel: TerminalPanel::new(&bus),
@@ -361,10 +336,6 @@ impl WorkbenchApp {
             send,
             layout_dirty: false,
             last_auto_save_time: 0.0,
-            bus: bus.clone(),
-            transport,
-            plugin_manager: pm,
-            recorder,
             file_broker,
             dialog_receiver,
             file_browse_subscription: bus.subscribe(tool_databus::TopicFilter::exact(
@@ -418,7 +389,7 @@ impl WorkbenchApp {
             .map(|c| c.enabled_plugins.clone())
             .unwrap_or_default();
         for id in &enabled {
-            if let Err(e) = app.plugin_manager.enable(id) {
+            if let Err(e) = app.workbench.plugin_manager.enable(id) {
                 app.log(LogLevel::Warn, format!("restore plugin {id}: {e}"));
             }
         }

@@ -316,8 +316,7 @@ pub(crate) fn create_serial_api(
                 if blocking {
                     let subscription =
                         expect_from_bus.subscribe(TopicFilter::exact(serial_topics::SERIAL_RX));
-                    let deadline =
-                        Instant::now() + Duration::from_millis(timeout_ms);
+                    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
                     let result =
                         poll_until_match(&subscription, &expect_from_stop, deadline, |event| {
                             let event_port = event
@@ -395,8 +394,7 @@ pub(crate) fn create_serial_api(
             let blocking = current_task_id(lua).is_empty();
             if blocking {
                 // 1. 先注册 subscriber
-                let subscription =
-                    rq_bus.subscribe(TopicFilter::exact(serial_topics::SERIAL_RX));
+                let subscription = rq_bus.subscribe(TopicFilter::exact(serial_topics::SERIAL_RX));
                 let deadline = Instant::now() + Duration::from_millis(timeout_ms);
                 // 2. 发送
                 rq_transport

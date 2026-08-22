@@ -623,7 +623,7 @@ impl WorkbenchApp {
             self.send.hex_mode,
             self.send.line_ending.suffix(),
             self.send.hex_strict,
-            &self.transport,
+            &self.workbench.transport,
         )
         .err()
         .map(|e| translate_error(&e));

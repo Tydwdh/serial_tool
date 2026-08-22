@@ -1526,17 +1526,13 @@ ctx.task.start({ id = "waiter" }, function()
 end)
 ctx.log.info("waiter-ready")
 "#
-                .to_owned(),
+            .to_owned(),
             LuaRunConfig {
                 script_name: "expect-yield.lua".to_owned(),
                 timeout_ms: 5_000,
                 source: "plugin:expect-plugin".to_owned(),
                 context: json!({}),
-                permissions: vec![
-                    "serial".to_owned(),
-                    "task".to_owned(),
-                    "log".to_owned(),
-                ],
+                permissions: vec!["serial".to_owned(), "task".to_owned(), "log".to_owned()],
             },
             bus.clone(),
             transport,

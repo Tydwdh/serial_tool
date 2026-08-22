@@ -315,6 +315,7 @@ impl WorkbenchApp {
             parity: self.serial.parity.clone(),
             recorder_path: self.recorder_path.clone(),
             enabled_plugins: self
+                .workbench
                 .plugin_manager
                 .summaries()
                 .into_iter()

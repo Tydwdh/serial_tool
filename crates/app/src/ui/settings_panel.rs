@@ -609,7 +609,7 @@ impl WorkbenchApp {
                     .collect();
                 dynamic_form_ui(
                     ui,
-                    &self.bus,
+                    &self.workbench.bus,
                     &panel_id,
                     &mut fields,
                     true, // auto_apply
