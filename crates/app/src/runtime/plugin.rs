@@ -1,5 +1,5 @@
 use crate::app::WorkbenchApp;
-use tool_core::{Direction, Event, Payload, topics};
+use tool_application::tool_core::{Direction, Event, Payload, topics};
 
 impl WorkbenchApp {
     /// 发布插件命令动作（模拟 UI 按钮点击）。
@@ -127,7 +127,7 @@ impl WorkbenchApp {
     /// 使用专用 topic `ui.contribution.set.value`，与动态面板的 `ui.form.set_value` 隔离。
     fn process_contribution_set_value(&mut self) {
         for event in self.contribution_set_value_subscription.drain_limited(64) {
-            let tool_core::Payload::Json(payload) = event.payload else {
+            let tool_application::tool_core::Payload::Json(payload) = event.payload else {
                 continue;
             };
             // 要求 panel_id == "__contribution__" 作为哨兵，防止误消费面板事件

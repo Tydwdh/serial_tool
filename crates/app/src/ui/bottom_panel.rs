@@ -464,7 +464,7 @@ impl WorkbenchApp {
         // HEX 模式下实时检查输入是否可解析（严格模式 vs 宽松模式）。
         let input_trim = self.send.input.trim();
         let hex_error = if self.send.hex_mode && !input_trim.is_empty() {
-            match tool_transport::parse_hex(input_trim) {
+            match tool_application::tool_transport::parse_hex(input_trim) {
                 Ok(_) => None,
                 Err(e) => Some(e.to_string()),
             }
@@ -554,7 +554,7 @@ impl WorkbenchApp {
                     .small(),
             )
             .on_hover_text(if is_err {
-                match tool_transport::parse_hex(self.send.input.trim()) {
+                match tool_application::tool_transport::parse_hex(self.send.input.trim()) {
                     Ok(_) => String::new(),
                     Err(e) => format!("HEX 解析失败: {e}"),
                 }
@@ -932,7 +932,7 @@ impl WorkbenchApp {
     }
 }
 
-use tool_transport::{hex_preview, send_impl_to, translate_error};
+use tool_application::tool_transport::{hex_preview, send_impl_to, translate_error};
 
 #[cfg(test)]
 mod tests {

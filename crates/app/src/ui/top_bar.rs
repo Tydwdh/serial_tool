@@ -6,8 +6,8 @@ use egui_material_icons::{
         ICON_REFRESH, ICON_STOP,
     },
 };
+use tool_application::tool_transport::SerialPortDescriptor;
 use tool_panels::design::{self, ButtonKind};
-use tool_transport::SerialPortDescriptor;
 
 const SERIAL_ACTION_BUTTON_SIZE: egui::Vec2 = egui::vec2(52.0, 26.0);
 
@@ -144,7 +144,7 @@ impl WorkbenchApp {
                     .selected_port
                     .as_deref()
                     .map(|port| self.workbench.transport.status_port(port))
-                    .unwrap_or_else(tool_transport::TransportStatus::closed);
+                    .unwrap_or_else(tool_application::tool_transport::TransportStatus::closed);
                 let selected_open = selected_status.open;
                 let selected_connecting = selected_status.connecting;
 
@@ -193,7 +193,7 @@ impl WorkbenchApp {
             }
             // 自动重连进度：拔串口后顶部栏直接可见，无需展开 device_panel。
             if let Some(ref pending) = self.serial.pending_reconnect {
-                let now = tool_core::now_timestamp_ms() as f64 / 1000.0;
+                let now = tool_application::tool_core::now_timestamp_ms() as f64 / 1000.0;
                 let remaining = (pending.next_try_at - now).max(0.0);
                 let label = format!(
                     "{} 重连中 {} {:.1}s ({}/{})",

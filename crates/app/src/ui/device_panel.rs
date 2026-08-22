@@ -8,8 +8,8 @@ use egui_material_icons::icons::{
     ICON_TUNE, ICON_WARNING,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use tool_application::tool_recorder::RecordMode;
 use tool_panels::{design, theme};
-use tool_recorder::RecordMode;
 
 impl WorkbenchApp {
     pub(crate) fn device_panel(&mut self, ui: &mut egui::Ui) {
@@ -57,7 +57,7 @@ impl WorkbenchApp {
             if self.serial.auto_reconnect
                 && let Some(ref pending) = self.serial.pending_reconnect
             {
-                let now = tool_core::now_timestamp_ms() as f64 / 1000.0;
+                let now = tool_application::tool_core::now_timestamp_ms() as f64 / 1000.0;
                 let remaining = (pending.next_try_at - now).max(0.0);
                 ui.label(
                     egui::RichText::new(format!(
@@ -205,7 +205,8 @@ impl WorkbenchApp {
             ui.separator();
 
             // ── 网络模拟串口（Nexus Prime 等 Klipper 服务器，WebSocket + JSON-RPC gcode 桥）──
-            let mut add_network: Option<tool_transport::NetworkSerialConfig> = None;
+            let mut add_network: Option<tool_application::tool_transport::NetworkSerialConfig> =
+                None;
             ui.horizontal(|ui| {
                 ui.label("网络");
                 ui.add(
@@ -225,11 +226,12 @@ impl WorkbenchApp {
                     } else {
                         match self.serial.network_port.trim().parse::<u16>() {
                             Ok(port) if port > 0 => {
-                                add_network = Some(tool_transport::NetworkSerialConfig {
-                                    host,
-                                    port,
-                                    api_key: None,
-                                });
+                                add_network =
+                                    Some(tool_application::tool_transport::NetworkSerialConfig {
+                                        host,
+                                        port,
+                                        api_key: None,
+                                    });
                             }
                             _ => self.set_status(StatusLevel::Error, "端口格式错误（1-65535）"),
                         }
@@ -367,8 +369,10 @@ impl WorkbenchApp {
             });
 
             // 按分组整理端口
-            let mut groups: BTreeMap<String, Vec<&tool_transport::SerialPortDescriptor>> =
-                BTreeMap::new();
+            let mut groups: BTreeMap<
+                String,
+                Vec<&tool_application::tool_transport::SerialPortDescriptor>,
+            > = BTreeMap::new();
             for port in &self.serial.ports {
                 let group = self
                     .serial
@@ -512,8 +516,10 @@ impl WorkbenchApp {
                                 ui.label(port.port_type.to_string());
 
                                 // 网络模拟串口：提供移除入口（仅 Network 类型）
-                                if matches!(port.port_type, tool_transport::PortType::Network)
-                                    && ui.small_button("×").on_hover_text("移除网络端口").clicked()
+                                if matches!(
+                                    port.port_type,
+                                    tool_application::tool_transport::PortType::Network
+                                ) && ui.small_button("×").on_hover_text("移除网络端口").clicked()
                                 {
                                     removed_network = Some(name.clone());
                                 }

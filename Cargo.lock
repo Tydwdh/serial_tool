@@ -1820,14 +1820,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tool-application",
- "tool-core",
- "tool-databus",
- "tool-extension",
- "tool-lua-host",
- "tool-marketplace",
  "tool-panels",
- "tool-recorder",
- "tool-transport",
  "tool-updater",
  "winresource",
 ]
@@ -4647,12 +4640,9 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "tool-application",
  "tool-core",
  "tool-databus",
- "tool-extension",
- "tool-marketplace",
- "tool-recorder",
- "tool-transport",
 ]
 
 [[package]]

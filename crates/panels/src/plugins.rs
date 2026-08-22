@@ -10,8 +10,10 @@ use egui_material_icons::icons::{
     ICON_SEARCH, ICON_SHOPPING_CART, ICON_TOGGLE_OFF, ICON_TOGGLE_ON,
 };
 use std::collections::{BTreeSet, HashMap};
-use tool_extension::{PluginDiagnostic, PluginDiagnosticSeverity, PluginState, PluginSummary};
-use tool_marketplace::{Registry, RegistryPlugin};
+use tool_application::tool_extension::{
+    PluginDiagnostic, PluginDiagnosticSeverity, PluginState, PluginSummary,
+};
+use tool_application::tool_marketplace::{Registry, RegistryPlugin};
 
 const TWO_COLUMN_PLUGIN_WIDTH: f32 = 980.0;
 const TWO_COLUMN_CARD_GAP: f32 = 10.0;

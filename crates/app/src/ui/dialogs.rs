@@ -1,6 +1,6 @@
 use crate::app::WorkbenchApp;
 use serde_json::Value;
-use tool_core::{Direction, Event, LogLevel, Payload};
+use tool_application::tool_core::{Direction, Event, LogLevel, Payload};
 
 impl WorkbenchApp {
     /// 处理 Lua ctx.dialog.open_file 请求。每帧最多处理一个。
@@ -35,12 +35,12 @@ impl WorkbenchApp {
         if let Payload::Json(value) = event.payload {
             let panel_id = value.get("panel_id").and_then(Value::as_str).unwrap_or("");
             let field_id = value.get("field_id").and_then(Value::as_str).unwrap_or("");
-            let filters: Vec<tool_lua_host::FileFilter> = value
+            let filters: Vec<tool_application::tool_lua_host::FileFilter> = value
                 .get("filters")
                 .and_then(Value::as_array)
                 .map(|arr| {
                     arr.iter()
-                        .map(|f| tool_lua_host::FileFilter {
+                        .map(|f| tool_application::tool_lua_host::FileFilter {
                             name: f
                                 .get("name")
                                 .and_then(Value::as_str)
@@ -86,7 +86,7 @@ impl WorkbenchApp {
                 }
 
                 self.workbench.bus.publish(Event::new(
-                    tool_core::topics::UI_FORM_FILE_SELECTED,
+                    tool_application::tool_core::topics::UI_FORM_FILE_SELECTED,
                     "ui",
                     Direction::Internal,
                     Payload::Json(serde_json::json!({

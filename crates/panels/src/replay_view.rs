@@ -1,4 +1,4 @@
-use tool_recorder::{ReplayBlockReason, ReplayPolicy, ReplayState};
+use tool_application::tool_recorder::{ReplayBlockReason, ReplayPolicy, ReplayState};
 
 /// Panel 侧的回放只读视图 — 不持有 ReplayManager，直接由 Workbench 提供。
 #[derive(Debug, Clone)]

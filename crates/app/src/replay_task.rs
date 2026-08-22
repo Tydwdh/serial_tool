@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tool_core::LogLevel;
-use tool_lua_host::{LuaReplayConfig, run_replay_analyzer_with_cancel};
+use tool_application::tool_core::LogLevel;
+use tool_application::tool_lua_host::{LuaReplayConfig, run_replay_analyzer_with_cancel};
 
 use crate::app::{ReplayAnalyzerJob, ReplayAnalyzerResult, WorkbenchApp};
 use crate::state::StatusLevel;

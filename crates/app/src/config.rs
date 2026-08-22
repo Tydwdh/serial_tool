@@ -1,11 +1,11 @@
 use crate::state::LineEnding;
 use std::path::{Path, PathBuf};
-use tool_core::{
+use tool_application::tool_core::{
     config::{CURRENT_SCHEMA_VERSION, atomic_write_json, quarantine_corrupt_file},
     now_timestamp_ms,
 };
-use tool_recorder::RecordMode;
-use tool_transport::NetworkSerialConfig;
+use tool_application::tool_recorder::RecordMode;
+use tool_application::tool_transport::NetworkSerialConfig;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -322,7 +322,8 @@ impl WorkbenchApp {
                 .filter(|s| {
                     matches!(
                         s.state,
-                        tool_extension::PluginState::Enabled | tool_extension::PluginState::Running
+                        tool_application::tool_extension::PluginState::Enabled
+                            | tool_application::tool_extension::PluginState::Running
                     )
                 })
                 .map(|s| s.id)
@@ -410,7 +411,7 @@ impl WorkbenchApp {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use tool_recorder::RecordMode;
+    use tool_application::tool_recorder::RecordMode;
 
     fn legacy_workspace_json() -> String {
         serde_json::json!({

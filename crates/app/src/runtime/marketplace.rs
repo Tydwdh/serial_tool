@@ -3,8 +3,8 @@ use crate::bootstrap::app_dir;
 use crate::state::StatusLevel;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tool_core::LogLevel;
-use tool_marketplace::{RegistryFetch, RegistryPlugin};
+use tool_application::tool_core::LogLevel;
+use tool_application::tool_marketplace::{RegistryFetch, RegistryPlugin};
 
 /// 市场索引 + 安装任务的运行时状态。
 pub(crate) struct MarketplaceState {
@@ -132,11 +132,10 @@ impl WorkbenchApp {
             return; // 已有刷新在进行
         }
         self.plugins_panel.set_market_refreshing(true);
-        let url = self
-            .marketplace
-            .url
-            .clone()
-            .unwrap_or_else(|| tool_marketplace::DEFAULT_REGISTRY_URL.to_owned());
+        let url =
+            self.marketplace.url.clone().unwrap_or_else(|| {
+                tool_application::tool_marketplace::DEFAULT_REGISTRY_URL.to_owned()
+            });
         let network = tool_updater::NetworkSettings::with_proxy(
             (!self.network_proxy_url.trim().is_empty()).then(|| self.network_proxy_url.clone()),
         );
@@ -146,7 +145,9 @@ impl WorkbenchApp {
                 .enable_all()
                 .build()
                 .map_err(|e| format!("创建 tokio runtime 失败：{e}"))?;
-            rt.block_on(async { tool_marketplace::fetch_registry(&url, &network).await })
+            rt.block_on(async {
+                tool_application::tool_marketplace::fetch_registry(&url, &network).await
+            })
         }));
     }
 
@@ -162,9 +163,9 @@ impl WorkbenchApp {
         // 导致替换失败，也保证重装后用户重新启用才加载新代码。
         let was_active = matches!(
             self.workbench.plugin_manager.plugin_state(&id),
-            Some(tool_extension::PluginState::Running)
-                | Some(tool_extension::PluginState::Enabled)
-                | Some(tool_extension::PluginState::Finished)
+            Some(tool_application::tool_extension::PluginState::Running)
+                | Some(tool_application::tool_extension::PluginState::Enabled)
+                | Some(tool_application::tool_extension::PluginState::Finished)
         );
         if was_active && let Err(e) = self.workbench.plugin_manager.disable(&id) {
             log::warn!("marketplace: 重装前禁用 {id} 失败（继续安装）：{e}");
@@ -186,7 +187,7 @@ impl WorkbenchApp {
                 .build()
                 .map_err(|e| format!("创建 tokio runtime 失败：{e}"))?;
             rt.block_on(async {
-                tool_marketplace::install_plugin(
+                tool_application::tool_marketplace::install_plugin(
                     &entry,
                     &install_dir,
                     &network,
@@ -232,10 +233,10 @@ impl WorkbenchApp {
         // 1. 先 disable（若活跃）
         let was_active = matches!(
             self.workbench.plugin_manager.plugin_state(plugin_id),
-            Some(tool_extension::PluginState::Running)
-                | Some(tool_extension::PluginState::Enabled)
-                | Some(tool_extension::PluginState::Finished)
-                | Some(tool_extension::PluginState::Failed)
+            Some(tool_application::tool_extension::PluginState::Running)
+                | Some(tool_application::tool_extension::PluginState::Enabled)
+                | Some(tool_application::tool_extension::PluginState::Finished)
+                | Some(tool_application::tool_extension::PluginState::Failed)
         );
         if was_active && let Err(e) = self.workbench.plugin_manager.disable(plugin_id) {
             log::warn!("marketplace: 卸载前禁用 {plugin_id} 失败（继续卸载）：{e}");

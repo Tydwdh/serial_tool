@@ -2,8 +2,8 @@ use crate::app::WorkbenchApp;
 use crate::config::windows_open_dialog;
 use crate::state::StatusLevel;
 use eframe::egui;
-use tool_core::{Direction, Event, Payload};
-use tool_recorder::{ReplayBlockReason, ReplayState};
+use tool_application::tool_core::{Direction, Event, Payload};
+use tool_application::tool_recorder::{ReplayBlockReason, ReplayState};
 
 impl WorkbenchApp {
     /// 回放相关：seek/step/pick_file/analyzer 调度。

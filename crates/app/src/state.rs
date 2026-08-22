@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tool_transport::SerialPortDescriptor;
+use tool_application::tool_transport::SerialPortDescriptor;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) enum StatusLevel {
@@ -56,7 +56,7 @@ impl NotificationQueue {
     /// 推送一条通知。同 source 的旧消息被替换（去重但不丢失历史位置）。
     /// Error 级别展示时间更长，也可手动 dismiss。
     pub(crate) fn push(&mut self, source: &str, level: StatusLevel, text: impl Into<String>) {
-        let now = tool_core::now_timestamp_ms();
+        let now = tool_application::tool_core::now_timestamp_ms();
         let deadline_ms = level.ttl_ms().map(|ttl| now + ttl);
         let notification = Notification {
             id: self.next_id,
@@ -80,7 +80,7 @@ impl NotificationQueue {
     /// 获取当前未过期的所有通知（按插入顺序）。
     /// Error 级别展示时间更长。
     pub(crate) fn current(&mut self) -> Vec<Notification> {
-        let now = tool_core::now_timestamp_ms();
+        let now = tool_application::tool_core::now_timestamp_ms();
         // 清理头部过期的（非 Error）
         while self.entries.front().is_some_and(|(_, n)| n.is_expired(now)) {
             self.entries.pop_front();
@@ -225,7 +225,7 @@ pub(crate) struct SerialUiState {
     pub(crate) port_profiles: std::collections::HashMap<String, crate::config::PortProfile>,
     pub(crate) top_bar_serial_collapsed: bool,
     /// 网络模拟串口列表（WebSocket + JSON-RPC gcode 桥），持久化到配置。
-    pub(crate) network_ports: Vec<tool_transport::NetworkSerialConfig>,
+    pub(crate) network_ports: Vec<tool_application::tool_transport::NetworkSerialConfig>,
     /// “网络端口”连接表单的主机输入。
     pub(crate) network_host: String,
     /// “网络端口”连接表单的端口输入。

@@ -16,7 +16,7 @@ use egui_material_icons::{
     MaterialIcon,
     icons::{ICON_BOLT, ICON_EXTENSION},
 };
-use tool_extension::PluginSummary;
+use tool_application::tool_extension::PluginSummary;
 
 // ── 内置命令 ID 常量（Keymap 持久化键的单一来源）──
 
@@ -319,10 +319,10 @@ mod tests {
             version: String::new(),
             api_version: String::new(),
             runtime: String::new(),
-            state: tool_extension::PluginState::Running,
+            state: tool_application::tool_extension::PluginState::Running,
             permissions: Vec::new(),
-            contributes: tool_extension::manifest::PluginContributes {
-                commands: vec![tool_extension::manifest::PluginCommand {
+            contributes: tool_application::tool_extension::manifest::PluginContributes {
+                commands: vec![tool_application::tool_extension::manifest::PluginCommand {
                     id: "demo.test.run".to_owned(),
                     title: "Run".to_owned(),
                 }],

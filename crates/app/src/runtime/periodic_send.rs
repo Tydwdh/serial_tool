@@ -3,7 +3,7 @@ use crate::runtime::timing::wait_until_deadline;
 use crate::state::StatusLevel;
 use eframe::egui;
 use std::sync::{Arc, Mutex};
-use tool_transport::send_impl_to;
+use tool_application::tool_transport::send_impl_to;
 
 /// 周期发送后台线程的控制状态。
 pub(crate) struct PeriodicSendState {
@@ -114,13 +114,13 @@ impl WorkbenchApp {
                     &transport,
                 )
                 .err()
-                .map(|e| tool_transport::translate_error(&e));
+                .map(|e| tool_application::tool_transport::translate_error(&e));
 
                 if let Some(e) = err {
                     cancel.store(true, std::sync::atomic::Ordering::Release);
                     let msg = format!("周期发送已在第 {count} 次后停止：{e}");
-                    bus.publish(tool_core::Event::system_log(
-                        tool_core::LogLevel::Error,
+                    bus.publish(tool_application::tool_core::Event::system_log(
+                        tool_application::tool_core::LogLevel::Error,
                         "periodic",
                         msg.clone(),
                     ));
@@ -136,8 +136,8 @@ impl WorkbenchApp {
                 {
                     cancel.store(true, std::sync::atomic::Ordering::Release);
                     let msg = format!("周期发送已完成（{max} 次）");
-                    bus.publish(tool_core::Event::system_log(
-                        tool_core::LogLevel::Info,
+                    bus.publish(tool_application::tool_core::Event::system_log(
+                        tool_application::tool_core::LogLevel::Info,
                         "periodic",
                         msg.clone(),
                     ));

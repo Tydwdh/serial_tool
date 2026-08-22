@@ -23,14 +23,7 @@ open.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tool-application = { path = "../application" }
-tool-core = { path = "../core" }
-tool-databus = { path = "../databus" }
-tool-extension = { path = "../extension" }
-tool-lua-host = { path = "../lua_host" }
-tool-marketplace = { path = "../marketplace" }
 tool-panels = { path = "../panels" }
-tool-recorder = { path = "../recorder" }
-tool-transport = { path = "../transport" }
 tool-updater = { path = "../updater" }
 tokio = { version = "1", features = ["rt"] }
 rfd = "0.17.2"

@@ -171,7 +171,10 @@ fn render_plugins(app: &mut WorkbenchApp, ui: &mut egui::Ui) {
     // pending_restart 需经 Workbench 重试（原 Panel 内直接 manager.enable(...) 已去业务）
     for id in app.plugins_panel.take_pending_restart() {
         if let Err(e) = app.workbench.plugin_manager.enable(&id) {
-            if matches!(e, tool_extension::ExtensionError::Stopping(_)) {
+            if matches!(
+                e,
+                tool_application::tool_extension::ExtensionError::Stopping(_)
+            ) {
                 app.plugins_panel.push_pending_restart(id);
             }
         }

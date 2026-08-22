@@ -6,8 +6,8 @@ use egui_material_icons::icons::{
     ICON_CHECK_CIRCLE, ICON_CLOUD_DOWNLOAD, ICON_ERROR, ICON_NOTIFICATIONS, ICON_REFRESH,
     ICON_SYSTEM_UPDATE, ICON_WARNING,
 };
+use tool_application::tool_transport::TransportStatus;
 use tool_panels::{design, theme};
-use tool_transport::TransportStatus;
 
 impl WorkbenchApp {
     pub(super) fn status_bar(&mut self, ui: &mut egui::Ui) {

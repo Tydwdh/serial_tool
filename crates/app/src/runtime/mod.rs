@@ -47,7 +47,7 @@ impl WorkbenchApp {
     /// 处理 Lua 插件通过 ctx.ui.set_status() 推送的状态栏通知。
     fn process_ui_set_status(&mut self) {
         for event in self.ui_set_status_subscription.drain_limited(32) {
-            if let tool_core::Payload::Json(payload) = event.payload
+            if let tool_application::tool_core::Payload::Json(payload) = event.payload
                 && let Some(msg) = payload.get("message").and_then(|v| v.as_str())
             {
                 self.notifications

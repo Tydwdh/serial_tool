@@ -4,9 +4,11 @@ use crate::state::StatusLevel;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
-use tool_core::now_timestamp_ms;
+use tool_application::tool_core::now_timestamp_ms;
+use tool_application::tool_transport::{
+    SerialConfig, parse_data_bits, parse_parity, parse_stop_bits,
+};
 use tool_panels::TerminalExportFormat;
-use tool_transport::{SerialConfig, parse_data_bits, parse_parity, parse_stop_bits};
 
 impl WorkbenchApp {
     pub(crate) fn export_terminal_data(&mut self, format: TerminalExportFormat) {
@@ -219,12 +221,14 @@ impl WorkbenchApp {
                 // 网络模拟串口（WebSocket + JSON-RPC gcode 桥）作为固定端口并入列表：
                 // 与系统串口一起排序、分组、别名、开关，表现完全一致。
                 new_ports.extend(self.serial.network_ports.iter().map(|net| {
-                    tool_transport::SerialPortDescriptor {
+                    tool_application::tool_transport::SerialPortDescriptor {
                         port_name: net.display_name(),
-                        port_type: tool_transport::PortType::Network,
+                        port_type: tool_application::tool_transport::PortType::Network,
                     }
                 }));
-                new_ports.sort_by_key(|port| tool_transport::natural_sort_key(&port.port_name));
+                new_ports.sort_by_key(|port| {
+                    tool_application::tool_transport::natural_sort_key(&port.port_name)
+                });
 
                 let new_names: BTreeSet<String> = new_ports
                     .iter()
