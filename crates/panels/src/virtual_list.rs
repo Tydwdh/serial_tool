@@ -180,23 +180,6 @@ impl VirtualRowIndex {
         true
     }
 
-    /// 使指定行回退到估计高度，等待下一次进入视口时重新布局。
-    pub(crate) fn invalidate_ids(&mut self, ids: impl IntoIterator<Item = u64>) -> bool {
-        let mut changed = false;
-        for id in ids {
-            let Ok(index) = self.ids.binary_search(&id) else {
-                continue;
-            };
-            let old_height = self.heights[index];
-            if (old_height - self.default_height).abs() > f32::EPSILON {
-                self.heights[index] = self.default_height;
-                self.fenwick.add(index, self.default_height - old_height);
-                changed = true;
-            }
-        }
-        changed
-    }
-
     pub(crate) fn len(&self) -> usize {
         self.ids.len()
     }
@@ -299,6 +282,17 @@ mod tests {
         assert!(index.sync_ids(&[1, 2, 3], 1, 10.0));
         assert_eq!(index.height(0), 20.0);
         assert_eq!(index.total_height(), 40.0);
+    }
+
+    #[test]
+    fn append_ids_updates_only_the_new_tail() {
+        let mut index = VirtualRowIndex::default();
+        index.sync_ids(&[1, 2], 1, 10.0);
+        index.set_height(0, 20.0);
+        assert!(index.append_ids(&[1, 2, 3, 4], 1, 10.0));
+        assert_eq!(index.height(0), 20.0);
+        assert_eq!(index.height(2), 10.0);
+        assert_eq!(index.total_height(), 50.0);
     }
 
     #[test]

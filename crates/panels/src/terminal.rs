@@ -817,8 +817,8 @@ impl TerminalPanel {
         let update: TerminalStoreUpdate =
             self.store
                 .ingest(self.assembler, &event, port, bytes.as_ref());
-        self.virtual_rows
-            .invalidate_ids(update.changed_ids.iter().copied());
+        // LiveTail 预览始终固定为单行；离屏内容变化不应重置旧行高，避免用户查看历史
+        // 时因为后台接收而发生滚动位置跳动。进入视口后仍会重新 layout 并收敛真实高度。
         self.view_index.mark_changed(update.changed_ids);
         self.view_index
             .mark_removed(update.removed_ids.iter().copied());
@@ -1105,6 +1105,7 @@ fn render_rows_view(
     }
 
     let mut navigate_id: Option<u64> = None;
+    let mut measured_content_height: Option<f32> = None;
 
     let scroll_output = ScrollArea::vertical()
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
@@ -1292,6 +1293,7 @@ fn render_rows_view(
             }
 
             let mut text_drag_response: Option<egui::Response> = None;
+            let mut row_heights_changed = false;
             for row_idx in render_range {
                 let Some(row) = row_ids
                     .get(row_idx)
@@ -1368,7 +1370,7 @@ fn render_rows_view(
                         .max(row_height)
                 };
                 let entry_height = entry_height.round().max(row_height);
-                virtual_rows.set_height(row_idx, entry_height);
+                row_heights_changed |= virtual_rows.set_height(row_idx, entry_height);
 
                 let label_y = current_y + row_height * 0.5;
 
@@ -1543,7 +1545,13 @@ fn render_rows_view(
                 }
             }
 
+            if row_heights_changed {
+                // 真实 galley 高度会在本帧布局后才可得；下一帧需要重新分配
+                // ScrollArea 内容高度并重新计算视口范围。
+                ui.ctx().request_repaint();
+            }
             let actual_total = virtual_rows.total_height().round();
+            measured_content_height = Some(actual_total);
             if actual_total > total_height + 0.5 {
                 ui.allocate_space(egui::vec2(0.0, actual_total - total_height));
             }
@@ -1830,7 +1838,7 @@ fn render_rows_view(
 
     RenderOutcome {
         inner_rect: scroll_output.inner_rect,
-        content_height: scroll_output.content_size.y,
+        content_height: measured_content_height.unwrap_or(scroll_output.content_size.y),
         offset_y: scroll_output.state.offset.y,
         pending_navigate_to_id: navigate_id,
     }
@@ -2557,16 +2565,6 @@ mod tests {
         assert_ne!(base, terminal_layout_key(true, false, 13.0, 240, 0));
         assert_ne!(base, terminal_layout_key(false, true, 13.0, 240, 0));
         assert_ne!(base, terminal_layout_key(false, false, 14.0, 240, 0));
-    }
-
-    #[test]
-    fn virtual_row_index_invalidates_changed_rows_without_scanning_content() {
-        let mut index = VirtualRowIndex::default();
-        index.sync_ids(&[1, 2], 1, 10.0);
-        index.set_height(0, 40.0);
-        assert!(index.invalidate_ids([1]));
-        assert_eq!(index.height(0), 10.0);
-        assert_eq!(index.total_height(), 20.0);
     }
 
     #[test]
