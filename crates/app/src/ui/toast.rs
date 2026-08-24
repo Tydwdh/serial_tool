@@ -14,9 +14,9 @@ use tool_panels::design;
 use tool_panels::theme;
 
 const MAX_TOASTS: usize = 5;
-const TOAST_WIDTH: f32 = 340.0;
-const VIEW_MARGIN: f32 = 14.0;
-const TOAST_GAP: f32 = 8.0;
+const TOAST_WIDTH: f32 = 300.0;
+const VIEW_MARGIN: f32 = 10.0;
+const TOAST_GAP: f32 = 5.0;
 const ANIMATION_SECONDS: f32 = 0.18;
 
 #[derive(Default)]
@@ -147,12 +147,12 @@ fn render_toast(ui: &mut egui::Ui, toast: &mut Toast, now_ms: u64) {
         .fill(theme::bg_secondary())
         .stroke(Stroke::new(1.0, accent.gamma_multiply(0.7)))
         .corner_radius(7.0)
-        .inner_margin(egui::Margin::symmetric(12, 10));
+        .inner_margin(egui::Margin::symmetric(9, 4));
 
     frame.show(ui, |ui| {
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                ui.label(design::icon_only(icon, accent, 18.0));
+                ui.label(design::icon_only(icon, accent, 16.0));
                 ui.label(RichText::new(title).color(accent).strong());
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if design::icon_button(ui, ICON_CLOSE, "关闭通知").clicked() {
@@ -160,13 +160,13 @@ fn render_toast(ui: &mut egui::Ui, toast: &mut Toast, now_ms: u64) {
                     }
                 });
             });
-            ui.add_space(3.0);
+            ui.add_space(1.0);
             ui.add(
                 egui::Label::new(RichText::new(&toast.text).color(theme::text_primary())).wrap(),
             );
 
             if let Some(fraction) = toast.remaining_fraction(now_ms) {
-                ui.add_space(8.0);
+                ui.add_space(3.0);
                 let rect = ui.allocate_space(egui::vec2(ui.available_width(), 2.0)).1;
                 ui.painter().rect_filled(rect, 1.0, theme::bg_tertiary());
                 ui.painter().rect_filled(

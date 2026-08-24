@@ -110,7 +110,7 @@ installer/       Windows 安装器配置
 ## 发布与变更
 
 - [变更记录](CHANGELOG.md)
-- [v1.1.0 发布说明](docs/releases/v1.1.0.md)
+- [v1.1.1 发布说明](docs/releases/v1.1.1.md)
 - [发布流程](docs/RELEASE.md)
 - [安装器说明](docs/INSTALLER.md)
 

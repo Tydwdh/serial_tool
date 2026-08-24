@@ -63,6 +63,7 @@ install -Dm644 "$REPO_ROOT/LICENSE" \
 install -Dm644 "$REPO_ROOT/README.md" \
     "$STAGE_DIR/usr/share/doc/$PACKAGE_NAME/README.md"
 
+install -d "$STAGE_DIR/usr/bin"
 ln -s "/usr/lib/hardware-workbench/$APP_NAME" \
     "$STAGE_DIR/usr/bin/$APP_NAME"
 

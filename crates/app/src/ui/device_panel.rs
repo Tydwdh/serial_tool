@@ -11,6 +11,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use tool_application::tool_recorder::RecordMode;
 use tool_panels::{design, theme};
 
+// 端口行的实际最小内容宽度约为 500px（状态、名称、别名编辑器和分组选择器）。
+// 留出少量余量即可，不能把卡片的可用宽度误当成 Dock 的断点。
+const PORT_INLINE_MIN_WIDTH: f32 = 560.0;
+
 impl WorkbenchApp {
     pub(crate) fn device_panel(&mut self, ui: &mut egui::Ui) {
         // ── 串口参数 ──
@@ -263,6 +267,7 @@ impl WorkbenchApp {
                     match self.workbench.transport.open_network_serial(cfg) {
                         Ok(_) => {
                             self.serial.selected_port = Some(name.clone());
+                            self.defer_port_open_notice(&name, format!("{name} 已连接"));
                             self.set_status_force(StatusLevel::Info, format!("正在连接 {name}..."));
                         }
                         Err(e) => {
@@ -491,7 +496,7 @@ impl WorkbenchApp {
                                 tool_application::tool_transport::PortType::Network
                             );
                             let has_alias = self.serial.port_aliases.contains_key(&name);
-                            let inline = ui.available_width() >= 760.0;
+                            let inline = ui.available_width() >= PORT_INLINE_MIN_WIDTH;
 
                             if inline {
                                 ui.horizontal(|ui| {
@@ -620,6 +625,7 @@ impl WorkbenchApp {
 
             // 移除网络端口：从配置列表删除、关闭连接、清空选择。
             if let Some(name) = removed_network {
+                self.cancel_pending_port_open_notice(&name);
                 self.serial
                     .network_ports
                     .retain(|n| n.display_name() != name);

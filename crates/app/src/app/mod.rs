@@ -222,7 +222,7 @@ impl WorkbenchApp {
         let mut rp = config
             .as_ref()
             .map(|c| c.panels.clone())
-            .unwrap_or_default();
+            .unwrap_or_else(PanelManager::default_workspace);
         rp.discard_dynamic_tabs();
         rp.dock.normalize_tool_layout();
         rp.ensure_tiles_layout();
@@ -303,6 +303,7 @@ impl WorkbenchApp {
                 last_port_refresh: 0.0,
                 auto_reconnect: config.as_ref().map(|c| c.auto_reconnect).unwrap_or(true),
                 pending_reconnect: None,
+                pending_open_notice: None,
                 port_aliases: config
                     .as_ref()
                     .map(|c| c.port_aliases.clone())

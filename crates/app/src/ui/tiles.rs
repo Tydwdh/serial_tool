@@ -308,6 +308,12 @@ impl Behavior<PanelId> for WorkbenchTiles<'_> {
         120.0
     }
 
+    fn is_container_kind_allowed(&self, kind: ContainerKind) -> bool {
+        // 上下拆分在 Dock 拖拽时命中面积太大，容易误触发并产生意义不大的
+        // Vertical 容器；保留左右拆分和标签合并即可满足当前工作区需求。
+        kind != ContainerKind::Vertical
+    }
+
     fn simplification_options(&self) -> SimplificationOptions {
         SimplificationOptions {
             // 单面板仍保留标签栏，保证区域标题与拖拽把手始终可见。

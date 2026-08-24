@@ -334,7 +334,9 @@ impl DropContext {
             return;
         }
 
-        if tile.kind() != Some(ContainerKind::Horizontal) {
+        if behavior.is_container_kind_allowed(ContainerKind::Horizontal)
+            && tile.kind() != Some(ContainerKind::Horizontal)
+        {
             self.suggest_rect(
                 InsertionPoint::new(parent_id, ContainerInsertion::Horizontal(0)),
                 rect.split_left_right_at_fraction(0.5).0,
@@ -345,7 +347,9 @@ impl DropContext {
             );
         }
 
-        if tile.kind() != Some(ContainerKind::Vertical) {
+        if behavior.is_container_kind_allowed(ContainerKind::Vertical)
+            && tile.kind() != Some(ContainerKind::Vertical)
+        {
             self.suggest_rect(
                 InsertionPoint::new(parent_id, ContainerInsertion::Vertical(0)),
                 rect.split_top_bottom_at_fraction(0.5).0,
@@ -356,11 +360,13 @@ impl DropContext {
             );
         }
 
-        self.suggest_rect(
-            InsertionPoint::new(parent_id, ContainerInsertion::Tabs(usize::MAX)),
-            rect.split_top_bottom_at_y(rect.top() + behavior.tab_bar_height(style))
-                .1,
-        );
+        if behavior.is_container_kind_allowed(ContainerKind::Tabs) {
+            self.suggest_rect(
+                InsertionPoint::new(parent_id, ContainerInsertion::Tabs(usize::MAX)),
+                rect.split_top_bottom_at_y(rect.top() + behavior.tab_bar_height(style))
+                    .1,
+            );
+        }
     }
 
     fn suggest_rect(&mut self, insertion: InsertionPoint, preview_rect: Rect) {

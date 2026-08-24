@@ -283,6 +283,15 @@ pub trait Behavior<Pane> {
         32.0
     }
 
+    /// Can this container kind be selected as a drag-and-drop destination?
+    ///
+    /// This only filters newly proposed drop targets. Existing containers are
+    /// left untouched, so applications can disable an accidental split
+    /// direction without changing their persisted layout structure.
+    fn is_container_kind_allowed(&self, _kind: ContainerKind) -> bool {
+        true
+    }
+
     /// Show we preview panes that are being dragged,
     /// i.e. show their ui in the region where they will end up?
     fn preview_dragged_panes(&self) -> bool {

@@ -1,4 +1,4 @@
-use egui_tiles::{Container, Tile, TileId, Tiles, Tree};
+use egui_tiles::{Container, Linear, LinearDir, Tile, TileId, Tiles, Tree};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 
@@ -330,6 +330,66 @@ impl TilesLayout {
             right_tabs,
             dock.right_visible && !dock.right.tabs.is_empty(),
         );
+
+        Self {
+            tree,
+            main_tabs,
+            bottom_tabs,
+            right_tabs,
+            plugin_panel_owners: BTreeMap::new(),
+            plugin_groups: BTreeMap::new(),
+        }
+    }
+
+    /// 当前工作区的默认 Dock 布局。
+    ///
+    /// 该布局来自用户当前工作区：主标签区与发送器上下排列，接收区和日志
+    /// 放在右侧。这里只固化面板树，不包含串口、主题、历史记录等个人配置。
+    pub fn current_default() -> Self {
+        let mut tiles = Tiles::default();
+
+        let center_panes = Self::pane_ids(
+            &mut tiles,
+            &[
+                PanelId::builtin(PANEL_SETTINGS),
+                PanelId::builtin(PANEL_DEVICES),
+                PanelId::builtin(PANEL_REPLAY),
+                PanelId::builtin(PANEL_PLUGINS),
+            ],
+        );
+        let sender_pane = Self::pane_ids(&mut tiles, &[PanelId::builtin(PANEL_SENDER)]);
+        let side_panes = Self::pane_ids(
+            &mut tiles,
+            &[
+                PanelId::builtin(PANEL_LOGS),
+                PanelId::builtin(PANEL_TERMINAL),
+            ],
+        );
+
+        let main_tabs = tiles.insert_tab_tile(center_panes);
+        let bottom_tabs = tiles.insert_tab_tile(sender_pane);
+        let right_tabs = tiles.insert_tab_tile(side_panes);
+        let settings_pane = tiles
+            .find_pane(&PanelId::builtin(PANEL_SETTINGS))
+            .expect("default settings pane");
+        let terminal_pane = tiles
+            .find_pane(&PanelId::builtin(PANEL_TERMINAL))
+            .expect("default terminal pane");
+
+        if let Some(Tile::Container(Container::Tabs(tabs))) = tiles.get_mut(main_tabs) {
+            tabs.set_active(settings_pane);
+        }
+        if let Some(Tile::Container(Container::Tabs(tabs))) = tiles.get_mut(right_tabs) {
+            tabs.set_active(terminal_pane);
+        }
+
+        let main_column = tiles.insert_vertical_tile(vec![main_tabs, bottom_tabs]);
+        let mut root_linear = Linear::new(LinearDir::Horizontal, vec![main_column, right_tabs]);
+        // 与当前工作区保存的左右区域比例保持一致。
+        root_linear.shares.set_share(main_column, 0.45367718);
+        root_linear.shares.set_share(right_tabs, 0.66292167);
+        let root = tiles.insert_container(root_linear);
+        let tree = Tree::new("hardware-workbench-layout", root, tiles);
 
         Self {
             tree,
@@ -838,7 +898,7 @@ impl PanelManager {
             .unwrap_or_default();
 
         self.dock = DockLayout::default();
-        self.tiles = Some(TilesLayout::from_legacy(&self.dock));
+        self.tiles = Some(TilesLayout::current_default());
         if let Some(layout) = self.tiles.as_mut() {
             for (kind, plugin_id) in dynamic_panels {
                 if let Some(plugin_id) = plugin_id {
@@ -849,7 +909,16 @@ impl PanelManager {
             }
             layout.select_pane(&PanelId::builtin(PANEL_DEVICES));
         }
-        self.active_tab = PanelId::builtin(PANEL_DEVICES);
+        self.active_tab = PanelId::builtin(PANEL_TERMINAL);
+    }
+
+    /// 创建没有用户配置文件时使用的工作区默认值。
+    pub fn default_workspace() -> Self {
+        Self {
+            active_tab: PanelId::builtin(PANEL_TERMINAL),
+            tiles: Some(TilesLayout::current_default()),
+            ..Self::default()
+        }
     }
 
     pub fn bottom_visible(&mut self) -> bool {
@@ -1240,7 +1309,7 @@ mod tests {
             Some("demo")
         );
         assert!(layout.plugin_groups.contains_key("demo"));
-        assert_eq!(manager.active_tab, PanelId::builtin(PANEL_DEVICES));
+        assert_eq!(manager.active_tab, PanelId::builtin(PANEL_TERMINAL));
     }
 
     #[test]

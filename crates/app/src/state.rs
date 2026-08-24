@@ -12,9 +12,9 @@ impl StatusLevel {
     /// 通知自动过期时间（毫秒）。错误保留更久，但也会自动关闭。
     pub(crate) fn ttl_ms(self) -> Option<u64> {
         match self {
-            Self::Info => Some(5_000),
-            Self::Warn => Some(8_000),
-            Self::Error => Some(15_000),
+            Self::Info => Some(1_500),
+            Self::Warn => Some(2_000),
+            Self::Error => Some(4_000),
         }
     }
 }
@@ -207,6 +207,14 @@ pub(crate) struct PendingReconnect {
     pub(crate) next_try_at: f64,
 }
 
+/// 等待 transport 确认端口已真正打开后再显示成功提示。
+#[derive(Clone)]
+pub(crate) struct PendingPortOpenNotice {
+    pub(crate) port_name: String,
+    pub(crate) success_message: String,
+    pub(crate) requested_at: f64,
+}
+
 /// 串口相关的 UI 状态聚合：端口列表、选中端口、串口参数、自动重连、别名与配置档案。
 ///
 /// 将原先散落在 `WorkbenchApp` 上的 13 个字段收拢于此，便于统一管理与持久化转换。
@@ -220,6 +228,7 @@ pub(crate) struct SerialUiState {
     pub(crate) last_port_refresh: f64,
     pub(crate) auto_reconnect: bool,
     pub(crate) pending_reconnect: Option<PendingReconnect>,
+    pub(crate) pending_open_notice: Option<PendingPortOpenNotice>,
     pub(crate) port_aliases: std::collections::HashMap<String, String>,
     pub(crate) port_groups: std::collections::HashMap<String, String>,
     pub(crate) port_profiles: std::collections::HashMap<String, crate::config::PortProfile>,
@@ -254,6 +263,7 @@ impl Default for SerialUiState {
             last_port_refresh: 0.0,
             auto_reconnect: true,
             pending_reconnect: None,
+            pending_open_notice: None,
             port_aliases: std::collections::HashMap::new(),
             port_groups: std::collections::HashMap::new(),
             port_profiles: std::collections::HashMap::new(),

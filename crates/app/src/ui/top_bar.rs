@@ -168,9 +168,10 @@ impl WorkbenchApp {
                     close_btn = close_btn.on_disabled_hover_text("端口未打开");
                 }
                 if close_btn.clicked()
-                    && let Some(ref port) = self.serial.selected_port
+                    && let Some(port) = self.serial.selected_port.clone()
                 {
-                    self.workbench.transport.close_port(port);
+                    self.cancel_pending_port_open_notice(&port);
+                    self.workbench.transport.close_port(&port);
                     self.set_status(StatusLevel::Info, format!("{port} 已关闭"));
                 }
             } else if so {

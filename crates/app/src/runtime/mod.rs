@@ -32,6 +32,7 @@ impl WorkbenchApp {
         self.flush_pending_command();
         self.tick_key_recording(ctx);
         self.tick_port_refresh(ctx);
+        self.tick_pending_port_open_notice(ctx);
         self.tick_periodic_send(ctx);
         self.tick_auto_save(ctx);
         self.tick_update();

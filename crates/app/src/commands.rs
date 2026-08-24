@@ -1,5 +1,6 @@
 use crate::app::WorkbenchApp;
 use crate::config::resolve_recorder_path;
+use crate::state::PendingPortOpenNotice;
 use crate::state::PendingReconnect;
 use crate::state::StatusLevel;
 use std::collections::BTreeSet;
@@ -322,8 +323,8 @@ impl WorkbenchApp {
                                 Ok(()) => {
                                     self.serial.selected_port = Some(pending.port_name.clone());
                                     self.serial.pending_reconnect = None;
-                                    self.set_status_force(
-                                        StatusLevel::Info,
+                                    self.defer_port_open_notice(
+                                        &pending.port_name,
                                         format!("已自动重连 {}", pending.port_name),
                                     );
                                 }
@@ -400,6 +401,7 @@ impl WorkbenchApp {
 
         if self.workbench.transport.status_port(name).open {
             // 已打开：关闭
+            self.cancel_pending_port_open_notice(name);
             self.workbench.transport.close_port(name);
             self.set_status_force(StatusLevel::Info, format!("{name} 已断开"));
             return;
@@ -407,6 +409,7 @@ impl WorkbenchApp {
 
         // 网络端口连接中：取消连接（worker 正在异步 connect）
         if self.workbench.transport.status_port(name).connecting {
+            self.cancel_pending_port_open_notice(name);
             self.workbench.transport.close_port(name);
             self.set_status_force(StatusLevel::Info, format!("已取消 {name} 的连接"));
             return;
@@ -418,7 +421,7 @@ impl WorkbenchApp {
             self.switch_port_selection(old.as_deref(), name);
         }
         match self.open_selected_port_result() {
-            Ok(()) => self.set_status_force(StatusLevel::Info, format!("{name} 已连接")),
+            Ok(()) => self.defer_port_open_notice(name, format!("{name} 已连接")),
             Err(e) => self.set_status_force(StatusLevel::Error, e),
         }
     }
@@ -426,8 +429,12 @@ impl WorkbenchApp {
     pub(crate) fn open_selected_port(&mut self) {
         match self.open_selected_port_result() {
             Ok(()) => {
-                let p = self.serial.selected_port.as_deref().unwrap_or("?");
-                self.set_status_force(StatusLevel::Info, format!("{p} 已连接"));
+                let p = self
+                    .serial
+                    .selected_port
+                    .clone()
+                    .unwrap_or_else(|| "?".to_owned());
+                self.defer_port_open_notice(&p, format!("{p} 已连接"));
             }
             Err(e) => {
                 self.set_status_force(StatusLevel::Error, e);
@@ -504,8 +511,28 @@ impl WorkbenchApp {
 
         // 重新打开
         match self.open_selected_port_result() {
-            Ok(()) => self.set_status_force(StatusLevel::Info, format!("{p} 已重新连接")),
+            Ok(()) => self.defer_port_open_notice(&p, format!("{p} 已重新连接")),
             Err(e) => self.set_status_force(StatusLevel::Error, format!("重连 {p} 失败：{e}")),
+        }
+    }
+
+    /// 打开请求已提交，但成功提示要等下一帧确认 transport 状态后再显示。
+    pub(crate) fn defer_port_open_notice(&mut self, port_name: &str, success_message: String) {
+        self.serial.pending_open_notice = Some(PendingPortOpenNotice {
+            port_name: port_name.to_owned(),
+            success_message,
+            requested_at: 0.0,
+        });
+    }
+
+    pub(crate) fn cancel_pending_port_open_notice(&mut self, port_name: &str) {
+        if self
+            .serial
+            .pending_open_notice
+            .as_ref()
+            .is_some_and(|pending| pending.port_name == port_name)
+        {
+            self.serial.pending_open_notice = None;
         }
     }
 

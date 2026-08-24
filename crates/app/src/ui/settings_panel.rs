@@ -16,6 +16,7 @@ use tool_panels::{
 };
 
 const SETTINGS_NAV_BUTTON_SIZE: egui::Vec2 = egui::vec2(136.0, 32.0);
+const CONFIG_LOCATION_LABEL_WIDTH: f32 = 96.0;
 const REPOSITORY_URL: &str = env!("CARGO_PKG_REPOSITORY");
 const SETTINGS_NAV_ITEMS: [(usize, egui_material_icons::MaterialIcon, &str); 5] = [
     (0, ICON_SETTINGS, "常规"),
@@ -421,11 +422,17 @@ impl WorkbenchApp {
         open_self: bool,
     ) {
         let path_text = path.display().to_string();
-        ui.horizontal_wrapped(|ui| {
-            ui.label(label);
-            ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            // 固定标签列并关闭自动换行，保证两条路径的起点和右侧操作列对齐。
+            ui.add_sized(
+                egui::vec2(CONFIG_LOCATION_LABEL_WIDTH, ui.spacing().interact_size.y),
+                egui::Label::new(label).halign(egui::Align::LEFT),
+            );
+
             // 等宽路径
-            let available_width = (ui.available_width() - 72.0).max(40.0);
+            let item_spacing = ui.spacing().item_spacing.x;
+            let action_width = design::ICON_BUTTON_SIZE * 2.0 + item_spacing * 2.0;
+            let available_width = (ui.available_width() - action_width).max(64.0);
             let display_path = tool_panels::compact_middle(
                 &path_text,
                 ((available_width / 8.0) as usize).clamp(20, 80),
@@ -437,7 +444,8 @@ impl WorkbenchApp {
                         .monospace()
                         .color(theme::text_primary()),
                 )
-                .truncate(),
+                .truncate()
+                .halign(egui::Align::LEFT),
             )
             .on_hover_text(&path_text);
             if design::icon_button(ui, ICON_CONTENT_COPY, "复制路径").clicked() {

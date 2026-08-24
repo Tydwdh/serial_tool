@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-08-25
+
+### 修复
+
+- 稳定终端虚拟列表滚动和增量布局更新。
+- 仅在 transport 确认端口真正打开后显示连接成功提示，连接超时则显示失败提示。
+- 修复 Ubuntu `.deb` 打包时 `/usr/bin/hardware-workbench-app` 符号链接目录不存在的问题。
+
+### 调整
+
+- 优化无配置文件时的默认工作区布局，并将终端作为默认活动面板。
+- Dock 拖拽时关闭容易误触发的上下拆分目标，保留左右拆分和标签合并。
+- 收紧通知、配置路径和设备面板的布局与显示时长。
+
 ## [1.1.0] - 2026-08-25
 
 ### 新增
@@ -39,6 +53,7 @@
 - 支持左键拖选文本或跨行选择时继续使用滚轮滚动。
 - 修复设置导航、工具栏按钮和插件统计切换时的布局抖动。
 
-[Unreleased]: https://github.com/Tydwdh/serial_tool/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/Tydwdh/serial_tool/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/Tydwdh/serial_tool/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/Tydwdh/serial_tool/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Tydwdh/serial_tool/compare/v0.7.3...v1.0.0
