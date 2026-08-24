@@ -1,13 +1,13 @@
 {
-  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v1.1.0/hardware-workbench-app.zip",
-  "version": "1.1.0",
-  "date": "2026-08-25",
   "changelog": [
-    "提供 Ubuntu 22.04+ x86_64 `.deb` 安装包，安装后可从应用菜单以普通用户运行。",
-    "Linux 用户数据写入用户目录，并为串口权限不足提供 `dialout` 引导；应用本身不要求使用 `sudo` 启动。",
-    "在 CI 中加入 Ubuntu 构建、Debian 包元数据检查和 SHA-256 校验文件生成。",
-    "建立 UI 无关的 application core 和 DTO 驱动的界面边界，降低前端与业务实现的耦合。",
-    "重构终端流存储，虚拟化行布局并延迟生成终端行，降低大数据量场景的渲染开销。",
-    "Linux 发行版不显示面向 Windows 便携包的应用内更新入口，改由 `.deb` 发布包升级。"
-  ]
+    "稳定终端虚拟列表滚动和增量布局更新。",
+    "仅在 transport 确认端口真正打开后显示连接成功提示，连接超时则显示失败提示。",
+    "修复 Ubuntu `.deb` 打包时 `/usr/bin/hardware-workbench-app` 符号链接目录不存在的问题。",
+    "优化无配置文件时的默认工作区布局，并将终端作为默认活动面板。",
+    "Dock 拖拽时关闭容易误触发的上下拆分目标，保留左右拆分和标签合并。",
+    "收紧通知、配置路径和设备面板的布局与显示时长。"
+  ],
+  "version": "1.1.1",
+  "date": "2026-08-25",
+  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v1.1.1/hardware-workbench-app.zip"
 }
