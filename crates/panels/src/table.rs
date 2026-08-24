@@ -338,7 +338,8 @@ impl MessageList {
 pub(crate) struct RowHighlight {
     frozen_y: Option<(f32, f32)>,
     frozen_y_id: Id,
-    row_y_ranges: Vec<(f32, f32)>,
+    /// 只记录实际参与本帧交互的行；虚拟列表中索引可能不是从 0 开始。
+    row_y_ranges: Vec<(usize, f32, f32)>,
 }
 
 /// 记录字符级拖选跨过的稳定行 ID。
@@ -483,11 +484,16 @@ impl RowHighlight {
 
     /// 在每行循环内调用：记录该行的 Y 范围，返回行索引。
     /// 参数 `current_y` 是该行顶部 Y，`entry_height` 是该行高度。
-    pub(crate) fn record_row(&mut self, _current_y: f32, _entry_height: f32) -> usize {
+    pub(crate) fn record_row(&mut self, current_y: f32, entry_height: f32) -> usize {
         let index = self.row_y_ranges.len();
-        self.row_y_ranges
-            .push((_current_y, _current_y + _entry_height));
+        self.record_row_at(index, current_y, entry_height);
         index
+    }
+
+    /// 记录带有绝对行索引的 Y 范围，供虚拟列表使用。
+    pub(crate) fn record_row_at(&mut self, index: usize, current_y: f32, entry_height: f32) {
+        self.row_y_ranges
+            .push((index, current_y, current_y + entry_height));
     }
 
     /// 在渲染循环**之后**调用：根据右键点击位置计算悬停行索引。
@@ -510,7 +516,8 @@ impl RowHighlight {
             let row_idx = ui.input(|i| i.pointer.hover_pos()).and_then(|pointer| {
                 self.row_y_ranges
                     .iter()
-                    .position(|(top, bottom)| pointer.y >= *top && pointer.y < *bottom)
+                    .find(|(_, top, bottom)| pointer.y >= *top && pointer.y < *bottom)
+                    .map(|(index, _, _)| *index)
             });
             ui.data_mut(|d| d.insert_persisted(frozen_data_id, row_idx));
             row_idx
@@ -527,7 +534,8 @@ impl RowHighlight {
         ui.input(|i| i.pointer.hover_pos()).and_then(|pointer| {
             self.row_y_ranges
                 .iter()
-                .position(|(top, bottom)| pointer.y >= *top && pointer.y < *bottom)
+                .find(|(_, top, bottom)| pointer.y >= *top && pointer.y < *bottom)
+                .map(|(index, _, _)| *index)
         })
     }
 
@@ -535,25 +543,29 @@ impl RowHighlight {
     pub(crate) fn row_index_at_y(&self, y: f32) -> Option<usize> {
         self.row_y_ranges
             .iter()
-            .position(|(top, bottom)| y >= *top && y < *bottom)
+            .find(|(_, top, bottom)| y >= *top && y < *bottom)
+            .map(|(index, _, _)| *index)
     }
 
     /// 获取指定行索引的 Y 范围。
     pub(crate) fn row_y_range(&self, index: usize) -> Option<(f32, f32)> {
-        self.row_y_ranges.get(index).copied()
+        self.row_y_ranges
+            .iter()
+            .find(|(row_index, _, _)| *row_index == index)
+            .map(|(_, top, bottom)| (*top, *bottom))
     }
 
     /// 根据 Y 坐标查找行；拖拽越过首尾时钳制到第一/最后一行。
     pub(crate) fn row_index_at_y_clamped(&self, y: f32) -> Option<usize> {
         let first = self.row_y_ranges.first()?;
-        if y < first.0 {
-            return Some(0);
+        if y < first.1 {
+            return Some(first.0);
         }
 
         let last_index = self.row_y_ranges.len() - 1;
         let last = self.row_y_ranges[last_index];
-        if y >= last.1 {
-            return Some(last_index);
+        if y >= last.2 {
+            return Some(last.0);
         }
 
         self.row_index_at_y(y)

@@ -14,6 +14,7 @@ mod search;
 mod table;
 mod terminal;
 pub mod theme;
+mod virtual_list;
 
 /// 面板每帧最多摄入的事件数，避免 UI 卡顿。
 pub(crate) const MAX_INGEST_PER_FRAME: usize = 500;

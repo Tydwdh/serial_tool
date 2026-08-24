@@ -3,12 +3,12 @@ use crate::{
     design::{self, ButtonKind},
     fmt_ts,
     table::{
-        AutoScrollState, MessageList, MessageSearch, RowHighlight, RowSelection, TextSelectionRows,
+        AutoScrollState, MessageSearch, RowHighlight, RowSelection, TextSelectionRows,
         bulk_copy_button, claim_copy_focus, copy_text_with_feedback, edge_scroll_delta,
-        estimated_wrapped_line_count, owns_copy_focus, report_copy_feedback,
-        wheel_scroll_during_selection,
+        owns_copy_focus, report_copy_feedback, wheel_scroll_during_selection,
     },
     theme,
+    virtual_list::VirtualRowIndex,
 };
 use egui::text_selection::LabelSelectionState;
 use egui::{Color32, RichText, ScrollArea, Sense, Stroke};
@@ -124,8 +124,8 @@ pub struct TerminalPanel {
     pub selection: RowSelection,
     /// 字符级拖选覆盖的行；用于在自动滚动时保活视口外的选区端点。
     text_selection_rows: TextSelectionRows,
-    /// 接收消息流的共享虚拟渲染状态（行高缓存与总高收敛）。
-    message_list: MessageList,
+    /// 接收消息流的虚拟行索引：只布局视口和 overscan 范围内的行。
+    virtual_rows: VirtualRowIndex,
 }
 
 struct VisibleRow<'a> {
@@ -283,18 +283,6 @@ struct RenderOutcome {
     pending_navigate_to_id: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-struct TerminalRowHeightSignature {
-    show_hex: bool,
-    show_raw: bool,
-    font_size_milli: i32,
-    live_line_count: usize,
-    raw_len: usize,
-    display_len: usize,
-    hex_len: usize,
-    preview_len: usize,
-}
-
 impl TerminalPanel {
     pub fn new(bus: &DataBus) -> Self {
         Self {
@@ -335,7 +323,7 @@ impl TerminalPanel {
             merge_window_ms: 5,
             selection: RowSelection::new(0),
             text_selection_rows: TextSelectionRows::default(),
-            message_list: MessageList::default(),
+            virtual_rows: VirtualRowIndex::default(),
         }
     }
     pub fn ingest_all_pending(&mut self) -> usize {
@@ -393,7 +381,7 @@ impl TerminalPanel {
         self.search.clear();
         self.port_filter = None;
         self.bookmarked_entry_ids.clear();
-        self.message_list.clear();
+        self.virtual_rows.clear();
         // 清空后重置为自动滚动，与 LogPanel::clear() 保持一致
         self.show_raw = false;
         self.selection.clear();
@@ -433,7 +421,6 @@ impl TerminalPanel {
                 self.detail_entry_id = None;
             }
             self.bookmarked_entry_ids.remove(&id);
-            self.message_list.remove(id);
         }
     }
 
@@ -761,7 +748,7 @@ impl TerminalPanel {
                 &mut self.selection,
                 &mut self.text_selection_rows,
                 empty_hint,
-                &mut self.message_list,
+                &mut self.virtual_rows,
                 self.navigate_highlight,
             )
         };
@@ -815,6 +802,8 @@ impl TerminalPanel {
         let update: TerminalStoreUpdate =
             self.store
                 .ingest(self.assembler, &event, port, bytes.as_ref());
+        self.virtual_rows
+            .invalidate_ids(update.changed_ids.iter().copied());
         self.view_index.mark_changed(update.changed_ids);
         self.view_index
             .mark_removed(update.removed_ids.iter().copied());
@@ -834,7 +823,6 @@ impl TerminalPanel {
                 self.detail_entry_id = None;
             }
             self.bookmarked_entry_ids.remove(&id);
-            self.message_list.remove(id);
         }
     }
 
@@ -948,117 +936,20 @@ impl TerminalPanel {
     }
 }
 
-fn terminal_row_height_signature(
-    row: &VisibleRow<'_>,
+fn terminal_layout_key(
     show_hex: bool,
     show_raw: bool,
     font_size: f32,
-) -> TerminalRowHeightSignature {
-    let live_line_count = terminal_live_line_count(row, show_hex, show_raw);
-    let live_tail = live_line_count > 0;
-    TerminalRowHeightSignature {
-        show_hex,
-        show_raw,
-        font_size_milli: (font_size * 1000.0).round() as i32,
-        live_line_count,
-        // 未完成尾行使用固定的尾部预览，尾行继续增长时不让行高缓存持续失效。
-        raw_len: if live_tail { 0 } else { row.raw_text.len() },
-        display_len: if live_tail { 0 } else { row.display_text.len() },
-        hex_len: if live_tail { 0 } else { row.hex_text.len() },
-        preview_len: if live_tail { 0 } else { row.preview_text.len() },
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn cached_or_estimated_terminal_row_height(
-    row: &VisibleRow<'_>,
-    signature: TerminalRowHeightSignature,
-    message_list: &MessageList,
-    show_hex: bool,
-    show_raw: bool,
-    base_row_height: f32,
-    glyph_width: f32,
     content_width_px: i32,
     preview_width_px: i32,
-) -> f32 {
-    let estimated = estimated_terminal_row_height(
-        row,
-        show_hex,
-        show_raw,
-        base_row_height,
-        glyph_width,
-        content_width_px as f32,
-        preview_width_px as f32,
-    );
-    message_list.estimated_height(
-        row.id,
-        terminal_row_height_signature_key(signature),
-        terminal_row_width_key(content_width_px, preview_width_px),
-        estimated,
-    )
-}
-
-fn terminal_row_height_signature_key(signature: TerminalRowHeightSignature) -> u64 {
+) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    signature.hash(&mut hasher);
+    show_hex.hash(&mut hasher);
+    show_raw.hash(&mut hasher);
+    ((font_size * 1000.0).round() as i32).hash(&mut hasher);
+    content_width_px.hash(&mut hasher);
+    preview_width_px.hash(&mut hasher);
     hasher.finish()
-}
-
-fn terminal_row_width_key(content_width_px: i32, preview_width_px: i32) -> u64 {
-    ((content_width_px as u32 as u64) << 32) | preview_width_px as u32 as u64
-}
-
-fn estimated_terminal_row_height(
-    row: &VisibleRow<'_>,
-    show_hex: bool,
-    show_raw: bool,
-    base_row_height: f32,
-    glyph_width: f32,
-    content_width: f32,
-    preview_width: f32,
-) -> f32 {
-    let live_tail = terminal_live_line_count(row, show_hex, show_raw) > 0;
-    let line_count = if show_hex {
-        let hex_text = if live_tail {
-            compact_live_tail_preview(
-                row.hex_text.as_ref(),
-                live_tail_max_chars(content_width, glyph_width),
-            )
-        } else {
-            row.hex_text.to_string()
-        };
-        let preview_text = if live_tail {
-            compact_live_tail_preview(
-                row.preview_text.as_ref(),
-                live_tail_max_chars(preview_width, glyph_width),
-            )
-        } else {
-            row.preview_text.to_string()
-        };
-        estimated_wrapped_line_count(&hex_text, content_width, glyph_width).max(
-            estimated_wrapped_line_count(&preview_text, preview_width, glyph_width),
-        )
-    } else if show_raw {
-        let content = visible_row_content(row, false, true);
-        let content = if live_tail {
-            compact_live_tail_preview(&content, live_tail_max_chars(content_width, glyph_width))
-        } else {
-            content
-        };
-        estimated_wrapped_line_count(&content, content_width, glyph_width)
-    } else {
-        let content = strip_terminal_trailing_line_ending(row.display_text.as_ref());
-        let content = if live_tail {
-            compact_live_tail_preview(content, live_tail_max_chars(content_width, glyph_width))
-        } else {
-            content.to_owned()
-        };
-        estimated_wrapped_line_count(&content, content_width, glyph_width)
-    };
-
-    (line_count as f32 * base_row_height)
-        .round()
-        .max(base_row_height)
 }
 
 fn terminal_live_line_count(row: &VisibleRow<'_>, _show_hex: bool, _show_raw: bool) -> usize {
@@ -1147,7 +1038,7 @@ fn render_rows_view(
     selection: &mut RowSelection,
     text_selection_rows: &mut TextSelectionRows,
     empty_hint: &str,
-    message_list: &mut MessageList,
+    virtual_rows: &mut VirtualRowIndex,
     navigate_highlight: Option<(u64, f64)>,
 ) -> RenderOutcome {
     let height = height.max(40.0);
@@ -1219,28 +1110,18 @@ fn render_rows_view(
             let content_width_px = galley_width.max(0.0).round() as i32;
             let preview_width_px = preview_galley_width.max(0.0).round() as i32;
 
-            let row_signatures: Vec<TerminalRowHeightSignature> = rows
-                .iter()
-                .map(|row| terminal_row_height_signature(row, show_hex, show_raw, font_size))
-                .collect();
-            let mut row_heights: Vec<f32> = rows
-                .iter()
-                .zip(row_signatures.iter().copied())
-                .map(|(row, signature)| {
-                    cached_or_estimated_terminal_row_height(
-                        row,
-                        signature,
-                        message_list,
-                        show_hex,
-                        show_raw,
-                        row_height,
-                        glyph_width,
-                        content_width_px,
-                        preview_width_px,
-                    )
-                })
-                .collect();
-            let total_height: f32 = row_heights.iter().sum();
+            let layout_key = terminal_layout_key(
+                show_hex,
+                show_raw,
+                font_size,
+                content_width_px,
+                preview_width_px,
+            );
+            let row_ids: Vec<u64> = rows.iter().map(|row| row.id).collect();
+            if virtual_rows.sync_ids(&row_ids, layout_key, row_height) {
+                ui.ctx().request_repaint();
+            }
+            let total_height = virtual_rows.total_height().max(row_height);
 
             let (full_rect, _alloc_response) =
                 ui.allocate_exact_size(egui::vec2(full_width, total_height), Sense::hover());
@@ -1283,10 +1164,31 @@ fn render_rows_view(
             // Draw rows with accumulated Y
             let mut hl = RowHighlight::new(ui, scroll_key);
 
-            let mut recorded_y = label_rect.top();
-            for height in &row_heights {
-                hl.record_row(recorded_y, *height);
-                recorded_y += *height;
+            let scroll_offset = (viewport_rect.top() - full_rect.top()).max(0.0);
+            let base_range =
+                virtual_rows.visible_range(scroll_offset, viewport_rect.height(), row_height * 2.0);
+            let text_selection_layout_range = if text_selection_rows.is_active() {
+                text_selection_rows.layout_range(rows.iter().map(|row| row.id))
+            } else {
+                None
+            };
+            let render_start = text_selection_layout_range
+                .as_ref()
+                .map_or(base_range.start, |range| {
+                    base_range.start.min(*range.start())
+                });
+            let render_end = text_selection_layout_range
+                .as_ref()
+                .map_or(base_range.end, |range| {
+                    base_range.end.max(range.end().saturating_add(1))
+                });
+            let render_range = render_start..render_end.min(rows.len());
+            for row_idx in render_range.clone() {
+                hl.record_row_at(
+                    row_idx,
+                    label_rect.top() + virtual_rows.row_top(row_idx),
+                    virtual_rows.height(row_idx),
+                );
             }
 
             let mut ctx_response = ui.interact(
@@ -1360,104 +1262,78 @@ fn render_rows_view(
                     .clear_selection();
             }
 
-            let mut current_y = label_rect.top();
             let mut text_drag_response: Option<egui::Response> = None;
-            let text_selection_layout_range =
-                text_selection_rows.layout_range(rows.iter().map(|row| row.id));
-            // 视口剔除：视口外的行跳过 layout + paint + interact。
-            // 只对视口内行做懒 layout（约 30-60 行），resize 宽度变化时不再 O(rows)。
-            // 上下各留 1 行 buffer，避免边界行因浮点误差被误剔。
-            let clip_top = viewport_rect.top() - row_height;
-            let clip_bottom = viewport_rect.bottom() + row_height;
-            for (row_idx, row) in rows.iter().enumerate() {
-                let estimated_height = row_heights
-                    .get(row_idx)
-                    .copied()
-                    .unwrap_or(row_height)
-                    .max(row_height);
-                // 先用缓存高度做视口判断；视口内才懒 layout 得到真实高度。
-                let in_text_selection = text_selection_layout_range
-                    .as_ref()
-                    .is_some_and(|range| range.contains(&row_idx));
-                let in_viewport = in_text_selection
-                    || current_y + estimated_height >= clip_top && current_y <= clip_bottom;
+            for row_idx in render_range {
+                let row = &rows[row_idx];
+                let current_y = label_rect.top() + virtual_rows.row_top(row_idx);
+                let content = visible_row_content(row, show_hex, show_raw);
+                let content = if terminal_live_line_count(row, show_hex, show_raw) > 0 {
+                    compact_live_tail_preview(
+                        &content,
+                        live_tail_max_chars(galley_width, glyph_width),
+                    )
+                } else {
+                    content
+                };
+                let content = if content.is_empty() {
+                    " ".to_owned()
+                } else {
+                    content
+                };
 
-                let (galley, preview_galley, entry_height) = if in_viewport {
-                    let content = visible_row_content(row, show_hex, show_raw);
-                    let content = if terminal_live_line_count(row, show_hex, show_raw) > 0 {
-                        compact_live_tail_preview(
-                            &content,
-                            live_tail_max_chars(galley_width, glyph_width),
-                        )
-                    } else {
-                        content
-                    };
-                    let content = if content.is_empty() {
+                let mut layout_job = egui::text::LayoutJob::simple(
+                    content,
+                    font_id.clone(),
+                    text_color,
+                    galley_width,
+                );
+                layout_job.halign = egui::Align::LEFT;
+                let galley = Some(ui.fonts_mut(|f| f.layout_job(layout_job)));
+
+                let preview_galley = if show_hex {
+                    let preview_text = if row.preview_text.is_empty() {
                         " ".to_owned()
                     } else {
-                        content
+                        row.preview_text.to_string()
                     };
-
+                    let preview_text = if terminal_live_line_count(row, show_hex, show_raw) > 0 {
+                        compact_live_tail_preview(
+                            &preview_text,
+                            live_tail_max_chars(preview_galley_width, glyph_width),
+                        )
+                    } else {
+                        preview_text
+                    };
                     let mut layout_job = egui::text::LayoutJob::simple(
-                        content,
+                        preview_text,
                         font_id.clone(),
-                        text_color,
-                        galley_width,
+                        theme::text_dimmed(),
+                        preview_galley_width,
                     );
                     layout_job.halign = egui::Align::LEFT;
-                    let galley = ui.fonts_mut(|f| f.layout_job(layout_job));
-
-                    let preview_galley = if show_hex {
-                        let preview_text = if row.preview_text.is_empty() {
-                            " ".to_owned()
-                        } else {
-                            row.preview_text.to_string()
-                        };
-                        let preview_text = if terminal_live_line_count(row, show_hex, show_raw) > 0
-                        {
-                            compact_live_tail_preview(
-                                &preview_text,
-                                live_tail_max_chars(preview_galley_width, glyph_width),
-                            )
-                        } else {
-                            preview_text
-                        };
-                        let mut layout_job = egui::text::LayoutJob::simple(
-                            preview_text,
-                            font_id.clone(),
-                            theme::text_dimmed(),
-                            preview_galley_width,
-                        );
-                        layout_job.halign = egui::Align::LEFT;
-                        Some(ui.fonts_mut(|f| f.layout_job(layout_job)))
-                    } else {
-                        None
-                    };
-
-                    let height = if let Some(ref pg) = preview_galley {
-                        galley.size().y.max(pg.size().y).max(row_height)
-                    } else {
-                        galley.size().y.max(row_height)
-                    };
-                    let height = height.round().max(row_height);
-                    row_heights[row_idx] = height;
-                    message_list.record_height(
-                        row.id,
-                        terminal_row_height_signature_key(row_signatures[row_idx]),
-                        terminal_row_width_key(content_width_px, preview_width_px),
-                        height,
-                    );
-                    (Some(galley), preview_galley, height)
+                    Some(ui.fonts_mut(|f| f.layout_job(layout_job)))
                 } else {
-                    (None, None, estimated_height)
+                    None
                 };
-                let galley = galley;
 
-                // 视口外只累加 Y，跳过所有 paint/interact/label 绘制
-                if !in_viewport {
-                    current_y += entry_height;
-                    continue;
-                }
+                let entry_height = if let Some(ref pg) = preview_galley {
+                    galley
+                        .as_ref()
+                        .expect("terminal galley exists")
+                        .size()
+                        .y
+                        .max(pg.size().y)
+                        .max(row_height)
+                } else {
+                    galley
+                        .as_ref()
+                        .expect("terminal galley exists")
+                        .size()
+                        .y
+                        .max(row_height)
+                };
+                let entry_height = entry_height.round().max(row_height);
+                virtual_rows.set_height(row_idx, entry_height);
 
                 let label_y = current_y + row_height * 0.5;
 
@@ -1630,12 +1506,9 @@ fn render_rows_view(
                         theme::text_dimmed(),
                     ));
                 }
-
-                current_y += entry_height;
             }
 
-            let actual_total = (current_y - label_rect.top()).round();
-            message_list.note_total_height(ui, actual_total, rows.len());
+            let actual_total = virtual_rows.total_height().round();
             if actual_total > total_height + 0.5 {
                 ui.allocate_space(egui::vec2(0.0, actual_total - total_height));
             }
@@ -1693,9 +1566,8 @@ fn render_rows_view(
             }
 
             // 跳转到目标行（搜索时双击 → 离开搜索进入上下文）
-            if let Some(target_row) = scroll_to_row
-                && let Some((y_top, _y_bottom)) = hl.row_y_range(target_row)
-            {
+            if let Some(target_row) = scroll_to_row {
+                let y_top = label_rect.top() + virtual_rows.row_top(target_row);
                 let target_rect =
                     egui::Rect::from_min_size(egui::pos2(0.0, y_top), egui::vec2(1.0, 1.0));
                 ui.scroll_to_rect(target_rect, Some(egui::Align::Center));
@@ -2594,92 +2466,22 @@ mod tests {
     }
 
     #[test]
-    fn estimated_row_height_counts_internal_newlines_not_final_line_ending() {
-        let row = VisibleRow {
-            id: 1,
-            port: Some(Cow::Borrowed("COM6")),
-            timestamp_label: Cow::Borrowed("[10:00:39.580]"),
-            direction: Direction::Rx,
-            raw_text: Cow::Borrowed("first\nsecond\n"),
-            display_text: Cow::Borrowed("first\nsecond\n"),
-            hex_text: Cow::Borrowed("66 69"),
-            preview_text: Cow::Borrowed("first\nsecond\n"),
-            live: false,
-        };
-
-        assert_eq!(
-            estimated_terminal_row_height(&row, false, false, 10.0, 5.0, 100.0, 100.0),
-            20.0
-        );
+    fn terminal_layout_key_changes_when_layout_inputs_change() {
+        let base = terminal_layout_key(false, false, 13.0, 240, 0);
+        assert_ne!(base, terminal_layout_key(false, false, 13.0, 180, 0));
+        assert_ne!(base, terminal_layout_key(true, false, 13.0, 240, 0));
+        assert_ne!(base, terminal_layout_key(false, true, 13.0, 240, 0));
+        assert_ne!(base, terminal_layout_key(false, false, 14.0, 240, 0));
     }
 
     #[test]
-    fn row_height_signature_is_stable_while_live_tail_grows() {
-        let short = VisibleRow {
-            id: 1,
-            port: Some(Cow::Borrowed("COM6")),
-            timestamp_label: Cow::Borrowed("[10:00:39.580]"),
-            direction: Direction::Rx,
-            raw_text: Cow::Borrowed("first"),
-            display_text: Cow::Borrowed("first"),
-            hex_text: Cow::Borrowed("66 69 72 73 74"),
-            preview_text: Cow::Borrowed("first"),
-            live: true,
-        };
-        let grown = VisibleRow {
-            id: 1,
-            port: Some(Cow::Borrowed("COM6")),
-            timestamp_label: Cow::Borrowed("[10:00:39.581]"),
-            direction: Direction::Rx,
-            raw_text: Cow::Borrowed("first\nsecond"),
-            display_text: Cow::Borrowed("first\nsecond"),
-            hex_text: Cow::Borrowed("66 69 72 73 74 0A 73 65 63 6F 6E 64"),
-            preview_text: Cow::Borrowed("first\nsecond"),
-            live: true,
-        };
-
-        assert_eq!(
-            terminal_row_height_signature(&short, false, false, 13.0),
-            terminal_row_height_signature(&grown, false, false, 13.0)
-        );
-    }
-
-    #[test]
-    fn unwrapped_row_height_cache_survives_width_changes() {
-        let row = VisibleRow {
-            id: 1,
-            port: Some(Cow::Borrowed("COM6")),
-            timestamp_label: Cow::Borrowed("[10:00:39.580]"),
-            direction: Direction::Rx,
-            raw_text: Cow::Borrowed("short"),
-            display_text: Cow::Borrowed("short"),
-            hex_text: Cow::Borrowed("73 68 6F 72 74"),
-            preview_text: Cow::Borrowed("short"),
-            live: true,
-        };
-        let signature = terminal_row_height_signature(&row, false, false, 13.0);
-        let mut message_list = MessageList::default();
-        message_list.record_height(
-            row.id,
-            terminal_row_height_signature_key(signature),
-            terminal_row_width_key(240, 0),
-            13.0,
-        );
-
-        assert_eq!(
-            cached_or_estimated_terminal_row_height(
-                &row,
-                signature,
-                &message_list,
-                false,
-                false,
-                13.0,
-                6.0,
-                180,
-                0
-            ),
-            13.0
-        );
+    fn virtual_row_index_invalidates_changed_rows_without_scanning_content() {
+        let mut index = VirtualRowIndex::default();
+        index.sync_ids(&[1, 2], 1, 10.0);
+        index.set_height(0, 40.0);
+        assert!(index.invalidate_ids([1]));
+        assert_eq!(index.height(0), 10.0);
+        assert_eq!(index.total_height(), 20.0);
     }
 
     #[test]
