@@ -589,7 +589,7 @@ impl PluginsPanel {
             });
 
             // 安装按钮 / 进度
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if let Some(pct) = progress {
                     // 安装中：显示进度条
                     let progress_bar =
@@ -657,7 +657,7 @@ impl PluginsPanel {
                         }
                     }
                 });
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("路径");
                     let full_path = summary.path.display().to_string();
                     let available_width = ui.available_width().max(40.0);

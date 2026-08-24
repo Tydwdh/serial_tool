@@ -56,8 +56,9 @@ pub(crate) fn baud_combo(ui: &mut egui::Ui, id: &'static str, w: f32, baud: &mut
         "256000", "512000", "1000000", "2000000", "3000000",
     ];
 
+    let combo_width = w.min(ui.available_width().max(48.0));
     egui::ComboBox::from_id_salt(id)
-        .width(w)
+        .width(combo_width)
         .selected_text(baud.clone())
         .show_ui(ui, |ui| {
             for rate in rates {

@@ -16,10 +16,11 @@ use egui_material_icons::icons::{
     ICON_CANCEL, ICON_DELETE_SWEEP, ICON_DOWNLOAD, ICON_FILTER_ALT_OFF, ICON_SEARCH,
 };
 use std::borrow::Cow;
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
+use tool_application::service::terminal_store::{
+    MAX_TERMINAL_BLOCK_BYTES, TerminalAssembler, TerminalItem, TerminalStore, TerminalStoreUpdate,
+};
 use tool_core::topics as serial_topics;
 use tool_core::{Direction, Event};
 use tool_databus::{DataBus, RingSubscription, TopicFilter};
@@ -83,7 +84,9 @@ const NAV_FADE: f64 = 0.3;
 
 pub struct TerminalPanel {
     subscription: RingSubscription,
-    ports: BTreeMap<String, PortData>,
+    store: TerminalStore,
+    assembler: TerminalAssembler,
+    view_index: TerminalViewIndex,
     /// 端口别名（app 层注入，渲染端口列时优先显示）。
     port_aliases: std::collections::HashMap<String, String>,
 
@@ -110,13 +113,12 @@ pub struct TerminalPanel {
     /// 跳转目标行高亮：(目标行 id, 起始时间秒)。渲染时若命中且未超时画强调色并淡出。
     navigate_highlight: Option<(u64, f64)>,
 
-    next_entry_id: u64,
     selected_entry_id: Option<u64>,
     detail_entry_id: Option<u64>,
 
     /// 用户可调的字体大小（10-24px），默认 13.0
     pub font_size: f32,
-    /// 合并阈值：同一端口、同一方向、间隔 ≤ 此毫秒且不含 \n 的连续事件合并显示
+    /// 展示块的空闲结束阈值。它只用于结束 LiveTail，不代表协议帧边界。
     pub merge_window_ms: u64,
     /// 框选状态
     pub selection: RowSelection,
@@ -124,43 +126,6 @@ pub struct TerminalPanel {
     text_selection_rows: TextSelectionRows,
     /// 接收消息流的共享虚拟渲染状态（行高缓存与总高收敛）。
     message_list: MessageList,
-}
-
-#[derive(Default)]
-struct PortData {
-    entries: VecDeque<TerminalEntry>,
-}
-
-// impl Default for PortData {
-//     fn default() -> Self {
-//         Self {
-//             entries: VecDeque::new(),
-//             truncated_count: 0,
-//         }
-//     }
-// }
-
-struct TerminalEntry {
-    /// TerminalPanel 内部使用的稳定 UI id。
-    id: u64,
-
-    /// DataBus 分配的全局事件 id。
-    /// 全局接收区按这个排序，避免 BTreeMap 端口顺序导致 COM 分组。
-    event_id: u64,
-
-    /// 原始时间戳（毫秒），用于合并判断。
-    timestamp_ms: u64,
-    timestamp_label: String,
-    direction: Direction,
-
-    raw_text: String,
-    display_text: String,
-
-    hex_text: String,
-    #[allow(dead_code)]
-    hex_preview: String,
-    /// 纯 UTF8 预览文本（不含方括号），HEX 模式下独立显示
-    preview_text: String,
 }
 
 struct VisibleRow<'a> {
@@ -172,21 +137,130 @@ struct VisibleRow<'a> {
     display_text: Cow<'a, str>,
     hex_text: Cow<'a, str>,
     preview_text: Cow<'a, str>,
+    live: bool,
 }
 
-impl<'a> VisibleRow<'a> {
-    fn from_entry(port: Option<&'a str>, entry: &'a TerminalEntry) -> Self {
+#[derive(Clone, PartialEq, Eq)]
+struct TerminalViewFilter {
+    port_filter: Option<String>,
+    show_rx: bool,
+    show_tx: bool,
+    search_text: String,
+    search_case_sensitive: bool,
+    show_hex: bool,
+    show_raw: bool,
+}
+
+struct TerminalViewIndex {
+    visible_ids: Vec<u64>,
+    filter: Option<TerminalViewFilter>,
+    changed_ids: BTreeSet<u64>,
+    removed_ids: BTreeSet<u64>,
+}
+
+impl Default for TerminalViewIndex {
+    fn default() -> Self {
         Self {
-            id: entry.id,
-            port: port.map(Cow::Borrowed),
-            timestamp_label: Cow::Borrowed(&entry.timestamp_label),
-            direction: entry.direction,
-            raw_text: Cow::Borrowed(&entry.raw_text),
-            display_text: Cow::Borrowed(&entry.display_text),
-            hex_text: Cow::Borrowed(&entry.hex_text),
-            preview_text: Cow::Borrowed(&entry.preview_text),
+            visible_ids: Vec::new(),
+            filter: None,
+            changed_ids: BTreeSet::new(),
+            removed_ids: BTreeSet::new(),
         }
     }
+}
+
+impl TerminalViewIndex {
+    fn clear(&mut self) {
+        self.visible_ids.clear();
+        self.filter = None;
+        self.changed_ids.clear();
+        self.removed_ids.clear();
+    }
+
+    fn mark_changed(&mut self, ids: impl IntoIterator<Item = u64>) {
+        self.changed_ids.extend(ids);
+    }
+
+    fn mark_removed(&mut self, ids: impl IntoIterator<Item = u64>) {
+        self.removed_ids.extend(ids);
+    }
+
+    fn sync(&mut self, store: &TerminalStore, filter: TerminalViewFilter) {
+        let query =
+            crate::search::SearchQuery::new(&filter.search_text, filter.search_case_sensitive);
+
+        if self.filter.as_ref() != Some(&filter) {
+            self.visible_ids = store
+                .iter()
+                .filter(|item| terminal_item_matches(item, &filter, &query))
+                .map(TerminalItem::id)
+                .collect();
+            self.filter = Some(filter);
+            self.changed_ids.clear();
+            self.removed_ids.clear();
+            return;
+        }
+
+        for id in std::mem::take(&mut self.removed_ids) {
+            if let Ok(index) = self.visible_ids.binary_search(&id) {
+                self.visible_ids.remove(index);
+            }
+        }
+
+        for id in std::mem::take(&mut self.changed_ids) {
+            let should_be_visible = store
+                .get(id)
+                .is_some_and(|item| terminal_item_matches(item, &filter, &query));
+            match self.visible_ids.binary_search(&id) {
+                Ok(index) if !should_be_visible => {
+                    self.visible_ids.remove(index);
+                }
+                Err(index) if should_be_visible => {
+                    self.visible_ids.insert(index, id);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+impl VisibleRow<'static> {
+    fn from_item(item: &TerminalItem) -> Self {
+        let raw_text = String::from_utf8_lossy(item.bytes()).into_owned();
+        Self {
+            id: item.id(),
+            port: Some(Cow::Owned(item.port().to_owned())),
+            timestamp_label: Cow::Owned(format!("[{}]", fmt_ts(item.first_timestamp_ms()))),
+            direction: item.direction(),
+            display_text: Cow::Owned(format_terminal_text(&raw_text)),
+            hex_text: Cow::Owned(format_hex(item.bytes())),
+            preview_text: Cow::Owned(format_utf8_preview(item.bytes())),
+            raw_text: Cow::Owned(raw_text),
+            live: item.is_live(),
+        }
+    }
+}
+
+fn terminal_item_matches(
+    item: &TerminalItem,
+    filter: &TerminalViewFilter,
+    query: &crate::search::SearchQuery,
+) -> bool {
+    if filter
+        .port_filter
+        .as_deref()
+        .is_some_and(|port| port != item.port())
+        || !entry_visible(item.direction(), filter.show_rx, filter.show_tx)
+    {
+        return false;
+    }
+
+    if query.is_empty() {
+        return true;
+    }
+
+    let row = VisibleRow::from_item(item);
+    row_matches_search(&row, query, filter.show_hex, filter.show_raw)
 }
 
 #[derive(Clone)]
@@ -214,127 +288,11 @@ struct TerminalRowHeightSignature {
     show_hex: bool,
     show_raw: bool,
     font_size_milli: i32,
+    live_line_count: usize,
     raw_len: usize,
     display_len: usize,
     hex_len: usize,
     preview_len: usize,
-}
-
-/// 将一行文本作为 entry push，或合并到上一条 entry（如果间隔 ≤ merge_window_ms
-/// 且上一条不以 \n 结尾）。
-fn push_entry(
-    data: &mut PortData,
-    text: &str,
-    event: &Event,
-    next_entry_id: &mut u64,
-    merge_window_ms: u64,
-) {
-    let bytes = text.as_bytes().to_vec();
-    let display_text = format_terminal_text(text);
-    let hex_text = format_hex(&bytes);
-    let utf8_preview = format_utf8_preview(&bytes);
-    let hex_preview = if hex_text.is_empty() {
-        String::new()
-    } else if utf8_preview.is_empty() {
-        hex_text.clone()
-    } else {
-        format!("{hex_text} [{utf8_preview}]")
-    };
-    let preview_text = if hex_text.is_empty() {
-        String::new()
-    } else {
-        utf8_preview
-    };
-
-    // ── 合并：同方向、不同 event、在阈值内、上一条不是完整行 → 直接拼接 ──
-    if let Some(prev) = data.entries.back_mut()
-        && prev.direction == event.direction
-        && prev.event_id != event.id
-        && event.timestamp_ms.saturating_sub(prev.timestamp_ms) <= merge_window_ms
-        && !prev.raw_text.ends_with('\n')
-    {
-        // 如果上一条包含内部 \n，先把 \n 之前的内容拆出为独立 entry，
-        // \n 之后的内容留在 prev 中继续合并。
-        if let Some(idx) = prev.raw_text.rfind('\n')
-            && idx != prev.raw_text.len() - 1
-        {
-            // 上一条末尾的未完成部分：\n 之后的内容
-            let tail = prev.raw_text[idx + 1..].to_owned();
-            // 上一条截断到 \n（含），变成完整行
-            let complete_part = prev.raw_text[..=idx].to_owned();
-            prev.raw_text.truncate(idx + 1);
-            prev.display_text = format_terminal_text(&complete_part);
-            // 把未完成部分作为新 entry push，然后本包合并到它
-            let new_id = *next_entry_id;
-            *next_entry_id = next_entry_id.wrapping_add(1).max(1);
-            let new_entry = TerminalEntry {
-                id: new_id,
-                event_id: prev.event_id,
-                timestamp_ms: prev.timestamp_ms,
-                timestamp_label: prev.timestamp_label.clone(),
-                direction: prev.direction,
-                raw_text: tail.clone(),
-                display_text: format_terminal_text(&tail),
-                hex_text: format_hex(tail.as_bytes()),
-                hex_preview: String::new(),
-                preview_text: format_utf8_preview(tail.as_bytes()),
-            };
-            data.entries.push_back(new_entry);
-            // 本包合并到刚拆出的未完成行
-            if let Some(new_prev) = data.entries.back_mut() {
-                new_prev.raw_text.push_str(text);
-                new_prev.display_text.push_str(&display_text);
-                new_prev.hex_text.push(' ');
-                new_prev.hex_text.push_str(&hex_text);
-                if !preview_text.is_empty() {
-                    new_prev.preview_text.push(' ');
-                    new_prev.preview_text.push_str(&preview_text);
-                }
-                new_prev.hex_preview = if new_prev.hex_text.is_empty() {
-                    String::new()
-                } else if new_prev.preview_text.is_empty() {
-                    new_prev.hex_text.clone()
-                } else {
-                    format!("{} [{}]", new_prev.hex_text, new_prev.preview_text)
-                };
-            }
-            return;
-        }
-
-        prev.raw_text.push_str(text);
-        prev.display_text.push_str(&display_text);
-        prev.hex_text.push(' ');
-        prev.hex_text.push_str(&hex_text);
-        if !preview_text.is_empty() {
-            prev.preview_text.push(' ');
-            prev.preview_text.push_str(&preview_text);
-        }
-        prev.hex_preview = if prev.hex_text.is_empty() {
-            String::new()
-        } else if prev.preview_text.is_empty() {
-            prev.hex_text.clone()
-        } else {
-            format!("{} [{}]", prev.hex_text, prev.preview_text)
-        };
-        return;
-    }
-
-    // ── 不合并：独立 push ──
-    let entry_id = *next_entry_id;
-    *next_entry_id = next_entry_id.wrapping_add(1).max(1);
-
-    data.entries.push_back(TerminalEntry {
-        id: entry_id,
-        event_id: event.id,
-        timestamp_ms: event.timestamp_ms,
-        timestamp_label: format!("[{}]", fmt_ts(event.timestamp_ms)),
-        direction: event.direction,
-        raw_text: text.to_owned(),
-        display_text,
-        hex_text,
-        hex_preview,
-        preview_text,
-    });
 }
 
 impl TerminalPanel {
@@ -344,7 +302,12 @@ impl TerminalPanel {
                 TopicFilter::prefix("transport.serial."),
                 MESSAGE_EVENT_BUFFER_CAPACITY,
             ),
-            ports: BTreeMap::new(),
+            store: TerminalStore::new(50_000),
+            assembler: TerminalAssembler {
+                idle_finalize_ms: 5,
+                max_block_bytes: MAX_TERMINAL_BLOCK_BYTES,
+            },
+            view_index: TerminalViewIndex::default(),
             port_aliases: std::collections::HashMap::new(),
 
             show_rx: true,
@@ -366,7 +329,6 @@ impl TerminalPanel {
             pending_navigate_to_id: None,
             navigate_highlight: None,
 
-            next_entry_id: 1,
             selected_entry_id: None,
             detail_entry_id: None,
             font_size: 13.0,
@@ -393,15 +355,38 @@ impl TerminalPanel {
             count += 1;
         }
 
+        if count > 0 {
+            self.enforce_max_entries();
+        }
+
         count
     }
     pub fn ingest_pending(&mut self) -> usize {
-        self.ingest()
+        let mut count = 0;
+
+        for event in self.subscription.drain_limited(MAX_INGEST_PER_FRAME) {
+            if !matches!(
+                event.topic.as_str(),
+                serial_topics::SERIAL_RX | serial_topics::SERIAL_TX
+            ) {
+                continue;
+            }
+
+            self.push_event(event);
+            count += 1;
+        }
+
+        if count > 0 {
+            self.enforce_max_entries();
+        }
+
+        count
     }
 
     pub fn clear(&mut self) {
         self.subscription.clear();
-        self.ports.clear();
+        self.store.clear();
+        self.view_index.clear();
         self.auto_scroll.reset();
         self.selected_entry_id = None;
         self.detail_entry_id = None;
@@ -435,48 +420,20 @@ impl TerminalPanel {
     }
 
     fn enforce_max_entries(&mut self) {
-        let mut total_entries: usize = self.ports.values().map(|data| data.entries.len()).sum();
-        while total_entries > self.max_entries {
-            let oldest_port = self
-                .ports
-                .iter()
-                .filter_map(|(port, data)| {
-                    data.entries
-                        .front()
-                        .map(|entry| (entry.event_id, port.clone()))
-                })
-                .min_by_key(|(event_id, _)| *event_id)
-                .map(|(_, port)| port);
-            let Some(port) = oldest_port else {
-                break;
-            };
-
-            let removed = self
-                .ports
-                .get_mut(&port)
-                .and_then(|data| data.entries.pop_front());
-            let port_is_empty = self
-                .ports
-                .get(&port)
-                .is_some_and(|data| data.entries.is_empty());
-            if port_is_empty {
-                self.ports.remove(&port);
+        let removed = self.store.set_max_entries(self.max_entries);
+        self.view_index.mark_removed(removed.iter().copied());
+        if !removed.is_empty() {
+            self.truncated = true;
+        }
+        for id in removed {
+            if self.selected_entry_id == Some(id) {
+                self.selected_entry_id = None;
             }
-
-            if let Some(removed) = removed {
-                if self.selected_entry_id == Some(removed.id) {
-                    self.selected_entry_id = None;
-                }
-                if self.detail_entry_id == Some(removed.id) {
-                    self.detail_entry_id = None;
-                }
-                self.bookmarked_entry_ids.remove(&removed.id);
-                self.message_list.remove(removed.id);
-                self.truncated = true;
-                total_entries -= 1;
-            } else {
-                break;
+            if self.detail_entry_id == Some(id) {
+                self.detail_entry_id = None;
             }
+            self.bookmarked_entry_ids.remove(&id);
+            self.message_list.remove(id);
         }
     }
 
@@ -491,17 +448,39 @@ impl TerminalPanel {
         self.search.query()
     }
 
-    fn collect_visible_rows(&self) -> Vec<VisibleRow<'_>> {
+    fn current_view_filter(&self) -> TerminalViewFilter {
+        TerminalViewFilter {
+            port_filter: self.port_filter.clone(),
+            show_rx: self.show_rx,
+            show_tx: self.show_tx,
+            search_text: self.search.text.clone(),
+            search_case_sensitive: self.search.case_sensitive,
+            show_hex: self.show_hex,
+            show_raw: self.show_raw,
+        }
+    }
+
+    fn collect_visible_rows(&mut self) -> Vec<VisibleRow<'static>> {
+        let filter = self.current_view_filter();
+        self.view_index.sync(&self.store, filter);
+        self.view_index
+            .visible_ids
+            .iter()
+            .filter_map(|id| self.store.get(*id))
+            .map(VisibleRow::from_item)
+            .collect()
+    }
+
+    /// 导出不是每帧渲染路径，允许一次性扫描当前 Store，避免为了保持
+    /// `&self` 导出 API 而让 ViewIndex 使用内部可变性。
+    fn collect_visible_rows_unindexed(&self) -> Vec<VisibleRow<'static>> {
+        let filter = self.current_view_filter();
         let search_key = self.search_query();
-        collect_visible_rows_merged(
-            &self.ports,
-            self.port_filter.as_deref(),
-            self.show_rx,
-            self.show_tx,
-            &search_key,
-            self.show_hex,
-            self.show_raw,
-        )
+        self.store
+            .iter()
+            .filter(|item| terminal_item_matches(item, &filter, &search_key))
+            .map(VisibleRow::from_item)
+            .collect()
     }
 
     pub fn take_export_request(&mut self) -> Option<TerminalExportFormat> {
@@ -511,7 +490,7 @@ impl TerminalPanel {
     pub fn export_visible_csv(&self) -> String {
         let show_hex = self.show_hex;
         let show_raw = self.show_raw;
-        let rows = self.collect_visible_rows();
+        let rows = self.collect_visible_rows_unindexed();
         let show_metadata = true;
 
         let mut headers: Vec<&str> = Vec::new();
@@ -551,7 +530,7 @@ impl TerminalPanel {
 
     pub fn export_visible_text(&self) -> String {
         let mut out = self
-            .collect_visible_rows()
+            .collect_visible_rows_unindexed()
             .iter()
             .map(|row| visible_row_content(row, self.show_hex, self.show_raw))
             .collect::<Vec<_>>()
@@ -565,7 +544,7 @@ impl TerminalPanel {
     pub fn export_visible_json(&self) -> String {
         let show_hex = self.show_hex;
         let show_raw = self.show_raw;
-        let rows = self.collect_visible_rows();
+        let rows = self.collect_visible_rows_unindexed();
         let show_metadata = true;
 
         let mut values = Vec::with_capacity(rows.len());
@@ -605,7 +584,7 @@ impl TerminalPanel {
     }
 
     pub fn port_names(&self) -> Vec<String> {
-        self.ports.keys().cloned().collect()
+        self.store.port_names()
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
@@ -691,7 +670,7 @@ impl TerminalPanel {
 
         force_scroll_to_bottom |= self.auto_scroll.enabled && wheel_moves_towards_bottom;
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(design::icon_only(
                 ICON_SEARCH,
                 theme::text_secondary(),
@@ -710,7 +689,7 @@ impl TerminalPanel {
                 .selected_text(self.port_filter.as_deref().unwrap_or("全部"))
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.port_filter, None, "全部");
-                    for port in self.ports.keys() {
+                    for port in self.store.port_names() {
                         ui.selectable_value(&mut self.port_filter, Some(port.clone()), port);
                     }
                 });
@@ -745,20 +724,8 @@ impl TerminalPanel {
         }
 
         let render_outcome = {
-            // 预编译搜索查询：普通词字面量 / re: 正则（避免渲染循环中重复编译）。
-            let search_key = self.search_query();
-
-            // 每个端口队列自身有序，用 k 路归并保持 DataBus 发布顺序；复杂度为
-            // O(N log P)，避免高数据量下每帧对所有可见行做 O(N log N) 全量排序。
-            let rows = collect_visible_rows_merged(
-                &self.ports,
-                self.port_filter.as_deref(),
-                self.show_rx,
-                self.show_tx,
-                &search_key,
-                self.show_hex,
-                self.show_raw,
-            );
+            // Store 已经按全局稳定 ID 排序，这里只做当前视图的筛选。
+            let rows = self.collect_visible_rows();
 
             // 获取下帧跳转目标的 row 索引（现在是完整列表）
             if let Some(target_id) = self.pending_navigate_to_id.take() {
@@ -770,7 +737,7 @@ impl TerminalPanel {
             let scroll_height = ui.available_height().max(40.0);
             let show_metadata = true;
             // 空状态引导：从未收到任何数据 vs 有数据但被筛选/搜索过滤光。
-            let empty_hint = if self.ports.is_empty() {
+            let empty_hint = if self.store.is_empty() {
                 "暂无数据 · 选择并打开串口后开始接收"
             } else {
                 "无匹配数据 · 试着清除筛选或搜索条件"
@@ -831,26 +798,6 @@ impl TerminalPanel {
         );
     }
 
-    fn ingest(&mut self) -> usize {
-        let mut count = 0;
-
-        for event in self.subscription.drain_limited(MAX_INGEST_PER_FRAME) {
-            if !matches!(
-                event.topic.as_str(),
-                serial_topics::SERIAL_RX | serial_topics::SERIAL_TX
-            ) {
-                continue;
-            }
-
-            self.push_event(event);
-            count += 1;
-        }
-
-        count
-    }
-
-    /// 将 event 的 payload 作为一整条 entry push（同包内不拆行）。
-    /// 跨包时用 merge_window_ms 决定是否合并，但以 \n 结尾的完整行阻断后续合并。
     fn push_event(&mut self, event: Event) {
         let port = event
             .metadata
@@ -859,45 +806,50 @@ impl TerminalPanel {
             .or_else(|| event.source.strip_prefix("serial:"))
             .unwrap_or("default")
             .to_owned();
-
-        let data = self.ports.entry(port).or_default();
-        let text = event.payload.text_lossy();
-        if text.is_empty() {
+        let bytes = payload_bytes(&event);
+        if bytes.is_empty() {
             return;
         }
 
-        push_entry(
-            data,
-            &text,
-            &event,
-            &mut self.next_entry_id,
-            self.merge_window_ms,
-        );
-        self.enforce_max_entries();
+        self.assembler.idle_finalize_ms = self.merge_window_ms;
+        let update: TerminalStoreUpdate =
+            self.store
+                .ingest(self.assembler, &event, port, bytes.as_ref());
+        self.view_index.mark_changed(update.changed_ids);
+        self.view_index
+            .mark_removed(update.removed_ids.iter().copied());
+        let removed = update.removed_ids;
+        let limit_removed = self.store.set_max_entries(self.max_entries);
+        self.view_index.mark_removed(limit_removed.iter().copied());
+        let mut removed = removed;
+        removed.extend(limit_removed);
+        if !removed.is_empty() {
+            self.truncated = true;
+        }
+        for id in removed {
+            if self.selected_entry_id == Some(id) {
+                self.selected_entry_id = None;
+            }
+            if self.detail_entry_id == Some(id) {
+                self.detail_entry_id = None;
+            }
+            self.bookmarked_entry_ids.remove(&id);
+            self.message_list.remove(id);
+        }
     }
 
-    /// 将一行文本作为 entry push，或合并到上一条 entry（如果间隔 ≤ merge_window_ms
-    /// 且上一条不以 \n 结尾）。
-    /// 尾巴已超时：作为独立 entry push，不强行合并到后续数据。
     fn entry_detail(&self, entry_id: u64) -> Option<EntryDetail> {
-        for (port, data) in &self.ports {
-            for entry in &data.entries {
-                if entry.id == entry_id {
-                    return Some(EntryDetail {
-                        id: entry.id,
-                        port: port.clone(),
-                        timestamp_label: entry.timestamp_label.clone(),
-                        direction: entry.direction,
-
-                        raw_text: entry.raw_text.clone(),
-                        display_text: entry.display_text.clone(),
-                        hex_text: entry.hex_text.clone(),
-                    });
-                }
-            }
-        }
-
-        None
+        let item = self.store.get(entry_id)?;
+        let raw_text = String::from_utf8_lossy(item.bytes()).into_owned();
+        Some(EntryDetail {
+            id: item.id(),
+            port: item.port().to_owned(),
+            timestamp_label: format!("[{}]", fmt_ts(item.first_timestamp_ms())),
+            direction: item.direction(),
+            display_text: format_terminal_text(&raw_text),
+            hex_text: format_hex(item.bytes()),
+            raw_text,
+        })
     }
 
     fn detail_popup(&mut self, ctx: &egui::Context) {
@@ -996,83 +948,24 @@ impl TerminalPanel {
     }
 }
 
-#[cfg(test)]
-fn build_visible_rows_for_port<'a>(
-    port: Option<&'a str>,
-    entries: impl IntoIterator<Item = &'a TerminalEntry>,
-) -> Vec<VisibleRow<'a>> {
-    entries
-        .into_iter()
-        .map(|entry| VisibleRow::from_entry(port, entry))
-        .collect()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn collect_visible_rows_merged<'a>(
-    ports: &'a BTreeMap<String, PortData>,
-    port_filter: Option<&str>,
-    show_rx: bool,
-    show_tx: bool,
-    search: &crate::search::SearchQuery,
-    show_hex: bool,
-    show_raw: bool,
-) -> Vec<VisibleRow<'a>> {
-    let mut streams: Vec<(
-        &'a str,
-        std::collections::vec_deque::Iter<'a, TerminalEntry>,
-    )> = ports
-        .iter()
-        .filter(|(port, _)| port_filter.is_none_or(|filter| filter == port.as_str()))
-        .map(|(port, data)| (port.as_str(), data.entries.iter()))
-        .collect();
-    let capacity = streams
-        .iter()
-        .map(|(_, entries)| entries.len())
-        .sum::<usize>();
-    let mut current: Vec<Option<&'a TerminalEntry>> = vec![None; streams.len()];
-    let mut heap: BinaryHeap<Reverse<(u64, u64, usize)>> = BinaryHeap::new();
-
-    for (index, (_, entries)) in streams.iter_mut().enumerate() {
-        if let Some(entry) = entries.next() {
-            current[index] = Some(entry);
-            heap.push(Reverse((entry.event_id, entry.id, index)));
-        }
-    }
-
-    let mut rows = Vec::with_capacity(capacity);
-    while let Some(Reverse((_, _, index))) = heap.pop() {
-        let entry = current[index]
-            .take()
-            .expect("heap entries always have a current terminal entry");
-        if entry_visible(entry.direction, show_rx, show_tx) {
-            let row = VisibleRow::from_entry(Some(streams[index].0), entry);
-            if search.is_empty() || row_matches_search(&row, search, show_hex, show_raw) {
-                rows.push(row);
-            }
-        }
-
-        if let Some(entry) = streams[index].1.next() {
-            current[index] = Some(entry);
-            heap.push(Reverse((entry.event_id, entry.id, index)));
-        }
-    }
-    rows
-}
-
 fn terminal_row_height_signature(
     row: &VisibleRow<'_>,
     show_hex: bool,
     show_raw: bool,
     font_size: f32,
 ) -> TerminalRowHeightSignature {
+    let live_line_count = terminal_live_line_count(row, show_hex, show_raw);
+    let live_tail = live_line_count > 0;
     TerminalRowHeightSignature {
         show_hex,
         show_raw,
         font_size_milli: (font_size * 1000.0).round() as i32,
-        raw_len: row.raw_text.len(),
-        display_len: row.display_text.len(),
-        hex_len: row.hex_text.len(),
-        preview_len: row.preview_text.len(),
+        live_line_count,
+        // 未完成尾行使用固定的尾部预览，尾行继续增长时不让行高缓存持续失效。
+        raw_len: if live_tail { 0 } else { row.raw_text.len() },
+        display_len: if live_tail { 0 } else { row.display_text.len() },
+        hex_len: if live_tail { 0 } else { row.hex_text.len() },
+        preview_len: if live_tail { 0 } else { row.preview_text.len() },
     }
 }
 
@@ -1124,27 +1017,85 @@ fn estimated_terminal_row_height(
     content_width: f32,
     preview_width: f32,
 ) -> f32 {
+    let live_tail = terminal_live_line_count(row, show_hex, show_raw) > 0;
     let line_count = if show_hex {
-        estimated_wrapped_line_count(row.hex_text.as_ref(), content_width, glyph_width).max(
-            estimated_wrapped_line_count(row.preview_text.as_ref(), preview_width, glyph_width),
+        let hex_text = if live_tail {
+            compact_live_tail_preview(
+                row.hex_text.as_ref(),
+                live_tail_max_chars(content_width, glyph_width),
+            )
+        } else {
+            row.hex_text.to_string()
+        };
+        let preview_text = if live_tail {
+            compact_live_tail_preview(
+                row.preview_text.as_ref(),
+                live_tail_max_chars(preview_width, glyph_width),
+            )
+        } else {
+            row.preview_text.to_string()
+        };
+        estimated_wrapped_line_count(&hex_text, content_width, glyph_width).max(
+            estimated_wrapped_line_count(&preview_text, preview_width, glyph_width),
         )
     } else if show_raw {
-        estimated_wrapped_line_count(
-            visible_row_content(row, false, true).as_ref(),
-            content_width,
-            glyph_width,
-        )
+        let content = visible_row_content(row, false, true);
+        let content = if live_tail {
+            compact_live_tail_preview(&content, live_tail_max_chars(content_width, glyph_width))
+        } else {
+            content
+        };
+        estimated_wrapped_line_count(&content, content_width, glyph_width)
     } else {
-        estimated_wrapped_line_count(
-            strip_terminal_trailing_line_ending(row.display_text.as_ref()),
-            content_width,
-            glyph_width,
-        )
+        let content = strip_terminal_trailing_line_ending(row.display_text.as_ref());
+        let content = if live_tail {
+            compact_live_tail_preview(content, live_tail_max_chars(content_width, glyph_width))
+        } else {
+            content.to_owned()
+        };
+        estimated_wrapped_line_count(&content, content_width, glyph_width)
     };
 
     (line_count as f32 * base_row_height)
         .round()
         .max(base_row_height)
+}
+
+fn terminal_live_line_count(row: &VisibleRow<'_>, _show_hex: bool, _show_raw: bool) -> usize {
+    if !row.live {
+        return 0;
+    }
+
+    1
+}
+
+fn live_tail_max_chars(width: f32, glyph_width: f32) -> usize {
+    (width.max(glyph_width) / glyph_width.max(1.0))
+        .floor()
+        .max(1.0) as usize
+}
+
+/// LiveTail 是固定高度的 transient row，只展示当前最后一段；完整历史字节
+/// 仍保存在 Store 中，封存后再恢复完整记录的正常高度。
+fn compact_live_tail_preview(content: &str, max_chars: usize) -> String {
+    let tail = content.rsplit_once('\n').map_or(content, |(_, tail)| tail);
+    compact_live_tail_segment(tail, max_chars)
+}
+
+fn compact_live_tail_segment(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+
+    let tail: String = text
+        .chars()
+        .rev()
+        .take(max_chars.saturating_sub(1))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("…{tail}")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1433,6 +1384,14 @@ fn render_rows_view(
 
                 let (galley, preview_galley, entry_height) = if in_viewport {
                     let content = visible_row_content(row, show_hex, show_raw);
+                    let content = if terminal_live_line_count(row, show_hex, show_raw) > 0 {
+                        compact_live_tail_preview(
+                            &content,
+                            live_tail_max_chars(galley_width, glyph_width),
+                        )
+                    } else {
+                        content
+                    };
                     let content = if content.is_empty() {
                         " ".to_owned()
                     } else {
@@ -1453,6 +1412,15 @@ fn render_rows_view(
                             " ".to_owned()
                         } else {
                             row.preview_text.to_string()
+                        };
+                        let preview_text = if terminal_live_line_count(row, show_hex, show_raw) > 0
+                        {
+                            compact_live_tail_preview(
+                                &preview_text,
+                                live_tail_max_chars(preview_galley_width, glyph_width),
+                            )
+                        } else {
+                            preview_text
                         };
                         let mut layout_job = egui::text::LayoutJob::simple(
                             preview_text,
@@ -2146,6 +2114,14 @@ fn format_hex(bytes: &[u8]) -> String {
     s
 }
 
+fn payload_bytes(event: &Event) -> Cow<'_, [u8]> {
+    if let Some(bytes) = event.payload.as_bytes() {
+        Cow::Borrowed(bytes)
+    } else {
+        Cow::Owned(event.payload.text_lossy().into_bytes())
+    }
+}
+
 fn format_utf8_preview(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     format_terminal_text(&text)
@@ -2200,8 +2176,21 @@ fn detail_text_rows(text: &str, min_rows: usize, max_rows: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tool_application::service::terminal_store::{Continuation, TerminalRecord};
     use tool_core::Payload;
     use tool_databus::DataBus;
+
+    fn port_items<'a>(panel: &'a TerminalPanel, port: &str) -> Vec<&'a TerminalItem> {
+        panel
+            .store
+            .iter()
+            .filter(|item| item.port() == port)
+            .collect()
+    }
+
+    fn item_text(item: &TerminalItem) -> String {
+        String::from_utf8_lossy(item.bytes()).into_owned()
+    }
 
     #[test]
     fn short_port_display_trims_ipv4_port_to_last_two_octets() {
@@ -2259,14 +2248,51 @@ mod tests {
 
         assert_eq!(panel.ingest_all_pending(), 1);
 
-        let port = panel.ports.get("COM1").expect("COM1 should have entries");
-        assert_eq!(port.entries.len(), 1);
+        let items = port_items(&panel, "COM1");
+        assert_eq!(items.len(), 1);
 
-        let entry = port.entries.front().expect("rx entry should be ingested");
-        assert_eq!(entry.direction, Direction::Rx);
-        assert_eq!(entry.raw_text, "hello");
-        assert_eq!(entry.display_text, "hello");
-        assert_eq!(entry.hex_text, "68 65 6C 6C 6F");
+        let item = items[0];
+        assert_eq!(item.direction(), Direction::Rx);
+        assert_eq!(item_text(item), "hello");
+        assert!(item.is_live());
+        assert_eq!(format_hex(item.bytes()), "68 65 6C 6C 6F");
+    }
+
+    #[test]
+    fn merge_does_not_create_unbounded_visual_entry() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+        let first = "a".repeat(MAX_TERMINAL_BLOCK_BYTES);
+
+        for (timestamp, text) in [(1_000, first), (1_001, "b".to_owned())] {
+            bus.publish(
+                Event::with_timestamp(
+                    timestamp,
+                    serial_topics::SERIAL_RX,
+                    "serial:COM1",
+                    Direction::Rx,
+                    Payload::Text(text),
+                )
+                .with_metadata(serde_json::json!({ "port": "COM1" })),
+            );
+        }
+
+        assert_eq!(panel.ingest_all_pending(), 2);
+        let items = port_items(&panel, "COM1");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].bytes().len(), MAX_TERMINAL_BLOCK_BYTES);
+        assert_eq!(item_text(items[1]), "b");
+        assert!(!items[0].is_live());
+        assert!(items[1].is_live());
+    }
+
+    #[test]
+    fn live_tail_preview_keeps_latest_text_and_completed_lines() {
+        assert_eq!(
+            compact_live_tail_preview("completed\n0123456789", 5),
+            "…6789"
+        );
+        assert_eq!(compact_live_tail_preview("short", 5), "short");
     }
 
     #[test]
@@ -2287,14 +2313,14 @@ mod tests {
         panel.clear();
 
         assert_eq!(panel.ingest_all_pending(), 0);
-        assert!(panel.ports.is_empty());
+        assert!(panel.store.is_empty());
     }
 
     #[test]
     fn max_entries_is_global_across_ports_and_keeps_newest_events() {
         let bus = DataBus::new();
         let mut panel = TerminalPanel::new(&bus);
-        panel.max_entries = 100;
+        panel.set_max_entries(100);
 
         for index in 0..120 {
             let port = if index % 2 == 0 { "COM1" } else { "COM2" };
@@ -2311,13 +2337,9 @@ mod tests {
         }
 
         assert_eq!(panel.ingest_all_pending(), 120);
-        let entries: Vec<&TerminalEntry> = panel
-            .ports
-            .values()
-            .flat_map(|data| data.entries.iter())
-            .collect();
-        assert_eq!(entries.len(), 100);
-        assert!(entries.iter().all(|entry| entry.event_id > 20));
+        let items: Vec<&TerminalItem> = panel.store.iter().collect();
+        assert_eq!(items.len(), 100);
+        assert!(items.iter().all(|item| item.first_event_id() > 20));
         let visible_ids: Vec<u64> = panel
             .collect_visible_rows()
             .into_iter()
@@ -2344,8 +2366,9 @@ mod tests {
 
         panel.set_max_entries(100);
 
-        assert_eq!(panel.ports["COM1"].entries.len(), 100);
-        assert_eq!(panel.ports["COM1"].entries.front().unwrap().event_id, 21);
+        let items = port_items(&panel, "COM1");
+        assert_eq!(items.len(), 100);
+        assert_eq!(items[0].first_event_id(), 21);
     }
 
     #[test]
@@ -2430,12 +2453,12 @@ mod tests {
 
         assert_eq!(panel.ingest_all_pending(), 3);
 
-        let entries = &panel.ports.get("COM6").expect("COM6 should exist").entries;
-        // 三条数据间隔 ≤ 5ms，全部直接拼接；
-        // 第二条以 \n 结尾（保留在 raw_text），第三条 "next" 无 \n → 合并成一整行。
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].raw_text, "(2.00000)echo:busy: processing*26\n");
-        assert_eq!(entries[1].raw_text, "next");
+        let items = port_items(&panel, "COM6");
+        assert_eq!(items.len(), 2);
+        assert_eq!(item_text(items[0]), "(2.00000)echo:busy: processing*26\n");
+        assert_eq!(item_text(items[1]), "next");
+        assert!(!items[0].is_live());
+        assert!(items[1].is_live());
     }
 
     /// event1 包含内部 \n，拆为两行：第一行完整，第二行未完成。
@@ -2466,14 +2489,14 @@ mod tests {
 
         assert_eq!(panel.ingest_all_pending(), 2);
 
-        let entries = &panel.ports.get("COM6").expect("COM6 should exist").entries;
-        // event1 拆为 2 行，event2 合并到 event1 的未完成尾行
-        assert_eq!(entries.len(), 2);
+        let items = port_items(&panel, "COM6");
+        // event1 产生一条 sealed 行和一个 LiveTail，event2 封存尾行。
+        assert_eq!(items.len(), 2);
         assert_eq!(
-            entries[0].raw_text,
+            item_text(items[0]),
             "(2.00000)X first home. completed.*77\n"
         );
-        assert_eq!(entries[1].raw_text, "(2.00000)X home. timeout = 20*16\n");
+        assert_eq!(item_text(items[1]), "(2.00000)X home. timeout = 20*16\n");
     }
 
     /// event1 "abc\ndef" → 拆为 "abc"(完整) + "def"(未完成)
@@ -2504,10 +2527,10 @@ mod tests {
 
         assert_eq!(panel.ingest_all_pending(), 2);
 
-        let entries = &panel.ports.get("COM7").expect("COM7 should exist").entries;
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].raw_text, "abc\n");
-        assert_eq!(entries[1].raw_text, "defghi\n");
+        let items = port_items(&panel, "COM7");
+        assert_eq!(items.len(), 2);
+        assert_eq!(item_text(items[0]), "abc\n");
+        assert_eq!(item_text(items[1]), "defghi\n");
     }
 
     /// event1 "abc\ndef" → "abc"(完整) + "def"(未完成)
@@ -2537,10 +2560,10 @@ mod tests {
         }
 
         assert_eq!(panel.ingest_all_pending(), 2);
-        let entries = &panel.ports.get("COM8").expect("COM8 should exist").entries;
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].raw_text, "abc\n");
-        assert_eq!(entries[1].raw_text, "defghi");
+        let items = port_items(&panel, "COM8");
+        assert_eq!(items.len(), 2);
+        assert_eq!(item_text(items[0]), "abc\n");
+        assert_eq!(item_text(items[1]), "defghi");
     }
 
     #[test]
@@ -2554,6 +2577,7 @@ mod tests {
             display_text: Cow::Borrowed("first\nsecond\n"),
             hex_text: Cow::Borrowed("66 69 72 73 74 0D 0A"),
             preview_text: Cow::Borrowed("first\nsecond\n"),
+            live: false,
         };
 
         assert_eq!(visible_row_content(&row, false, false), "first\nsecond");
@@ -2580,6 +2604,7 @@ mod tests {
             display_text: Cow::Borrowed("first\nsecond\n"),
             hex_text: Cow::Borrowed("66 69"),
             preview_text: Cow::Borrowed("first\nsecond\n"),
+            live: false,
         };
 
         assert_eq!(
@@ -2589,7 +2614,7 @@ mod tests {
     }
 
     #[test]
-    fn row_height_signature_changes_when_entry_text_grows() {
+    fn row_height_signature_is_stable_while_live_tail_grows() {
         let short = VisibleRow {
             id: 1,
             port: Some(Cow::Borrowed("COM6")),
@@ -2599,6 +2624,7 @@ mod tests {
             display_text: Cow::Borrowed("first"),
             hex_text: Cow::Borrowed("66 69 72 73 74"),
             preview_text: Cow::Borrowed("first"),
+            live: true,
         };
         let grown = VisibleRow {
             id: 1,
@@ -2609,9 +2635,10 @@ mod tests {
             display_text: Cow::Borrowed("first\nsecond"),
             hex_text: Cow::Borrowed("66 69 72 73 74 0A 73 65 63 6F 6E 64"),
             preview_text: Cow::Borrowed("first\nsecond"),
+            live: true,
         };
 
-        assert_ne!(
+        assert_eq!(
             terminal_row_height_signature(&short, false, false, 13.0),
             terminal_row_height_signature(&grown, false, false, 13.0)
         );
@@ -2628,6 +2655,7 @@ mod tests {
             display_text: Cow::Borrowed("short"),
             hex_text: Cow::Borrowed("73 68 6F 72 74"),
             preview_text: Cow::Borrowed("short"),
+            live: true,
         };
         let signature = terminal_row_height_signature(&row, false, false, 13.0);
         let mut message_list = MessageList::default();
@@ -2670,28 +2698,26 @@ mod tests {
 
     #[test]
     fn entries_map_one_to_one_visible_rows() {
-        // push_event 已将间隔 ≤5ms 的未完成行合并，entry 已是完整行 → 1:1 映射
-        let entry = TerminalEntry {
+        let item = TerminalItem::Sealed(TerminalRecord {
             id: 1,
-            event_id: 1,
-            timestamp_ms: 0,
-            timestamp_label: "[12:00:00.000]".to_owned(),
+            first_event_id: 1,
+            last_event_id: 1,
+            first_timestamp_ms: 0,
+            last_timestamp_ms: 0,
+            port: "COM6".to_owned(),
             direction: Direction::Rx,
-            raw_text: "(42.0000)ok*29\n".to_owned(),
-            display_text: "(42.0000)ok*29\n".to_owned(),
-            hex_text: format_hex(b"(42.0000)ok*29\n"),
-            hex_preview: String::new(),
-            preview_text: "(42.0000)ok*29\n".to_owned(),
-        };
+            bytes: b"(42.0000)ok*29\n".to_vec(),
+            continuation: Continuation::Complete,
+        });
 
-        let rows = build_visible_rows_for_port(Some("COM6"), [&entry]);
+        let row = VisibleRow::from_item(&item);
 
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].port.as_deref(), Some("COM6"));
-        assert_eq!(rows[0].raw_text, "(42.0000)ok*29\n");
+        assert_eq!(row.port.as_deref(), Some("COM6"));
+        assert_eq!(row.raw_text, "(42.0000)ok*29\n");
+        assert!(!row.live);
     }
 
-    /// 发送 "111\n111\n"（以 \n 结尾）→ 一整条 entry，同包内不拆分。
+    /// 换行是展示边界，同一个 packet 内的多行也分别封存。
     #[test]
     fn multiline_text_splits_into_independent_entries() {
         let bus = DataBus::new();
@@ -2706,13 +2732,10 @@ mod tests {
         ));
 
         assert_eq!(panel.ingest_all_pending(), 1);
-        let entries = &panel.ports.get("COM2").expect("COM2 should exist").entries;
-        assert_eq!(
-            entries.len(),
-            1,
-            "111\\n111\\n should produce 1 entry (trailing \\n)"
-        );
-        assert_eq!(entries[0].raw_text, "111\n111\n");
+        let items = port_items(&panel, "COM2");
+        assert_eq!(items.len(), 2);
+        assert_eq!(item_text(items[0]), "111\n");
+        assert_eq!(item_text(items[1]), "111\n");
     }
 
     /// 发送 "1\n" → raw_text="1\n"（保留 \n 供原始模式转义）
@@ -2730,13 +2753,12 @@ mod tests {
         ));
 
         assert_eq!(panel.ingest_all_pending(), 1);
-        let entries = &panel.ports.get("COM2").expect("COM2 should exist").entries;
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].raw_text, "1\n");
+        let items = port_items(&panel, "COM2");
+        assert_eq!(items.len(), 1);
+        assert_eq!(item_text(items[0]), "1\n");
     }
 
-    /// 两次快速发送（3ms ≤ 5ms）：第一次 "111\n111\n"（以 \n 结尾）→ 1 条
-    /// 第二次 "111\n111\n"（3ms）→ 合并到上一条 → 1 条
+    /// 两次快速发送也保持每个换行分段，不再使用 5ms merge 定义记录。
     #[test]
     fn rapid_send_merges_unfinished_lines() {
         let bus = DataBus::new();
@@ -2758,13 +2780,12 @@ mod tests {
         ));
 
         assert_eq!(panel.ingest_all_pending(), 2);
-        let entries = &panel.ports.get("COM2").expect("COM2 should exist").entries;
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].raw_text, "111\n111\n");
-        assert_eq!(entries[1].raw_text, "111\n111\n");
+        let items = port_items(&panel, "COM2");
+        assert_eq!(items.len(), 4);
+        assert!(items.iter().all(|item| item_text(item) == "111\n"));
     }
 
-    /// 周期发送（3ms × 3次）：每次 "111\n111\n"，全部合并
+    /// 周期发送（3ms × 3次）：每个换行分段保持独立。
     #[test]
     fn periodic_send_merges_only_first_line_per_event() {
         let bus = DataBus::new();
@@ -2781,15 +2802,12 @@ mod tests {
         }
 
         assert_eq!(panel.ingest_all_pending(), 3);
-        let entries = &panel.ports.get("COM2").expect("COM2 should exist").entries;
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].raw_text, "111\n111\n");
-        assert_eq!(entries[1].raw_text, "111\n111\n");
-        assert_eq!(entries[2].raw_text, "111\n111\n");
+        let items = port_items(&panel, "COM2");
+        assert_eq!(items.len(), 6);
+        assert!(items.iter().all(|item| item_text(item) == "111\n"));
     }
 
-    /// 发送三行 "111\n111\n111\n"（以 \n 结尾）：
-    /// 最后一个 \n 在末尾 → 没有未完成行 → 一整条 entry。
+    /// 发送三行完整文本：得到三条 sealed record。
     #[test]
     fn three_line_send_all_complete() {
         let bus = DataBus::new();
@@ -2804,15 +2822,12 @@ mod tests {
         ));
 
         assert_eq!(panel.ingest_all_pending(), 1);
-        let entries = &panel.ports.get("COM2").expect("COM2 should exist").entries;
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].raw_text, "111\n111\n111\n");
+        let items = port_items(&panel, "COM2");
+        assert_eq!(items.len(), 3);
+        assert!(items.iter().all(|item| item_text(item) == "111\n"));
     }
 
-    /// 发送三行 "111\n111\n111"（末尾没有 \n）：
-    /// 最后一个 \n 不在末尾 → 拆成两条 entry。
-    /// entry0 包含最后一个 \n 之前的所有内容（含 \n）："111\n111\n"
-    /// entry1 是最后一个 \n 之后的内容（无 \n 结尾）："111"
+    /// 发送两条完整行和一个未完成的 LiveTail。
     #[test]
     fn three_line_send_last_incomplete() {
         let bus = DataBus::new();
@@ -2827,9 +2842,12 @@ mod tests {
         ));
 
         assert_eq!(panel.ingest_all_pending(), 1);
-        let entries = &panel.ports.get("COM2").expect("COM2 should exist").entries;
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].raw_text, "111\n111\n111");
+        let items = port_items(&panel, "COM2");
+        assert_eq!(items.len(), 3);
+        assert_eq!(item_text(items[0]), "111\n");
+        assert_eq!(item_text(items[1]), "111\n");
+        assert_eq!(item_text(items[2]), "111");
+        assert!(items[2].is_live());
     }
 
     /// 搜索应该能过滤出包含关键字的 entry。
@@ -2859,5 +2877,37 @@ mod tests {
         let rows = panel.collect_visible_rows();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].raw_text, "3");
+    }
+
+    #[test]
+    fn view_index_updates_only_the_changed_live_tail_for_active_search() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+
+        bus.publish(Event::with_timestamp(
+            1_000,
+            serial_topics::SERIAL_RX,
+            "serial:COM9",
+            Direction::Rx,
+            Payload::Bytes(b"prefix".to_vec()),
+        ));
+        assert_eq!(panel.ingest_all_pending(), 1);
+
+        panel.search.text = "target".to_owned();
+        assert!(panel.collect_visible_rows().is_empty());
+
+        bus.publish(Event::with_timestamp(
+            1_001,
+            serial_topics::SERIAL_RX,
+            "serial:COM9",
+            Direction::Rx,
+            Payload::Bytes(b"target\n".to_vec()),
+        ));
+        assert_eq!(panel.ingest_all_pending(), 1);
+
+        let rows = panel.collect_visible_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].raw_text, "prefixtarget\n");
+        assert!(!rows[0].live);
     }
 }

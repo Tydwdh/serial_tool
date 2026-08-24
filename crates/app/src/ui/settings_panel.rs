@@ -67,7 +67,7 @@ impl WorkbenchApp {
                 self.render_config_locations(ui);
 
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("工作区布局");
                     let confirm_id = ui.id().with("reset_workspace_layout_confirm");
                     let now = ui.input(|input| input.time);
@@ -124,7 +124,7 @@ impl WorkbenchApp {
                     let mut to_remove: Option<usize> = None;
                     for (i, path) in &paths {
                         let path_str = path.display().to_string();
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             if ui.small_button("打开").clicked() {
                                 match self.load_config_from_path(path) {
                                     Ok(()) => {
@@ -161,7 +161,7 @@ impl WorkbenchApp {
                 ui.set_min_width(ui.available_width());
                 design::section_header(ui, ICON_PALETTE, "外观");
                 ui.separator();
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("界面主题");
                     let selected_label =
                         theme::current_theme_name().unwrap_or_else(|| "选择主题…".to_owned());
@@ -192,7 +192,7 @@ impl WorkbenchApp {
                             }
                         });
                 });
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui
                         .button("打开主题目录")
                         .on_hover_text("将 JSON 主题文件放入此目录")
@@ -214,7 +214,7 @@ impl WorkbenchApp {
                     };
                 }
                 ui.add_space(4.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("等宽字体大小");
                     let mut size = self.monospace_font_size;
                     let resp = ui.add(
@@ -242,12 +242,13 @@ impl WorkbenchApp {
                 ui.set_min_width(ui.available_width());
                 design::section_header(ui, ICON_NETWORK_CHECK, "网络");
                 ui.separator();
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("代理地址");
+                    let proxy_width = (ui.available_width() - 8.0).clamp(140.0, 260.0);
                     let response = ui
                         .add(
                             egui::TextEdit::singleline(&mut self.network_proxy_url)
-                                .desired_width(260.0)
+                                .desired_width(proxy_width)
                                 .hint_text("留空：系统/环境代理或直连"),
                         )
                         .on_hover_text("支持 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080");
@@ -266,8 +267,8 @@ impl WorkbenchApp {
                 ui.set_min_width(ui.available_width());
                 design::section_header(ui, ICON_TUNE, "数据");
                 ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label("终端合并阈值");
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("终端空闲结束阈值");
                     let mut ms = self.terminal_panel.merge_window_ms;
                     let resp = ui.add(
                         egui::Slider::new(&mut ms, 0..=100)
@@ -283,11 +284,11 @@ impl WorkbenchApp {
                 })
                 .response
                 .on_hover_text(
-                    "同一端口、同一方向、间隔 ≤ 此毫秒且不含换行符的连续数据包合并显示。\
-                     慢设备调小避免误合并，高速流调大减少视觉碎片。",
+                    "当前展示块超过此毫秒没有新数据就暂时封存；换行和 4KiB 展示分段会直接封存。\
+                     这只是展示边界，不代表协议帧；高速流可适当调大以减少视觉碎片。",
                 );
                 ui.add_space(4.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("终端保留条数");
                     let mut n = self.terminal_panel.max_entries.clamp(500, 200_000);
                     let drag_changed = ui
@@ -308,7 +309,7 @@ impl WorkbenchApp {
                     "接收区保留的最近条数上限，超出后丢弃最旧条目。可拖拽滑块或直接输入数字。",
                 );
                 ui.add_space(4.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("日志保留条数");
                     let mut n = self.bottom_log_panel.max_entries.clamp(500, 200_000);
                     let drag_changed = ui
@@ -352,7 +353,7 @@ impl WorkbenchApp {
 
         if category == 4 {
             // ── 恢复默认 ──
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if design::button(ui, ICON_RESTART_ALT, "恢复所有默认设置", ButtonKind::Danger)
                     .clicked()
                 {
@@ -420,14 +421,23 @@ impl WorkbenchApp {
         open_self: bool,
     ) {
         let path_text = path.display().to_string();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(label);
             ui.add_space(4.0);
             // 等宽路径
-            ui.label(
-                egui::RichText::new(&path_text)
-                    .monospace()
-                    .color(theme::text_primary()),
+            let available_width = (ui.available_width() - 72.0).max(40.0);
+            let display_path = tool_panels::compact_middle(
+                &path_text,
+                ((available_width / 8.0) as usize).clamp(20, 80),
+            );
+            ui.add_sized(
+                egui::vec2(available_width, ui.spacing().interact_size.y),
+                egui::Label::new(
+                    egui::RichText::new(display_path)
+                        .monospace()
+                        .color(theme::text_primary()),
+                )
+                .truncate(),
             )
             .on_hover_text(&path_text);
             if design::icon_button(ui, ICON_CONTENT_COPY, "复制路径").clicked() {

@@ -38,8 +38,9 @@ pub(super) fn serial_combo(
             }
         });
 
+    let combo_width = w.min(ui.available_width().max(48.0));
     egui::ComboBox::from_id_salt(id)
-        .width(w)
+        .width(combo_width)
         .selected_text(selected_text)
         .show_ui(ui, |ui| {
             if ports.is_empty() {

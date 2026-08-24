@@ -60,7 +60,7 @@ pub(crate) struct PersistedConfig {
     /// 当前主题 JSON 路径。内置和用户新增主题都走同一字段。
     #[serde(default, alias = "custom_theme_path")]
     pub(crate) theme_path: Option<String>,
-    /// 终端合并阈值（ms），同端口同方向间隔 ≤ 此值的连续包合并显示。默认 5。
+    /// 终端展示块空闲结束阈值（ms）。仅用于展示块封存，不代表协议帧。默认 5。
     #[serde(default = "default_terminal_merge_window_ms")]
     pub(crate) terminal_merge_window_ms: u64,
     /// 终端保留条数上限。默认 2000。

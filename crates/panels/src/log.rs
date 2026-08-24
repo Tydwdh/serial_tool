@@ -259,7 +259,7 @@ impl LogPanel {
         let mut force_scroll_to_bottom = self.auto_scroll.take_pending(LOG_SCROLL_ID);
 
         // ── 第一行：级别过滤 + 自动滚动 + 清空 ──
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let padding = ui.spacing().button_padding.x * 2.0;
             let char_w = 10.0;
             let btn_w = padding + 5.0 * char_w + 4.0;
@@ -272,10 +272,9 @@ impl LogPanel {
                 LogLevel::Error,
             ] {
                 ui.allocate_ui_with_layout(
-                    egui::vec2(btn_w, ui.available_height()),
+                    egui::vec2(btn_w, 30.0),
                     egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
                     |ui| {
-                        ui.set_min_size(egui::vec2(btn_w, ui.available_height()));
                         if ui
                             .selectable_label(self.min_level == level, level.as_str())
                             .clicked()
@@ -330,7 +329,7 @@ impl LogPanel {
         });
 
         // ── 第二行：搜索 + 来源过滤 ──
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("搜索");
             self.search.toolbar(ui, 120.0, "关键词", "区分大小写");
 

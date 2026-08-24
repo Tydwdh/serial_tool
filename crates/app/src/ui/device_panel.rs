@@ -19,7 +19,7 @@ impl WorkbenchApp {
             design::section_header(ui, ICON_TUNE, "串口参数");
             ui.separator();
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("波特率");
                 baud_combo(ui, "dev-port-rate", 180.0, &mut self.serial.baud_rate);
                 ui.label("数据位");
@@ -79,14 +79,17 @@ impl WorkbenchApp {
             design::section_header(ui, ICON_FIBER_MANUAL_RECORD, "录制");
             ui.separator();
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("路径");
 
                 let recording = self.workbench.recorder.is_running();
 
+                // 录制路径和三个操作按钮在窄 Dock 中不能共用一行，
+                // 先让输入框让出按钮所需空间，再由 wrapped 布局决定是否换行。
+                let path_width = (ui.available_width() - 150.0).clamp(140.0, 360.0);
                 ui.add_enabled(
                     !recording,
-                    egui::TextEdit::singleline(&mut self.recorder_path).desired_width(360.0),
+                    egui::TextEdit::singleline(&mut self.recorder_path).desired_width(path_width),
                 );
 
                 if ui
@@ -149,7 +152,7 @@ impl WorkbenchApp {
                 }
             });
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("模式");
                 let recording = self.workbench.recorder.is_running();
                 let mut mode = self.workbench.recorder.mode();
@@ -170,7 +173,7 @@ impl WorkbenchApp {
             let stats = self.workbench.recorder.stats();
             if stats.running || stats.stopping {
                 ui.separator();
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if stats.paused {
                         design::status_pill(ui, theme::yellow(), "已暂停，未写入新事件");
                     } else if stats.running {
@@ -207,7 +210,7 @@ impl WorkbenchApp {
             // ── 网络模拟串口（Nexus Prime 等 Klipper 服务器，WebSocket + JSON-RPC gcode 桥）──
             let mut add_network: Option<tool_application::tool_transport::NetworkSerialConfig> =
                 None;
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("网络");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.serial.network_host)
@@ -293,7 +296,7 @@ impl WorkbenchApp {
                         format!("{} 以下端口已打开但可能已拔出：", ICON_WARNING.codepoint),
                     );
                     for port in &stale {
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             ui.label(
                                 egui::RichText::new(*port)
                                     .monospace()
@@ -391,7 +394,7 @@ impl WorkbenchApp {
                         ui.data_mut(|d| d.get_persisted::<bool>(state_id).unwrap_or(true));
 
                     // ── 组标题行 ──
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         let toggle = if open { "▾" } else { "▸" };
                         if ui.selectable_label(false, toggle).clicked() {
                             open = !open;
@@ -476,111 +479,82 @@ impl WorkbenchApp {
                                 .cloned()
                                 .unwrap_or_else(|| "未分组".to_owned());
 
-                            ui.horizontal(|ui| {
-                                ui.add_space(16.0);
-                                let status = self.workbench.transport.status_port(&name);
-                                let port_open = status.open;
-                                let connecting = status.connecting;
-                                let pending_reconnect = self
-                                    .serial
-                                    .pending_reconnect
-                                    .as_ref()
-                                    .is_some_and(|p| p.port_name == name);
-                                // 端口状态按钮：带文字 + 颜色，加大命中区，色盲友好。
-                                // ●开(绿)=已开→点击关闭，○关(红)=未开→点击打开，
-                                // ⟳连(黄)=重连中/连接中→点击取消。
-                                let (icon, text, color, tooltip) = if pending_reconnect {
-                                    ("⟳", "连", theme::yellow(), "重连中，点击取消")
-                                } else if connecting {
-                                    ("⟳", "连", theme::yellow(), "连接中，点击取消")
-                                } else if port_open {
-                                    ("●", "开", theme::green(), "已打开，点击关闭")
-                                } else {
-                                    ("○", "关", theme::red(), "未打开，点击打开")
-                                };
-                                let btn_label = format!("{icon}{text}");
-                                if ui
-                                    .add(
-                                        egui::Button::new(
-                                            egui::RichText::new(btn_label).color(color).small(),
-                                        )
-                                        .frame(false)
-                                        .min_size(egui::vec2(36.0, 18.0)),
-                                    )
-                                    .on_hover_text(tooltip)
-                                    .clicked()
-                                {
-                                    toggled_port = Some(name.clone());
-                                }
-                                ui.monospace(&name);
-                                ui.label(port.port_type.to_string());
+                            let status = self.workbench.transport.status_port(&name);
+                            let pending_reconnect = self
+                                .serial
+                                .pending_reconnect
+                                .as_ref()
+                                .is_some_and(|p| p.port_name == name);
+                            let port_type = port.port_type.to_string();
+                            let is_network = matches!(
+                                port.port_type,
+                                tool_application::tool_transport::PortType::Network
+                            );
+                            let has_alias = self.serial.port_aliases.contains_key(&name);
+                            let inline = ui.available_width() >= 760.0;
 
-                                // 网络模拟串口：提供移除入口（仅 Network 类型）
-                                if matches!(
-                                    port.port_type,
-                                    tool_application::tool_transport::PortType::Network
-                                ) && ui.small_button("×").on_hover_text("移除网络端口").clicked()
-                                {
-                                    removed_network = Some(name.clone());
-                                }
-
-                                // 别名
-                                ui.label("别名");
-                                let resp = ui.add(
-                                    egui::TextEdit::singleline(&mut alias_buf)
-                                        .desired_width(100.0)
-                                        .hint_text("例如 主控板"),
-                                );
-                                // alias_buf 每帧从 port_aliases 重新 clone，必须即时回写，
-                                // 否则下一帧旧值会覆盖用户输入。save_config 有 60s autosave 兜底。
-                                if resp.changed() {
-                                    let new_alias = if alias_buf.trim().is_empty() {
-                                        None
-                                    } else {
-                                        Some(alias_buf.trim().to_owned())
-                                    };
-                                    alias_changes.push((name.clone(), new_alias));
-                                }
-                                if self.serial.port_aliases.contains_key(&name)
-                                    && ui.small_button("×").clicked()
-                                {
-                                    alias_changes.push((name.clone(), None));
-                                }
-
-                                // 分组选择
-                                let mut selected = current_group.clone();
-                                egui::ComboBox::from_id_salt(format!("port-group-{name}"))
-                                    .width(100.0)
-                                    .selected_text(&selected)
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut selected,
-                                            "未分组".to_owned(),
-                                            "未分组",
+                            if inline {
+                                ui.horizontal(|ui| {
+                                    render_port_status_controls(
+                                        ui,
+                                        &name,
+                                        &port_type,
+                                        is_network,
+                                        status.open,
+                                        status.connecting,
+                                        pending_reconnect,
+                                        &mut toggled_port,
+                                        &mut removed_network,
+                                    );
+                                    render_port_editor_controls(
+                                        ui,
+                                        &name,
+                                        &mut alias_buf,
+                                        &current_group,
+                                        &group_names,
+                                        has_alias,
+                                        true,
+                                        &mut new_group_active,
+                                        &mut new_group_port,
+                                        &mut alias_changes,
+                                        &mut group_changes,
+                                    );
+                                });
+                            } else {
+                                // 窄 Dock：信息行和编辑行分开，避免 wrapped 布局把
+                                // “别名”插入状态行造成重叠。
+                                ui.vertical(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
+                                        render_port_status_controls(
+                                            ui,
+                                            &name,
+                                            &port_type,
+                                            is_network,
+                                            status.open,
+                                            status.connecting,
+                                            pending_reconnect,
+                                            &mut toggled_port,
+                                            &mut removed_network,
                                         );
-                                        for gn in &group_names {
-                                            ui.selectable_value(
-                                                &mut selected,
-                                                gn.clone(),
-                                                gn.as_str(),
-                                            );
-                                        }
-                                        ui.separator();
-                                        if ui.button("+ 新建分组...").clicked() {
-                                            new_group_active = true;
-                                            new_group_port = name.clone();
-                                        }
                                     });
-
-                                if selected != current_group {
-                                    let new_group = if selected == "未分组" {
-                                        None
-                                    } else {
-                                        Some(selected)
-                                    };
-                                    group_changes.push((name.clone(), new_group));
-                                }
-                            });
+                                    ui.horizontal_wrapped(|ui| {
+                                        render_port_editor_controls(
+                                            ui,
+                                            &name,
+                                            &mut alias_buf,
+                                            &current_group,
+                                            &group_names,
+                                            has_alias,
+                                            false,
+                                            &mut new_group_active,
+                                            &mut new_group_port,
+                                            &mut alias_changes,
+                                            &mut group_changes,
+                                        );
+                                    });
+                                    ui.add_space(4.0);
+                                });
+                            }
                         }
                     }
                 }
@@ -710,5 +684,121 @@ impl WorkbenchApp {
                 log::warn!("save_config failed: {e}")
             };
         });
+    }
+}
+
+fn render_port_status_controls(
+    ui: &mut egui::Ui,
+    name: &str,
+    port_type: &str,
+    is_network: bool,
+    port_open: bool,
+    connecting: bool,
+    pending_reconnect: bool,
+    toggled_port: &mut Option<String>,
+    removed_network: &mut Option<String>,
+) {
+    ui.add_space(16.0);
+
+    // 端口状态按钮：带文字 + 颜色，加大命中区，色盲友好。
+    // ●开(绿)=已开→点击关闭，○关(红)=未开→点击打开，
+    // ⟳连(黄)=重连中/连接中→点击取消。
+    let (icon, text, color, tooltip) = if pending_reconnect {
+        ("⟳", "连", theme::yellow(), "重连中，点击取消")
+    } else if connecting {
+        ("⟳", "连", theme::yellow(), "连接中，点击取消")
+    } else if port_open {
+        ("●", "开", theme::green(), "已打开，点击关闭")
+    } else {
+        ("○", "关", theme::red(), "未打开，点击打开")
+    };
+    let btn_label = format!("{icon}{text}");
+    if ui
+        .add(
+            egui::Button::new(egui::RichText::new(btn_label).color(color).small())
+                .frame(false)
+                .min_size(egui::vec2(36.0, 18.0)),
+        )
+        .on_hover_text(tooltip)
+        .clicked()
+    {
+        *toggled_port = Some(name.to_owned());
+    }
+
+    ui.monospace(name).on_hover_text(name);
+    ui.label(port_type);
+
+    if is_network && ui.small_button("×").on_hover_text("移除网络端口").clicked() {
+        *removed_network = Some(name.to_owned());
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_port_editor_controls(
+    ui: &mut egui::Ui,
+    name: &str,
+    alias_buf: &mut String,
+    current_group: &str,
+    group_names: &[String],
+    has_alias: bool,
+    inline: bool,
+    new_group_active: &mut bool,
+    new_group_port: &mut String,
+    alias_changes: &mut Vec<(String, Option<String>)>,
+    group_changes: &mut Vec<(String, Option<String>)>,
+) {
+    if !inline {
+        ui.add_space(16.0);
+    }
+    ui.label("别名");
+
+    let alias_width = if inline {
+        (ui.available_width() - 150.0).clamp(120.0, 240.0)
+    } else {
+        (ui.available_width() - 120.0).clamp(80.0, 160.0)
+    };
+    let response = ui.add(
+        egui::TextEdit::singleline(alias_buf)
+            .desired_width(alias_width)
+            .hint_text("例如 主控板"),
+    );
+    // alias_buf 每帧从 port_aliases 重新 clone，必须即时回写，
+    // 否则下一帧旧值会覆盖用户输入。save_config 有 60s autosave 兜底。
+    if response.changed() {
+        let new_alias = if alias_buf.trim().is_empty() {
+            None
+        } else {
+            Some(alias_buf.trim().to_owned())
+        };
+        alias_changes.push((name.to_owned(), new_alias));
+    }
+    if has_alias && ui.small_button("×").clicked() {
+        alias_changes.push((name.to_owned(), None));
+    }
+
+    let mut selected = current_group.to_owned();
+    let group_width = if inline {
+        100.0
+    } else {
+        ui.available_width().clamp(80.0, 100.0)
+    };
+    egui::ComboBox::from_id_salt(format!("port-group-{name}"))
+        .width(group_width)
+        .selected_text(&selected)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut selected, "未分组".to_owned(), "未分组");
+            for group_name in group_names {
+                ui.selectable_value(&mut selected, group_name.clone(), group_name.as_str());
+            }
+            ui.separator();
+            if ui.button("+ 新建分组...").clicked() {
+                *new_group_active = true;
+                *new_group_port = name.to_owned();
+            }
+        });
+
+    if selected != current_group {
+        let new_group = (selected != "未分组").then_some(selected);
+        group_changes.push((name.to_owned(), new_group));
     }
 }

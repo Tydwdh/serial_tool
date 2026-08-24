@@ -283,12 +283,13 @@ impl ReplayPanel {
     }
 
     fn file_controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("文件");
 
+            let path_width = (ui.available_width() - 120.0).clamp(140.0, 280.0);
             ui.add(
                 TextEdit::singleline(&mut self.path)
-                    .desired_width(280.0)
+                    .desired_width(path_width)
                     .hint_text("选择 JSONL 回放文件"),
             );
 
@@ -305,7 +306,7 @@ impl ReplayPanel {
     }
 
     fn policy_controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("回放策略");
 
             let mut policy = self.manager.policy();
@@ -593,7 +594,7 @@ impl ReplayPanel {
             return;
         }
         let can_seek = self.manager.can_seek();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .small_button("+书签")
                 .on_hover_text("在当前时间点添加书签")

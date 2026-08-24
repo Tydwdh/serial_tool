@@ -123,10 +123,14 @@ impl MessageSearch {
     }
 
     pub(crate) fn toolbar(&mut self, ui: &mut Ui, desired_width: f32, hint: &str, case_hint: &str) {
+        // 搜索框后面通常还跟着大小写按钮、来源/端口筛选等控件。
+        // 直接使用固定 desired_width 会在窄 Dock 中把后续控件推出可视区域，
+        // 这里给后续按钮预留一点空间；外层使用 horizontal_wrapped 时也能自然换行。
+        let input_width = desired_width.min((ui.available_width() - 40.0).max(48.0));
         let search_response = ui
             .add(
                 egui::TextEdit::singleline(&mut self.text)
-                    .desired_width(desired_width)
+                    .desired_width(input_width)
                     .hint_text(hint),
             )
             .on_hover_text("支持正则：以 re: 开头（如 re:^ok\\d+）；否则按字面量搜索");

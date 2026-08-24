@@ -21,6 +21,7 @@ pub struct ApplicationConfig {
     pub stop_bits: String,
     pub parity: String,
     pub auto_reconnect: bool,
+    /// Terminal display-block idle-finalize threshold, not a protocol merge window.
     pub terminal_merge_window_ms: u64,
     pub terminal_max_entries: usize,
     pub log_max_entries: usize,
