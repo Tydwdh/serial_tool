@@ -1,17 +1,13 @@
 {
-  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v1.0.0/hardware-workbench-app.zip",
-  "version": "1.0.0",
+  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v1.1.0/hardware-workbench-app.zip",
+  "version": "1.1.0",
+  "date": "2026-08-25",
   "changelog": [
-    "将插件源码、市场索引和发布产物统一合并到主仓库维护。",
-    "完善 Lua 插件生命周期、权限、命令、任务、配置和动态面板能力。",
-    "增加可停靠工作区、JSON 主题系统、数据表格与插件场景测试。",
-    "设置页显示可点击的项目仓库地址。",
-    "恢复 Rust + egui 为唯一桌面客户端，移除 Flutter 和小窗模式遗留。",
-    "重构插件管理页为响应式紧凑卡片，并统一界面层级、间距和对比度。",
-    "简化界面提示文字和次要操作，减少视觉噪声。",
-    "修复接收区和日志区自动跟随无法通过向上滚轮暂停的问题。",
-    "支持左键拖选文本或跨行选择时继续使用滚轮滚动。",
-    "修复设置导航、工具栏按钮和插件统计切换时的布局抖动。"
-  ],
-  "date": "2026-08-02"
+    "提供 Ubuntu 22.04+ x86_64 `.deb` 安装包，安装后可从应用菜单以普通用户运行。",
+    "Linux 用户数据写入用户目录，并为串口权限不足提供 `dialout` 引导；应用本身不要求使用 `sudo` 启动。",
+    "在 CI 中加入 Ubuntu 构建、Debian 包元数据检查和 SHA-256 校验文件生成。",
+    "建立 UI 无关的 application core 和 DTO 驱动的界面边界，降低前端与业务实现的耦合。",
+    "重构终端流存储，虚拟化行布局并延迟生成终端行，降低大数据量场景的渲染开销。",
+    "Linux 发行版不显示面向 Windows 便携包的应用内更新入口，改由 `.deb` 发布包升级。"
+  ]
 }
