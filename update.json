@@ -1,13 +1,14 @@
 {
+  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v1.1.2/hardware-workbench-app.zip",
+  "version": "1.1.2",
   "changelog": [
-    "稳定终端虚拟列表滚动和增量布局更新。",
-    "仅在 transport 确认端口真正打开后显示连接成功提示，连接超时则显示失败提示。",
-    "修复 Ubuntu `.deb` 打包时 `/usr/bin/hardware-workbench-app` 符号链接目录不存在的问题。",
-    "优化无配置文件时的默认工作区布局，并将终端作为默认活动面板。",
-    "Dock 拖拽时关闭容易误触发的上下拆分目标，保留左右拆分和标签合并。",
-    "收紧通知、配置路径和设备面板的布局与显示时长。"
+    "G-code Sender 支持跳过 M110 行号同步，并可配置设备“运行中”匹配规则。",
+    "G-code Sender 支持配置暂停和取消时直接发送的原始串口指令。",
+    "插件设置在插件被禁用时仍可编辑，重新启用后直接生效。",
+    "G-code Sender 默认在作业末尾追加 M2，并将 ACK 超时和设备重传处理调整为超时即停止，避免重复执行。",
+    "插件管理页的启用、禁用操作改为明确的状态事件并持久化配置。",
+    "Windows 便携包使用系统自带 tar 生成 ZIP，避免压缩步骤在 CI 中卡住。",
+    "修改插件或主题后，Windows 构建会重新同步运行时资源，避免安装包携带旧内容。"
   ],
-  "version": "1.1.1",
-  "date": "2026-08-25",
-  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v1.1.1/hardware-workbench-app.zip"
+  "date": "2026-08-25"
 }
