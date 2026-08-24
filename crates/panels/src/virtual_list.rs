@@ -101,6 +101,32 @@ impl VirtualRowIndex {
         self.layout_key = None;
     }
 
+    pub(crate) fn needs_sync(&self, layout_key: u64, default_height: f32) -> bool {
+        self.layout_key != Some(layout_key)
+            || (self.default_height - default_height.max(1.0)).abs() > f32::EPSILON
+    }
+
+    /// 追加当前 ID 列表尾部的新行。
+    ///
+    /// 调用方必须已经确认新列表只是在旧列表尾部追加；这样可以避免每帧再次比较
+    /// 全部稳定 ID。若布局参数不一致或列表并非增长，则回退到完整同步。
+    pub(crate) fn append_ids(&mut self, ids: &[u64], layout_key: u64, default_height: f32) -> bool {
+        let default_height = default_height.max(1.0);
+        if self.layout_key == Some(layout_key)
+            && (self.default_height - default_height).abs() <= f32::EPSILON
+            && ids.len() >= self.ids.len()
+            && ids.len() > self.ids.len()
+        {
+            for &id in &ids[self.ids.len()..] {
+                self.ids.push(id);
+                self.heights.push(default_height);
+                self.fenwick.append(default_height);
+            }
+            return true;
+        }
+        self.sync_ids(ids, layout_key, default_height)
+    }
+
     /// 同步筛选后的稳定 ID。
     ///
     /// 连续接收时通常只是尾部追加，走 O(log n) 的 Fenwick append；筛选结果或布局

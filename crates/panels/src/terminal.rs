@@ -158,6 +158,12 @@ struct TerminalViewIndex {
     removed_ids: BTreeSet<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct VisibleIdsUpdate {
+    changed: bool,
+    append_only: bool,
+}
+
 impl Default for TerminalViewIndex {
     fn default() -> Self {
         Self {
@@ -185,25 +191,33 @@ impl TerminalViewIndex {
         self.removed_ids.extend(ids);
     }
 
-    fn sync(&mut self, store: &TerminalStore, filter: TerminalViewFilter) {
+    fn sync(&mut self, store: &TerminalStore, filter: TerminalViewFilter) -> VisibleIdsUpdate {
         let query =
             crate::search::SearchQuery::new(&filter.search_text, filter.search_case_sensitive);
 
         if self.filter.as_ref() != Some(&filter) {
-            self.visible_ids = store
+            let next_visible_ids: Vec<u64> = store
                 .iter()
                 .filter(|item| terminal_item_matches(item, &filter, &query))
                 .map(TerminalItem::id)
                 .collect();
+            let visible_ids_changed = self.visible_ids != next_visible_ids;
+            self.visible_ids = next_visible_ids;
             self.filter = Some(filter);
             self.changed_ids.clear();
             self.removed_ids.clear();
-            return;
+            return VisibleIdsUpdate {
+                changed: visible_ids_changed,
+                append_only: false,
+            };
         }
 
+        let mut update = VisibleIdsUpdate::default();
         for id in std::mem::take(&mut self.removed_ids) {
             if let Ok(index) = self.visible_ids.binary_search(&id) {
                 self.visible_ids.remove(index);
+                update.changed = true;
+                update.append_only = false;
             }
         }
 
@@ -214,13 +228,23 @@ impl TerminalViewIndex {
             match self.visible_ids.binary_search(&id) {
                 Ok(index) if !should_be_visible => {
                     self.visible_ids.remove(index);
+                    update.changed = true;
+                    update.append_only = false;
                 }
                 Err(index) if should_be_visible => {
+                    let append_candidate = !update.changed || update.append_only;
                     self.visible_ids.insert(index, id);
+                    update.changed = true;
+                    if append_candidate && index == self.visible_ids.len() - 1 {
+                        update.append_only = true;
+                    } else {
+                        update.append_only = false;
+                    }
                 }
                 _ => {}
             }
         }
+        update
     }
 }
 
@@ -447,6 +471,7 @@ impl TerminalPanel {
         }
     }
 
+    #[cfg(test)]
     fn collect_visible_rows(&mut self) -> Vec<VisibleRow<'static>> {
         let filter = self.current_view_filter();
         self.view_index.sync(&self.store, filter);
@@ -712,11 +737,13 @@ impl TerminalPanel {
 
         let render_outcome = {
             // Store 已经按全局稳定 ID 排序，这里只做当前视图的筛选。
-            let rows = self.collect_visible_rows();
+            let filter = self.current_view_filter();
+            let visible_ids_update = self.view_index.sync(&self.store, filter);
+            let visible_ids = &self.view_index.visible_ids;
 
-            // 获取下帧跳转目标的 row 索引（现在是完整列表）
+            // 获取下帧跳转目标的 row 索引；实际行内容由视口渲染阶段按需构造。
             if let Some(target_id) = self.pending_navigate_to_id.take() {
-                scroll_to_row = rows.iter().position(|r| r.id == target_id);
+                scroll_to_row = visible_ids.iter().position(|id| *id == target_id);
                 // 跳转生效：设置目标行高亮（起始时间用 egui 时钟）。
                 self.navigate_highlight = Some((target_id, ui.ctx().input(|i| i.time)));
             }
@@ -733,7 +760,9 @@ impl TerminalPanel {
                 ui,
                 &scroll_key,
                 scroll_height,
-                &rows,
+                &self.store,
+                visible_ids,
+                visible_ids_update,
                 scroll_to_row,
                 self.show_hex,
                 self.show_raw,
@@ -1023,7 +1052,9 @@ fn render_rows_view(
     ui: &mut egui::Ui,
     scroll_key: &str,
     height: f32,
-    rows: &[VisibleRow<'_>],
+    store: &TerminalStore,
+    row_ids: &[u64],
+    visible_ids_update: VisibleIdsUpdate,
     scroll_to_row: Option<usize>,
     show_hex: bool,
     show_raw: bool,
@@ -1044,7 +1075,9 @@ fn render_rows_view(
     let height = height.max(40.0);
     let font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
     let row_height = ui.fonts_mut(|f| f.row_height(&font_id));
-    selection.sync_rows(rows.iter().map(|row| row.id));
+    if visible_ids_update.changed {
+        selection.sync_rows(row_ids.iter().copied());
+    }
 
     // 列宽随字体大小缩放（基准 13px）
     let scale = font_size / 13.0;
@@ -1054,7 +1087,8 @@ fn render_rows_view(
     let col_gap = COL_GAP * scale;
     let row_left_padding = ROW_LEFT_PADDING * scale;
 
-    if rows.is_empty() {
+    if row_ids.is_empty() {
+        virtual_rows.clear();
         let scroll_output = ScrollArea::vertical()
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
             .max_height(height)
@@ -1117,8 +1151,17 @@ fn render_rows_view(
                 content_width_px,
                 preview_width_px,
             );
-            let row_ids: Vec<u64> = rows.iter().map(|row| row.id).collect();
-            if virtual_rows.sync_ids(&row_ids, layout_key, row_height) {
+            let virtual_rows_changed = if visible_ids_update.append_only
+                && !virtual_rows.needs_sync(layout_key, row_height)
+            {
+                virtual_rows.append_ids(row_ids, layout_key, row_height)
+            } else if visible_ids_update.changed || virtual_rows.needs_sync(layout_key, row_height)
+            {
+                virtual_rows.sync_ids(row_ids, layout_key, row_height)
+            } else {
+                false
+            };
+            if virtual_rows_changed {
                 ui.ctx().request_repaint();
             }
             let total_height = virtual_rows.total_height().max(row_height);
@@ -1168,7 +1211,7 @@ fn render_rows_view(
             let base_range =
                 virtual_rows.visible_range(scroll_offset, viewport_rect.height(), row_height * 2.0);
             let text_selection_layout_range = if text_selection_rows.is_active() {
-                text_selection_rows.layout_range(rows.iter().map(|row| row.id))
+                text_selection_rows.layout_range(row_ids.iter().copied())
             } else {
                 None
             };
@@ -1182,7 +1225,7 @@ fn render_rows_view(
                 .map_or(base_range.end, |range| {
                     base_range.end.max(range.end().saturating_add(1))
                 });
-            let render_range = render_start..render_end.min(rows.len());
+            let render_range = render_start..render_end.min(row_ids.len());
             for row_idx in render_range.clone() {
                 hl.record_row_at(
                     row_idx,
@@ -1235,16 +1278,16 @@ fn render_rows_view(
             }
             if data_pressed
                 && let Some(index) = hovered_idx
-                && let Some(row) = rows.get(index)
+                && let Some(row_id) = row_ids.get(index)
             {
-                text_selection_rows.begin(row.id);
+                text_selection_rows.begin(*row_id);
             }
             if primary_down
                 && text_selection_rows.is_active()
                 && let Some(index) = hovered_idx
-                && let Some(row) = rows.get(index)
+                && let Some(row_id) = row_ids.get(index)
             {
-                text_selection_rows.update(row.id);
+                text_selection_rows.update(*row_id);
             }
             let mut scroll_delta: f32 = 0.0;
             let row_selection_started = selection.handle_input(
@@ -1264,10 +1307,16 @@ fn render_rows_view(
 
             let mut text_drag_response: Option<egui::Response> = None;
             for row_idx in render_range {
-                let row = &rows[row_idx];
+                let Some(row) = row_ids
+                    .get(row_idx)
+                    .and_then(|id| store.get(*id))
+                    .map(VisibleRow::from_item)
+                else {
+                    continue;
+                };
                 let current_y = label_rect.top() + virtual_rows.row_top(row_idx);
-                let content = visible_row_content(row, show_hex, show_raw);
-                let content = if terminal_live_line_count(row, show_hex, show_raw) > 0 {
+                let content = visible_row_content(&row, show_hex, show_raw);
+                let content = if terminal_live_line_count(&row, show_hex, show_raw) > 0 {
                     compact_live_tail_preview(
                         &content,
                         live_tail_max_chars(galley_width, glyph_width),
@@ -1296,7 +1345,7 @@ fn render_rows_view(
                     } else {
                         row.preview_text.to_string()
                     };
-                    let preview_text = if terminal_live_line_count(row, show_hex, show_raw) > 0 {
+                    let preview_text = if terminal_live_line_count(&row, show_hex, show_raw) > 0 {
                         compact_live_tail_preview(
                             &preview_text,
                             live_tail_max_chars(preview_galley_width, glyph_width),
@@ -1556,9 +1605,9 @@ fn render_rows_view(
             let mut pending_navigate: Option<u64> = None;
             if double_clicked
                 && let Some(idx) = frozen_row_idx.or_else(|| hl.hover_index(ui))
-                && let Some(row) = rows.get(idx)
+                && let Some(row_id) = row_ids.get(idx)
             {
-                pending_navigate = Some(row.id);
+                pending_navigate = Some(*row_id);
             }
             // 捕获到外层变量
             if pending_navigate.is_some() {
@@ -1580,16 +1629,20 @@ fn render_rows_view(
                 hl.hover_index(ui)
             }
             .and_then(|idx| {
-                rows.get(idx).map(|row| {
-                    let content_only = visible_row_content(row, show_hex, show_raw);
-                    let port = row.port.as_deref().unwrap_or("");
-                    let (dir_label, _) = direction_label(row.direction);
-                    let full_line = format!(
-                        "{} {} {} {}",
-                        row.timestamp_label, port, dir_label, content_only
-                    );
-                    (full_line, content_only)
-                })
+                row_ids
+                    .get(idx)
+                    .and_then(|id| store.get(*id))
+                    .map(VisibleRow::from_item)
+                    .map(|row| {
+                        let content_only = visible_row_content(&row, show_hex, show_raw);
+                        let port = row.port.as_deref().unwrap_or("");
+                        let (dir_label, _) = direction_label(row.direction);
+                        let full_line = format!(
+                            "{} {} {} {}",
+                            row.timestamp_label, port, dir_label, content_only
+                        );
+                        (full_line, content_only)
+                    })
             });
 
             // 框选范围文本（移入 context_menu 闭包内按需构造，避免菜单未打开时每帧构造）
@@ -1616,8 +1669,16 @@ fn render_rows_view(
                 && copy_requested
                 && owns_copy_focus(ui, COPY_OWNER)
                 && !ui.ctx().text_edit_focused()
-                && let Some(full) =
-                    build_selected_full_text(rows, &selected_indices, show_hex, show_raw)
+                && let Some(full) = {
+                    let selected_rows = visible_rows_for_indices(store, row_ids, &selected_indices);
+                    let selected_row_indices: Vec<usize> = (0..selected_rows.len()).collect();
+                    build_selected_full_text(
+                        &selected_rows,
+                        &selected_row_indices,
+                        show_hex,
+                        show_raw,
+                    )
+                }
             {
                 copy_text_with_feedback(
                     ui,
@@ -1652,7 +1713,15 @@ fn render_rows_view(
                 };
                 if bulk_copy_button(ctx_ui, "terminal-selected-full", full_label, target_count) {
                     let text = if selected_count > 0 {
-                        build_selected_full_text(rows, &selected_indices, show_hex, show_raw)
+                        let selected_rows =
+                            visible_rows_for_indices(store, row_ids, &selected_indices);
+                        let selected_row_indices: Vec<usize> = (0..selected_rows.len()).collect();
+                        build_selected_full_text(
+                            &selected_rows,
+                            &selected_row_indices,
+                            show_hex,
+                            show_raw,
+                        )
                     } else {
                         hovered_row.as_ref().map(|(full, _)| full.clone())
                     };
@@ -1673,7 +1742,15 @@ fn render_rows_view(
                 };
                 if bulk_copy_button(ctx_ui, "terminal-selected-data", data_label, target_count) {
                     let text = if selected_count > 0 {
-                        build_selected_data_text(rows, &selected_indices, show_hex, show_raw)
+                        let selected_rows =
+                            visible_rows_for_indices(store, row_ids, &selected_indices);
+                        let selected_row_indices: Vec<usize> = (0..selected_rows.len()).collect();
+                        build_selected_data_text(
+                            &selected_rows,
+                            &selected_row_indices,
+                            show_hex,
+                            show_raw,
+                        )
                     } else {
                         hovered_row.as_ref().map(|(_, data)| data.clone())
                     };
@@ -1693,9 +1770,11 @@ fn render_rows_view(
                 if bulk_copy_button(
                     ctx_ui,
                     "terminal-all-content",
-                    format!("复制全部可见内容（{} 行）", rows.len()),
-                    rows.len(),
+                    format!("复制全部可见内容（{} 行）", row_ids.len()),
+                    row_ids.len(),
                 ) {
+                    let all_indices: Vec<usize> = (0..row_ids.len()).collect();
+                    let rows = visible_rows_for_indices(store, row_ids, &all_indices);
                     let combined_text: String = rows
                         .iter()
                         .map(|row| visible_row_content(row, show_hex, show_raw))
@@ -1704,15 +1783,21 @@ fn render_rows_view(
                     copy_text_with_feedback(
                         ctx_ui,
                         combined_text,
-                        format!("已复制全部可见内容（{} 行）", rows.len()),
+                        format!("已复制全部可见内容（{} 行）", row_ids.len()),
                     );
                     ctx_ui.close();
                 }
 
-                if bulk_copy_button(ctx_ui, "terminal-all-csv", "复制全部可见为 CSV", rows.len())
-                {
+                if bulk_copy_button(
+                    ctx_ui,
+                    "terminal-all-csv",
+                    "复制全部可见为 CSV",
+                    row_ids.len(),
+                ) {
+                    let all_indices: Vec<usize> = (0..row_ids.len()).collect();
+                    let rows = visible_rows_for_indices(store, row_ids, &all_indices);
                     let csv = build_csv(
-                        rows,
+                        &rows,
                         show_hex,
                         show_raw,
                         show_timestamp || show_port || show_direction,
@@ -1720,7 +1805,7 @@ fn render_rows_view(
                     copy_text_with_feedback(
                         ctx_ui,
                         csv,
-                        format!("已复制 CSV（{} 行）", rows.len()),
+                        format!("已复制 CSV（{} 行）", row_ids.len()),
                     );
                     ctx_ui.close();
                 }
@@ -1729,10 +1814,12 @@ fn render_rows_view(
                     ctx_ui,
                     "terminal-all-jsonl",
                     "复制全部可见为 JSONL",
-                    rows.len(),
+                    row_ids.len(),
                 ) {
+                    let all_indices: Vec<usize> = (0..row_ids.len()).collect();
+                    let rows = visible_rows_for_indices(store, row_ids, &all_indices);
                     let jsonl = build_jsonl(
-                        rows,
+                        &rows,
                         show_hex,
                         show_raw,
                         show_timestamp,
@@ -1742,7 +1829,7 @@ fn render_rows_view(
                     copy_text_with_feedback(
                         ctx_ui,
                         jsonl,
-                        format!("已复制 JSONL（{} 行）", rows.len()),
+                        format!("已复制 JSONL（{} 行）", row_ids.len()),
                     );
                     ctx_ui.close();
                 }
@@ -1896,6 +1983,18 @@ fn entry_visible(direction: Direction, show_rx: bool, show_tx: bool) -> bool {
 }
 
 /// 构造选中行的完整文本（含时间戳、端口和方向）。
+fn visible_rows_for_indices(
+    store: &TerminalStore,
+    row_ids: &[u64],
+    indices: &[usize],
+) -> Vec<VisibleRow<'static>> {
+    indices
+        .iter()
+        .filter_map(|&index| row_ids.get(index).and_then(|id| store.get(*id)))
+        .map(VisibleRow::from_item)
+        .collect()
+}
+
 fn build_selected_full_text<'a>(
     rows: &[VisibleRow<'a>],
     selected_indices: &[usize],
@@ -2711,5 +2810,42 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].raw_text, "prefixtarget\n");
         assert!(!rows[0].live);
+    }
+
+    #[test]
+    fn view_index_marks_tail_growth_as_append_only() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+
+        for (timestamp, text) in [(1_000, b"first".as_slice()), (2_000, b"second".as_slice())] {
+            bus.publish(Event::with_timestamp(
+                timestamp,
+                serial_topics::SERIAL_RX,
+                "serial:COM10",
+                Direction::Rx,
+                Payload::Bytes(text.to_vec()),
+            ));
+            assert_eq!(panel.ingest_all_pending(), 1);
+            let _ = panel.collect_visible_rows();
+        }
+
+        let update = panel
+            .view_index
+            .sync(&panel.store, panel.current_view_filter());
+        assert!(!update.changed);
+
+        bus.publish(Event::with_timestamp(
+            3_000,
+            serial_topics::SERIAL_RX,
+            "serial:COM10",
+            Direction::Rx,
+            Payload::Bytes(b"third".to_vec()),
+        ));
+        assert_eq!(panel.ingest_all_pending(), 1);
+        let update = panel
+            .view_index
+            .sync(&panel.store, panel.current_view_filter());
+        assert!(update.changed);
+        assert!(update.append_only);
     }
 }
