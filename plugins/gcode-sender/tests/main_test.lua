@@ -5,6 +5,7 @@ end
 local callbacks = {}
 local current_task
 local writes = {}
+local control_writes = {}
 local config_values = { default_setup_gcode = "M92 X40 Y40 Z2.5 E7.53" }
 local file_contents = {}
 local followup_lines = {}
@@ -47,6 +48,9 @@ ctx = {
             return { open = true }
         end,
         flush_rx = function() end,
+        write_line = function(_, wire)
+            control_writes[#control_writes + 1] = wire
+        end,
         write_line_and_expect = function(_, wire, options)
             writes[#writes + 1] = wire
             ctx.last_expect_options = options
@@ -134,6 +138,7 @@ assert(config_values.default_setup_gcode == "", "legacy setup default must be mi
 local function reset()
     current_task = nil
     writes = {}
+    control_writes = {}
     config_values = {}
     file_contents = {}
     followup_lines = {}
@@ -162,7 +167,7 @@ local function send_file(path)
     })
 end
 
--- 已有行号/校验和会被移除，M110 会被跳过；默认不改写作业结尾。
+-- 已有行号/校验和会被移除，M110 会被跳过；已有 M30 时不追加 M2。
 reset()
 send_single("N42 G1 X1*99 ; old checksum\nM110 N0\nM30")
 assert(#writes == 3, "expected M110 sync plus two G-code lines")
@@ -174,30 +179,37 @@ reset()
 config_values.default_setup_gcode = "G21"
 file_contents["job.gcode"] = { "; comment", "G1 X1" }
 send_file("job.gcode")
-assert(#writes == 3, "expected sync, setup and file command")
+assert(#writes == 4, "expected sync, setup, file command and default M2")
 assert(writes[2]:match("^N1 G21%*"), writes[2])
 assert(writes[3]:match("^N2 G1 X1%*"), writes[3])
+assert(writes[4]:match("^N3 M2%*"), writes[4])
 
 reset()
 send_single("G1 X1")
-assert(#writes == 2, "default setup and M2 must both be empty/off")
+assert(#writes == 3, "M2 must be appended by default")
 
--- M2 只有显式启用时才追加。
+-- M2 可以显式关闭。
 reset()
-config_values.append_program_end = true
+config_values.append_program_end = false
 send_single("G1 X1")
-assert(#writes == 3, "expected sync, command and opt-in M2")
-assert(writes[3]:match("^N2 M2%*"), writes[3])
+assert(#writes == 2, "expected sync and command when M2 is disabled")
 
--- ACK 超时只执行配置数量的额外重试，不会无限循环。
+-- 可以跳过 N0 M110 N0，但仍保留后续行号和校验和。
 reset()
-config_values.max_retries = 2
+config_values.skip_line_number_sync = true
+send_single("G1 X1")
+assert(#writes == 2, "skip sync must send command and default M2 only")
+assert(writes[1]:match("^N1 G1 X1%*"), writes[1])
+assert(writes[2]:match("^N2 M2%*"), writes[2])
+
+-- ACK 超时直接停止，不重发，避免设备已执行但 ACK 丢失时重复执行命令。
+reset()
 responder = function(wire)
     if wire:match("^N0 M110") then return ok_response() end
     return { err = "timeout" }
 end
 send_single("G1 X1")
-assert(#writes == 4, "expected sync plus initial attempt and two retries")
+assert(#writes == 2, "timeout must not resend the command")
 assert(current_task.status == "ACK 超时，已停止", current_task.status)
 
 -- 等待 ACK 时取消应立即结束，不能被当作超时再次发送。
@@ -234,6 +246,7 @@ assert(current_task.status == "行号同步失败", current_task.status)
 -- Resend:N 能跳回指定行；末行 ACK 丢失后的 N+1 也视为设备已接收。
 reset()
 local requested_resend = false
+config_values.append_program_end = false
 responder = function(wire)
     if wire:match("^N0 M110") then return ok_response() end
     if wire:match("^N2 ") and not requested_resend then
@@ -246,6 +259,7 @@ send_single("G1 X1\nG1 X2")
 assert(#writes == 5, "expected sync, N1, N2, then N1/N2 resend")
 
 reset()
+config_values.append_program_end = false
 responder = function(wire, write_count)
     if wire:match("^N0 M110") then return ok_response() end
     if write_count == 2 then return result_response("resend", "Resend: N2") end
@@ -259,6 +273,7 @@ assert(current_task.status == "发送完成", current_task.status)
 reset()
 local first_command = true
 config_values.error_followup_ms = 100
+config_values.append_program_end = false
 followup_lines = { "(0.125)Resend: N1" }
 responder = function(wire)
     if wire:match("^N0 M110") then return ok_response() end
@@ -291,6 +306,7 @@ assert(serial_status_calls == 0, "busy task should be rejected before touching t
 -- omit_line_numbers：发送原始行（无 N 前缀、无 * 校验和），且跳过 M110 行号同步。
 reset()
 config_values.omit_line_numbers = true
+config_values.append_program_end = false
 send_single("G1 X1\nG1 X2")
 assert(#writes == 2, "omit mode must send raw lines without M110 sync")
 assert(writes[1] == "G1 X1", writes[1])
@@ -301,6 +317,7 @@ assert(current_task.status == "发送完成", current_task.status)
 reset()
 config_values.omit_line_numbers = true
 config_values.default_setup_gcode = "G21"
+config_values.append_program_end = false
 send_single("G1 X1")
 assert(#writes == 2, "omit mode must include setup line raw")
 assert(writes[1] == "G21", writes[1])
@@ -309,6 +326,7 @@ assert(writes[2] == "G1 X1", writes[2])
 -- omit 模式收到 resend 属于异常（无校验模式固件不会请求重传），应立即停止而非乱跳行。
 reset()
 config_values.omit_line_numbers = true
+config_values.append_program_end = false
 responder = function(wire)
     if wire == "G1 X1" then return result_response("resend", "Resend: N1") end
     return ok_response()
@@ -322,6 +340,7 @@ assert(current_task.status == "设备请求重传但未启用行号校验", curr
 -- 因此 mock 也返回 name="ok"，与真实宿主行为一致。
 reset()
 config_values.custom_success_patterns = "^done$\n# 注释行会被忽略\ncompleted"
+config_values.append_program_end = false
 responder = function(wire)
     if wire:match("^N0 M110") then return ok_response() end
     return result_response("ok", "done")
@@ -340,5 +359,51 @@ end
 send_single("G1 X1")
 assert(#writes == 2, "custom error pattern must stop the job")
 assert(current_task.status == "设备错误，已停止", current_task.status)
+
+-- 自定义运行中正则必须作为 continue 模式传给宿主，命中后只刷新超时，不完成当前行。
+reset()
+config_values.custom_running_patterns = "(?i)processing\\s+command"
+send_single("G1 X1")
+local running_pattern
+for _, pattern in ipairs(ctx.last_expect_options.patterns) do
+    if pattern.name == "running" then
+        running_pattern = pattern
+        break
+    end
+end
+assert(running_pattern, "custom running pattern must be registered")
+assert(running_pattern.pattern == "re:(?i)processing\\s+command")
+assert(running_pattern.action == "continue")
+
+-- 暂停指令直接发送原始内容，不走 G-code 清理、行号校验或 ACK 等待。
+reset()
+config_values.pause_gcode = "M25 ; raw pause\nM117 paused"
+local pause_requested = false
+responder = function(wire)
+    if wire:match("^N0 M110") and not pause_requested then
+        pause_requested = true
+        callbacks["gcode-sender.pause"]({})
+    end
+    return ok_response()
+end
+send_single("G1 X1")
+assert(#control_writes == 1, "pause must send one direct control payload")
+assert(control_writes[1] == "M25 ; raw pause\nM117 paused")
+
+-- 取消指令同样直接发送，随后取消任务。
+reset()
+config_values.cancel_gcode = "M524"
+local cancel_requested = false
+responder = function(wire)
+    if wire:match("^N1 ") and not cancel_requested then
+        cancel_requested = true
+        callbacks["gcode-sender.cancel"]({})
+    end
+    return ok_response()
+end
+send_single("G1 X1")
+assert(#control_writes == 1, "cancel must send one direct control payload")
+assert(control_writes[1] == "M524")
+assert(current_task.status == "已取消", current_task.status)
 
 print("gcode-sender tests passed")

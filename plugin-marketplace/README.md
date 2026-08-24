@@ -30,7 +30,7 @@ plugin-marketplace/
 # 在仓库根目录执行；SourcePath 默认是 plugins/<PluginId>
 .\plugin-marketplace\scripts\publish.ps1 `
     -PluginId gcode-sender `
-    -Version 0.4.0
+    -Version 0.7.0
 ```
 
 脚本会：

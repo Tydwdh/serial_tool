@@ -549,7 +549,7 @@ impl WorkbenchApp {
         }
     }
 
-    /// 渲染所有已启用插件的设置表单
+    /// 渲染所有已发现插件的设置表单
     fn render_plugin_settings(&mut self, ui: &mut egui::Ui) {
         let plugin_settings = self.workbench.plugin_manager.plugin_settings();
         if plugin_settings.is_empty() {

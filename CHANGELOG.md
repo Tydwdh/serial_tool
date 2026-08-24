@@ -4,6 +4,24 @@
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-08-25
+
+### 新增
+
+- G-code Sender 支持跳过 M110 行号同步，并可配置设备“运行中”匹配规则。
+- G-code Sender 支持配置暂停和取消时直接发送的原始串口指令。
+- 插件设置在插件被禁用时仍可编辑，重新启用后直接生效。
+
+### 调整
+
+- G-code Sender 默认在作业末尾追加 M2，并将 ACK 超时和设备重传处理调整为超时即停止，避免重复执行。
+- 插件管理页的启用、禁用操作改为明确的状态事件并持久化配置。
+- Windows 便携包使用系统自带 tar 生成 ZIP，避免压缩步骤在 CI 中卡住。
+
+### 修复
+
+- 修改插件或主题后，Windows 构建会重新同步运行时资源，避免安装包携带旧内容。
+
 ## [1.1.1] - 2026-08-25
 
 ### 修复
@@ -53,7 +71,8 @@
 - 支持左键拖选文本或跨行选择时继续使用滚轮滚动。
 - 修复设置导航、工具栏按钮和插件统计切换时的布局抖动。
 
-[Unreleased]: https://github.com/Tydwdh/serial_tool/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/Tydwdh/serial_tool/compare/v1.1.2...HEAD
+[1.1.2]: https://github.com/Tydwdh/serial_tool/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/Tydwdh/serial_tool/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/Tydwdh/serial_tool/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Tydwdh/serial_tool/compare/v0.7.3...v1.0.0

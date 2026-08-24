@@ -85,15 +85,15 @@ cargo clippy --all-targets -- -D warnings
 
 ```powershell
 # 编辑 Cargo.toml workspace.package.version
-# 例如: version = "1.1.1"
+# 例如: version = "1.1.2"
 # 同步更新 CHANGELOG.md 的版本与发布日期
-# 新增 docs/releases/v1.1.1.md，作为 GitHub Release 正文
+# 新增 docs/releases/v1.1.2.md，作为 GitHub Release 正文
 
 # 检查并提交全部已确认的发布准备变更
 git status --short
 git diff --check
 git add -A
-git commit -m "release: v1.1.1"
+git commit -m "release: v1.1.2"
 ```
 
 ### 3. 打包便携版
@@ -123,9 +123,9 @@ choco install innosetup
 ### 5. 打标签发布
 
 ```bash
-git tag -a v1.1.1 -m "v1.1.1"
+git tag -a v1.1.2 -m "v1.1.2"
 git push origin main
-git push origin v1.1.1
+git push origin v1.1.2
 ```
 
 ### 6. CI 自动流程
@@ -157,10 +157,10 @@ git push origin v1.1.1
 
 ```json
 {
-  "version": "1.1.1",
+  "version": "1.1.2",
   "date": "2026-08-25",
-  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v1.1.1/hardware-workbench-app.zip",
-  "changelog": ["将插件源码、市场索引和发布产物统一合并到主仓库维护。"]
+  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v1.1.2/hardware-workbench-app.zip",
+  "changelog": ["G-code Sender 支持可配置的暂停、取消和运行中状态处理。"]
 }
 ```
 

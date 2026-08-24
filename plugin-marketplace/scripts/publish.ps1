@@ -39,7 +39,7 @@
 
 .EXAMPLE
   .\plugin-marketplace\scripts\publish.ps1 `
-    -PluginId gcode-sender -Version 0.6.0
+    -PluginId gcode-sender -Version 0.7.0
 #>
 
 [CmdletBinding()]

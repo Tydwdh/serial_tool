@@ -1,5 +1,10 @@
 #[cfg(windows)]
 fn main() {
+    // 插件和主题不是 Rust 源码，但它们会被复制到 exe 旁边并在运行时加载。
+    // 声明目录依赖，避免只改 Lua/manifest 后 target/<profile>/plugins 仍停留在旧版本。
+    println!("cargo:rerun-if-changed=../../plugins");
+    println!("cargo:rerun-if-changed=../../assets/themes");
+
     let mut resource = winresource::WindowsResource::new();
     if let Some(rc_path) = find_rc_exe() {
         println!("cargo:rerun-if-env-changed=PATH");

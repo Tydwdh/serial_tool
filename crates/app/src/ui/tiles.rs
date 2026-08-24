@@ -69,6 +69,30 @@ impl WorkbenchApp {
                     };
                     self.set_status_force(level, message);
                 }
+                PluginPanelEvent::Enable(id) => match self.workbench.plugin_manager.enable(&id) {
+                    Ok(()) => {
+                        if let Err(error) = self.save_config() {
+                            log::warn!("save_config after enabling plugin failed: {error}");
+                        }
+                        self.set_status_force(StatusLevel::Info, format!("插件 {id} 已启用"));
+                    }
+                    Err(error) => self.set_status_force(
+                        StatusLevel::Error,
+                        format!("启用插件 {id} 失败：{error}"),
+                    ),
+                },
+                PluginPanelEvent::Disable(id) => match self.workbench.plugin_manager.disable(&id) {
+                    Ok(()) => {
+                        if let Err(error) = self.save_config() {
+                            log::warn!("save_config after disabling plugin failed: {error}");
+                        }
+                        self.set_status_force(StatusLevel::Info, format!("插件 {id} 正在禁用"));
+                    }
+                    Err(error) => self.set_status_force(
+                        StatusLevel::Error,
+                        format!("禁用插件 {id} 失败：{error}"),
+                    ),
+                },
                 PluginPanelEvent::RefreshMarket => self.start_marketplace_refresh(),
                 PluginPanelEvent::InstallPlugin(id) => {
                     match self.plugins_panel.find_market_plugin(&id) {

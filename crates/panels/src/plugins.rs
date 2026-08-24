@@ -31,6 +31,10 @@ pub enum PluginTab {
 pub enum PluginPanelEvent {
     /// 状态栏反馈（消息内容，是否错误）——兼容原 ui() 返回值语义。
     Status(String, bool),
+    /// 用户请求启用插件。
+    Enable(String),
+    /// 用户请求禁用插件。
+    Disable(String),
     /// 用户请求刷新市场索引。
     RefreshMarket,
     /// 用户请求安装/重装某个市场插件。
@@ -742,18 +746,12 @@ impl PluginsPanel {
                         if design::button(ui, ICON_TOGGLE_OFF, "禁用", ButtonKind::Secondary)
                             .clicked()
                         {
-                            return Some(PluginPanelEvent::Status(
-                                format!("disable:{}", summary.id),
-                                false,
-                            ));
+                            return Some(PluginPanelEvent::Disable(summary.id.clone()));
                         }
                     } else if design::button(ui, ICON_TOGGLE_ON, "启用", ButtonKind::Primary)
                         .clicked()
                     {
-                        return Some(PluginPanelEvent::Status(
-                            format!("enable:{}", summary.id),
-                            false,
-                        ));
+                        return Some(PluginPanelEvent::Enable(summary.id.clone()));
                     }
                     // 重启语义：Running/Enabled 先 disable 再 enable（走 pending_restart 队列等线程退出）；
                     // Disabled/Finished/Failed 已无运行时，直接 enable 即可重新拉起。
@@ -769,15 +767,9 @@ impl PluginsPanel {
                     {
                         if is_active {
                             self.pending_restart.push(summary.id.clone());
-                            return Some(PluginPanelEvent::Status(
-                                format!("disable:{}", summary.id),
-                                false,
-                            ));
+                            return Some(PluginPanelEvent::Disable(summary.id.clone()));
                         } else {
-                            return Some(PluginPanelEvent::Status(
-                                format!("enable:{}", summary.id),
-                                false,
-                            ));
+                            return Some(PluginPanelEvent::Enable(summary.id.clone()));
                         }
                     }
 

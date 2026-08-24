@@ -120,8 +120,8 @@ Windows PowerShell 5.1：
 
 ```powershell
 Set-Location <仓库目录>
-git tag -a v1.1.1 -m "v1.1.1"
-git push origin v1.1.1
+git tag -a v1.1.2 -m "v1.1.2"
+git push origin v1.1.2
 ```
 
 ## 安装位置

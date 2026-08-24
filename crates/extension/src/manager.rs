@@ -90,17 +90,13 @@ impl PluginManager {
         &self.config_store
     }
 
-    /// 返回所有已启用插件的设置定义：(plugin_id, plugin_name, settings)
+    /// 返回所有已发现插件的设置定义：(plugin_id, plugin_name, settings)
+    ///
+    /// 设置不依赖插件运行状态；这样禁用插件后仍然可以调整配置，重新启用时直接生效。
     pub fn plugin_settings(&self) -> Vec<(String, String, Vec<crate::manifest::PluginSetting>)> {
         self.records
             .iter()
-            .filter(|(_, record)| {
-                !record.manifest.contributes.settings.is_empty()
-                    && matches!(
-                        record.state,
-                        PluginState::Enabled | PluginState::Running | PluginState::Finished
-                    )
-            })
+            .filter(|(_, record)| !record.manifest.contributes.settings.is_empty())
             .map(|(id, record)| {
                 (
                     id.clone(),
