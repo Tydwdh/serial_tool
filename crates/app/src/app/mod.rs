@@ -13,7 +13,7 @@ use tool_panels::{
     DynamicPanels, LogPanel, PanelManager, PluginsPanel, ReplayPanel, TerminalPanel, theme,
 };
 
-use crate::bootstrap::{app_dir, apply_theme, setup_fonts};
+use crate::bootstrap::{apply_theme, setup_fonts, user_plugins_dir, user_themes_dir};
 use crate::ui::toast::ToastOverlay;
 
 // ── 数据结构 ──
@@ -178,7 +178,7 @@ impl WorkbenchApp {
                 (None, false, false)
             }
         };
-        let theme_dir = app_dir().join("themes");
+        let theme_dir = user_themes_dir();
         if let Err(error) = theme::ensure_theme_directory(&theme_dir) {
             log::warn!("initialize theme directory failed: {error}");
         }
@@ -241,7 +241,7 @@ impl WorkbenchApp {
         let workbench = {
             let mut w = Workbench::new(bus.clone());
             w.transport.set_repaint_waker(waker);
-            let plugin_dir = app_dir().join("plugins");
+            let plugin_dir = user_plugins_dir();
             tool_application::tool_marketplace::retire_old_plugin_dirs(&plugin_dir);
             if let Err(e) = w.plugin_manager.discover_roots([plugin_dir]) {
                 bus.publish(Event::system_log(

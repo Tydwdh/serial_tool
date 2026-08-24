@@ -1374,8 +1374,8 @@ pub fn translate_error(err: &TransportError) -> String {
             // 将常见的英文 serialport 错误转为中文，方便用户排查。
             let msg = e.to_string();
             let msg_lower = msg.to_ascii_lowercase();
-            if msg_lower.contains("access is denied") || msg_lower.contains("access denied") {
-                "串口被占用或无权限访问，请检查是否已被其他程序打开".to_owned()
+            if is_permission_denied(&msg_lower) {
+                serial_permission_message(&msg)
             } else if msg_lower.contains("device not found")
                 || msg_lower.contains("not found")
                 || msg_lower.contains("does not exist")
@@ -1387,6 +1387,9 @@ pub fn translate_error(err: &TransportError) -> String {
                 format!("串口错误：{msg}")
             }
         }
+        TransportError::Io(e) if is_permission_denied(&e.to_string().to_ascii_lowercase()) => {
+            serial_permission_message(&e.to_string())
+        }
         TransportError::Io(e) => match e.kind() {
             std::io::ErrorKind::WouldBlock => e.to_string(), // "正在关闭中" 等业务状态文案已含中文
             std::io::ErrorKind::TimedOut => format!("操作超时：{e}"),
@@ -1394,6 +1397,25 @@ pub fn translate_error(err: &TransportError) -> String {
             _ => format!("IO 错误：{e}"),
         },
     }
+}
+
+fn is_permission_denied(message: &str) -> bool {
+    message.contains("access is denied")
+        || message.contains("access denied")
+        || message.contains("permission denied")
+        || message.contains("operation not permitted")
+        || message.contains("os error 13")
+}
+
+fn serial_permission_message(detail: &str) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        return format!(
+            "当前用户没有串口访问权限：{detail}\n\nUbuntu 用户通常需要加入 dialout 用户组：\n\nsudo usermod -aG dialout $USER\n\n完成后请注销并重新登录。不要使用 sudo 启动 Hardware Workbench。"
+        );
+    }
+
+    format!("串口被占用或无权限访问：{detail}，请检查是否已被其他程序打开")
 }
 
 #[cfg(test)]
@@ -1470,6 +1492,18 @@ mod tests {
         assert!(!translate_error(&TransportError::WorkerClosed).is_empty());
         assert!(!translate_error(&TransportError::QueueFull).is_empty());
         assert!(translate_error(&TransportError::InvalidHex("bad".into())).contains("bad"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn translate_error_explains_linux_serial_group_permission() {
+        let error = TransportError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Permission denied (os error 13)",
+        ));
+        let message = translate_error(&error);
+        assert!(message.contains("dialout"));
+        assert!(message.contains("不要使用 sudo 启动 Hardware Workbench"));
     }
 
     #[test]

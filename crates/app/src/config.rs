@@ -1,3 +1,4 @@
+use crate::bootstrap::{user_data_dir, user_logs_dir};
 use crate::state::LineEnding;
 use std::path::{Path, PathBuf};
 use tool_application::tool_core::{
@@ -291,7 +292,22 @@ pub(crate) fn record_mode_label(mode: RecordMode) -> &'static str {
 }
 
 pub(crate) fn default_recorder_path() -> String {
-    format!("logs/session-{}.jsonl", now_timestamp_ms())
+    user_logs_dir()
+        .join(format!("session-{}.jsonl", now_timestamp_ms()))
+        .display()
+        .to_string()
+}
+
+/// 将旧配置中的相对录制路径解析到用户可写目录。
+///
+/// 旧版本保存的是 `logs/session-*.jsonl`。在 Linux `.deb` 安装中，进程
+/// 可能从只读的系统目录启动，因此不能再把相对路径交给录制器。
+pub(crate) fn resolve_recorder_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        user_data_dir().join(path)
+    }
 }
 
 // ── WorkbenchApp 配置持久化方法 ──

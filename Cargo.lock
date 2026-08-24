@@ -1803,7 +1803,7 @@ dependencies = [
 
 [[package]]
 name = "hardware-workbench-app"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "crossbeam-channel",
  "dirs-next",
@@ -4542,7 +4542,7 @@ checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
 
 [[package]]
 name = "tool-application"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "crossbeam-channel",
  "log",
@@ -4562,7 +4562,7 @@ dependencies = [
 
 [[package]]
 name = "tool-core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "log",
  "serde",
@@ -4571,7 +4571,7 @@ dependencies = [
 
 [[package]]
 name = "tool-databus"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "crossbeam-channel",
  "parking_lot",
@@ -4582,7 +4582,7 @@ dependencies = [
 
 [[package]]
 name = "tool-extension"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "crossbeam-channel",
  "dirs-next",
@@ -4599,7 +4599,7 @@ dependencies = [
 
 [[package]]
 name = "tool-lua-host"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "crossbeam-channel",
  "log",
@@ -4617,7 +4617,7 @@ dependencies = [
 
 [[package]]
 name = "tool-marketplace"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "log",
  "serde",
@@ -4628,7 +4628,7 @@ dependencies = [
 
 [[package]]
 name = "tool-panels"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "egui",
@@ -4647,7 +4647,7 @@ dependencies = [
 
 [[package]]
 name = "tool-recorder"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "crossbeam-channel",
  "log",
@@ -4660,7 +4660,7 @@ dependencies = [
 
 [[package]]
 name = "tool-testing"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4670,7 +4670,7 @@ dependencies = [
 
 [[package]]
 name = "tool-transport"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "crossbeam-channel",
  "parking_lot",
@@ -4686,7 +4686,7 @@ dependencies = [
 
 [[package]]
 name = "tool-updater"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "dirs-next",
  "log",

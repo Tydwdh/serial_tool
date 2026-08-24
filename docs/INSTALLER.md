@@ -4,6 +4,54 @@
 
 - Portable zip：由 `package.bat` 生成，解压即可运行。
 - Windows installer：由 Inno Setup 脚本生成，适合正式发布给普通用户。
+- Ubuntu 22.04+ `.deb`：由 `installer/linux/build-deb.sh` 生成，安装后从应用菜单直接运行。
+
+## 生成 Ubuntu `.deb`
+
+Ubuntu V1 目标为 x86_64（Debian 架构名 `amd64`）。在 Ubuntu 或其它带有
+`dpkg-deb` 的 Debian 系统上执行：
+
+```bash
+bash ./installer/linux/build-deb.sh
+```
+
+输出文件：
+
+```text
+dist/hardware-workbench_<version>_amd64.deb
+```
+
+安装阶段需要系统管理员权限，这是一次性的系统安装权限：
+
+```bash
+sudo apt install ./dist/hardware-workbench_<version>_amd64.deb
+```
+
+安装完成后，应用菜单会出现 `Hardware Workbench`，也可以执行：
+
+```bash
+hardware-workbench-app
+```
+
+这两个启动方式都以当前普通用户运行，不要使用 `sudo hardware-workbench-app`。
+程序、插件、主题和默认录制文件的用户可写数据分别位于：
+
+```text
+~/.config/HardwareWorkbench/
+~/.local/share/HardwareWorkbench/
+```
+
+### 串口权限
+
+如果打开 `/dev/ttyUSB0` 或 `/dev/ttyACM0` 时提示 `Permission denied`，应用会给出
+Ubuntu 的标准处理方式：
+
+```bash
+sudo usermod -aG dialout $USER
+```
+
+执行后注销并重新登录即可。`.deb` 不会把所有串口设备开放给所有用户，也不会自动
+修改 `dialout` 或安装宽泛的 udev 规则。
 
 ## 生成便携包
 
@@ -72,8 +120,8 @@ Windows PowerShell 5.1：
 
 ```powershell
 Set-Location <仓库目录>
-git tag -a v1.0.0 -m "v1.0.0"
-git push origin v1.0.0
+git tag -a v1.1.0 -m "v1.1.0"
+git push origin v1.1.0
 ```
 
 ## 安装位置

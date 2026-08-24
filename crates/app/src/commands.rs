@@ -1,12 +1,12 @@
 use crate::app::WorkbenchApp;
+use crate::config::resolve_recorder_path;
 use crate::state::PendingReconnect;
 use crate::state::StatusLevel;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 use std::time::Duration;
 use tool_application::tool_core::now_timestamp_ms;
 use tool_application::tool_transport::{
-    SerialConfig, parse_data_bits, parse_parity, parse_stop_bits,
+    SerialConfig, parse_data_bits, parse_parity, parse_stop_bits, translate_error,
 };
 use tool_panels::TerminalExportFormat;
 
@@ -141,13 +141,6 @@ impl WorkbenchApp {
     pub(crate) fn cmd_send_if_ready(&mut self) {
         if self.send_target_port_open() && !self.send.input.trim().is_empty() {
             self.do_send();
-        }
-    }
-
-    /// `$AddBookmark`：录制中时添加标记点。
-    pub(crate) fn cmd_add_bookmark_if_recording(&mut self) {
-        if self.workbench.recorder.is_running() {
-            self.workbench.recorder.add_bookmark("");
         }
     }
 
@@ -338,8 +331,10 @@ impl WorkbenchApp {
                                     self.set_status_force(
                                         StatusLevel::Warn,
                                         format!(
-                                            "自动重连 {} 失败 (第 {} 次): {e}",
-                                            pending.port_name, pending.attempts
+                                            "自动重连 {} 失败 (第 {} 次): {}",
+                                            pending.port_name,
+                                            pending.attempts,
+                                            translate_error(&e),
                                         ),
                                     );
                                     self.serial.pending_reconnect = Some(pending);
@@ -481,7 +476,7 @@ impl WorkbenchApp {
         self.workbench
             .transport
             .open_serial(cfg)
-            .map_err(|e| e.to_string())
+            .map_err(|e| translate_error(&e))
     }
 
     /// 真正重连：先关闭端口并等待 worker 退出，再用当前配置重新打开。
@@ -519,11 +514,8 @@ impl WorkbenchApp {
             self.workbench.recorder.stop();
             self.set_status_force(StatusLevel::Info, "正在停止录制...");
         } else {
-            match self
-                .workbench
-                .recorder
-                .start(PathBuf::from(&self.recorder_path))
-            {
+            let recorder_path = resolve_recorder_path(std::path::Path::new(&self.recorder_path));
+            match self.workbench.recorder.start(recorder_path) {
                 Ok(()) => {
                     self.set_status_force(StatusLevel::Info, "录制中");
                 }

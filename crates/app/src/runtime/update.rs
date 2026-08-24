@@ -5,6 +5,12 @@ use std::sync::Arc;
 impl WorkbenchApp {
     /// 自动更新调度：启动检查、收割结果、启动下载、收割下载、处理重启。
     pub(super) fn tick_update(&mut self) {
+        #[cfg(not(target_os = "linux"))]
+        self.tick_update_desktop();
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn tick_update_desktop(&mut self) {
         // 从 Arc 读取下载进度
         if let Some(ref progress_arc) = self.update_state.download_progress_arc {
             let raw = progress_arc.load(std::sync::atomic::Ordering::Relaxed);

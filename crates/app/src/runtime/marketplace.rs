@@ -1,5 +1,5 @@
 use crate::app::WorkbenchApp;
-use crate::bootstrap::app_dir;
+use crate::bootstrap::user_plugins_dir;
 use crate::state::StatusLevel;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -174,7 +174,7 @@ impl WorkbenchApp {
 
         self.plugins_panel.mark_installing(&id);
 
-        let install_dir = app_dir().join("plugins");
+        let install_dir = user_plugins_dir();
         let network = tool_updater::NetworkSettings::with_proxy(
             (!self.network_proxy_url.trim().is_empty()).then(|| self.network_proxy_url.clone()),
         );
@@ -213,7 +213,7 @@ impl WorkbenchApp {
 
     /// 重新扫描插件目录（安装成功后调用）。
     fn refresh_plugin_discovery(&mut self) {
-        let plugin_dir = app_dir().join("plugins");
+        let plugin_dir = user_plugins_dir();
         if let Err(e) = self.workbench.plugin_manager.discover_roots([plugin_dir]) {
             self.log(LogLevel::Warn, format!("安装后重新扫描插件失败：{e}"));
         }
@@ -228,7 +228,7 @@ impl WorkbenchApp {
     /// 3. discover_roots：refresh 会因目录不存在而移除该插件 record。
     /// 4. PluginManager 请求宿主清理该插件关联的面板和文件授权。
     pub(crate) fn uninstall_plugin(&mut self, plugin_id: &str) {
-        let plugin_dir = app_dir().join("plugins");
+        let plugin_dir = user_plugins_dir();
 
         // 1. 先 disable（若活跃）
         let was_active = matches!(

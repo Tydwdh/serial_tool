@@ -92,10 +92,56 @@ jobs:
             dist/HardwareWorkbenchSetup.exe
             dist/SHA256SUMS.txt
 
+  linux-deb:
+    name: Ubuntu .deb
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.92.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgl1-mesa-dev \
+            libssl-dev \
+            libudev-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxkbcommon-dev \
+            pkg-config
+
+      - name: Build Ubuntu package
+        run: bash ./installer/linux/build-deb.sh
+
+      - name: Verify Debian package metadata
+        run: |
+          deb="$(find dist -maxdepth 1 -type f -name 'hardware-workbench_*.deb' -print -quit)"
+          test -n "$deb"
+          dpkg-deb --info "$deb"
+
+      - name: Generate Linux checksum
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          deb="$(find dist -maxdepth 1 -type f -name 'hardware-workbench_*.deb' -print -quit)"
+          sha256sum "$deb" | sed 's#dist/##' > dist/SHA256SUMS-linux.txt
+
+      - name: Upload Linux artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardware-workbench-linux
+          path: |
+            dist/hardware-workbench_*.deb
+            dist/SHA256SUMS-linux.txt
+
   release:
     name: GitHub Release
     runs-on: windows-latest
-    needs: test
+    needs: [test, linux-deb]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
@@ -108,6 +154,10 @@ jobs:
         with:
           name: hardware-workbench-windows
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: hardware-workbench-linux
+
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
@@ -116,7 +166,9 @@ jobs:
           files: |
             hardware-workbench-app.zip
             HardwareWorkbenchSetup.exe
+            hardware-workbench_*_amd64.deb
             SHA256SUMS.txt
+            SHA256SUMS-linux.txt
           generate_release_notes: true
 
       - name: Checkout default branch for updater manifest

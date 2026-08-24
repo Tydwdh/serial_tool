@@ -170,13 +170,13 @@ fn render_plugins(app: &mut WorkbenchApp, ui: &mut egui::Ui) {
         .inner;
     // pending_restart 需经 Workbench 重试（原 Panel 内直接 manager.enable(...) 已去业务）
     for id in app.plugins_panel.take_pending_restart() {
-        if let Err(e) = app.workbench.plugin_manager.enable(&id) {
-            if matches!(
+        if let Err(e) = app.workbench.plugin_manager.enable(&id)
+            && matches!(
                 e,
                 tool_application::tool_extension::ExtensionError::Stopping(_)
-            ) {
-                app.plugins_panel.push_pending_restart(id);
-            }
+            )
+        {
+            app.plugins_panel.push_pending_restart(id);
         }
     }
     app.handle_plugin_panel_events(events);

@@ -23,6 +23,37 @@ pub fn app_dir() -> PathBuf {
         })
 }
 
+/// 用户可写的应用数据目录。
+///
+/// Ubuntu 的 `.deb` 会把程序安装到 `/usr/lib/hardware-workbench`，该目录
+/// 只应存放只读资源。插件、主题和录制文件必须放在当前用户的数据目录，
+/// 这样从应用菜单启动时不需要 root 权限。
+pub fn user_data_dir() -> PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        dirs_next::data_dir()
+            .map(|dir| dir.join("HardwareWorkbench"))
+            .unwrap_or_else(app_dir)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // 保持便携包和 Windows 安装器的既有目录行为。
+        app_dir()
+    }
+}
+
+pub fn user_plugins_dir() -> PathBuf {
+    user_data_dir().join("plugins")
+}
+
+pub fn user_themes_dir() -> PathBuf {
+    user_data_dir().join("themes")
+}
+
+pub fn user_logs_dir() -> PathBuf {
+    user_data_dir().join("logs")
+}
+
 pub fn setup_fonts(cc: &eframe::CreationContext<'_>) {
     let dir = app_dir();
 

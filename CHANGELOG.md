@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-25
+
+### 新增
+
+- 提供 Ubuntu 22.04+ x86_64 `.deb` 安装包，安装后可从应用菜单以普通用户运行。
+- Linux 用户数据写入用户目录，并为串口权限不足提供 `dialout` 引导；应用本身不要求使用 `sudo` 启动。
+- 在 CI 中加入 Ubuntu 构建、Debian 包元数据检查和 SHA-256 校验文件生成。
+
+### 调整
+
+- 建立 UI 无关的 application core 和 DTO 驱动的界面边界，降低前端与业务实现的耦合。
+- 重构终端流存储，虚拟化行布局并延迟生成终端行，降低大数据量场景的渲染开销。
+- Linux 发行版不显示面向 Windows 便携包的应用内更新入口，改由 `.deb` 发布包升级。
+
 ## [1.0.0] - 2026-08-02
 
 ### 新增
@@ -25,5 +39,6 @@
 - 支持左键拖选文本或跨行选择时继续使用滚轮滚动。
 - 修复设置导航、工具栏按钮和插件统计切换时的布局抖动。
 
-[Unreleased]: https://github.com/Tydwdh/serial_tool/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/Tydwdh/serial_tool/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/Tydwdh/serial_tool/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Tydwdh/serial_tool/compare/v0.7.3...v1.0.0

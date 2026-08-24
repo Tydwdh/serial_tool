@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Hardware Workbench
+Comment=Hardware serial debugging workbench
+Exec=hardware-workbench-app
+TryExec=hardware-workbench-app
+Icon=hardware-workbench
+Terminal=false
+Categories=Development;Electronics;
+StartupWMClass=hardware-workbench

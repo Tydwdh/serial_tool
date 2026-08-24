@@ -687,6 +687,7 @@ impl WorkbenchApp {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_port_status_controls(
     ui: &mut egui::Ui,
     name: &str,

@@ -85,15 +85,15 @@ cargo clippy --all-targets -- -D warnings
 
 ```powershell
 # 编辑 Cargo.toml workspace.package.version
-# 例如: version = "1.0.0"
+# 例如: version = "1.1.0"
 # 同步更新 CHANGELOG.md 的版本与发布日期
-# 新增 docs/releases/v1.0.0.md，作为 GitHub Release 正文
+# 新增 docs/releases/v1.1.0.md，作为 GitHub Release 正文
 
 # 检查并提交全部已确认的发布准备变更
 git status --short
 git diff --check
 git add -A
-git commit -m "release: v1.0.0"
+git commit -m "release: v1.1.0"
 ```
 
 ### 3. 打包便携版
@@ -123,9 +123,9 @@ choco install innosetup
 ### 5. 打标签发布
 
 ```bash
-git tag -a v1.0.0 -m "v1.0.0"
+git tag -a v1.1.0 -m "v1.1.0"
 git push origin main
-git push origin v1.0.0
+git push origin v1.1.0
 ```
 
 ### 6. CI 自动流程
@@ -136,9 +136,10 @@ git push origin v1.0.0
 2. **Release check** — 标签必须与 Cargo 版本一致，并存在同名发布说明
 3. **Package** — `package.bat` 生成便携版 zip
 4. **Installer** — 安装 Inno Setup, 构建 `HardwareWorkbenchSetup.exe`
-5. **Checksums** — 生成 `SHA256SUMS.txt`
-6. **Release** — 上传便携包、安装器和校验文件，以 `docs/releases/<tag>.md` 为正文并附加提交记录
-7. **update.json** — 从 CHANGELOG 提取本版条目，生成 `update.json` 并推回 `main` 分支
+5. **Ubuntu .deb** — 在 Ubuntu 22.04 上构建 amd64 `.deb`，检查包元数据并生成 Linux 校验文件
+6. **Checksums** — 生成 `SHA256SUMS.txt` 和 `SHA256SUMS-linux.txt`
+7. **Release** — 上传便携包、安装器、`.deb` 和校验文件，以 `docs/releases/<tag>.md` 为正文并附加提交记录
+8. **update.json** — 从 CHANGELOG 提取本版条目，生成 Windows 便携包更新清单并推回 `main` 分支；Ubuntu 用户通过 `.deb` 升级
 
 ### 7. 发布插件（如有插件变更）
 
@@ -156,14 +157,15 @@ git push origin v1.0.0
 
 ```json
 {
-  "version": "1.0.0",
-  "date": "2026-08-02",
-  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v1.0.0/hardware-workbench-app.zip",
+  "version": "1.1.0",
+  "date": "2026-08-25",
+  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v1.1.0/hardware-workbench-app.zip",
   "changelog": ["将插件源码、市场索引和发布产物统一合并到主仓库维护。"]
 }
 ```
 
 应用启动时检查 `https://raw.githubusercontent.com/Tydwdh/serial_tool/main/update.json`，发现新版本后通过内置 updater 自动下载、SHA256 校验、替换 exe。
+该更新流程用于 Windows 便携版；Ubuntu `.deb` 用户请下载新版本 `.deb` 后用系统包管理器升级。
 
 ## 配置文件
 
@@ -176,8 +178,8 @@ git push origin v1.0.0
 ### 插件目录
 
 - 开发期: `plugins/` 目录（通过 `build.rs` 同步到 `target/`）
-- 安装期: 跟随 exe 的 `plugins/` 目录
-- 市场安装: `app_dir()/plugins/`
+- Windows 便携/安装期: 跟随 exe 的 `plugins/` 目录
+- Ubuntu `.deb` 市场安装: `~/.local/share/HardwareWorkbench/plugins/`
 
 ### 插件清单
 

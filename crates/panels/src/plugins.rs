@@ -327,7 +327,7 @@ impl PluginsPanel {
                 if plugin_column_count(ui.available_width()) == 2 {
                     let card_width =
                         ((ui.available_width() - TWO_COLUMN_CARD_GAP) / 2.0).max(320.0);
-                    let mut summaries = summaries.into_iter();
+                    let mut summaries = summaries.iter();
                     while let Some(left) = summaries.next() {
                         let right = summaries.next();
                         ui.horizontal_top(|ui| {

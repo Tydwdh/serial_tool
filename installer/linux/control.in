@@ -1,0 +1,10 @@
+Package: hardware-workbench
+Version: @VERSION@
+Section: electronics
+Priority: optional
+Architecture: @ARCH@
+Maintainer: Tydwdh <tydwdh@users.noreply.github.com>
+Depends: libgl1, libudev1, libx11-6, libxkbcommon0, libwayland-client0
+Description: Hardware Workbench serial debugging tool
+ Hardware serial debugging workbench with terminal, recording, replay,
+ visualization and Lua plugin support.

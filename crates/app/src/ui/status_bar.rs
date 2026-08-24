@@ -298,6 +298,13 @@ impl WorkbenchApp {
 
     /// 更新图标（靠右对齐）。
     fn draw_update_status(&mut self, ui: &mut egui::Ui) {
+        #[cfg(target_os = "linux")]
+        {
+            let _ = ui;
+            return;
+        }
+
+        #[cfg(not(target_os = "linux"))]
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             self.draw_update_icon(ui);
         });

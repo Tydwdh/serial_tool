@@ -29,7 +29,9 @@
 
 所有快捷键均可在设置面板中自定义。`StartRecording`、`ReconnectPort`、`AddBookmark` 默认未绑定，可手动设置。
 
-应用运行时从可执行文件同级的 `assets\`、`themes\` 和 `plugins\` 目录加载资源；用户配置写入系统配置目录。
+应用运行时从可执行文件同级的 `assets\` 目录加载只读资源；用户配置写入系统配置目录。
+Ubuntu `.deb` 安装中，插件、主题和录制文件写入当前用户的
+`~/.local/share/HardwareWorkbench/`，不会写入 `/usr/lib`。
 
 ## 配置
 
@@ -74,6 +76,7 @@ cargo build -p hardware-workbench-app
 
 - **Portable zip**：解压后直接运行，适合临时调试和免安装使用。
 - **Windows installer**：安装 Inno Setup 6 后执行 `installer\build-installer.ps1`；安装器使用同一 Rust 便携输出。
+- **Ubuntu `.deb`**：在 Ubuntu/Debian 环境执行 `installer/linux/build-deb.sh`，支持 Ubuntu 22.04+ x86_64。
 
 发布包默认不预装个人脚本或测试脚本。应用会创建空的 `plugins\` 目录，用户可从插件市场安装或手动放入 `plugins\<plugin-id>\`。源码仓库中的模板插件仅用于开发参考，不作为默认启用功能。
 
@@ -107,7 +110,7 @@ installer/       Windows 安装器配置
 ## 发布与变更
 
 - [变更记录](CHANGELOG.md)
-- [v1.0.0 发布说明](docs/releases/v1.0.0.md)
+- [v1.1.0 发布说明](docs/releases/v1.1.0.md)
 - [发布流程](docs/RELEASE.md)
 - [安装器说明](docs/INSTALLER.md)
 

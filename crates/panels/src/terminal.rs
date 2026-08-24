@@ -151,6 +151,7 @@ struct TerminalViewFilter {
     show_raw: bool,
 }
 
+#[derive(Default)]
 struct TerminalViewIndex {
     visible_ids: Vec<u64>,
     filter: Option<TerminalViewFilter>,
@@ -162,17 +163,6 @@ struct TerminalViewIndex {
 struct VisibleIdsUpdate {
     changed: bool,
     append_only: bool,
-}
-
-impl Default for TerminalViewIndex {
-    fn default() -> Self {
-        Self {
-            visible_ids: Vec::new(),
-            filter: None,
-            changed_ids: BTreeSet::new(),
-            removed_ids: BTreeSet::new(),
-        }
-    }
 }
 
 impl TerminalViewIndex {
@@ -235,11 +225,7 @@ impl TerminalViewIndex {
                     let append_candidate = !update.changed || update.append_only;
                     self.visible_ids.insert(index, id);
                     update.changed = true;
-                    if append_candidate && index == self.visible_ids.len() - 1 {
-                        update.append_only = true;
-                    } else {
-                        update.append_only = false;
-                    }
+                    update.append_only = append_candidate && index == self.visible_ids.len() - 1;
                 }
                 _ => {}
             }

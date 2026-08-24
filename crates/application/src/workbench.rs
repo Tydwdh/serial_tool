@@ -459,10 +459,7 @@ impl Workbench {
     }
 
     fn refresh_ports(&mut self) {
-        let available = match self.transport.list_serial_ports() {
-            Ok(v) => v,
-            Err(_) => Vec::new(),
-        };
+        let available = self.transport.list_serial_ports().unwrap_or_default();
         let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for p in available {
             seen.insert(p.port_name.clone());
