@@ -73,7 +73,7 @@ for %%P in (template.hello template.serial-chart template.file-tool) do (
 mkdir "%OUT_DIR%\logs" >nul 2>nul
 
 echo [4/5] Creating zip...
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Compress-Archive -Path '%OUT_DIR%' -DestinationPath '%ZIP_PATH%' -Force"
+tar.exe -a -c -f "%ZIP_PATH%" -C "%OUT_ROOT%" "%NAME%"
 if %ERRORLEVEL% neq 0 (
     echo Failed to create zip
     exit /b %ERRORLEVEL%
