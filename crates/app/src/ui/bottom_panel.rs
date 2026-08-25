@@ -37,7 +37,7 @@ pub(crate) enum SendLayout {
 impl WorkbenchApp {
     /// 确保 send.target_port 指向一个已打开的端口（自动回退逻辑）。
     pub(crate) fn ensure_send_target_port(&mut self) {
-        let open_ports = self.workbench.transport.open_ports();
+        let open_ports = self.workbench.open_port_names();
 
         if self
             .send
@@ -49,7 +49,7 @@ impl WorkbenchApp {
                 .serial
                 .selected_port
                 .clone()
-                .filter(|p| self.workbench.transport.status_port(p).open)
+                .filter(|p| self.workbench.transport_status(p).open)
                 .or_else(|| open_ports.first().cloned());
         }
     }
@@ -58,11 +58,11 @@ impl WorkbenchApp {
         self.send
             .target_port
             .as_deref()
-            .is_some_and(|p| self.workbench.transport.status_port(p).open)
+            .is_some_and(|p| self.workbench.transport_status(p).open)
     }
 
     pub(super) fn send_target_port_combo(&mut self, ui: &mut egui::Ui, id_salt: &'static str) {
-        let open_ports: Vec<String> = self.workbench.transport.open_ports();
+        let open_ports: Vec<String> = self.workbench.open_port_names();
 
         egui::ComboBox::from_id_salt(id_salt)
             .width(130.0)
@@ -464,7 +464,7 @@ impl WorkbenchApp {
         // HEX 模式下实时检查输入是否可解析（严格模式 vs 宽松模式）。
         let input_trim = self.send.input.trim();
         let hex_error = if self.send.hex_mode && !input_trim.is_empty() {
-            match tool_application::tool_transport::parse_hex(input_trim) {
+            match tool_application::api::transport::parse_hex(input_trim) {
                 Ok(_) => None,
                 Err(e) => Some(e.to_string()),
             }
@@ -554,7 +554,7 @@ impl WorkbenchApp {
                     .small(),
             )
             .on_hover_text(if is_err {
-                match tool_application::tool_transport::parse_hex(self.send.input.trim()) {
+                match tool_application::api::transport::parse_hex(self.send.input.trim()) {
                     Ok(_) => String::new(),
                     Err(e) => format!("HEX 解析失败: {e}"),
                 }
@@ -581,13 +581,13 @@ impl WorkbenchApp {
             .target_port
             .clone()
             .expect("target_port was checked non-None above");
-        let open = self.workbench.transport.status_port(&port).open;
+        let open = self.workbench.transport_status(&port).open;
 
         ui.add_enabled_ui(open, |ui| {
             let mut dtr = self.send.dtr_high;
             let dtr_resp = ui.checkbox(&mut dtr, "DTR");
             if dtr_resp.changed() {
-                match self.workbench.transport.set_dtr(&port, dtr) {
+                match self.workbench.set_dtr(&port, dtr) {
                     Ok(()) => self.send.dtr_high = dtr,
                     Err(e) => self.set_status_force(StatusLevel::Error, e.to_string()),
                 }
@@ -599,7 +599,7 @@ impl WorkbenchApp {
             let mut rts = self.send.rts_high;
             let rts_resp = ui.checkbox(&mut rts, "RTS");
             if rts_resp.changed() {
-                match self.workbench.transport.set_rts(&port, rts) {
+                match self.workbench.set_rts(&port, rts) {
                     Ok(()) => self.send.rts_high = rts,
                     Err(e) => self.set_status_force(StatusLevel::Error, e.to_string()),
                 }
@@ -617,16 +617,17 @@ impl WorkbenchApp {
             self.send.error = Some("请选择发送目标串口".into());
             return;
         };
-        self.send.error = send_impl_to(
-            port,
-            &self.send.input,
-            self.send.hex_mode,
-            self.send.line_ending.suffix(),
-            self.send.hex_strict,
-            &self.workbench.transport,
-        )
-        .err()
-        .map(|e| translate_error(&e));
+        self.send.error = self
+            .workbench
+            .send_input(
+                port,
+                &self.send.input,
+                self.send.hex_mode,
+                self.send.line_ending.suffix(),
+                self.send.hex_strict,
+            )
+            .err()
+            .map(|e| e.to_string());
 
         if self.send.error.is_none() && !self.send.input.trim().is_empty() {
             let text = self.send.input.clone();
@@ -932,7 +933,7 @@ impl WorkbenchApp {
     }
 }
 
-use tool_application::tool_transport::{hex_preview, send_impl_to, translate_error};
+use tool_application::api::transport::hex_preview;
 
 #[cfg(test)]
 mod tests {

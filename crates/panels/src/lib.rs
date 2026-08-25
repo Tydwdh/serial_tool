@@ -31,7 +31,7 @@ pub use dynamic::{
     parse_fields,
 };
 pub use gauge::GaugePanel;
-pub use log::LogPanel;
+pub use log::{LogExportJob, LogPanel};
 pub use manager::{
     DockArea, DockLayout, DockStack, PANEL_BUILTIN, PANEL_DEVICES, PANEL_LOGS, PANEL_PLUGINS,
     PANEL_REPLAY, PANEL_SENDER, PANEL_SETTINGS, PANEL_TERMINAL, PanelId, PanelManager, TilesLayout,
@@ -42,7 +42,7 @@ pub use replay::ReplayPanel;
 pub use replay_view::{ReplayUiCommand, ReplayView};
 pub use search::SearchQuery;
 pub use table::{RowSelection, copy_text_with_feedback, take_copy_feedback};
-pub use terminal::{TerminalExportFormat, TerminalPanel};
+pub use terminal::{TerminalExportFormat, TerminalExportJob, TerminalPanel};
 
 /// 将毫秒时间戳格式化为本地时间 HH:MM:SS.mmm
 pub fn fmt_ts(ms: u64) -> String {

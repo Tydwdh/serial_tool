@@ -69,7 +69,7 @@ impl WorkbenchApp {
                     };
                     self.set_status_force(level, message);
                 }
-                PluginPanelEvent::Enable(id) => match self.workbench.plugin_manager.enable(&id) {
+                PluginPanelEvent::Enable(id) => match self.workbench.enable_plugin(&id) {
                     Ok(()) => {
                         if let Err(error) = self.save_config() {
                             log::warn!("save_config after enabling plugin failed: {error}");
@@ -81,7 +81,7 @@ impl WorkbenchApp {
                         format!("启用插件 {id} 失败：{error}"),
                     ),
                 },
-                PluginPanelEvent::Disable(id) => match self.workbench.plugin_manager.disable(&id) {
+                PluginPanelEvent::Disable(id) => match self.workbench.disable_plugin(&id) {
                     Ok(()) => {
                         if let Err(error) = self.save_config() {
                             log::warn!("save_config after disabling plugin failed: {error}");

@@ -6,7 +6,7 @@ use egui_material_icons::icons::{
     ICON_CHECK_CIRCLE, ICON_CLOUD_DOWNLOAD, ICON_ERROR, ICON_NOTIFICATIONS, ICON_REFRESH,
     ICON_SYSTEM_UPDATE, ICON_WARNING,
 };
-use tool_application::tool_transport::TransportStatus;
+use tool_application::query::TransportStatusView;
 use tool_panels::{design, theme};
 
 impl WorkbenchApp {
@@ -15,8 +15,8 @@ impl WorkbenchApp {
             .serial
             .selected_port
             .as_deref()
-            .map(|p| self.workbench.transport.status_port(p))
-            .unwrap_or_else(TransportStatus::closed);
+            .map(|p| self.workbench.transport_status(p))
+            .unwrap_or_else(TransportStatusView::closed);
         ui.horizontal(|ui| {
             // 串口状态
             let (dot_color, label) =
@@ -50,9 +50,9 @@ impl WorkbenchApp {
             design::status_pill(ui, dot_color, label);
 
             // 录制状态
-            let rec = self.workbench.recorder.is_running();
+            let rec = self.workbench.recording_is_running();
             let recording_label = if rec {
-                let stats = self.workbench.recorder.stats();
+                let stats = self.workbench.query_recording().stats;
                 if stats.paused {
                     format!(
                         "已暂停 {} 条 {:.1}MB",
@@ -79,7 +79,7 @@ impl WorkbenchApp {
                 recording_label,
             );
             if rec {
-                let stats = self.workbench.recorder.stats();
+                let stats = self.workbench.query_recording().stats;
                 if let Some(ref err) = stats.last_error {
                     ui.colored_label(theme::red(), format!("错误: {err}"));
                 }
@@ -129,7 +129,7 @@ impl WorkbenchApp {
                         "数据终端就绪 (DTR)。点击切换会立即驱动该线路，部分设备会用它触发复位/进入 bootload，请谨慎。",
                     ) {
                         let new_dtr = !self.send.dtr_high;
-                        match self.workbench.transport.set_dtr(&port, new_dtr) {
+                        match self.workbench.set_dtr(&port, new_dtr) {
                             Ok(()) => self.send.dtr_high = new_dtr,
                             Err(e) => self.set_status_force(StatusLevel::Error, e.to_string()),
                         }
@@ -142,7 +142,7 @@ impl WorkbenchApp {
                         "请求发送 (RTS)。点击切换会立即驱动该线路，部分设备会用它触发复位/进入 bootload，请谨慎。",
                     ) {
                         let new_rts = !self.send.rts_high;
-                        match self.workbench.transport.set_rts(&port, new_rts) {
+                        match self.workbench.set_rts(&port, new_rts) {
                             Ok(()) => self.send.rts_high = new_rts,
                             Err(e) => self.set_status_force(StatusLevel::Error, e.to_string()),
                         }

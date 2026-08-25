@@ -1,12 +1,12 @@
 use crate::bootstrap::{user_data_dir, user_logs_dir};
 use crate::state::LineEnding;
 use std::path::{Path, PathBuf};
-use tool_application::tool_core::{
+use tool_application::api::core::{
     config::{CURRENT_SCHEMA_VERSION, atomic_write_json, quarantine_corrupt_file},
     now_timestamp_ms,
 };
-use tool_application::tool_recorder::RecordMode;
-use tool_application::tool_transport::NetworkSerialConfig;
+use tool_application::query::NetworkPortConfig;
+use tool_application::query::RecordModeView;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -78,7 +78,7 @@ pub(crate) struct PersistedConfig {
     pub(crate) network_proxy_url: Option<String>,
     /// 网络模拟串口列表（WebSocket + JSON-RPC gcode 桥，Nexus Prime 等 Klipper 服务器）。
     #[serde(default)]
-    pub(crate) network_ports: Vec<NetworkSerialConfig>,
+    pub(crate) network_ports: Vec<NetworkPortConfig>,
 }
 
 fn default_terminal_merge_window_ms() -> u64 {
@@ -284,10 +284,10 @@ pub(crate) fn ensure_jsonl_extension(mut path: PathBuf) -> PathBuf {
 
     path
 }
-pub(crate) fn record_mode_label(mode: RecordMode) -> &'static str {
+pub(crate) fn record_mode_label(mode: RecordModeView) -> &'static str {
     match mode {
-        RecordMode::StandardReplay => "标准回放",
-        RecordMode::RawSerial => "原始串口",
+        RecordModeView::StandardReplay => "标准回放",
+        RecordModeView::RawSerial => "原始串口",
     }
 }
 
@@ -332,14 +332,14 @@ impl WorkbenchApp {
             recorder_path: self.recorder_path.clone(),
             enabled_plugins: self
                 .workbench
-                .plugin_manager
-                .summaries()
+                .query_plugins()
+                .summaries
                 .into_iter()
                 .filter(|s| {
                     matches!(
                         s.state,
-                        tool_application::tool_extension::PluginState::Enabled
-                            | tool_application::tool_extension::PluginState::Running
+                        tool_application::api::extension::PluginState::Enabled
+                            | tool_application::api::extension::PluginState::Running
                     )
                 })
                 .map(|s| s.id)
@@ -427,7 +427,7 @@ impl WorkbenchApp {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use tool_application::tool_recorder::RecordMode;
+    use tool_application::query::RecordModeView;
 
     fn legacy_workspace_json() -> String {
         serde_json::json!({
@@ -501,7 +501,7 @@ mod tests {
 
     #[test]
     fn record_mode_label_all_variants_non_empty() {
-        let modes = [RecordMode::StandardReplay, RecordMode::RawSerial];
+        let modes = [RecordModeView::StandardReplay, RecordModeView::RawSerial];
         for mode in &modes {
             let label = record_mode_label(*mode);
             assert!(!label.is_empty(), "label for {mode:?} should not be empty");
@@ -510,12 +510,15 @@ mod tests {
 
     #[test]
     fn record_mode_label_standard_replay() {
-        assert_eq!(record_mode_label(RecordMode::StandardReplay), "标准回放");
+        assert_eq!(
+            record_mode_label(RecordModeView::StandardReplay),
+            "标准回放"
+        );
     }
 
     #[test]
     fn record_mode_label_raw_serial() {
-        assert_eq!(record_mode_label(RecordMode::RawSerial), "原始串口");
+        assert_eq!(record_mode_label(RecordModeView::RawSerial), "原始串口");
     }
 
     // ── default_recorder_path ──

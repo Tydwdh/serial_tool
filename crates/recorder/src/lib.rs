@@ -14,5 +14,6 @@ pub mod replay;
 pub use format::RecordMode;
 pub use recorder::{JsonlRecorder, RecorderStats};
 pub use replay::{
-    ReplayBlockReason, ReplayLoadReport, ReplayManager, ReplayPolicy, ReplayState, ReplayStatus,
+    ReplayBlockReason, ReplayLoadData, ReplayLoadReport, ReplayManager, ReplayPolicy, ReplayState,
+    ReplayStatus,
 };

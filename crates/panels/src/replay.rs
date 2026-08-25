@@ -6,7 +6,7 @@ use egui_material_icons::icons::{
     ICON_FOLDER_OPEN, ICON_PAUSE, ICON_PLAY_ARROW, ICON_REPLAY, ICON_SKIP_NEXT, ICON_SKIP_PREVIOUS,
     ICON_STOP, ICON_TUNE, ICON_UPLOAD_FILE,
 };
-use tool_application::tool_recorder::{
+use tool_application::api::recorder::{
     ReplayBlockReason, ReplayManager, ReplayPolicy, ReplayState,
 };
 use tool_databus::DataBus;
@@ -372,7 +372,7 @@ impl ReplayPanel {
     fn playback_controls(
         &mut self,
         ui: &mut egui::Ui,
-        status: &tool_application::tool_recorder::ReplayStatus,
+        status: &tool_application::api::recorder::ReplayStatus,
     ) {
         let has_events = status.total_events > 0;
         let can_play = self.manager.can_play();
@@ -540,7 +540,7 @@ impl ReplayPanel {
     fn progress_bar(
         &mut self,
         ui: &mut egui::Ui,
-        status: &tool_application::tool_recorder::ReplayStatus,
+        status: &tool_application::api::recorder::ReplayStatus,
     ) {
         let progress = if status.duration_ms == 0 {
             0.0
@@ -587,7 +587,7 @@ impl ReplayPanel {
     fn bookmark_controls(
         &mut self,
         ui: &mut egui::Ui,
-        status: &tool_application::tool_recorder::ReplayStatus,
+        status: &tool_application::api::recorder::ReplayStatus,
     ) {
         let bookmarks = self.manager.bookmarks().to_vec();
         if bookmarks.is_empty() && status.total_events == 0 {
@@ -626,7 +626,7 @@ impl ReplayPanel {
     fn status_line(
         &mut self,
         ui: &mut egui::Ui,
-        status: &tool_application::tool_recorder::ReplayStatus,
+        status: &tool_application::api::recorder::ReplayStatus,
     ) {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(state_label(status.state)).color(state_color(status.state)));

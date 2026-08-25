@@ -8,11 +8,11 @@ use crate::theme;
 use egui::{Color32, ComboBox, DragValue, ProgressBar, RichText, Slider, TextEdit};
 use serde_json::Value;
 use tool_core::{Direction, Event, Payload, topics};
-use tool_databus::DataBus;
+use tool_databus::EventPublisher;
 
-pub fn dynamic_form_ui(
+pub fn dynamic_form_ui<P: EventPublisher>(
     ui: &mut egui::Ui,
-    bus: &DataBus,
+    bus: &P,
     panel_id: &str,
     fields: &mut [DynamicField],
     auto_apply: bool,
@@ -81,7 +81,7 @@ pub fn dynamic_form_ui(
                     for (id, val) in &field_values {
                         values.insert(id.clone(), val.clone());
                     }
-                    bus.publish(Event::new(
+                    bus.publish_event(Event::new(
                         topics::UI_FORM_ACTION,
                         format!("ui.panel:{panel_id}"),
                         Direction::Internal,
@@ -183,7 +183,7 @@ pub fn dynamic_form_ui(
                         format!("完整路径: {path}")
                     });
                     if ui.add_enabled(enabled, egui::Button::new("浏览")).clicked() {
-                        bus.publish(Event::new(
+                        bus.publish_event(Event::new(
                             topics::UI_FORM_FILE_BROWSE,
                             format!("ui.panel:{panel_id}"),
                             Direction::Internal,
@@ -375,7 +375,11 @@ pub fn dynamic_form_ui(
     }
 }
 
-pub(super) fn publish_form_changed(bus: &DataBus, panel_id: &str, fields: &[DynamicField]) {
+pub(super) fn publish_form_changed<P: EventPublisher>(
+    bus: &P,
+    panel_id: &str,
+    fields: &[DynamicField],
+) {
     let mut values = serde_json::Map::new();
 
     for field in fields {
@@ -393,7 +397,7 @@ pub(super) fn publish_form_changed(bus: &DataBus, panel_id: &str, fields: &[Dyna
         values.insert(field.id.clone(), field.value.clone());
     }
 
-    bus.publish(Event::new(
+    bus.publish_event(Event::new(
         topics::UI_FORM_CHANGED,
         format!("ui.panel:{panel_id}"),
         Direction::Internal,

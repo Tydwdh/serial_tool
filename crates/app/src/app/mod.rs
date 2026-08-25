@@ -4,10 +4,8 @@ use crate::config::{
 use crate::state::{MAX_SEND_HISTORY, NotificationQueue, SendUiState, SerialUiState, UpdateState};
 use eframe::egui;
 use std::collections::VecDeque;
-use std::sync::Arc;
-use tool_application::tool_core::{Event, LogLevel};
-use tool_application::tool_databus::DataBus;
-use tool_application::tool_lua_host::{DialogRequest, FileAccessBroker};
+use tool_application::api::core::{Event, LogLevel};
+use tool_application::api::databus::DataBus;
 use tool_application::{ApplicationConfig, Workbench};
 use tool_panels::{
     DynamicPanels, LogPanel, PanelManager, PluginsPanel, ReplayPanel, TerminalPanel, theme,
@@ -35,11 +33,7 @@ pub(crate) struct WorkbenchApp {
     /// `egui_tiles` 的拖拽、选中和尺寸变更尚未写入配置。
     pub(crate) layout_dirty: bool,
     pub(crate) last_auto_save_time: f64,
-    pub(crate) file_broker: Arc<FileAccessBroker>,
-    pub(crate) dialog_receiver: crossbeam_channel::Receiver<DialogRequest>,
-    pub(crate) file_browse_subscription: tool_application::tool_databus::Subscription,
-    pub(crate) contribution_set_value_subscription: tool_application::tool_databus::Subscription,
-    pub(crate) ui_set_status_subscription: tool_application::tool_databus::Subscription,
+    pub(crate) ui_events: tool_application::UiEventSubscriptions,
     pub(crate) replay_analyzer: crate::replay_task::ReplayAnalyzerState,
     /// 周期发送后台线程控制状态。
     pub(crate) periodic_send: crate::runtime::periodic_send::PeriodicSendState,
@@ -63,7 +57,7 @@ pub(crate) struct WorkbenchApp {
     /// 在 top_bar/status_bar/bottom_panel 每帧共 5+ 次重复全量 clone manifest + 命令对账。
     /// 在 tick_pre_ui 开头 take() 重置。
     pub(crate) plugin_summaries_cache:
-        std::cell::OnceCell<Vec<tool_application::tool_extension::PluginSummary>>,
+        std::cell::OnceCell<Vec<tool_application::api::extension::PluginSummary>>,
     /// 等宽字体大小（终端/日志区），默认 13.0
     pub(crate) monospace_font_size: f32,
     /// 当前主题的运行时风格（由已选 JSON 文件推导）。
@@ -127,7 +121,7 @@ impl WorkbenchApp {
         let bus = DataBus::new();
         // waker 注入需在 Workbench 创建前准备好闭包，创建后立即注入
         let ctx_strong = cc.egui_ctx.clone();
-        let waker: std::sync::Arc<dyn tool_application::tool_transport::RepaintWaker> =
+        let waker: std::sync::Arc<dyn tool_application::api::transport::RepaintWaker> =
             std::sync::Arc::new(move || {
                 if !ctx_strong.has_requested_repaint() {
                     ctx_strong.request_repaint();
@@ -240,16 +234,9 @@ impl WorkbenchApp {
 
         let workbench = {
             let mut w = Workbench::new(bus.clone());
-            w.transport.set_repaint_waker(waker);
+            w.set_transport_repaint_waker(waker);
             let plugin_dir = user_plugins_dir();
-            tool_application::tool_marketplace::retire_old_plugin_dirs(&plugin_dir);
-            if let Err(e) = w.plugin_manager.discover_roots([plugin_dir]) {
-                bus.publish(Event::system_log(
-                    LogLevel::Error,
-                    "ext",
-                    format!("插件发现失败：{e}"),
-                ));
-            }
+            tool_application::api::marketplace::retire_old_plugin_dirs(&plugin_dir);
             if let Some(cfg) = config.as_ref() {
                 let ac = ApplicationConfig {
                     selected_port: cfg.selected_port.clone(),
@@ -270,10 +257,13 @@ impl WorkbenchApp {
                 };
                 w = w.with_config(ac);
             }
+            // 初始插件扫描也走统一后台任务，避免启动阶段在 UI 线程读 manifest。
+            let _ = w.dispatch(tool_application::AppCommand::DiscoverPlugins {
+                roots: vec![plugin_dir],
+            });
             w
         };
-        let file_broker = workbench.file_broker();
-        let dialog_receiver = workbench.dialog_receiver().clone();
+        let ui_events = workbench.subscribe_ui_events();
         let mut app = Self {
             workbench,
             terminal_panel: TerminalPanel::new(&bus),
@@ -338,23 +328,7 @@ impl WorkbenchApp {
             send,
             layout_dirty: false,
             last_auto_save_time: 0.0,
-            file_broker,
-            dialog_receiver,
-            file_browse_subscription: bus.subscribe(
-                tool_application::tool_databus::TopicFilter::exact(
-                    tool_application::tool_core::topics::UI_FORM_FILE_BROWSE,
-                ),
-            ),
-            contribution_set_value_subscription: bus.subscribe(
-                tool_application::tool_databus::TopicFilter::exact(
-                    tool_application::tool_core::topics::UI_CONTRIBUTION_SET_VALUE,
-                ),
-            ),
-            ui_set_status_subscription: bus.subscribe(
-                tool_application::tool_databus::TopicFilter::exact(
-                    tool_application::tool_core::topics::UI_SET_STATUS,
-                ),
-            ),
+            ui_events,
             replay_analyzer: Default::default(),
             periodic_send: Default::default(),
             keymap: config
@@ -392,15 +366,6 @@ impl WorkbenchApp {
             app.bottom_log_panel.set_max_entries(c.log_max_entries);
         }
         app.refresh_ports();
-        let enabled: Vec<String> = config
-            .as_ref()
-            .map(|c| c.enabled_plugins.clone())
-            .unwrap_or_default();
-        for id in &enabled {
-            if let Err(e) = app.workbench.plugin_manager.enable(id) {
-                app.log(LogLevel::Warn, format!("restore plugin {id}: {e}"));
-            }
-        }
         let should_persist_config = !config_write_protected
             && (config_migrated
                 || theme_recovered
@@ -413,9 +378,7 @@ impl WorkbenchApp {
     }
 
     pub(crate) fn log(&self, lv: LogLevel, m: impl Into<String>) {
-        self.workbench
-            .bus
-            .publish(Event::system_log(lv, "app", m.into()));
+        self.workbench.log(lv, m);
     }
 
     /// 帧级缓存的插件 summaries。
@@ -428,9 +391,9 @@ impl WorkbenchApp {
     /// 注意：返回的是 `&[PluginSummary]` 借用，调用方不能在此引用存活期间
     /// 再 `&mut self`。需要 `&mut self` 的逻辑应先把需要的字段 clone 出来
     /// 或在循环外处理。
-    pub(crate) fn plugin_summaries(&self) -> &[tool_application::tool_extension::PluginSummary] {
+    pub(crate) fn plugin_summaries(&self) -> &[tool_application::api::extension::PluginSummary] {
         self.plugin_summaries_cache
-            .get_or_init(|| self.workbench.plugin_manager.summaries())
+            .get_or_init(|| self.workbench.query_plugins().summaries)
     }
 }
 
@@ -440,8 +403,8 @@ impl Drop for WorkbenchApp {
         if let Err(e) = self.save_config() {
             log::warn!("save_config failed: {e}")
         };
-        self.workbench.recorder.stop();
-        self.workbench.close_all_serial();
+        self.workbench.stop_recording();
+        self.workbench.shutdown_serial();
     }
 }
 

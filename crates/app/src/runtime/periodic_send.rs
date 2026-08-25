@@ -3,7 +3,6 @@ use crate::runtime::timing::wait_until_deadline;
 use crate::state::StatusLevel;
 use eframe::egui;
 use std::sync::{Arc, Mutex};
-use tool_application::tool_transport::send_impl_to;
 
 /// 周期发送后台线程的控制状态。
 pub(crate) struct PeriodicSendState {
@@ -82,9 +81,9 @@ impl WorkbenchApp {
         let hex_mode = self.send.hex_mode;
         let line_ending = self.send.line_ending;
         let hex_strict = self.send.hex_strict;
-        let transport = self.workbench.transport_clone();
+        let transport = self.workbench.transport_endpoint();
         let max_count = self.send.periodic_max_count;
-        let bus = self.workbench.bus.clone();
+        let event_sink = self.workbench.event_sink();
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let outcome = self.periodic_send.outcome.clone();
         let interval = std::time::Duration::from_secs_f64(interval_ms / 1000.0);
@@ -105,22 +104,15 @@ impl WorkbenchApp {
                 }
 
                 // 恰好到期，发送
-                let err = send_impl_to(
-                    &port,
-                    &input,
-                    hex_mode,
-                    line_ending.suffix(),
-                    hex_strict,
-                    &transport,
-                )
-                .err()
-                .map(|e| tool_application::tool_transport::translate_error(&e));
+                let err = transport
+                    .send(&port, &input, hex_mode, line_ending.suffix(), hex_strict)
+                    .err();
 
                 if let Some(e) = err {
                     cancel.store(true, std::sync::atomic::Ordering::Release);
                     let msg = format!("周期发送已在第 {count} 次后停止：{e}");
-                    bus.publish(tool_application::tool_core::Event::system_log(
-                        tool_application::tool_core::LogLevel::Error,
+                    event_sink.publish(tool_application::api::core::Event::system_log(
+                        tool_application::api::core::LogLevel::Error,
                         "periodic",
                         msg.clone(),
                     ));
@@ -136,8 +128,8 @@ impl WorkbenchApp {
                 {
                     cancel.store(true, std::sync::atomic::Ordering::Release);
                     let msg = format!("周期发送已完成（{max} 次）");
-                    bus.publish(tool_application::tool_core::Event::system_log(
-                        tool_application::tool_core::LogLevel::Info,
+                    event_sink.publish(tool_application::api::core::Event::system_log(
+                        tool_application::api::core::LogLevel::Info,
                         "periodic",
                         msg.clone(),
                     ));

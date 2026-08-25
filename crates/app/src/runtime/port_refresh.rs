@@ -28,7 +28,7 @@ impl WorkbenchApp {
             return;
         }
 
-        let status = self.workbench.transport.status_port(&pending.port_name);
+        let status = self.workbench.transport_status(&pending.port_name);
         if status.open {
             self.serial.pending_open_notice = None;
             self.set_status_force(crate::state::StatusLevel::Info, pending.success_message);

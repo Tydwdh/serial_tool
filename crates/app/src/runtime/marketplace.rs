@@ -3,8 +3,8 @@ use crate::bootstrap::user_plugins_dir;
 use crate::state::StatusLevel;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tool_application::tool_core::LogLevel;
-use tool_application::tool_marketplace::{RegistryFetch, RegistryPlugin};
+use tool_application::api::core::LogLevel;
+use tool_application::api::marketplace::{RegistryFetch, RegistryPlugin};
 
 /// 市场索引 + 安装任务的运行时状态。
 pub(crate) struct MarketplaceState {
@@ -49,12 +49,8 @@ impl Drop for MarketplaceInstallJob {
 impl WorkbenchApp {
     /// 每帧把已发现的插件 id 集合回填给市场 UI，用于显示「已安装」标记。
     pub(super) fn sync_marketplace_installed_ids(&mut self) {
-        let ids: std::collections::BTreeSet<String> = self
-            .workbench
-            .plugin_manager
-            .plugin_ids()
-            .into_iter()
-            .collect();
+        let ids: std::collections::BTreeSet<String> =
+            self.workbench.plugin_ids().into_iter().collect();
         self.plugins_panel.set_installed_ids(ids);
     }
 
@@ -134,7 +130,7 @@ impl WorkbenchApp {
         self.plugins_panel.set_market_refreshing(true);
         let url =
             self.marketplace.url.clone().unwrap_or_else(|| {
-                tool_application::tool_marketplace::DEFAULT_REGISTRY_URL.to_owned()
+                tool_application::api::marketplace::DEFAULT_REGISTRY_URL.to_owned()
             });
         let network = tool_updater::NetworkSettings::with_proxy(
             (!self.network_proxy_url.trim().is_empty()).then(|| self.network_proxy_url.clone()),
@@ -146,7 +142,7 @@ impl WorkbenchApp {
                 .build()
                 .map_err(|e| format!("创建 tokio runtime 失败：{e}"))?;
             rt.block_on(async {
-                tool_application::tool_marketplace::fetch_registry(&url, &network).await
+                tool_application::api::marketplace::fetch_registry(&url, &network).await
             })
         }));
     }
@@ -162,12 +158,12 @@ impl WorkbenchApp {
         // 重装场景：若该插件已启用/运行，先 disable，避免 Windows 下旧文件被占用
         // 导致替换失败，也保证重装后用户重新启用才加载新代码。
         let was_active = matches!(
-            self.workbench.plugin_manager.plugin_state(&id),
-            Some(tool_application::tool_extension::PluginState::Running)
-                | Some(tool_application::tool_extension::PluginState::Enabled)
-                | Some(tool_application::tool_extension::PluginState::Finished)
+            self.workbench.plugin_state(&id),
+            Some(tool_application::api::extension::PluginState::Running)
+                | Some(tool_application::api::extension::PluginState::Enabled)
+                | Some(tool_application::api::extension::PluginState::Finished)
         );
-        if was_active && let Err(e) = self.workbench.plugin_manager.disable(&id) {
+        if was_active && let Err(e) = self.workbench.disable_plugin(&id) {
             log::warn!("marketplace: 重装前禁用 {id} 失败（继续安装）：{e}");
         }
         // disable 后的动态面板/资源由 PluginManager 统一请求宿主回收。
@@ -187,7 +183,7 @@ impl WorkbenchApp {
                 .build()
                 .map_err(|e| format!("创建 tokio runtime 失败：{e}"))?;
             rt.block_on(async {
-                tool_application::tool_marketplace::install_plugin(
+                tool_application::api::marketplace::install_plugin(
                     &entry,
                     &install_dir,
                     &network,
@@ -214,8 +210,13 @@ impl WorkbenchApp {
     /// 重新扫描插件目录（安装成功后调用）。
     fn refresh_plugin_discovery(&mut self) {
         let plugin_dir = user_plugins_dir();
-        if let Err(e) = self.workbench.plugin_manager.discover_roots([plugin_dir]) {
-            self.log(LogLevel::Warn, format!("安装后重新扫描插件失败：{e}"));
+        if let Err(error) = self
+            .workbench
+            .dispatch(tool_application::AppCommand::DiscoverPlugins {
+                roots: vec![plugin_dir],
+            })
+        {
+            self.log(LogLevel::Warn, format!("安装后重新扫描插件失败：{error}"));
         }
     }
 
@@ -232,13 +233,13 @@ impl WorkbenchApp {
 
         // 1. 先 disable（若活跃）
         let was_active = matches!(
-            self.workbench.plugin_manager.plugin_state(plugin_id),
-            Some(tool_application::tool_extension::PluginState::Running)
-                | Some(tool_application::tool_extension::PluginState::Enabled)
-                | Some(tool_application::tool_extension::PluginState::Finished)
-                | Some(tool_application::tool_extension::PluginState::Failed)
+            self.workbench.plugin_state(plugin_id),
+            Some(tool_application::api::extension::PluginState::Running)
+                | Some(tool_application::api::extension::PluginState::Enabled)
+                | Some(tool_application::api::extension::PluginState::Finished)
+                | Some(tool_application::api::extension::PluginState::Failed)
         );
-        if was_active && let Err(e) = self.workbench.plugin_manager.disable(plugin_id) {
+        if was_active && let Err(e) = self.workbench.disable_plugin(plugin_id) {
             log::warn!("marketplace: 卸载前禁用 {plugin_id} 失败（继续卸载）：{e}");
         }
 
@@ -268,8 +269,13 @@ impl WorkbenchApp {
         }
 
         // 3. 重新扫描：refresh 会移除已不存在的插件 record
-        if let Err(e) = self.workbench.plugin_manager.discover_roots([plugin_dir]) {
-            self.log(LogLevel::Warn, format!("卸载后重新扫描插件失败：{e}"));
+        if let Err(error) = self
+            .workbench
+            .dispatch(tool_application::AppCommand::DiscoverPlugins {
+                roots: vec![plugin_dir],
+            })
+        {
+            self.log(LogLevel::Warn, format!("卸载后重新扫描插件失败：{error}"));
         }
 
         self.set_status(StatusLevel::Info, format!("插件 {plugin_id} 已卸载"));

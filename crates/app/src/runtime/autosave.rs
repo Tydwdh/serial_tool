@@ -16,14 +16,14 @@ impl WorkbenchApp {
 
     /// 录制状态检测：收割已停止的录制、worker 线程错误反馈。
     pub(super) fn tick_recorder_status(&mut self) {
-        match self.workbench.recorder.reap_stopping() {
+        match self.workbench.reap_recording_stop() {
             Some(Ok(path)) => {
                 self.set_status_force(StatusLevel::Info, format!("录制已保存: {}", path.display()))
             }
             Some(Err(e)) => self.set_status_force(StatusLevel::Error, format!("录制失败: {e}")),
             None => {}
         }
-        if let Some(error) = self.workbench.recorder.reap_error() {
+        if let Some(error) = self.workbench.reap_recording_error() {
             self.set_status(StatusLevel::Error, format!("录制失败：{error}"));
         }
     }

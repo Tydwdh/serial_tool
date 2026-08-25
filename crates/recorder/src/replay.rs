@@ -46,6 +46,17 @@ pub struct ReplayLoadReport {
     pub first_errors: Vec<String>,
 }
 
+/// 在后台线程完成文件读取和 JSON 解析后的回放数据。
+#[derive(Debug)]
+pub struct ReplayLoadData {
+    pub path: PathBuf,
+    pub events: Vec<Event>,
+    pub report: ReplayLoadReport,
+    pub timestamp_index: Vec<(u64, usize)>,
+    pub has_recorded_protocol: bool,
+    pub bookmarks: Vec<(u64, Option<String>)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ReplayStatus {
     pub state: ReplayState,
@@ -139,7 +150,8 @@ impl ReplayManager {
         &self.bookmarks
     }
 
-    pub fn load(&mut self, path: impl AsRef<std::path::Path>) -> io::Result<usize> {
+    /// 只做文件读取和解析，不触碰 ReplayManager，可安全放到 worker 线程。
+    pub fn prepare_load(path: impl AsRef<std::path::Path>) -> io::Result<ReplayLoadData> {
         const MAX_LINE_BYTES: u64 = 4 * 1024 * 1024; // 4MB per line
         const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024; // 512MB total
 
@@ -191,20 +203,53 @@ impl ReplayManager {
                 }
             }
         }
-        self.last_load_report = Some(ReplayLoadReport {
-            loaded: events.len(),
-            skipped,
-            first_errors,
-        });
+        let loaded = events.len();
         events.sort_by_key(|event| (event.timestamp_ms, event.id));
-
-        // 构建稀疏时间戳索引：每 INDEX_STRIDE 事件记录一条
         let timestamp_index = build_timestamp_index(&events);
-
-        // 扫描是否存在录制的 protocol.*（非 replay 事件）
-        self.has_recorded_protocol = events
+        let has_recorded_protocol = events
             .iter()
-            .any(|e| e.topic.starts_with("protocol.") && !e.is_replay());
+            .any(|event| event.topic.starts_with("protocol.") && !event.is_replay());
+        let first_timestamp = events.first().map(|event| event.timestamp_ms).unwrap_or(0);
+        let mut bookmarks = Vec::new();
+        for event in &events {
+            if event.topic == "recorder.bookmark" {
+                let name = event.payload.text_lossy();
+                let name = (!name.is_empty()).then_some(name);
+                let position_ms = event.timestamp_ms.saturating_sub(first_timestamp);
+                if !bookmarks
+                    .iter()
+                    .any(|(position, _)| *position == position_ms)
+                {
+                    bookmarks.push((position_ms, name));
+                }
+            }
+        }
+        Ok(ReplayLoadData {
+            path,
+            events,
+            report: ReplayLoadReport {
+                loaded,
+                skipped,
+                first_errors,
+            },
+            timestamp_index,
+            has_recorded_protocol,
+            bookmarks,
+        })
+    }
+
+    /// 在 Workbench 所在线程应用已经解析好的回放数据。
+    pub fn load_prepared(&mut self, prepared: ReplayLoadData) -> usize {
+        let ReplayLoadData {
+            path,
+            events,
+            report,
+            timestamp_index,
+            has_recorded_protocol,
+            bookmarks,
+        } = prepared;
+        self.last_load_report = Some(report);
+        self.has_recorded_protocol = has_recorded_protocol;
 
         self.events = events;
         self.timestamp_index = timestamp_index;
@@ -219,20 +264,10 @@ impl ReplayManager {
         self.clear_analyzer_messages();
         self.analyzer_cursor = 0;
 
-        // 从录制事件中恢复书签（recorder.bookmark 事件）
-        self.bookmarks.clear();
-        for event in &self.events {
-            if event.topic == "recorder.bookmark" {
-                let name = event.payload.text_lossy();
-                let name = if name.is_empty() { None } else { Some(name) };
-                let pos_ms = event
-                    .timestamp_ms
-                    .saturating_sub(self.events.first().map(|e| e.timestamp_ms).unwrap_or(0));
-                if !self.bookmarks.iter().any(|b| b.pos_ms == pos_ms) {
-                    self.bookmarks.push(Bookmark { pos_ms, name });
-                }
-            }
-        }
+        self.bookmarks = bookmarks
+            .into_iter()
+            .map(|(pos_ms, name)| Bookmark { pos_ms, name })
+            .collect();
 
         self.state = if self.events.is_empty() {
             ReplayState::Empty
@@ -250,7 +285,12 @@ impl ReplayManager {
                 self.policy,
             ),
         ));
-        Ok(self.events.len())
+        self.events.len()
+    }
+
+    pub fn load(&mut self, path: impl AsRef<std::path::Path>) -> io::Result<usize> {
+        let prepared = Self::prepare_load(path)?;
+        Ok(self.load_prepared(prepared))
     }
 
     // ── Policy ──

@@ -60,12 +60,75 @@ pub struct LogPanel {
     pub truncated: bool,
 }
 
+#[derive(Clone)]
 struct LogEntry {
     id: u64,
     timestamp_label: String,
     level: LogLevel,
     source: String,
     message: String,
+}
+
+pub struct LogExportJob {
+    entries: Vec<LogEntry>,
+}
+
+impl LogExportJob {
+    pub fn render(&self, format: TerminalExportFormat) -> String {
+        match format {
+            TerminalExportFormat::Txt => {
+                let mut output = self
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        format!(
+                            "{} {:<5} {:<18} {}",
+                            entry.timestamp_label,
+                            entry.level.as_str(),
+                            entry.source,
+                            entry.message
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                output
+            }
+            TerminalExportFormat::Csv => {
+                let mut output = "time,level,source,message\n".to_owned();
+                for entry in &self.entries {
+                    output.push_str(
+                        &[
+                            log_csv_cell(&entry.timestamp_label),
+                            log_csv_cell(entry.level.as_str()),
+                            log_csv_cell(&entry.source),
+                            log_csv_cell(&entry.message),
+                        ]
+                        .join(","),
+                    );
+                    output.push('\n');
+                }
+                output
+            }
+            TerminalExportFormat::Json => {
+                let values = self
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        serde_json::json!({
+                            "time": entry.timestamp_label,
+                            "level": entry.level.as_str(),
+                            "source": entry.source,
+                            "message": entry.message,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                serde_json::to_string_pretty(&values).unwrap_or_default()
+            }
+        }
+    }
 }
 
 struct LogRenderOutcome {
@@ -140,6 +203,16 @@ impl LogPanel {
 
     pub fn take_export_request(&mut self) -> Option<TerminalExportFormat> {
         self.export_request.take()
+    }
+
+    pub fn export_job(&self) -> LogExportJob {
+        LogExportJob {
+            entries: self
+                .collect_visible_entries()
+                .into_iter()
+                .cloned()
+                .collect(),
+        }
     }
 
     fn collect_visible_entries(&self) -> Vec<&LogEntry> {

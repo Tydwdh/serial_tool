@@ -4,8 +4,8 @@ use tool_databus::DataBus;
 use tool_transport::TransportManager;
 
 pub struct DeviceService {
-    pub bus: DataBus,
-    pub transport: TransportManager,
+    bus: DataBus,
+    transport: TransportManager,
 }
 
 impl DeviceService {

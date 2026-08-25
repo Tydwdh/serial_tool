@@ -19,6 +19,11 @@ use eframe::egui;
 
 impl WorkbenchApp {
     pub(crate) fn tick_pre_ui(&mut self, ctx: &egui::Context) {
+        // 先收取统一后台任务事件：串口、Replay、插件扫描和导出都在这里
+        // 将结果安全地应用回 Workbench/UI 线程。
+        self.workbench.tick(ctx.input(|input| input.time));
+        self.sync_ports_from_workbench(false);
+
         // 帧级缓存重置：每帧 UI 构建前清空 plugin_summaries_cache，使其在首次
         // ui_contribution_slot 调用时重新计算，同帧后续调用复用。
         self.plugin_summaries_cache = std::cell::OnceCell::new();
@@ -47,8 +52,8 @@ impl WorkbenchApp {
 
     /// 处理 Lua 插件通过 ctx.ui.set_status() 推送的状态栏通知。
     fn process_ui_set_status(&mut self) {
-        for event in self.ui_set_status_subscription.drain_limited(32) {
-            if let tool_application::tool_core::Payload::Json(payload) = event.payload
+        for event in self.ui_events.drain_status(32) {
+            if let tool_application::api::core::Payload::Json(payload) = event.payload
                 && let Some(msg) = payload.get("message").and_then(|v| v.as_str())
             {
                 self.notifications

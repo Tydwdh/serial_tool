@@ -23,6 +23,10 @@ pub enum AppCommand {
         port_name: String,
     },
 
+    CancelTask {
+        task_id: crate::task::TaskId,
+    },
+
     SendText {
         port_name: String,
         text: String,
@@ -87,7 +91,7 @@ pub enum AppCommand {
     },
 
     SetReplayPolicy {
-        policy: tool_recorder::ReplayPolicy,
+        policy: crate::query::ReplayPolicyView,
     },
 
     EnablePlugin {
@@ -137,6 +141,7 @@ pub enum CommandOutcome {
     Done,
     /// 已触发异步操作（如重连），结果通过 Event 回传。
     Pending {
+        task_id: crate::task::TaskId,
         message: String,
     },
 }

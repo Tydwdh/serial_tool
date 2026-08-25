@@ -6,7 +6,7 @@ use egui_material_icons::{
         ICON_REFRESH, ICON_STOP,
     },
 };
-use tool_application::tool_transport::SerialPortDescriptor;
+use tool_application::query::{PortView, TransportStatusView};
 use tool_panels::design::{self, ButtonKind};
 
 const SERIAL_ACTION_BUTTON_SIZE: egui::Vec2 = egui::vec2(52.0, 26.0);
@@ -15,7 +15,7 @@ pub(super) fn serial_combo(
     ui: &mut egui::Ui,
     id: &'static str,
     w: f32,
-    ports: &[SerialPortDescriptor],
+    ports: &[PortView],
     sel: &mut Option<String>,
     aliases: &std::collections::HashMap<String, String>,
 ) {
@@ -97,7 +97,7 @@ impl WorkbenchApp {
                 .serial
                 .selected_port
                 .as_deref()
-                .is_some_and(|p| self.workbench.transport.status_port(p).open);
+                .is_some_and(|p| self.workbench.transport_status(p).open);
             let sl = if so {
                 format!(
                     "串口 ▸ {}",
@@ -144,8 +144,8 @@ impl WorkbenchApp {
                     .serial
                     .selected_port
                     .as_deref()
-                    .map(|port| self.workbench.transport.status_port(port))
-                    .unwrap_or_else(tool_application::tool_transport::TransportStatus::closed);
+                    .map(|port| self.workbench.transport_status(port))
+                    .unwrap_or_else(TransportStatusView::closed);
                 let selected_open = selected_status.open;
                 let selected_connecting = selected_status.connecting;
 
@@ -171,8 +171,17 @@ impl WorkbenchApp {
                     && let Some(port) = self.serial.selected_port.clone()
                 {
                     self.cancel_pending_port_open_notice(&port);
-                    self.workbench.transport.close_port(&port);
-                    self.set_status(StatusLevel::Info, format!("{port} 已关闭"));
+                    match self
+                        .workbench
+                        .dispatch(tool_application::AppCommand::Disconnect {
+                            port_name: port.clone(),
+                        }) {
+                        Ok(tool_application::CommandOutcome::Pending { .. }) => {
+                            self.set_status(StatusLevel::Info, format!("正在关闭 {port}..."));
+                        }
+                        Ok(tool_application::CommandOutcome::Done) => {}
+                        Err(error) => self.set_status(StatusLevel::Error, error.to_string()),
+                    }
                 }
             } else if so {
                 // 折叠时显示当前配置摘要：波特率 数据位 校验位 停止位
@@ -195,7 +204,7 @@ impl WorkbenchApp {
             }
             // 自动重连进度：拔串口后顶部栏直接可见，无需展开 device_panel。
             if let Some(ref pending) = self.serial.pending_reconnect {
-                let now = tool_application::tool_core::now_timestamp_ms() as f64 / 1000.0;
+                let now = tool_application::api::core::now_timestamp_ms() as f64 / 1000.0;
                 let remaining = (pending.next_try_at - now).max(0.0);
                 let label = format!(
                     "{} 重连中 {} {:.1}s ({}/{})",
@@ -215,7 +224,7 @@ impl WorkbenchApp {
             ui.separator();
             // ── 插件贡献：top_bar.left ──
             self.ui_contribution_slot(ui, "top_bar.left");
-            let rec = self.workbench.recorder.is_running();
+            let rec = self.workbench.recording_is_running();
             let record_response = if rec {
                 design::button(ui, ICON_STOP, "停止录制", ButtonKind::Danger)
             } else {

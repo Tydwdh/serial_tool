@@ -8,6 +8,8 @@ use crate::model::terminal::{TerminalDelta, TerminalEntry, TerminalSeq};
 use crate::service::terminal_store::{
     MAX_TERMINAL_BLOCK_BYTES, TerminalAssembler, TerminalItem, TerminalStore,
 };
+use parking_lot::RwLock;
+use std::sync::Arc;
 use tool_core::{Event, Payload};
 use tool_databus::{DataBus, RingSubscription, TopicFilter};
 
@@ -15,8 +17,24 @@ const DEFAULT_MAX_ENTRIES: usize = 50_000;
 
 pub struct TerminalService {
     subscription: RingSubscription,
-    store: TerminalStore,
+    store: Arc<RwLock<TerminalStore>>,
     assembler: TerminalAssembler,
+}
+
+/// 后台导出任务持有的终端只读快照入口。
+#[derive(Clone)]
+pub struct TerminalExportJob {
+    store: Arc<RwLock<TerminalStore>>,
+}
+
+impl TerminalExportJob {
+    pub fn render(&self, format: &str) -> String {
+        // 只在锁内复制条目，随后立即释放；大字符串生成和 JSON/CSV
+        // 序列化不占用终端接收路径的写锁。
+        let items = self.store.read().iter().cloned().collect::<Vec<_>>();
+        let entries = items.iter().map(entry_from_item).collect::<Vec<_>>();
+        render_export(&entries, format)
+    }
 }
 
 impl TerminalService {
@@ -24,7 +42,7 @@ impl TerminalService {
         Self {
             subscription: bus
                 .subscribe_ring_bounded(TopicFilter::prefix("transport.serial."), 65_536),
-            store: TerminalStore::new(DEFAULT_MAX_ENTRIES),
+            store: Arc::new(RwLock::new(TerminalStore::new(DEFAULT_MAX_ENTRIES))),
             assembler: TerminalAssembler {
                 idle_finalize_ms: 5,
                 max_block_bytes: MAX_TERMINAL_BLOCK_BYTES,
@@ -33,7 +51,7 @@ impl TerminalService {
     }
 
     pub fn set_max_entries(&mut self, max: usize) {
-        self.store.set_max_entries(max);
+        self.store.write().set_max_entries(max);
     }
 
     /// Keep the public setting name for compatibility; the value is an idle
@@ -43,8 +61,14 @@ impl TerminalService {
     }
 
     pub fn clear(&mut self) {
-        self.store.clear();
+        self.store.write().clear();
         self.subscription.clear();
+    }
+
+    pub fn export_job(&self) -> TerminalExportJob {
+        TerminalExportJob {
+            store: Arc::clone(&self.store),
+        }
     }
 
     /// Consume serial events without delaying their insertion into the store.
@@ -58,7 +82,12 @@ impl TerminalService {
     pub fn entries_since(&self, since_seq: TerminalSeq, limit: usize) -> TerminalDelta {
         let mut out = Vec::new();
         let mut truncated = false;
-        for item in self.store.iter().filter(|item| item.id() > since_seq) {
+        for item in self
+            .store
+            .read()
+            .iter()
+            .filter(|item| item.id() > since_seq)
+        {
             if out.len() >= limit {
                 truncated = true;
                 break;
@@ -76,43 +105,19 @@ impl TerminalService {
     }
 
     pub fn total_entries(&self) -> usize {
-        self.store.len()
+        self.store.read().len()
     }
 
     pub fn export_text(&self) -> String {
-        self.store
-            .iter()
-            .map(|item| {
-                let entry = entry_from_item(item);
-                format!(
-                    "{} [{}] {}",
-                    entry.port,
-                    format_dir(entry.direction),
-                    entry.display_text
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        self.export_job().render("text")
     }
 
     pub fn export_csv(&self) -> String {
-        let mut out = String::from("seq,port,direction,text\n");
-        for item in self.store.iter() {
-            let entry = entry_from_item(item);
-            out.push_str(&format!(
-                "{},{},{},{}\n",
-                entry.seq,
-                csv_escape(&entry.port),
-                format_dir(entry.direction),
-                csv_escape(&entry.display_text)
-            ));
-        }
-        out
+        self.export_job().render("csv")
     }
 
     pub fn export_json(&self) -> String {
-        let entries = self.store.iter().map(entry_from_item).collect::<Vec<_>>();
-        serde_json::to_string_pretty(&entries).unwrap_or_default()
+        self.export_job().render("json")
     }
 
     fn push_event(&mut self, event: &Event) {
@@ -137,7 +142,39 @@ impl TerminalService {
         }
 
         self.store
+            .write()
             .ingest(self.assembler, event, port, bytes.as_ref());
+    }
+}
+
+fn render_export(entries: &[TerminalEntry], format: &str) -> String {
+    match format {
+        "csv" => {
+            let mut out = String::from("seq,port,direction,text\n");
+            for entry in entries {
+                out.push_str(&format!(
+                    "{},{},{},{}\n",
+                    entry.seq,
+                    csv_escape(&entry.port),
+                    format_dir(entry.direction),
+                    csv_escape(&entry.display_text)
+                ));
+            }
+            out
+        }
+        "json" => serde_json::to_string_pretty(entries).unwrap_or_default(),
+        _ => entries
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{} [{}] {}",
+                    entry.port,
+                    format_dir(entry.direction),
+                    entry.display_text
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
     }
 }
 

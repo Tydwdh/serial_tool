@@ -21,6 +21,23 @@ use crate::{ExtensionError, ExtensionResult};
 
 const MAX_PLUGIN_EVENTS_PER_FRAME: usize = 500;
 
+/// 插件扫描阶段产出的、与运行时无关的数据。
+///
+/// 这个结构可以安全地从后台 worker 传回 Workbench；只有 `apply_scan` 会
+/// 接触插件运行时、DataBus 和 UI 所在线程状态。
+#[derive(Debug, Clone)]
+pub struct PluginScanCandidate {
+    pub manifest: PluginManifest,
+    pub root: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct PluginScan {
+    pub roots: Vec<PathBuf>,
+    pub candidates: Vec<PluginScanCandidate>,
+    pub diagnostics: Vec<PluginDiagnostic>,
+}
+
 struct PluginRecord {
     manifest: PluginManifest,
     root: PathBuf,
@@ -120,29 +137,15 @@ impl PluginManager {
         &mut self,
         roots: impl IntoIterator<Item = PathBuf>,
     ) -> ExtensionResult<usize> {
-        self.roots = roots.into_iter().collect();
-        self.refresh()
+        let roots = roots.into_iter().collect::<Vec<_>>();
+        let scan = Self::scan_roots(&roots)?;
+        Ok(self.apply_scan(scan))
     }
 
     pub fn refresh(&mut self) -> ExtensionResult<usize> {
-        self.diagnostics.clear();
-        // 清理：移除所有之前从某个 root 发现但现已不存在的插件
-        self.records.retain(|_, record| record.root.exists());
-
         let roots = self.roots.clone();
-        let mut count = 0;
-
-        for root in roots {
-            count += self.discover_root(&root)?;
-        }
-
-        self.bus.publish(Event::system_log(
-            LogLevel::Info,
-            "extension",
-            format!("发现 {count} 个插件"),
-        ));
-
-        Ok(count)
+        let scan = Self::scan_roots(&roots)?;
+        Ok(self.apply_scan(scan))
     }
 
     pub fn discover_root(&mut self, root: &Path) -> ExtensionResult<usize> {
@@ -309,6 +312,158 @@ impl PluginManager {
         }
 
         Ok(count)
+    }
+
+    /// 只扫描文件系统和 manifest，不接触插件运行时，可放到 worker 线程。
+    pub fn scan_roots(roots: &[PathBuf]) -> ExtensionResult<PluginScan> {
+        let permission_manager = PermissionManager::default();
+        let mut candidates = Vec::new();
+        let mut diagnostics = Vec::new();
+
+        for root in roots {
+            if !root.exists() {
+                continue;
+            }
+
+            for entry in fs::read_dir(root)? {
+                let entry = entry?;
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+
+                let manifest_path = path.join("plugin.json");
+                if !manifest_path.exists() {
+                    continue;
+                }
+
+                let manifest = match load_manifest(&manifest_path) {
+                    Ok(manifest) => manifest,
+                    Err(error) => {
+                        diagnostics.push(PluginDiagnostic::new(
+                            PluginDiagnosticSeverity::Error,
+                            "manifest_parse_error",
+                            None,
+                            path,
+                            format!("manifest 解析失败: {error}"),
+                        ));
+                        continue;
+                    }
+                };
+
+                if !manifest.api_version_supported() {
+                    diagnostics.push(PluginDiagnostic::new(
+                        PluginDiagnosticSeverity::Warning,
+                        "unsupported_api_version",
+                        Some(manifest.id.clone()),
+                        path,
+                        format!(
+                            "api_version '{}' 不受支持，当前支持 {}",
+                            manifest.api_version,
+                            SUPPORTED_PLUGIN_API_VERSIONS.join(", ")
+                        ),
+                    ));
+                    continue;
+                }
+
+                if let Err(errors) = manifest.validate() {
+                    diagnostics.push(PluginDiagnostic::new(
+                        PluginDiagnosticSeverity::Error,
+                        "manifest_validation_error",
+                        Some(manifest.id.clone()),
+                        path,
+                        errors.join("; "),
+                    ));
+                    continue;
+                }
+
+                if let Err(error) = permission_manager.check(&manifest) {
+                    diagnostics.push(PluginDiagnostic::new(
+                        PluginDiagnosticSeverity::Error,
+                        "permission_denied",
+                        Some(manifest.id.clone()),
+                        path,
+                        error.to_string(),
+                    ));
+                    continue;
+                }
+
+                candidates.push(PluginScanCandidate {
+                    manifest,
+                    root: path,
+                });
+            }
+        }
+
+        Ok(PluginScan {
+            roots: roots.to_vec(),
+            candidates,
+            diagnostics,
+        })
+    }
+
+    /// 在 Workbench 线程应用 worker 产生的扫描结果。
+    pub fn apply_scan(&mut self, scan: PluginScan) -> usize {
+        self.roots = scan.roots;
+        self.diagnostics = scan.diagnostics;
+        self.records.retain(|_, record| record.root.exists());
+
+        let mut count = 0;
+        for candidate in scan.candidates {
+            let id = candidate.manifest.id.clone();
+            if let Some(existing) = self.records.get(&id)
+                && existing.root != candidate.root
+            {
+                let is_running =
+                    matches!(existing.state, PluginState::Running | PluginState::Enabled);
+                self.bus.publish(Event::system_log(
+                    LogLevel::Warn,
+                    "extension",
+                    format!(
+                        "插件 ID 冲突: '{id}' 同时存在于 {} 和 {}",
+                        existing.root.display(),
+                        candidate.root.display()
+                    ),
+                ));
+                if is_running {
+                    self.push_diagnostic(
+                        PluginDiagnosticSeverity::Warning,
+                        "duplicate_plugin_id",
+                        Some(id.clone()),
+                        candidate.root.clone(),
+                        format!(
+                            "插件 ID 冲突，{} 已在运行，跳过 {}",
+                            existing.root.display(),
+                            candidate.root.display()
+                        ),
+                    );
+                    continue;
+                }
+            }
+
+            let existing_state = self
+                .records
+                .get(&id)
+                .map(|record| record.state)
+                .unwrap_or(PluginState::Discovered);
+            self.records.insert(
+                id,
+                PluginRecord {
+                    manifest: candidate.manifest,
+                    root: candidate.root,
+                    state: existing_state,
+                    last_error: None,
+                },
+            );
+            count += 1;
+        }
+
+        self.bus.publish(Event::system_log(
+            LogLevel::Info,
+            "extension",
+            format!("发现 {count} 个插件"),
+        ));
+        count
     }
 
     pub fn enable(&mut self, plugin_id: &str) -> ExtensionResult<()> {
@@ -523,6 +678,10 @@ impl PluginManager {
 
     pub fn diagnostics(&self) -> &[PluginDiagnostic] {
         &self.diagnostics
+    }
+
+    pub fn roots(&self) -> Vec<PathBuf> {
+        self.roots.clone()
     }
 
     /// 列出所有已发现插件中有 replay analyzer 的配置。

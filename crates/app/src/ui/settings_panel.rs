@@ -408,7 +408,7 @@ impl WorkbenchApp {
 
     fn render_config_locations(&mut self, ui: &mut egui::Ui) {
         let workspace_config = config_path();
-        let plugin_config_dir = self.workbench.plugin_manager.config_root().to_path_buf();
+        let plugin_config_dir = self.workbench.plugin_config_root();
 
         self.render_config_location_row(ui, "工作区配置", &workspace_config, false);
         self.render_config_location_row(ui, "插件配置", &plugin_config_dir, true);
@@ -551,7 +551,7 @@ impl WorkbenchApp {
 
     /// 渲染所有已发现插件的设置表单
     fn render_plugin_settings(&mut self, ui: &mut egui::Ui) {
-        let plugin_settings = self.workbench.plugin_manager.plugin_settings();
+        let plugin_settings = self.workbench.plugin_settings();
         if plugin_settings.is_empty() {
             design::card().show(ui, |ui| {
                 design::empty_state(ui, ICON_APPS, "暂无插件设置");
@@ -560,7 +560,7 @@ impl WorkbenchApp {
         }
         for (plugin_id, plugin_name, settings) in &plugin_settings {
             // 从 ConfigStore 读取当前值，构建 DynamicField 列表
-            let config_store = self.workbench.plugin_manager.config_store();
+            let config_store = self.workbench.plugin_config_store();
             let mut fields: Vec<DynamicField>;
             let mut fields_json = Vec::with_capacity(settings.len());
 
@@ -625,9 +625,10 @@ impl WorkbenchApp {
                         port_name: d.port_name.clone(),
                     })
                     .collect();
+                let event_sink = self.workbench.event_sink();
                 dynamic_form_ui(
                     ui,
-                    &self.workbench.bus,
+                    &event_sink,
                     &panel_id,
                     &mut fields,
                     true, // auto_apply

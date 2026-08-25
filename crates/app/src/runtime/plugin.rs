@@ -1,11 +1,11 @@
 use crate::app::WorkbenchApp;
-use tool_application::tool_core::{Direction, Event, Payload, topics};
+use tool_application::api::core::{Direction, Event, Payload, topics};
 
 impl WorkbenchApp {
     /// 发布插件命令动作（模拟 UI 按钮点击）。
     pub(crate) fn publish_plugin_command_action(&mut self, plugin_id: &str, command_id: &str) {
         // 查找该插件的 UI contribution 信息以确定是否 record_send_input
-        let summaries = self.workbench.plugin_manager.summaries();
+        let summaries = self.workbench.query_plugins().summaries;
         let record_send_input = summaries
             .iter()
             .find(|s| s.id == plugin_id)
@@ -34,7 +34,7 @@ impl WorkbenchApp {
             if !input.is_empty() && input.lines().count() == 1 {
                 let path = std::path::PathBuf::from(input.trim_matches('"'));
                 if path.is_file() {
-                    self.file_broker.authorize(plugin_id, path);
+                    self.workbench.authorize_plugin_file(plugin_id, path);
                 }
             }
         }
@@ -55,7 +55,7 @@ impl WorkbenchApp {
             },
             "serial": {
                 "selected_port": self.serial.selected_port.clone(),
-                "open_ports": self.workbench.transport.open_ports(),
+                "open_ports": self.workbench.open_port_names(),
             }
         });
 
@@ -84,7 +84,7 @@ impl WorkbenchApp {
             object.insert("origin".to_owned(), serde_json::json!("host.command"));
         }
 
-        self.workbench.bus.publish(Event::new(
+        self.workbench.publish_event(Event::new(
             topics::PLUGIN_COMMAND_EXECUTE,
             "plugin.command",
             Direction::Internal,
@@ -97,7 +97,22 @@ impl WorkbenchApp {
         self.poll_dialog_requests();
         self.handle_file_browse_requests();
 
-        self.workbench.plugin_manager.process_pending();
+        // 初始扫描在后台完成后，按配置启用插件；此处只在 Discovered 状态
+        // 尝试一次，避免扫描尚未完成时把“未找到”误报成启动错误。
+        let configured = self.workbench.app_config().enabled_plugins.clone();
+        for plugin_id in configured {
+            if self.workbench.plugin_state(&plugin_id)
+                == Some(tool_application::api::extension::PluginState::Discovered)
+                && let Err(error) = self.workbench.enable_plugin(&plugin_id)
+            {
+                self.log(
+                    tool_application::api::core::LogLevel::Warn,
+                    format!("恢复插件 {plugin_id} 失败：{error}"),
+                );
+            }
+        }
+
+        self.workbench.process_plugin_lifecycle();
         // 插件命令并入统一 CommandRegistry（内置命令同表）。
         // 先 clone summaries 再重建，避免 plugin_summaries 的 &self 借用与
         // &mut self.commands 冲突。
@@ -109,12 +124,12 @@ impl WorkbenchApp {
             .sync_dynamic_panels(&self.dynamic_panels);
         self.process_contribution_set_value();
 
-        for plugin_id in self.workbench.plugin_manager.take_cleanup_requests() {
+        for plugin_id in self.workbench.take_plugin_cleanup_requests() {
             let removed = self.dynamic_panels.remove_by_plugin(&plugin_id);
             for id in &removed {
                 self.panels.close_tab(tool_panels::PanelId::dynamic(id));
             }
-            self.file_broker.clear(&plugin_id);
+            self.workbench.clear_plugin_file_authorization(&plugin_id);
             let prefix = format!("{plugin_id}:");
             self.contribution_states
                 .retain(|key, _| !key.starts_with(&prefix));
@@ -126,8 +141,8 @@ impl WorkbenchApp {
     /// 处理插件通过 ctx.ui.set_contribution_value 对 UI contribution 的状态更新。
     /// 使用专用 topic `ui.contribution.set.value`，与动态面板的 `ui.form.set_value` 隔离。
     fn process_contribution_set_value(&mut self) {
-        for event in self.contribution_set_value_subscription.drain_limited(64) {
-            let tool_application::tool_core::Payload::Json(payload) = event.payload else {
+        for event in self.ui_events.drain_contribution_set_value(64) {
+            let tool_application::api::core::Payload::Json(payload) = event.payload else {
                 continue;
             };
             // 要求 panel_id == "__contribution__" 作为哨兵，防止误消费面板事件

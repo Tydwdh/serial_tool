@@ -7,7 +7,11 @@ fn headless_workbench_can_dispatch_and_query() {
     let mut wb = Workbench::new(bus);
 
     // RefreshPorts should be executable without egui.
-    wb.dispatch(AppCommand::RefreshPorts).expect("refresh");
+    let refresh = wb.dispatch(AppCommand::RefreshPorts).expect("refresh");
+    assert!(matches!(
+        refresh,
+        tool_application::CommandOutcome::Pending { .. }
+    ));
 
     // ClearTerminal must not require egui.
     wb.dispatch(AppCommand::ClearTerminal).expect("clear");
@@ -25,14 +29,30 @@ fn headless_workbench_can_dispatch_and_query() {
     assert!(!d1.truncated);
 
     // Invalid connect should return transport error, not panic.
-    let err = wb.dispatch(AppCommand::Connect {
+    let connect = wb.dispatch(AppCommand::Connect {
         port_name: "COM_NOT_EXIST_999".into(),
     });
-    assert!(err.is_err());
+    assert!(matches!(
+        connect,
+        Ok(tool_application::CommandOutcome::Pending { .. })
+    ));
 
-    // Tick must be callable headless.
-    wb.tick(0.0);
-    wb.tick(1.0);
+    // Tick 必须能回收后台任务；无效连接最终应落到 Failed，而不是在 dispatch
+    // 阶段阻塞或直接把硬件错误同步抛回 UI。
+    for i in 0..100 {
+        wb.tick(i as f64 * 0.01);
+        if wb.task_snapshots().iter().any(|snapshot| {
+            snapshot.kind == "connect_serial"
+                && matches!(snapshot.state, tool_application::TaskState::Failed)
+        }) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert!(wb.task_snapshots().iter().any(|snapshot| {
+        snapshot.kind == "connect_serial"
+            && matches!(snapshot.state, tool_application::TaskState::Failed)
+    }));
 }
 
 #[test]

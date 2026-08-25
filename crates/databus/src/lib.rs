@@ -98,6 +98,14 @@ pub struct Subscription {
     dropped: Arc<AtomicU64>,
 }
 
+/// Minimal event publishing capability used by presentation adapters.
+///
+/// Keeping this capability as a trait avoids making UI components depend on a
+/// concrete application bus implementation.
+pub trait EventPublisher {
+    fn publish_event(&self, event: Event);
+}
+
 /// 发布线程直接写入的有界环形订阅。
 ///
 /// 队列满时丢弃最旧事件并保留最新事件，适合 UI 消息流：窗口最小化时不依赖
@@ -324,6 +332,12 @@ impl DataBus {
 
     pub fn published_count(&self) -> u64 {
         self.inner.next_id.load(Ordering::Relaxed).saturating_sub(1)
+    }
+}
+
+impl EventPublisher for DataBus {
+    fn publish_event(&self, event: Event) {
+        let _ = self.publish(event);
     }
 }
 

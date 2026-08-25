@@ -140,6 +140,16 @@ struct VisibleRow<'a> {
     live: bool,
 }
 
+/// 已在 UI 线程完成筛选的终端导出任务。
+///
+/// 行数据本身是拥有所有权的，后续格式化和文件写入可以交给 Workbench
+/// 的后台任务，不会把 TerminalPanel 或 egui 状态跨线程借出去。
+pub struct TerminalExportJob {
+    rows: Vec<VisibleRow<'static>>,
+    show_hex: bool,
+    show_raw: bool,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct TerminalViewFilter {
     port_filter: Option<String>,
@@ -247,6 +257,98 @@ impl VisibleRow<'static> {
             preview_text: Cow::Owned(format_utf8_preview(item.bytes())),
             raw_text: Cow::Owned(raw_text),
             live: item.is_live(),
+        }
+    }
+}
+
+impl TerminalExportJob {
+    pub fn render(&self, format: TerminalExportFormat) -> String {
+        match format {
+            TerminalExportFormat::Txt => {
+                let mut output = self
+                    .rows
+                    .iter()
+                    .map(|row| visible_row_content(row, self.show_hex, self.show_raw))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                output
+            }
+            TerminalExportFormat::Csv => {
+                let mut output = String::from("time,port,direction,");
+                output.push_str(if self.show_hex {
+                    "hex\n"
+                } else if self.show_raw {
+                    "raw\n"
+                } else {
+                    "text\n"
+                });
+                for row in &self.rows {
+                    let direction = match row.direction {
+                        Direction::Rx => "RX",
+                        Direction::Tx => "TX",
+                        Direction::Internal => "INTERNAL",
+                    };
+                    output.push_str(
+                        &[
+                            csv_cell(&row.timestamp_label),
+                            csv_cell(row.port.as_deref().unwrap_or("")),
+                            csv_cell(direction),
+                            csv_cell(&visible_row_content(row, self.show_hex, self.show_raw)),
+                        ]
+                        .join(","),
+                    );
+                    output.push('\n');
+                }
+                output
+            }
+            TerminalExportFormat::Json => {
+                let values = self
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        let content_key = if self.show_hex {
+                            "hex"
+                        } else if self.show_raw {
+                            "raw"
+                        } else {
+                            "text"
+                        };
+                        let mut object = serde_json::Map::new();
+                        object.insert(
+                            "time".to_owned(),
+                            serde_json::Value::String(row.timestamp_label.to_string()),
+                        );
+                        object.insert(
+                            "port".to_owned(),
+                            serde_json::Value::String(row.port.as_deref().unwrap_or("").to_owned()),
+                        );
+                        object.insert(
+                            "direction".to_owned(),
+                            serde_json::Value::String(
+                                match row.direction {
+                                    Direction::Rx => "RX",
+                                    Direction::Tx => "TX",
+                                    Direction::Internal => "INTERNAL",
+                                }
+                                .to_owned(),
+                            ),
+                        );
+                        object.insert(
+                            content_key.to_owned(),
+                            serde_json::Value::String(visible_row_content(
+                                row,
+                                self.show_hex,
+                                self.show_raw,
+                            )),
+                        );
+                        serde_json::Value::Object(object)
+                    })
+                    .collect::<Vec<_>>();
+                serde_json::to_string_pretty(&values).unwrap_or_default()
+            }
         }
     }
 }
@@ -483,6 +585,14 @@ impl TerminalPanel {
 
     pub fn take_export_request(&mut self) -> Option<TerminalExportFormat> {
         self.export_request.take()
+    }
+
+    pub fn export_job(&self) -> TerminalExportJob {
+        TerminalExportJob {
+            rows: self.collect_visible_rows_unindexed(),
+            show_hex: self.show_hex,
+            show_raw: self.show_raw,
+        }
     }
 
     pub fn export_visible_csv(&self) -> String {

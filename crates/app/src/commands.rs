@@ -4,11 +4,7 @@ use crate::state::PendingPortOpenNotice;
 use crate::state::PendingReconnect;
 use crate::state::StatusLevel;
 use std::collections::BTreeSet;
-use std::time::Duration;
-use tool_application::tool_core::now_timestamp_ms;
-use tool_application::tool_transport::{
-    SerialConfig, parse_data_bits, parse_parity, parse_stop_bits, translate_error,
-};
+use tool_application::api::core::now_timestamp_ms;
 use tool_panels::TerminalExportFormat;
 
 impl WorkbenchApp {
@@ -37,31 +33,22 @@ impl WorkbenchApp {
             path.set_extension(extension);
         }
 
-        let result = match format {
-            TerminalExportFormat::Txt => {
-                std::fs::write(&path, self.terminal_panel.export_visible_text())
-            }
-            TerminalExportFormat::Csv => {
-                let content = self.terminal_panel.export_visible_csv();
-                // UTF-8 BOM 让 Windows Excel 直接打开时能正确识别中文。
-                write_utf8_csv(&path, &content)
-            }
-            TerminalExportFormat::Json => {
-                std::fs::write(&path, self.terminal_panel.export_visible_json())
-            }
-        };
-
-        match result {
-            Ok(()) => self.notifications.push(
+        let format_name = format_name.to_ascii_lowercase();
+        let job = self.terminal_panel.export_job();
+        let task_format = format;
+        let outcome = self.workbench.spawn_file_export(
+            "export_terminal",
+            format_name.clone(),
+            path.clone(),
+            move || Ok(job.render(task_format)),
+        );
+        match outcome {
+            tool_application::CommandOutcome::Pending { .. } => self.notifications.push(
                 "terminal-export",
                 StatusLevel::Info,
-                format!("已导出 {format_name}：{}", path.display()),
+                format!("正在导出 {format_name}：{}", path.display()),
             ),
-            Err(error) => self.notifications.push(
-                "terminal-export",
-                StatusLevel::Error,
-                format!("导出失败：{error}"),
-            ),
+            tool_application::CommandOutcome::Done => {}
         }
     }
 
@@ -88,28 +75,21 @@ impl WorkbenchApp {
             path.set_extension(extension);
         }
 
-        let result = match format {
-            TerminalExportFormat::Txt => {
-                std::fs::write(&path, self.bottom_log_panel.export_visible_text())
-            }
-            TerminalExportFormat::Csv => {
-                write_utf8_csv(&path, &self.bottom_log_panel.export_visible_csv())
-            }
-            TerminalExportFormat::Json => {
-                std::fs::write(&path, self.bottom_log_panel.export_visible_json())
-            }
-        };
-        match result {
-            Ok(()) => self.notifications.push(
+        let format_name = format_name.to_ascii_lowercase();
+        let job = self.bottom_log_panel.export_job();
+        let outcome = self.workbench.spawn_file_export(
+            "export_log",
+            format_name.clone(),
+            path.clone(),
+            move || Ok(job.render(format)),
+        );
+        match outcome {
+            tool_application::CommandOutcome::Pending { .. } => self.notifications.push(
                 "log-export",
                 StatusLevel::Info,
-                format!("已导出 {format_name}：{}", path.display()),
+                format!("正在导出 {format_name}：{}", path.display()),
             ),
-            Err(error) => self.notifications.push(
-                "log-export",
-                StatusLevel::Error,
-                format!("导出失败：{error}"),
-            ),
+            tool_application::CommandOutcome::Done => {}
         }
     }
 
@@ -201,6 +181,26 @@ impl WorkbenchApp {
     }
 
     pub(crate) fn refresh_ports_impl(&mut self, show_status: bool) {
+        if let Err(error) = self
+            .workbench
+            .dispatch(tool_application::AppCommand::RefreshPorts)
+        {
+            self.set_status(StatusLevel::Error, error.to_string());
+        }
+        self.sync_ports_from_workbench(show_status);
+    }
+
+    /// 将 Workbench 已经完成的后台刷新结果同步到 egui 状态。
+    /// 这里仅做小型状态合并，不访问串口硬件。
+    pub(crate) fn sync_ports_from_workbench(&mut self, show_status: bool) {
+        // 初始/周期刷新尚未完成时，Workbench 的旧列表可能还是空的；不能因此
+        // 把配置中的 selected_port 误判为拔出。
+        if self.workbench.has_active_task_kind("refresh_ports")
+            && self.workbench.query_transport().ports.is_empty()
+        {
+            return;
+        }
+
         let old_names: BTreeSet<String> = self
             .serial
             .ports
@@ -209,168 +209,112 @@ impl WorkbenchApp {
             .collect();
 
         let old_selected = self.serial.selected_port.clone();
-
-        match self.workbench.transport.list_serial_ports() {
-            Ok(mut new_ports) => {
-                // 网络模拟串口（WebSocket + JSON-RPC gcode 桥）作为固定端口并入列表：
-                // 与系统串口一起排序、分组、别名、开关，表现完全一致。
-                new_ports.extend(self.serial.network_ports.iter().map(|net| {
-                    tool_application::tool_transport::SerialPortDescriptor {
-                        port_name: net.display_name(),
-                        port_type: tool_application::tool_transport::PortType::Network,
-                    }
-                }));
-                new_ports.sort_by_key(|port| {
-                    tool_application::tool_transport::natural_sort_key(&port.port_name)
+        let mut new_ports = self.workbench.query_transport().ports;
+        for network in &self.serial.network_ports {
+            let name = network.display_name();
+            if !new_ports.iter().any(|port| port.port_name == name) {
+                new_ports.push(tool_application::query::PortView {
+                    port_name: name,
+                    port_type: tool_application::query::PortTypeView::Network,
                 });
+            }
+        }
+        new_ports.sort_by_key(|port| {
+            tool_application::api::transport::natural_sort_key(&port.port_name)
+        });
+        let new_names: BTreeSet<String> = new_ports
+            .iter()
+            .map(|port| port.port_name.clone())
+            .collect();
+        let added_ports: Vec<String> = new_names.difference(&old_names).cloned().collect();
+        let removed_ports: Vec<String> = old_names.difference(&new_names).cloned().collect();
 
-                let new_names: BTreeSet<String> = new_ports
-                    .iter()
-                    .map(|port| port.port_name.clone())
-                    .collect();
+        self.serial.ports = new_ports;
+        self.dynamic_panels.set_ports(
+            &self
+                .serial
+                .ports
+                .iter()
+                .map(|d| tool_panels::PortItem {
+                    port_name: d.port_name.clone(),
+                })
+                .collect::<Vec<_>>(),
+        );
 
-                let added_ports: Vec<String> = new_names.difference(&old_names).cloned().collect();
+        let selected_still_exists = self
+            .serial
+            .selected_port
+            .as_ref()
+            .is_some_and(|selected| new_names.contains(selected));
 
-                let removed_ports: Vec<String> =
-                    old_names.difference(&new_names).cloned().collect();
-
-                self.serial.ports = new_ports;
-                self.dynamic_panels.set_ports(
-                    &self
-                        .serial
-                        .ports
-                        .iter()
-                        .map(|d| tool_panels::PortItem {
-                            port_name: d.port_name.clone(),
-                        })
-                        .collect::<Vec<_>>(),
-                );
-
-                let selected_still_exists = self
-                    .serial
-                    .selected_port
-                    .as_ref()
-                    .is_some_and(|selected| new_names.contains(selected));
-
-                // 只在端口消失且 transport 也未打开时才清空选择
-                if !selected_still_exists {
-                    let selected_val = self.serial.selected_port.clone();
-                    if let Some(ref selected) = selected_val {
-                        if self.workbench.transport.status_port(selected).open {
-                            self.set_status_force(
-                                StatusLevel::Warn,
-                                format!("{selected} 已打开但不在系统列表中"),
-                            );
-                        } else {
-                            self.serial.selected_port = None;
-                            self.set_status_force(
-                                StatusLevel::Warn,
-                                format!("{selected} 已拔出或不可用"),
-                            );
-                        }
-                        // 记录待重连端口名（重连时使用当前 UI 配置，故无需保存快照）
-                        if self.serial.auto_reconnect {
-                            self.serial.pending_reconnect = Some(PendingReconnect {
-                                port_name: selected.clone(),
-                                attempts: 0,
-                                next_try_at: 0.0,
-                            });
-                        }
-                    }
+        if !selected_still_exists {
+            let selected_val = self.serial.selected_port.clone();
+            if let Some(ref selected) = selected_val {
+                if self.workbench.transport_status(selected).open {
+                    self.set_status_force(
+                        StatusLevel::Warn,
+                        format!("{selected} 已打开但不在系统列表中"),
+                    );
+                } else {
+                    self.serial.selected_port = None;
+                    self.set_status_force(StatusLevel::Warn, format!("{selected} 已拔出或不可用"));
                 }
-
-                // 自动重连：使用完整配置快照，带 backoff 和最大尝试次数
                 if self.serial.auto_reconnect {
-                    let pending = self.serial.pending_reconnect.clone();
-                    if let Some(mut pending) = pending
-                        && new_names.contains(&pending.port_name)
-                    {
-                        let now = now_timestamp_ms() as f64 / 1000.0;
-                        if now < pending.next_try_at {
-                            // cooldown not expired, keep waiting
-                        } else if pending.attempts >= 10 {
-                            self.set_status(
-                                StatusLevel::Error,
-                                format!(
-                                    "自动重连 {} 失败，已达最大尝试次数，放弃",
-                                    pending.port_name
-                                ),
-                            );
-                            self.serial.pending_reconnect = None;
-                        } else {
-                            pending.attempts += 1;
-                            // 使用 saturating 避免 attempts >= 64 时 2u64.pow 溢出/ panic
-                            let backoff_ms = if pending.attempts >= 64 {
-                                30_000
-                            } else {
-                                (1u64 << pending.attempts.saturating_sub(1))
-                                    .saturating_mul(100)
-                                    .min(30_000)
-                            };
-                            pending.next_try_at = now + backoff_ms as f64 / 1000.0;
-
-                            // 使用当前 UI 配置重连，避免沿用拔出的旧快照（用户在断开期间
-                            // 调整波特率等设置后，恢复时应使用新值）。端口名用 pending 确保障本匹配。
-                            let reconnect_config = SerialConfig {
-                                port_name: pending.port_name.clone(),
-                                baud_rate: self.serial.baud_rate.parse().unwrap_or(115200),
-                                data_bits: parse_data_bits(&self.serial.data_bits),
-                                stop_bits: parse_stop_bits(&self.serial.stop_bits),
-                                parity: parse_parity(&self.serial.parity),
-                            };
-
-                            match self.workbench.transport.open_serial(reconnect_config) {
-                                Ok(()) => {
-                                    self.serial.selected_port = Some(pending.port_name.clone());
-                                    self.serial.pending_reconnect = None;
-                                    self.defer_port_open_notice(
-                                        &pending.port_name,
-                                        format!("已自动重连 {}", pending.port_name),
-                                    );
-                                }
-                                Err(e) => {
-                                    self.set_status_force(
-                                        StatusLevel::Warn,
-                                        format!(
-                                            "自动重连 {} 失败 (第 {} 次): {}",
-                                            pending.port_name,
-                                            pending.attempts,
-                                            translate_error(&e),
-                                        ),
-                                    );
-                                    self.serial.pending_reconnect = Some(pending);
-                                }
-                            }
-                        }
-                    }
-                    // else: port not yet reappeared, keep waiting
-                }
-
-                if show_status {
-                    self.set_status_force(
-                        StatusLevel::Info,
-                        format!("{} 个串口", self.serial.ports.len()),
-                    );
-                    return;
-                }
-
-                if !added_ports.is_empty() {
-                    self.set_status_force(
-                        StatusLevel::Info,
-                        format!("发现串口 {}", added_ports.join(", ")),
-                    );
-                } else if !removed_ports.is_empty() {
-                    self.set_status_force(
-                        StatusLevel::Info,
-                        format!("移除串口 {}", removed_ports.join(", ")),
-                    );
-                } else if self.serial.selected_port != old_selected {
-                    self.set_status_force(StatusLevel::Info, "请选择串口");
+                    self.serial.pending_reconnect = Some(PendingReconnect {
+                        port_name: selected.clone(),
+                        attempts: 0,
+                        next_try_at: 0.0,
+                    });
                 }
             }
-            Err(error) => {
-                self.set_status(StatusLevel::Error, error.to_string());
+        }
+
+        // 自动重连现在只提交统一后台任务，UI tick 不再直接触碰 open_serial。
+        if self.serial.auto_reconnect
+            && let Some(pending) = self.serial.pending_reconnect.clone()
+            && new_names.contains(&pending.port_name)
+        {
+            let name = pending.port_name.clone();
+            self.workbench.set_serial_parameters(
+                self.serial.baud_rate.clone(),
+                self.serial.data_bits.clone(),
+                self.serial.stop_bits.clone(),
+                self.serial.parity.clone(),
+            );
+            match self
+                .workbench
+                .dispatch(tool_application::AppCommand::Reconnect {
+                    port_name: name.clone(),
+                }) {
+                Ok(tool_application::CommandOutcome::Pending { .. }) => {
+                    self.serial.pending_reconnect = None;
+                    self.defer_port_open_notice(&name, format!("已自动重连 {name}"));
+                    self.set_status_force(StatusLevel::Info, format!("正在自动重连 {name}..."));
+                }
+                Ok(tool_application::CommandOutcome::Done) => {
+                    self.serial.pending_reconnect = None;
+                }
+                Err(error) => self.set_status_force(StatusLevel::Warn, error.to_string()),
             }
+        }
+
+        if show_status {
+            self.set_status_force(
+                StatusLevel::Info,
+                format!("{} 个串口", self.serial.ports.len()),
+            );
+        } else if !added_ports.is_empty() {
+            self.set_status_force(
+                StatusLevel::Info,
+                format!("发现串口 {}", added_ports.join(", ")),
+            );
+        } else if !removed_ports.is_empty() {
+            self.set_status_force(
+                StatusLevel::Info,
+                format!("移除串口 {}", removed_ports.join(", ")),
+            );
+        } else if self.serial.selected_port != old_selected {
+            self.set_status_force(StatusLevel::Info, "请选择串口");
         }
     }
 
@@ -399,18 +343,31 @@ impl WorkbenchApp {
             return;
         }
 
-        if self.workbench.transport.status_port(name).open {
+        if self.workbench.transport_status(name).open {
             // 已打开：关闭
             self.cancel_pending_port_open_notice(name);
-            self.workbench.transport.close_port(name);
-            self.set_status_force(StatusLevel::Info, format!("{name} 已断开"));
+            match self
+                .workbench
+                .dispatch(tool_application::AppCommand::Disconnect {
+                    port_name: name.to_owned(),
+                }) {
+                Ok(tool_application::CommandOutcome::Pending { .. }) => {
+                    self.set_status_force(StatusLevel::Info, format!("正在断开 {name}..."));
+                }
+                Ok(tool_application::CommandOutcome::Done) => {}
+                Err(error) => self.set_status_force(StatusLevel::Error, error.to_string()),
+            }
             return;
         }
 
         // 网络端口连接中：取消连接（worker 正在异步 connect）
-        if self.workbench.transport.status_port(name).connecting {
+        if self.workbench.transport_status(name).connecting {
             self.cancel_pending_port_open_notice(name);
-            self.workbench.transport.close_port(name);
+            let _ = self
+                .workbench
+                .dispatch(tool_application::AppCommand::Disconnect {
+                    port_name: name.to_owned(),
+                });
             self.set_status_force(StatusLevel::Info, format!("已取消 {name} 的连接"));
             return;
         }
@@ -443,50 +400,42 @@ impl WorkbenchApp {
     }
 
     fn open_selected_port_result(&mut self) -> Result<(), String> {
-        self.refresh_ports_silent();
         let Some(p) = self.serial.selected_port.clone() else {
             return Err("请选择串口".to_owned());
         };
         if !self.serial.ports.iter().any(|port| port.port_name == p) {
             return Err(format!("{p} 不存在"));
         }
-        // 网络模拟串口：走 WebSocket + JSON-RPC gcode 桥
-        if let Some(net) = self
+        if !self
             .serial
             .network_ports
             .iter()
-            .find(|net| net.display_name() == p)
+            .any(|net| net.display_name() == p)
         {
-            self.workbench
-                .transport
-                .open_network_serial(net.clone())
-                .map_err(|e| e.to_string())?;
-            return Ok(());
+            let baud_rate = self
+                .serial
+                .baud_rate
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| "波特率格式错误".to_owned())?;
+            if baud_rate == 0 {
+                return Err("波特率格式错误".to_owned());
+            }
         }
 
-        let baud_rate = self
-            .serial
-            .baud_rate
-            .trim()
-            .parse::<u32>()
-            .map_err(|_| "波特率格式错误".to_owned())?;
-        if baud_rate == 0 {
-            return Err("波特率格式错误".to_owned());
-        }
-        let cfg = SerialConfig {
-            port_name: p,
-            baud_rate,
-            data_bits: parse_data_bits(&self.serial.data_bits),
-            stop_bits: parse_stop_bits(&self.serial.stop_bits),
-            parity: parse_parity(&self.serial.parity),
-        };
+        self.workbench.set_serial_parameters(
+            self.serial.baud_rate.clone(),
+            self.serial.data_bits.clone(),
+            self.serial.stop_bits.clone(),
+            self.serial.parity.clone(),
+        );
         self.workbench
-            .transport
-            .open_serial(cfg)
-            .map_err(|e| translate_error(&e))
+            .dispatch(tool_application::AppCommand::Connect { port_name: p })
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 
-    /// 真正重连：先关闭端口并等待 worker 退出，再用当前配置重新打开。
+    /// 提交统一后台重连任务；关闭和重新打开均在线程中完成。
     pub(crate) fn reconnect_selected_port(&mut self) {
         let Some(p) = self.serial.selected_port.clone() else {
             self.set_status_force(StatusLevel::Warn, "请选择串口");
@@ -499,20 +448,23 @@ impl WorkbenchApp {
             return;
         }
 
-        // 先关闭，阻塞等待 worker 退出
-        if let Err(e) = self
+        self.workbench.set_serial_parameters(
+            self.serial.baud_rate.clone(),
+            self.serial.data_bits.clone(),
+            self.serial.stop_bits.clone(),
+            self.serial.parity.clone(),
+        );
+        match self
             .workbench
-            .transport
-            .close_port_blocking(&p, Duration::from_millis(3000))
-        {
-            self.set_status_force(StatusLevel::Error, format!("关闭 {p} 失败：{e}"));
-            return;
-        }
-
-        // 重新打开
-        match self.open_selected_port_result() {
-            Ok(()) => self.defer_port_open_notice(&p, format!("{p} 已重新连接")),
-            Err(e) => self.set_status_force(StatusLevel::Error, format!("重连 {p} 失败：{e}")),
+            .dispatch(tool_application::AppCommand::Reconnect {
+                port_name: p.clone(),
+            }) {
+            Ok(tool_application::CommandOutcome::Pending { .. }) => {
+                self.defer_port_open_notice(&p, format!("{p} 已重新连接"));
+                self.set_status_force(StatusLevel::Info, format!("正在重连 {p}..."));
+            }
+            Ok(tool_application::CommandOutcome::Done) => {}
+            Err(error) => self.set_status_force(StatusLevel::Error, error.to_string()),
         }
     }
 
@@ -537,12 +489,12 @@ impl WorkbenchApp {
     }
 
     pub(crate) fn start_or_stop_recording(&mut self) {
-        if self.workbench.recorder.is_running() || self.workbench.recorder.is_stopping() {
-            self.workbench.recorder.stop();
+        if self.workbench.recording_is_running() || self.workbench.recording_is_stopping() {
+            self.workbench.stop_recording();
             self.set_status_force(StatusLevel::Info, "正在停止录制...");
         } else {
             let recorder_path = resolve_recorder_path(std::path::Path::new(&self.recorder_path));
-            match self.workbench.recorder.start(recorder_path) {
+            match self.workbench.start_recording(recorder_path) {
                 Ok(()) => {
                     self.set_status_force(StatusLevel::Info, "录制中");
                 }
@@ -552,14 +504,4 @@ impl WorkbenchApp {
             }
         }
     }
-}
-
-fn write_utf8_csv(path: &std::path::Path, content: &str) -> std::io::Result<()> {
-    use std::io::Write as _;
-
-    let file = std::fs::File::create(path)?;
-    let mut writer = std::io::BufWriter::new(file);
-    writer.write_all(b"\xEF\xBB\xBF")?;
-    writer.write_all(content.as_bytes())?;
-    writer.flush()
 }

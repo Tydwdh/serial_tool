@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tool_application::tool_core::LogLevel;
-use tool_application::tool_lua_host::{LuaReplayConfig, run_replay_analyzer_with_cancel};
+use tool_application::api::core::LogLevel;
+use tool_application::api::lua_host::{LuaReplayConfig, run_replay_analyzer_with_cancel};
 
 use crate::app::{ReplayAnalyzerJob, ReplayAnalyzerResult, WorkbenchApp};
 use crate::state::StatusLevel;
@@ -33,7 +33,7 @@ impl WorkbenchApp {
             return;
         }
 
-        let entries = self.workbench.plugin_manager.replay_analyzer_entries();
+        let entries = self.workbench.replay_analyzer_entries();
         if entries.is_empty() {
             self.replay_panel
                 .set_analyzer_error("没有可用的 replay analyzer".to_owned());

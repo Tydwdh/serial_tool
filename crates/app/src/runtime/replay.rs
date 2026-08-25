@@ -2,8 +2,8 @@ use crate::app::WorkbenchApp;
 use crate::config::windows_open_dialog;
 use crate::state::StatusLevel;
 use eframe::egui;
-use tool_application::tool_core::{Direction, Event, Payload};
-use tool_application::tool_recorder::{ReplayBlockReason, ReplayState};
+use tool_application::api::core::{Direction, Event, Payload};
+use tool_application::api::recorder::{ReplayBlockReason, ReplayState};
 
 impl WorkbenchApp {
     /// 回放相关：seek/step/pick_file/analyzer 调度。
@@ -108,7 +108,7 @@ impl WorkbenchApp {
         self.bottom_log_panel.clear();
         self.dynamic_panels.clear_charts();
 
-        self.workbench.bus.publish(Event::new(
+        self.workbench.publish_event(Event::new(
             "ui.replay.reset",
             "ui.replay",
             Direction::Internal,
