@@ -311,7 +311,10 @@ impl Workbench {
                 });
                 Ok(pending(task_id, "正在获取串口"))
             }
-            AppCommand::Connect { port_name } => self.connect(&port_name),
+            AppCommand::Connect {
+                port_name,
+                settings,
+            } => self.connect(&port_name, settings),
             AppCommand::Disconnect { port_name } => {
                 let task_port = port_name.clone();
                 let is_network = self
@@ -663,6 +666,10 @@ impl Workbench {
         self.transport.status_port(port).into()
     }
 
+    pub fn serial_settings(&self) -> SerialSettings {
+        self.platform_serial_settings()
+    }
+
     pub fn set_dtr(&mut self, port: &str, value: bool) -> Result<CommandOutcome, AppError> {
         self.dispatch(AppCommand::SetDtr {
             port_name: port.to_owned(),
@@ -863,7 +870,11 @@ impl Workbench {
         });
     }
 
-    fn connect(&mut self, port_name: &str) -> Result<CommandOutcome, AppError> {
+    fn connect(
+        &mut self,
+        port_name: &str,
+        settings: SerialSettings,
+    ) -> Result<CommandOutcome, AppError> {
         if let Some(net) = self
             .app_config
             .network_ports
@@ -887,7 +898,6 @@ impl Workbench {
             let task_port = port_name.to_owned();
             let backend = self.transport_backend.clone();
             let port = PortId::new(task_port.clone());
-            let settings = self.platform_serial_settings();
             let task_id = self.tasks.spawn("connect_serial", move |_context| {
                 block_on_transport(backend.connect(port.clone(), settings))
                     .map_err(|error| error.to_string())?;

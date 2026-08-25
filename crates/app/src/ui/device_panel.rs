@@ -268,6 +268,7 @@ impl WorkbenchApp {
                         .workbench
                         .dispatch(tool_application::AppCommand::Connect {
                             port_name: name.clone(),
+                            settings: self.workbench.serial_settings(),
                         }) {
                         Ok(tool_application::CommandOutcome::Pending { .. }) => {
                             self.serial.selected_port = Some(name.clone());

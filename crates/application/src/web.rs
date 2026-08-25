@@ -8,13 +8,14 @@ use std::rc::Rc;
 use tool_databus::DataBus;
 use tool_platform::web_serial::WebSerialTransport;
 use tool_platform::{
-    PortDescriptor, PortId, SerialSettings, TransportBackend, TransportFuture, serial_rx_event,
-    serial_tx_event,
+    PortDescriptor, PortId, TransportBackend, TransportFuture, serial_rx_event, serial_tx_event,
 };
 use wasm_bindgen_futures::spawn_local;
 
 use crate::command::{AppCommand, CommandOutcome};
 use crate::task_model::{TaskId, TaskSnapshot, TaskState};
+
+pub type RepaintWaker = Rc<dyn Fn()>;
 
 #[derive(Debug, Clone)]
 pub enum WebAppEvent {
@@ -74,6 +75,7 @@ pub struct WebApplication {
     bus: DataBus,
     transport: WebSerialTransport,
     tasks: Rc<RefCell<WebTaskRegistry>>,
+    repaint_waker: Rc<RefCell<Option<RepaintWaker>>>,
 }
 
 impl WebApplication {
@@ -82,7 +84,16 @@ impl WebApplication {
             bus,
             transport: WebSerialTransport::from_window().map_err(|error| error.to_string())?,
             tasks: Rc::new(RefCell::new(WebTaskRegistry::default())),
+            repaint_waker: Rc::new(RefCell::new(None)),
         })
+    }
+
+    pub fn set_repaint_waker(&self, waker: RepaintWaker) {
+        *self.repaint_waker.borrow_mut() = Some(waker);
+    }
+
+    fn wake(&self) {
+        wake_handle(&self.repaint_waker);
     }
 
     pub fn bus(&self) -> DataBus {
@@ -108,6 +119,8 @@ impl WebApplication {
             snapshot.state = TaskState::Cancelled;
             snapshot.message = "任务已取消".to_owned();
         }
+        drop(tasks);
+        self.wake();
         true
     }
 
@@ -136,6 +149,7 @@ impl WebApplication {
             tasks.events.push(WebAppEvent::TaskStateChanged(snapshot));
             (id, self.tasks.clone())
         };
+        self.wake();
 
         {
             let mut tasks = tasks.borrow_mut();
@@ -146,31 +160,40 @@ impl WebApplication {
                 tasks.events.push(WebAppEvent::TaskStateChanged(snapshot));
             }
         }
+        self.wake();
 
+        let repaint_waker = self.repaint_waker.clone();
         spawn_local(async move {
             let result = future.await;
-            let mut tasks = tasks.borrow_mut();
-            if tasks.cancelled.remove(&id) {
-                return;
-            }
-            match result {
-                Ok(value) => {
-                    if let Some(snapshot) = tasks.snapshots.get_mut(&id) {
-                        snapshot.state = TaskState::Completed;
-                        snapshot.message = "异步操作完成".to_owned();
+            let should_wake = {
+                let mut tasks = tasks.borrow_mut();
+                if tasks.cancelled.remove(&id) {
+                    false
+                } else {
+                    match result {
+                        Ok(value) => {
+                            if let Some(snapshot) = tasks.snapshots.get_mut(&id) {
+                                snapshot.state = TaskState::Completed;
+                                snapshot.message = "异步操作完成".to_owned();
+                            }
+                            tasks.events.push(complete(value));
+                        }
+                        Err(error) => {
+                            if let Some(snapshot) = tasks.snapshots.get_mut(&id) {
+                                snapshot.state = TaskState::Failed;
+                                snapshot.message = error.to_string();
+                            }
+                            tasks.events.push(WebAppEvent::TaskFailed {
+                                id,
+                                error: error.to_string(),
+                            });
+                        }
                     }
-                    tasks.events.push(complete(value));
+                    true
                 }
-                Err(error) => {
-                    if let Some(snapshot) = tasks.snapshots.get_mut(&id) {
-                        snapshot.state = TaskState::Failed;
-                        snapshot.message = error.to_string();
-                    }
-                    tasks.events.push(WebAppEvent::TaskFailed {
-                        id,
-                        error: error.to_string(),
-                    });
-                }
+            };
+            if should_wake {
+                wake_handle(&repaint_waker);
             }
         });
         id
@@ -192,38 +215,45 @@ impl WebApplication {
             }
             AppCommand::RequestPort => {
                 let transport = self.transport.clone();
-                let task_id = self.spawn(
-                    "request_port",
-                    async move { transport.request_port().await },
-                    WebAppEvent::PortRequested,
-                );
+                // requestPort() must be created while the browser still has
+                // the button's transient user activation.  The transport
+                // deliberately constructs the Promise in request_port(),
+                // before returning the future to this scheduler.
+                let future = transport.request_port();
+                let task_id = self.spawn("request_port", future, WebAppEvent::PortRequested);
                 Ok(CommandOutcome::Pending {
                     task_id,
                     message: "等待浏览器选择串口".to_owned(),
                 })
             }
-            AppCommand::Connect { port_name } => {
+            AppCommand::Connect {
+                port_name,
+                settings,
+            } => {
                 let transport = self.transport.clone();
                 let port = PortId::new(port_name);
                 let task_port = port.clone();
                 let bus = self.bus.clone();
                 let task_events = self.tasks.clone();
+                let repaint_waker = self.repaint_waker.clone();
                 let task_id = self.spawn(
                     "connect_serial",
                     async move {
-                        transport
-                            .connect(port.clone(), SerialSettings::default())
-                            .await?;
+                        transport.connect(port.clone(), settings).await?;
                         let rx_port = port.clone();
                         let rx_bus = bus.clone();
+                        let rx_waker = repaint_waker.clone();
                         let sink = Rc::new(move |bytes: Vec<u8>| {
                             rx_bus.publish(serial_rx_event(&rx_port, bytes));
+                            wake_handle(&rx_waker);
                         });
+                        let disconnect_waker = repaint_waker.clone();
                         let on_disconnect = Rc::new(move |port| {
                             task_events
                                 .borrow_mut()
                                 .events
                                 .push(WebAppEvent::Disconnected { port });
+                            wake_handle(&disconnect_waker);
                         });
                         transport
                             .start_receive_with_disconnect(port.clone(), sink, on_disconnect)
@@ -336,4 +366,11 @@ fn parse_hex(input: &str) -> Result<Vec<u8>, String> {
                 .map_err(|_| format!("无效 HEX：{}", &compact[index..index + 2]))
         })
         .collect()
+}
+
+fn wake_handle(handle: &Rc<RefCell<Option<RepaintWaker>>>) {
+    let waker = handle.borrow().clone();
+    if let Some(waker) = waker {
+        waker();
+    }
 }

@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 use crate::TaskId;
+use tool_platform::SerialSettings;
 
 /// 应用层命令：描述“我要做什么”，由 `Workbench::dispatch` 执行。
 #[derive(Debug, Clone)]
@@ -16,6 +17,7 @@ pub enum AppCommand {
 
     Connect {
         port_name: String,
+        settings: SerialSettings,
     },
 
     Disconnect {

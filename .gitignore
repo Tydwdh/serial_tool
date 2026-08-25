@@ -23,6 +23,7 @@ workspace.json.backup
 
 # ── Dist ──
 dist/
+dist-web/
 
 # ── 调试工具 / 临时脚本 ──
 code_dump.txt

@@ -1837,6 +1837,7 @@ dependencies = [
  "tool-updater",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "web-sys",
  "winresource",
 ]
 

@@ -430,7 +430,10 @@ impl WorkbenchApp {
             self.serial.parity.clone(),
         );
         self.workbench
-            .dispatch(tool_application::AppCommand::Connect { port_name: p })
+            .dispatch(tool_application::AppCommand::Connect {
+                port_name: p,
+                settings: self.workbench.serial_settings(),
+            })
             .map(|_| ())
             .map_err(|error| error.to_string())
     }

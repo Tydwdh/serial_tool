@@ -1,0 +1,12 @@
+[build]
+dist = "../dist-web"
+public_url = "/"
+filehash = true
+
+[watch]
+watch = ["../crates", "../assets"]
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 8080
+open = false

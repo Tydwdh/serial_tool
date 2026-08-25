@@ -8,7 +8,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use js_sys::{Array, JsString, Reflect, Uint8Array};
+use js_sys::{Array, JsString, Object, Reflect, Uint8Array};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{
@@ -25,7 +25,8 @@ use crate::{
 pub struct WebSerialTransport {
     serial: Serial,
     ports: Rc<RefCell<HashMap<PortId, SerialPort>>>,
-    next_requested_id: Rc<Cell<u64>>,
+    readers: Rc<RefCell<HashMap<PortId, ReadableStreamDefaultReader>>>,
+    next_session_id: Rc<Cell<u64>>,
 }
 
 impl WebSerialTransport {
@@ -38,7 +39,8 @@ impl WebSerialTransport {
         Ok(Self {
             serial: navigator.serial(),
             ports: Rc::new(RefCell::new(HashMap::new())),
-            next_requested_id: Rc::new(Cell::new(1)),
+            readers: Rc::new(RefCell::new(HashMap::new())),
+            next_session_id: Rc::new(Cell::new(1)),
         })
     }
 
@@ -48,26 +50,13 @@ impl WebSerialTransport {
         Self::from_navigator(window.navigator())
     }
 
-    fn descriptor(
-        &self,
-        port: &SerialPort,
-        ordinal: usize,
-        requested: bool,
-    ) -> (PortId, PortDescriptor) {
+    fn descriptor(&self, port: &SerialPort, ordinal: usize) -> (PortId, PortDescriptor) {
         let info = port.get_info();
         let vendor_id = info.get_usb_vendor_id();
         let product_id = info.get_usb_product_id();
-        let id = if requested {
-            let next = self.next_requested_id.get();
-            self.next_requested_id.set(next + 1);
-            PortId::new(format!("webserial:requested:{next}"))
-        } else {
-            PortId::new(format!(
-                "webserial:{:04x}:{:04x}:{ordinal}",
-                vendor_id.unwrap_or_default(),
-                product_id.unwrap_or_default()
-            ))
-        };
+        let id = self
+            .find_session_id(port)
+            .unwrap_or_else(|| self.allocate_session_id());
         let label = match (vendor_id, product_id) {
             (Some(vendor), Some(product)) => format!("USB {vendor:04X}:{product:04X}"),
             _ => format!("Web Serial {ordinal}"),
@@ -81,6 +70,20 @@ impl WebSerialTransport {
             authorized: true,
         };
         (id, descriptor)
+    }
+
+    fn allocate_session_id(&self) -> PortId {
+        let next = self.next_session_id.get();
+        self.next_session_id.set(next + 1);
+        PortId::new(format!("webserial:session:{next}"))
+    }
+
+    fn find_session_id(&self, port: &SerialPort) -> Option<PortId> {
+        let value: &JsValue = port.as_ref();
+        self.ports
+            .borrow()
+            .iter()
+            .find_map(|(id, known)| Object::is(value, known.as_ref()).then(|| id.clone()))
     }
 
     fn remember(&self, id: PortId, port: SerialPort) {
@@ -117,6 +120,8 @@ impl WebSerialTransport {
         let readable = port.readable();
         let reader_object = readable.get_reader();
         let reader: ReadableStreamDefaultReader = reader_object.unchecked_into();
+        self.readers.borrow_mut().insert(id.clone(), reader.clone());
+        let readers = self.readers.clone();
         spawn_local(async move {
             loop {
                 let result = match JsFuture::from(reader.read()).await {
@@ -141,6 +146,7 @@ impl WebSerialTransport {
                 }
                 sink(Uint8Array::new(&value).to_vec());
             }
+            readers.borrow_mut().remove(&id);
             reader.release_lock();
             on_disconnect(id);
         });
@@ -176,7 +182,7 @@ impl TransportBackend for WebSerialTransport {
                 let port: SerialPort = value
                     .dyn_into()
                     .map_err(|_| TransportError::Operation("invalid SerialPort value".into()))?;
-                let (id, descriptor) = backend.descriptor(&port, ordinal, false);
+                let (id, descriptor) = backend.descriptor(&port, ordinal);
                 backend.remember(id, port);
                 descriptors.push(descriptor);
             }
@@ -195,7 +201,7 @@ impl TransportBackend for WebSerialTransport {
             let port: SerialPort = value
                 .dyn_into()
                 .map_err(|_| TransportError::PermissionDenied)?;
-            let (id, descriptor) = backend.descriptor(&port, 0, true);
+            let (id, descriptor) = backend.descriptor(&port, 0);
             backend.remember(id, port);
             Ok(descriptor)
         })
@@ -222,6 +228,13 @@ impl TransportBackend for WebSerialTransport {
         let backend = self.clone();
         Box::pin(async move {
             let port = backend.port(&port_id)?;
+            if let Some(reader) = backend.readers.borrow_mut().remove(&port_id) {
+                // A SerialPort cannot be closed while its readable stream is
+                // locked. Cancelling first also wakes the receive task so it
+                // can publish the matching Disconnected event.
+                let _ = WebSerialTransport::await_promise(reader.cancel()).await;
+                reader.release_lock();
+            }
             WebSerialTransport::await_promise(port.close()).await?;
             Ok(())
         })

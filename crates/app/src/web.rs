@@ -7,6 +7,7 @@
 
 use eframe::egui;
 use egui::FontFamily;
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::rc::Rc;
 use tool_application::web::{WebAppEvent, WebApplication};
@@ -14,7 +15,7 @@ use tool_application::{AppCommand, CommandOutcome};
 use tool_databus::DataBus;
 use tool_panels::{ChartPanel, TerminalPanel, theme};
 use tool_platform::storage::{SettingsStore, web::WebSettingsStore};
-use tool_platform::{PortDescriptor, PortId};
+use tool_platform::{PortDescriptor, PortId, SerialParity, SerialSettings};
 use wasm_bindgen::{JsCast, JsValue, prelude::wasm_bindgen};
 use wasm_bindgen_futures::spawn_local;
 
@@ -30,12 +31,34 @@ enum WebPanel {
     Settings,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WebSettings {
+    #[serde(default)]
+    theme: theme::AppTheme,
+    #[serde(default)]
+    serial: SerialSettings,
+    #[serde(default)]
+    tx_hex: bool,
+}
+
+impl Default for WebSettings {
+    fn default() -> Self {
+        Self {
+            theme: theme::AppTheme::default(),
+            serial: SerialSettings::default(),
+            tx_hex: false,
+        }
+    }
+}
+
 struct WebSerialState {
     ports: Vec<PortDescriptor>,
     connected: Option<PortId>,
-    send_text: String,
+    send_input: String,
+    tx_hex: bool,
     dtr: bool,
     rts: bool,
+    settings: SerialSettings,
     status: String,
 }
 
@@ -44,9 +67,11 @@ impl Default for WebSerialState {
         Self {
             ports: Vec::new(),
             connected: None,
-            send_text: String::new(),
+            send_input: String::new(),
+            tx_hex: false,
             dtr: true,
             rts: true,
+            settings: SerialSettings::default(),
             status: "Web Serial：点击“刷新”读取已授权设备".to_owned(),
         }
     }
@@ -60,6 +85,7 @@ pub(crate) struct WebApp {
     application: Option<WebApplication>,
     serial: Rc<RefCell<WebSerialState>>,
     settings_store: Option<WebSettingsStore>,
+    settings_load: Rc<RefCell<Option<WebSettings>>>,
 }
 
 impl WebApp {
@@ -69,27 +95,82 @@ impl WebApp {
         setup_web_fonts(cc);
 
         let bus = DataBus::new();
-        let application = WebApplication::new(bus.clone()).ok();
+        let application = WebApplication::new(bus.clone()).ok().map(|application| {
+            let ctx = cc.egui_ctx.clone();
+            application.set_repaint_waker(Rc::new(move || ctx.request_repaint()));
+            application
+        });
+        let serial = Rc::new(RefCell::new(WebSerialState::default()));
+        let settings_store = WebSettingsStore::from_window("hardware-workbench").ok();
+        let settings_load = Rc::new(RefCell::new(None));
+        if let Some(store) = settings_store.clone() {
+            let loaded = settings_load.clone();
+            let ctx = cc.egui_ctx.clone();
+            spawn_local(async move {
+                let settings = match store.load("settings.json".to_owned()).await {
+                    Ok(Some(bytes)) => serde_json::from_slice::<WebSettings>(&bytes).ok(),
+                    _ => match store.load("theme.json".to_owned()).await {
+                        Ok(Some(bytes)) => serde_json::from_slice::<theme::AppTheme>(&bytes)
+                            .ok()
+                            .map(|theme| WebSettings {
+                                theme,
+                                ..WebSettings::default()
+                            }),
+                        _ => None,
+                    },
+                };
+                if let Some(settings) = settings {
+                    *loaded.borrow_mut() = Some(settings);
+                    ctx.request_repaint();
+                }
+            });
+        }
         let serial_status = if application.is_some() {
             "Web Serial：点击“刷新”读取已授权设备"
         } else {
             "当前浏览器不支持 Web Serial"
         };
+        serial.borrow_mut().status = serial_status.to_owned();
         Self {
             terminal: TerminalPanel::new(&bus),
             chart: ChartPanel::new(&bus),
             active_panel: WebPanel::Terminal,
             theme: selected_theme,
             application,
-            serial: Rc::new(RefCell::new(WebSerialState {
-                status: serial_status.to_owned(),
-                ..WebSerialState::default()
-            })),
-            settings_store: WebSettingsStore::from_window("hardware-workbench").ok(),
+            serial,
+            settings_store,
+            settings_load,
         }
     }
 
-    fn poll_web_events(&mut self, ctx: &egui::Context) {
+    fn poll_loaded_settings(&mut self, ctx: &egui::Context) {
+        let Some(settings) = self.settings_load.borrow_mut().take() else {
+            return;
+        };
+        self.theme = settings.theme;
+        self.serial.borrow_mut().settings = settings.serial;
+        self.serial.borrow_mut().tx_hex = settings.tx_hex;
+        apply_web_theme(ctx, self.theme);
+    }
+
+    fn persist_settings(&self) {
+        let Some(store) = self.settings_store.clone() else {
+            return;
+        };
+        let settings = WebSettings {
+            theme: self.theme,
+            serial: self.serial.borrow().settings,
+            tx_hex: self.serial.borrow().tx_hex,
+        };
+        let Ok(value) = serde_json::to_vec(&settings) else {
+            return;
+        };
+        spawn_local(async move {
+            let _ = store.save("settings.json".to_owned(), value).await;
+        });
+    }
+
+    fn poll_web_events(&mut self) {
         let Some(application) = self.application.clone() else {
             return;
         };
@@ -110,7 +191,7 @@ impl WebApp {
                 }
                 WebAppEvent::Connected { port } => {
                     serial.connected = Some(port.clone());
-                    serial.status = format!("已连接 {port} @ 115200 8N1");
+                    serial.status = format!("已连接 {port} @ {}", settings_label(serial.settings));
                 }
                 WebAppEvent::Disconnected { port } => {
                     if serial.connected.as_ref() == Some(&port) {
@@ -136,7 +217,6 @@ impl WebApp {
                 }
             }
         }
-        ctx.request_repaint();
     }
 
     fn dispatch_serial(&self, command: AppCommand, ctx: &egui::Context) {
@@ -168,7 +248,8 @@ impl eframe::App for WebApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.poll_web_events(ui.ctx());
+        self.poll_loaded_settings(ui.ctx());
+        self.poll_web_events();
         egui::Panel::top("web-v1-header").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("硬件调试工作台");
@@ -228,12 +309,7 @@ impl WebApp {
                 {
                     self.theme = candidate;
                     apply_web_theme(ui.ctx(), candidate);
-                    if let Some(store) = self.settings_store.clone() {
-                        let value = serde_json::to_vec(&candidate).unwrap_or_default();
-                        spawn_local(async move {
-                            let _ = store.save("theme.json".to_owned(), value).await;
-                        });
-                    }
+                    self.persist_settings();
                 }
             }
         });
@@ -243,6 +319,69 @@ impl WebApp {
         let ctx = ui.ctx().clone();
         ui.heading("Web Serial");
         ui.separator();
+
+        let mut settings = self.serial.borrow().settings;
+        let mut settings_changed = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.label("串口参数");
+            egui::ComboBox::from_id_salt("web-baud-rate")
+                .selected_text(settings.baud_rate.to_string())
+                .show_ui(ui, |ui| {
+                    for baud_rate in [9600, 19200, 38400, 57600, 115200, 230400, 460800] {
+                        settings_changed |= ui
+                            .selectable_value(
+                                &mut settings.baud_rate,
+                                baud_rate,
+                                baud_rate.to_string(),
+                            )
+                            .changed();
+                    }
+                });
+            egui::ComboBox::from_id_salt("web-data-bits")
+                .selected_text(settings.data_bits.to_string())
+                .show_ui(ui, |ui| {
+                    for data_bits in [5, 6, 7, 8] {
+                        settings_changed |= ui
+                            .selectable_value(
+                                &mut settings.data_bits,
+                                data_bits,
+                                data_bits.to_string(),
+                            )
+                            .changed();
+                    }
+                });
+            egui::ComboBox::from_id_salt("web-stop-bits")
+                .selected_text(settings.stop_bits.to_string())
+                .show_ui(ui, |ui| {
+                    for stop_bits in [1, 2] {
+                        settings_changed |= ui
+                            .selectable_value(
+                                &mut settings.stop_bits,
+                                stop_bits,
+                                stop_bits.to_string(),
+                            )
+                            .changed();
+                    }
+                });
+            egui::ComboBox::from_id_salt("web-parity")
+                .selected_text(parity_label(settings.parity))
+                .show_ui(ui, |ui| {
+                    for (parity, label) in [
+                        (SerialParity::None, "None"),
+                        (SerialParity::Odd, "Odd"),
+                        (SerialParity::Even, "Even"),
+                    ] {
+                        settings_changed |= ui
+                            .selectable_value(&mut settings.parity, parity, label)
+                            .changed();
+                    }
+                });
+        });
+        if settings_changed {
+            self.serial.borrow_mut().settings = settings;
+            self.persist_settings();
+        }
+
         ui.horizontal(|ui| {
             if ui.button("刷新已授权设备").clicked() {
                 self.dispatch_serial(AppCommand::RefreshPorts, &ctx);
@@ -256,6 +395,7 @@ impl WebApp {
         ui.label(&snapshot.status);
         let connected = snapshot.connected.clone();
         let ports = snapshot.ports.clone();
+        let serial_settings = snapshot.settings;
         drop(snapshot);
 
         for port in ports {
@@ -271,10 +411,14 @@ impl WebApp {
                             &ctx,
                         );
                     }
-                } else if ui.button("连接 115200 8N1").clicked() {
+                } else if ui
+                    .button(format!("连接 {}", settings_label(serial_settings)))
+                    .clicked()
+                {
                     self.dispatch_serial(
                         AppCommand::Connect {
                             port_name: port.id.to_string(),
+                            settings: serial_settings,
                         },
                         &ctx,
                     );
@@ -283,24 +427,38 @@ impl WebApp {
         }
 
         ui.add_space(12.0);
-        let mut send_text = self.serial.borrow().send_text.clone();
+        let mut send_input = self.serial.borrow().send_input.clone();
+        let mut tx_hex = self.serial.borrow().tx_hex;
         ui.horizontal(|ui| {
-            ui.label("TEXT");
-            ui.text_edit_singleline(&mut send_text);
+            ui.selectable_value(&mut tx_hex, false, "TEXT");
+            ui.selectable_value(&mut tx_hex, true, "HEX");
+            ui.text_edit_singleline(&mut send_input);
             let enabled = connected.is_some();
             if ui.add_enabled(enabled, egui::Button::new("发送")).clicked()
                 && let Some(port) = connected.clone()
             {
-                self.dispatch_serial(
+                let command = if tx_hex {
+                    AppCommand::SendHex {
+                        port_name: port.to_string(),
+                        hex: send_input.clone(),
+                    }
+                } else {
                     AppCommand::SendText {
                         port_name: port.to_string(),
-                        text: send_text.clone(),
-                    },
-                    &ctx,
-                );
+                        text: send_input.clone(),
+                    }
+                };
+                self.dispatch_serial(command, &ctx);
             }
         });
-        self.serial.borrow_mut().send_text = send_text;
+        let mut serial = self.serial.borrow_mut();
+        let mode_changed = serial.tx_hex != tx_hex;
+        serial.tx_hex = tx_hex;
+        serial.send_input = send_input;
+        drop(serial);
+        if mode_changed {
+            self.persist_settings();
+        }
 
         let mut dtr = self.serial.borrow().dtr;
         let mut rts = self.serial.borrow().rts;
@@ -386,6 +544,28 @@ fn apply_web_theme(ctx: &egui::Context, selected_theme: theme::AppTheme) {
     ctx.set_global_style(style);
 }
 
+fn parity_label(parity: SerialParity) -> &'static str {
+    match parity {
+        SerialParity::None => "None",
+        SerialParity::Odd => "Odd",
+        SerialParity::Even => "Even",
+    }
+}
+
+fn settings_label(settings: SerialSettings) -> String {
+    format!(
+        "{} {}{}{}",
+        settings.baud_rate,
+        settings.data_bits,
+        match settings.parity {
+            SerialParity::None => 'N',
+            SerialParity::Odd => 'O',
+            SerialParity::Even => 'E',
+        },
+        settings.stop_bits
+    )
+}
+
 /// Start the Web V1 application in an existing canvas.
 ///
 /// The HTML/JS host owns the canvas and calls this function after the page is
@@ -412,4 +592,16 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
             Box::new(|cc| Ok(Box::new(WebApp::new(cc)))),
         )
         .await
+}
+
+/// Trunk loads the generated wasm module after the canvas has been parsed.
+/// Starting from this hook keeps the host page free of generated wasm-bindgen
+/// module names while retaining `start(canvas_id)` for embedding scenarios.
+#[wasm_bindgen(start)]
+pub fn bootstrap() {
+    spawn_local(async {
+        if let Err(error) = start("hardware-workbench".to_owned()).await {
+            web_sys::console::error_1(&error);
+        }
+    });
 }
