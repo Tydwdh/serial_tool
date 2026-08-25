@@ -1,17 +1,17 @@
 use crate::{
     MAX_INGEST_PER_FRAME, MESSAGE_EVENT_BUFFER_CAPACITY, TerminalExportFormat, fmt_ts,
     table::{
-        AutoScrollState, MessageList, MessageSearch, RowHighlight, RowSelection, TextSelectionRows,
+        AutoScrollState, MessageSearch, RowHighlight, RowSelection, TextSelectionRows,
         bulk_copy_button, claim_copy_focus, copy_text_with_feedback, edge_scroll_delta,
         estimated_wrapped_line_count, owns_copy_focus, report_copy_feedback,
         wheel_scroll_during_selection,
     },
     theme,
+    virtual_list::VirtualRowIndex,
 };
 use egui::text_selection::LabelSelectionState;
 use egui::{RichText, ScrollArea, Sense, Stroke};
-use std::collections::{BTreeSet, VecDeque};
-use std::hash::{Hash, Hasher};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use tool_core::{Event, LogLevel};
 use tool_databus::{DataBus, RingSubscription, TopicFilter};
 
@@ -34,7 +34,14 @@ const NAV_FADE: f64 = 0.3;
 
 pub struct LogPanel {
     subscription: RingSubscription,
-    entries: VecDeque<LogEntry>,
+    entry_order: VecDeque<u64>,
+    entries: HashMap<u64, LogEntry>,
+    source_counts: HashMap<String, usize>,
+    source_names_cache: BTreeSet<String>,
+    visible_rows_cache: VecDeque<LogEntry>,
+    visible_filter_key: Option<LogFilterKey>,
+    visible_rows_dirty: bool,
+    visible_rows_generation: u64,
     next_entry_id: u64,
     min_level: LogLevel,
     auto_scroll: AutoScrollState,
@@ -55,7 +62,7 @@ pub struct LogPanel {
     /// 字符级拖选覆盖的行；用于在自动滚动时保活视口外的选区端点。
     text_selection_rows: TextSelectionRows,
     /// 日志消息流的共享虚拟渲染状态（与接收区共用实现）。
-    message_list: MessageList,
+    virtual_rows: VirtualRowIndex,
     /// 是否发生过截断（用于状态栏提示，显示后清除）
     pub truncated: bool,
 }
@@ -67,6 +74,14 @@ struct LogEntry {
     level: LogLevel,
     source: String,
     message: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct LogFilterKey {
+    min_level: LogLevel,
+    source_filter: Option<String>,
+    search_text: String,
+    case_sensitive: bool,
 }
 
 pub struct LogExportJob {
@@ -142,7 +157,14 @@ impl LogPanel {
         Self {
             subscription: bus
                 .subscribe_ring_bounded(TopicFilter::prefix("log."), MESSAGE_EVENT_BUFFER_CAPACITY),
-            entries: VecDeque::new(),
+            entry_order: VecDeque::new(),
+            entries: HashMap::new(),
+            source_counts: HashMap::new(),
+            source_names_cache: BTreeSet::new(),
+            visible_rows_cache: VecDeque::new(),
+            visible_filter_key: None,
+            visible_rows_dirty: true,
+            visible_rows_generation: 1,
             next_entry_id: 1,
             min_level: LogLevel::Info,
             auto_scroll: AutoScrollState::default(),
@@ -155,7 +177,7 @@ impl LogPanel {
             font_size: 13.0,
             selection: RowSelection::new(0),
             text_selection_rows: TextSelectionRows::default(),
-            message_list: MessageList::default(),
+            virtual_rows: VirtualRowIndex::default(),
             truncated: false,
         }
     }
@@ -173,23 +195,26 @@ impl LogPanel {
     }
     pub fn clear(&mut self) {
         self.subscription.clear();
+        self.entry_order.clear();
         self.entries.clear();
+        self.source_counts.clear();
+        self.source_names_cache.clear();
+        self.visible_rows_cache.clear();
+        self.visible_filter_key = None;
+        self.visible_rows_dirty = true;
+        self.visible_rows_generation = self.visible_rows_generation.wrapping_add(1);
         self.auto_scroll.reset();
         self.pending_navigate_to_id = None;
         self.search.clear();
         self.source_filter = None;
         self.selection.clear();
         self.text_selection_rows.clear();
-        self.message_list.clear();
+        self.virtual_rows.clear();
     }
 
     /// 收集所有已出现过的 source 名称，用于过滤下拉框。
     fn source_names(&self) -> Vec<String> {
-        let mut names: BTreeSet<&str> = BTreeSet::new();
-        for entry in &self.entries {
-            names.insert(&entry.source);
-        }
-        names.into_iter().map(|s| s.to_owned()).collect()
+        self.source_names_cache.iter().cloned().collect()
     }
 
     /// 让 main.rs 在日志面板不可见时也能消费日志事件。
@@ -217,8 +242,9 @@ impl LogPanel {
 
     fn collect_visible_entries(&self) -> Vec<&LogEntry> {
         let search_key = self.search.query();
-        self.entries
+        self.entry_order
             .iter()
+            .filter_map(|id| self.entries.get(id))
             .filter(|entry| entry.level >= self.min_level)
             .filter(|entry| {
                 self.source_filter
@@ -293,9 +319,31 @@ impl LogPanel {
     }
 
     fn enforce_max_entries(&mut self) {
-        while self.entries.len() > self.max_entries {
-            if let Some(removed) = self.entries.pop_front() {
-                self.message_list.remove(removed.id);
+        while self.entry_order.len() > self.max_entries {
+            let Some(removed_id) = self.entry_order.pop_front() else {
+                break;
+            };
+            if let Some(removed) = self.entries.remove(&removed_id)
+                && let Some(count) = self.source_counts.get_mut(&removed.source)
+            {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.source_counts.remove(&removed.source);
+                    self.source_names_cache.remove(&removed.source);
+                }
+            }
+            if !self.visible_rows_dirty
+                && self
+                    .visible_filter_key
+                    .as_ref()
+                    .is_some_and(|key| *key == self.current_filter_key())
+                && self
+                    .visible_rows_cache
+                    .front()
+                    .is_some_and(|entry| entry.id == removed_id)
+            {
+                self.visible_rows_cache.pop_front();
+                self.visible_rows_generation = self.visible_rows_generation.wrapping_add(1);
             }
             self.truncated = true;
         }
@@ -447,26 +495,8 @@ impl LogPanel {
             self.auto_scroll.enabled = false;
         }
 
-        let search_key = self.search.query();
-        let rows: Vec<&LogEntry> = self
-            .entries
-            .iter()
-            .filter(|entry| entry.level >= self.min_level)
-            .filter(|entry| {
-                if let Some(ref filter) = self.source_filter {
-                    entry.source == *filter
-                } else {
-                    true
-                }
-            })
-            .filter(|entry| {
-                if search_key.is_empty() {
-                    return true;
-                }
-                self.search.matches(&entry.source, &search_key)
-                    || self.search.matches(&entry.message, &search_key)
-            })
-            .collect();
+        self.refresh_visible_rows();
+        let rows = &self.visible_rows_cache;
 
         // 获取跳转目标的 row 索引
         let taken_id = self.pending_navigate_to_id.take();
@@ -481,17 +511,18 @@ impl LogPanel {
 
         let outcome = render_log_rows(
             ui,
-            &rows,
-            !self.entries.is_empty(),
+            rows,
+            !self.entry_order.is_empty(),
             scroll_to_row,
             &mut navigate_id,
             self.auto_scroll.enabled,
             force_scroll_to_bottom,
             scroll_delta_y,
             self.font_size,
+            self.visible_rows_generation,
             &mut self.selection,
             &mut self.text_selection_rows,
-            &mut self.message_list,
+            &mut self.virtual_rows,
             self.navigate_highlight,
         );
 
@@ -547,15 +578,96 @@ impl LogPanel {
         let entry_id = self.next_entry_id;
         self.next_entry_id = self.next_entry_id.wrapping_add(1).max(1);
 
-        self.entries.push_back(LogEntry {
+        let entry = LogEntry {
             id: entry_id,
             timestamp_label: format!("[{}]", fmt_ts(event.timestamp_ms)),
             level,
             source,
             message,
-        });
+        };
+        let cache_is_current = !self.visible_rows_dirty
+            && self
+                .visible_filter_key
+                .as_ref()
+                .is_some_and(|key| *key == self.current_filter_key());
+        if cache_is_current {
+            let filter_key = self.current_filter_key();
+            if self.matches_filter(&entry, &filter_key) {
+                self.visible_rows_cache.push_back(entry.clone());
+                self.visible_rows_generation = self.visible_rows_generation.wrapping_add(1);
+            }
+        } else {
+            self.visible_rows_dirty = true;
+        }
+        self.entry_order.push_back(entry_id);
+        *self.source_counts.entry(entry.source.clone()).or_default() += 1;
+        self.source_names_cache.insert(entry.source.clone());
+        self.entries.insert(entry_id, entry);
 
         self.enforce_max_entries();
+    }
+
+    #[cfg(test)]
+    fn push_test_entry(&mut self, entry: LogEntry) {
+        let id = entry.id;
+        self.entry_order.push_back(id);
+        *self.source_counts.entry(entry.source.clone()).or_default() += 1;
+        self.source_names_cache.insert(entry.source.clone());
+        self.entries.insert(id, entry);
+        self.visible_rows_dirty = true;
+    }
+
+    fn current_filter_key(&self) -> LogFilterKey {
+        LogFilterKey {
+            min_level: self.min_level,
+            source_filter: self.source_filter.clone(),
+            search_text: self.search.text.clone(),
+            case_sensitive: self.search.case_sensitive,
+        }
+    }
+
+    fn matches_filter(&self, entry: &LogEntry, key: &LogFilterKey) -> bool {
+        if entry.level < key.min_level {
+            return false;
+        }
+        if key
+            .source_filter
+            .as_ref()
+            .is_some_and(|filter| entry.source != *filter)
+        {
+            return false;
+        }
+        let query = crate::search::SearchQuery::new(&key.search_text, key.case_sensitive);
+        query.is_empty() || query.matches(&entry.source) || query.matches(&entry.message)
+    }
+
+    fn refresh_visible_rows(&mut self) {
+        let key = self.current_filter_key();
+        if self.visible_rows_dirty || self.visible_filter_key.as_ref() != Some(&key) {
+            let query = crate::search::SearchQuery::new(&key.search_text, key.case_sensitive);
+            self.visible_rows_cache = self
+                .entry_order
+                .iter()
+                .filter_map(|id| {
+                    self.entries
+                        .get(id)
+                        .filter(|entry| {
+                            entry.level >= key.min_level
+                                && key
+                                    .source_filter
+                                    .as_ref()
+                                    .is_none_or(|filter| entry.source == *filter)
+                                && (query.is_empty()
+                                    || query.matches(&entry.source)
+                                    || query.matches(&entry.message))
+                        })
+                        .cloned()
+                })
+                .collect();
+            self.visible_filter_key = Some(key);
+            self.visible_rows_dirty = false;
+            self.visible_rows_generation = self.visible_rows_generation.wrapping_add(1);
+        }
     }
 }
 
@@ -580,12 +692,6 @@ fn log_table_widths(full_width: f32, desired_label_width: f32) -> LogTableWidths
     LogTableWidths { label, message }
 }
 
-fn log_row_height_signature(entry: &LogEntry, font_size: f32) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    (entry.message.len(), (font_size * 1000.0).round() as i32).hash(&mut hasher);
-    hasher.finish()
-}
-
 fn estimated_log_row_height(
     entry: &LogEntry,
     base_row_height: f32,
@@ -601,7 +707,7 @@ fn estimated_log_row_height(
 #[allow(clippy::too_many_arguments)]
 fn render_log_rows(
     ui: &mut egui::Ui,
-    rows: &[&LogEntry],
+    rows: &VecDeque<LogEntry>,
     has_any_entries: bool,
     scroll_to_row: Option<usize>,
     pending_navigate: &mut Option<u64>,
@@ -609,14 +715,15 @@ fn render_log_rows(
     force_scroll_to_bottom: bool,
     wheel_scroll_delta_y: f32,
     font_size: f32,
+    visible_rows_generation: u64,
     selection: &mut RowSelection,
     text_selection_rows: &mut TextSelectionRows,
-    message_list: &mut MessageList,
+    virtual_rows: &mut VirtualRowIndex,
     navigate_highlight: Option<(u64, f64)>,
 ) -> LogRenderOutcome {
     let font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
     let base_row_height = ui.fonts_mut(|f| f.row_height(&font_id));
-    selection.sync_rows(rows.iter().map(|entry| entry.id));
+    selection.sync_rows_with_generation(rows.iter().map(|entry| entry.id), visible_rows_generation);
 
     // 列宽随字体大小缩放（基准 13px）
     let scale = font_size / 13.0;
@@ -674,23 +781,20 @@ fn render_log_rows(
             let galley_width = (message_width - text_padding).max(0.0).floor();
 
             let width_key = galley_width.max(0.0).round() as u64;
-            let row_signatures: Vec<u64> = rows
-                .iter()
-                .map(|entry| log_row_height_signature(entry, font_size))
-                .collect();
-            let mut row_heights: Vec<f32> = rows
-                .iter()
-                .zip(row_signatures.iter().copied())
-                .map(|(entry, signature)| {
-                    message_list.estimated_height(
-                        entry.id,
-                        signature,
-                        width_key,
-                        estimated_log_row_height(entry, base_row_height, galley_width, glyph_width),
-                    )
-                })
-                .collect();
-            let total_height: f32 = row_heights.iter().sum();
+            let layout_key = width_key
+                ^ ((font_size * 1000.0).round() as u64).rotate_left(17)
+                ^ visible_rows_generation.rotate_left(31);
+            if !virtual_rows.matches_layout(layout_key, rows.len()) {
+                let row_ids: Vec<u64> = rows.iter().map(|entry| entry.id).collect();
+                let estimated_heights: Vec<f32> = rows
+                    .iter()
+                    .map(|entry| {
+                        estimated_log_row_height(entry, base_row_height, galley_width, glyph_width)
+                    })
+                    .collect();
+                virtual_rows.sync_rows(&row_ids, &estimated_heights, layout_key);
+            }
+            let total_height = virtual_rows.total_height().max(base_row_height);
 
             // 分配总区域
             let (full_rect, _alloc_response) =
@@ -726,13 +830,6 @@ fn render_log_rows(
             // 逐行绘制标签 + 可选择的文本
             let mut hl = RowHighlight::new(ui, LOG_SCROLL_ID);
 
-            // 先记录所有行范围，当前帧的点击/拖拽才能立即命中正确行。
-            let mut recorded_y = label_rect.top();
-            for height in &row_heights {
-                hl.record_row(recorded_y, *height);
-                recorded_y += *height;
-            }
-
             let mut ctx_response = ui.interact(
                 label_rect,
                 ui.make_persistent_id(("log-metadata", LOG_SCROLL_ID)),
@@ -742,8 +839,9 @@ fn render_log_rows(
                 ctx_response |= response;
             }
             let hovered_idx = ui
-                .input(|input| input.pointer.hover_pos().map(|pos| pos.y))
-                .and_then(|y| hl.row_index_at_y_clamped(y));
+                .input(|input| input.pointer.hover_pos())
+                .filter(|position| label_rect.contains(*position))
+                .and_then(|position| virtual_rows.index_at_offset(position.y - label_rect.top()));
             let message_pressed = ui.input(|input| {
                 input.pointer.button_pressed(egui::PointerButton::Primary)
                     && input
@@ -804,12 +902,34 @@ fn render_log_rows(
                     .clear_selection();
             }
 
-            let mut current_y = label_rect.top();
-            let mut text_drag_response: Option<egui::Response> = None;
+            let viewport_rect = ui.clip_rect();
+            let scroll_offset = (viewport_rect.top() - label_rect.top()).max(0.0);
+            let visible_range = virtual_rows.visible_range(
+                scroll_offset,
+                viewport_rect.height(),
+                base_row_height * 2.0,
+            );
             let text_selection_layout_range =
                 text_selection_rows.layout_range(rows.iter().map(|entry| entry.id));
-            for (row_idx, entry) in rows.iter().enumerate() {
-                let estimated_height = row_heights[row_idx].max(base_row_height);
+            let render_start = text_selection_layout_range
+                .as_ref()
+                .map_or(visible_range.start, |range| {
+                    visible_range.start.min(*range.start())
+                });
+            let render_end = text_selection_layout_range
+                .as_ref()
+                .map_or(visible_range.end, |range| {
+                    visible_range.end.max(range.end() + 1)
+                });
+
+            let mut text_drag_response: Option<egui::Response> = None;
+            let mut row_heights_changed = false;
+            for row_idx in render_start..render_end.min(rows.len()) {
+                let Some(entry) = rows.get(row_idx) else {
+                    continue;
+                };
+                let current_y = label_rect.top() + virtual_rows.row_top(row_idx);
+                let estimated_height = virtual_rows.height(row_idx).max(base_row_height);
                 let in_text_selection = text_selection_layout_range
                     .as_ref()
                     .is_some_and(|range| range.contains(&row_idx));
@@ -826,22 +946,16 @@ fn render_log_rows(
                     layout_job.halign = egui::Align::LEFT;
                     let galley = ui.fonts_mut(|f| f.layout_job(layout_job));
                     let height = galley.size().y.max(base_row_height).round();
-                    row_heights[row_idx] = height;
-                    message_list.record_height(
-                        entry.id,
-                        row_signatures[row_idx],
-                        width_key,
-                        height,
-                    );
+                    row_heights_changed |= virtual_rows.set_height(row_idx, height);
                     (Some(galley), height)
                 } else {
                     (None, estimated_height)
                 };
 
                 if !in_viewport {
-                    current_y += entry_height;
                     continue;
                 }
+                hl.record_row_at(row_idx, current_y, entry_height);
                 // 标签对齐第一行中心（和终端面板一致）
                 let label_y = current_y + base_row_height * 0.5;
 
@@ -1002,12 +1116,12 @@ fn render_log_rows(
                         );
                     }
                 }
-
-                current_y += entry_height;
             }
 
-            let actual_total = (current_y - label_rect.top()).round();
-            message_list.note_total_height(ui, actual_total, rows.len());
+            let actual_total = virtual_rows.total_height().round();
+            if row_heights_changed {
+                ui.ctx().request_repaint();
+            }
             if actual_total > total_height + 0.5 {
                 ui.allocate_space(egui::vec2(0.0, actual_total - total_height));
             }
@@ -1087,7 +1201,11 @@ fn render_log_rows(
             });
 
             // 框选范围文本（移入 context_menu 闭包内按需构造，避免菜单未打开时每帧构造）
-            let selected_indices: Vec<usize> = selection.selected_indices().collect();
+            let selected_indices: Vec<usize> = if selection.has_selection() {
+                selection.selected_indices().collect()
+            } else {
+                Vec::new()
+            };
 
             // Ctrl+A 全选：无 TextEdit 聚焦时选中所有可见行。
             // 用 consume_key 消费事件，阻止 egui 的 LabelSelectionState 再对当前 galley
@@ -1271,13 +1389,16 @@ fn render_log_rows(
 }
 
 /// 构造选中日志行的完整文本（含时间、级别和来源）。
-fn build_selected_log_full_text(rows: &[&LogEntry], selected_indices: &[usize]) -> Option<String> {
+fn build_selected_log_full_text(
+    rows: &VecDeque<LogEntry>,
+    selected_indices: &[usize],
+) -> Option<String> {
     if selected_indices.is_empty() {
         return None;
     }
     let full: String = selected_indices
         .iter()
-        .map(|&index| rows[index])
+        .map(|&index| &rows[index])
         .map(|entry| {
             format!(
                 "{} {} {} {}",
@@ -1294,7 +1415,7 @@ fn build_selected_log_full_text(rows: &[&LogEntry], selected_indices: &[usize]) 
 
 /// 构造选中日志行的纯消息文本。
 fn build_selected_log_message_text(
-    rows: &[&LogEntry],
+    rows: &VecDeque<LogEntry>,
     selected_indices: &[usize],
 ) -> Option<String> {
     if selected_indices.is_empty() {
@@ -1303,7 +1424,7 @@ fn build_selected_log_message_text(
     Some(
         selected_indices
             .iter()
-            .map(|&index| rows[index])
+            .map(|&index| &rows[index])
             .map(|entry| entry.message.clone())
             .collect::<Vec<_>>()
             .join("\n"),
@@ -1320,6 +1441,14 @@ mod tests {
     use super::*;
     use tool_databus::DataBus;
 
+    fn ordered_entries(panel: &LogPanel) -> Vec<&LogEntry> {
+        panel
+            .entry_order
+            .iter()
+            .filter_map(|id| panel.entries.get(id))
+            .collect()
+    }
+
     #[test]
     fn ingest_system_log_keeps_app_ready_entry() {
         let bus = DataBus::new();
@@ -1328,9 +1457,12 @@ mod tests {
         bus.publish(Event::system_log(LogLevel::Info, "app", "就绪"));
 
         assert_eq!(panel.ingest_all_pending(), 1);
-        assert_eq!(panel.entries.len(), 1);
+        assert_eq!(panel.entry_order.len(), 1);
 
-        let entry = panel.entries.front().expect("log entry should be ingested");
+        let entry = ordered_entries(&panel)
+            .first()
+            .copied()
+            .expect("log entry should be ingested");
         assert_eq!(entry.level, LogLevel::Info);
         assert_eq!(entry.source, "app");
         assert_eq!(entry.message, "就绪");
@@ -1345,7 +1477,7 @@ mod tests {
         panel.clear();
 
         assert_eq!(panel.ingest_all_pending(), 0);
-        assert!(panel.entries.is_empty());
+        assert!(panel.entry_order.is_empty());
     }
 
     #[test]
@@ -1359,7 +1491,7 @@ mod tests {
 
         assert!(panel.search.text.is_empty());
         assert!(panel.source_filter.is_none());
-        assert!(panel.entries.is_empty());
+        assert!(panel.entry_order.is_empty());
     }
 
     #[test]
@@ -1367,14 +1499,14 @@ mod tests {
         let bus = DataBus::new();
         let mut panel = LogPanel::new(&bus);
 
-        panel.entries.push_back(LogEntry {
+        panel.push_test_entry(LogEntry {
             id: 1,
             timestamp_label: "[12:00:00.000]".into(),
             level: LogLevel::Error,
             source: "transport.serial".into(),
             message: "read failed on COM3: timeout".into(),
         });
-        panel.entries.push_back(LogEntry {
+        panel.push_test_entry(LogEntry {
             id: 2,
             timestamp_label: "[12:00:01.000]".into(),
             level: LogLevel::Info,
@@ -1383,9 +1515,8 @@ mod tests {
         });
 
         panel.search.text = "com3".into();
-        let rows: Vec<&LogEntry> = panel
-            .entries
-            .iter()
+        let rows: Vec<&LogEntry> = ordered_entries(&panel)
+            .into_iter()
             .filter(|e| {
                 e.source.to_ascii_lowercase().contains("com3")
                     || e.message.to_ascii_lowercase().contains("com3")
@@ -1395,9 +1526,8 @@ mod tests {
         assert_eq!(rows[0].source, "transport.serial");
 
         panel.search.text = "app".into();
-        let rows: Vec<&LogEntry> = panel
-            .entries
-            .iter()
+        let rows: Vec<&LogEntry> = ordered_entries(&panel)
+            .into_iter()
             .filter(|e| {
                 e.source.to_ascii_lowercase().contains("app")
                     || e.message.to_ascii_lowercase().contains("app")
@@ -1407,7 +1537,7 @@ mod tests {
         assert_eq!(rows[0].message, "就绪");
 
         panel.search.clear();
-        let rows: Vec<&LogEntry> = panel.entries.iter().filter(|_| true).collect();
+        let rows = ordered_entries(&panel);
         assert_eq!(rows.len(), 2);
     }
 
@@ -1415,14 +1545,14 @@ mod tests {
     fn unicode_case_insensitive_search_and_exports_use_visible_rows() {
         let bus = DataBus::new();
         let mut panel = LogPanel::new(&bus);
-        panel.entries.push_back(LogEntry {
+        panel.push_test_entry(LogEntry {
             id: 1,
             timestamp_label: "[12:00:00.000]".into(),
             level: LogLevel::Info,
             source: "Äpp".into(),
             message: "设备就绪".into(),
         });
-        panel.entries.push_back(LogEntry {
+        panel.push_test_entry(LogEntry {
             id: 2,
             timestamp_label: "[12:00:01.000]".into(),
             level: LogLevel::Info,
@@ -1446,7 +1576,7 @@ mod tests {
         let bus = DataBus::new();
         let mut panel = LogPanel::new(&bus);
         for index in 0..120 {
-            panel.entries.push_back(LogEntry {
+            panel.push_test_entry(LogEntry {
                 id: index + 1,
                 timestamp_label: "[12:00:00.000]".into(),
                 level: LogLevel::Info,
@@ -1457,8 +1587,11 @@ mod tests {
 
         panel.set_max_entries(100);
 
-        assert_eq!(panel.entries.len(), 100);
-        assert_eq!(panel.entries.front().unwrap().message, "message-20");
+        assert_eq!(panel.entry_order.len(), 100);
+        assert_eq!(
+            ordered_entries(&panel).first().unwrap().message,
+            "message-20"
+        );
     }
 
     #[test]
@@ -1466,14 +1599,14 @@ mod tests {
         let bus = DataBus::new();
         let mut panel = LogPanel::new(&bus);
 
-        panel.entries.push_back(LogEntry {
+        panel.push_test_entry(LogEntry {
             id: 1,
             timestamp_label: "[12:00:00.000]".into(),
             level: LogLevel::Warn,
             source: "ext".into(),
             message: "plugin time out".into(),
         });
-        panel.entries.push_back(LogEntry {
+        panel.push_test_entry(LogEntry {
             id: 2,
             timestamp_label: "[12:00:01.000]".into(),
             level: LogLevel::Info,
@@ -1482,12 +1615,15 @@ mod tests {
         });
 
         panel.source_filter = Some("app".into());
-        let rows: Vec<&LogEntry> = panel.entries.iter().filter(|e| e.source == "app").collect();
+        let rows: Vec<&LogEntry> = ordered_entries(&panel)
+            .into_iter()
+            .filter(|e| e.source == "app")
+            .collect();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].source, "app");
 
         panel.source_filter = None;
-        let rows: Vec<&LogEntry> = panel.entries.iter().collect();
+        let rows = ordered_entries(&panel);
         assert_eq!(rows.len(), 2);
     }
 
@@ -1518,8 +1654,9 @@ mod tests {
             ));
         }
         panel.ingest_all_pending();
-        assert_eq!(panel.entries.len(), 3);
-        assert_eq!(panel.entries[0].message, "msg 2");
-        assert_eq!(panel.entries[2].message, "msg 4");
+        let rows = ordered_entries(&panel);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].message, "msg 2");
+        assert_eq!(rows[2].message, "msg 4");
     }
 }

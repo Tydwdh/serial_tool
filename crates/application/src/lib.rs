@@ -2,6 +2,7 @@ pub mod command;
 pub mod error;
 pub mod event;
 pub mod model;
+pub mod perf;
 pub mod query;
 pub mod service;
 pub mod task;
@@ -29,7 +30,10 @@ pub mod api {
     }
 
     pub mod databus {
-        pub use ::tool_databus::{DataBus, RingSubscription, Subscription, TopicFilter};
+        pub use ::tool_databus::{
+            DataBus, DataBusPerfSnapshot, RingSubscription, Subscription, SubscriptionBacklog,
+            TopicFilter,
+        };
     }
 
     pub mod extension {

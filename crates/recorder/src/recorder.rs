@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tool_core::{Direction, Event, LogLevel, Payload};
-use tool_databus::{DataBus, TopicFilter};
+use tool_databus::{DataBus, SubscriptionBacklog, TopicFilter};
 
 use crate::format::{RecordMode, should_record_event_with_mode, write_event_counted};
 
@@ -26,6 +26,36 @@ pub struct RecorderStats {
     pub stopping: bool,
     pub paused: bool,
     pub pause_count: u64,
+    pub queued_events: u64,
+    pub queued_bytes: u64,
+    pub seconds_behind: f64,
+    pub write_throughput_bytes_per_sec: u64,
+    pub backlog_warning: bool,
+    pub incomplete: bool,
+    pub stop_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RecorderBackpressureConfig {
+    pub soft_events: u64,
+    pub soft_bytes: u64,
+    pub soft_seconds_behind: f64,
+    pub hard_events: u64,
+    pub hard_bytes: u64,
+    pub hard_seconds_behind: f64,
+}
+
+impl Default for RecorderBackpressureConfig {
+    fn default() -> Self {
+        Self {
+            soft_events: 100_000,
+            soft_bytes: 256 * 1024 * 1024,
+            soft_seconds_behind: 10.0,
+            hard_events: 1_000_000,
+            hard_bytes: 512 * 1024 * 1024,
+            hard_seconds_behind: 60.0,
+        }
+    }
 }
 
 pub struct JsonlRecorder {
@@ -35,6 +65,9 @@ pub struct JsonlRecorder {
     current_path: Option<PathBuf>,
     mode: RecordMode,
     stats: Arc<Mutex<RecorderStats>>,
+    backpressure: RecorderBackpressureConfig,
+    backlog: Option<SubscriptionBacklog>,
+    backlog_warning_sent: bool,
 }
 
 struct StoppingRecorder {
@@ -45,6 +78,7 @@ struct StoppingRecorder {
 
 struct RecorderWorker {
     stop: Arc<AtomicBool>,
+    discard_pending: Arc<AtomicBool>,
     pause: Arc<AtomicBool>,
     finished: Arc<AtomicBool>,
     last_error: Arc<Mutex<Option<String>>>,
@@ -62,6 +96,9 @@ impl JsonlRecorder {
             current_path: None,
             mode: RecordMode::default(),
             stats: Arc::new(Mutex::new(RecorderStats::default())),
+            backpressure: RecorderBackpressureConfig::default(),
+            backlog: None,
+            backlog_warning_sent: false,
         }
     }
 
@@ -71,6 +108,14 @@ impl JsonlRecorder {
 
     pub fn set_mode(&mut self, mode: RecordMode) {
         self.mode = mode;
+    }
+
+    pub fn set_backpressure_config(&mut self, config: RecorderBackpressureConfig) {
+        self.backpressure = config;
+    }
+
+    pub fn backpressure_config(&self) -> RecorderBackpressureConfig {
+        self.backpressure
     }
 
     pub fn mode(&self) -> RecordMode {
@@ -111,10 +156,14 @@ impl JsonlRecorder {
         // recorder 是可靠性链路，不能用 bounded 订阅。
         // UI 面板可以 bounded，recorder 必须 lossless。
         let subscription = self.bus.subscribe_lossless(TopicFilter::All);
+        self.backlog = Some(subscription.backlog());
+        self.backlog_warning_sent = false;
         let stop = Arc::new(AtomicBool::new(false));
+        let discard_pending = Arc::new(AtomicBool::new(false));
         let pause = Arc::new(AtomicBool::new(false));
         let pause_for_worker = Arc::clone(&pause);
         let stop_thread = Arc::clone(&stop);
+        let discard_pending_thread = Arc::clone(&discard_pending);
         let finished = Arc::new(AtomicBool::new(false));
         let finished_thread = Arc::clone(&finished);
         let last_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -137,6 +186,7 @@ impl JsonlRecorder {
             let mut writer = BufWriter::new(file);
             let mut written_since_flush = 0u64;
             let mut last_flush = Instant::now();
+            let started_at = Instant::now();
 
             // 统一的错误处理：记录错误、停止 worker、发布日志
             let handle_fatal = |msg: &str,
@@ -167,6 +217,11 @@ impl JsonlRecorder {
                                     let mut s = stats_thread.lock();
                                     s.events_written += 1;
                                     s.bytes_written += bytes;
+                                    let elapsed = started_at.elapsed().as_secs_f64();
+                                    if elapsed > 0.0 {
+                                        s.write_throughput_bytes_per_sec =
+                                            (s.bytes_written as f64 / elapsed) as u64;
+                                    }
                                 }
                                 Err(e) => {
                                     let msg = format!("write failed: {e}");
@@ -204,23 +259,30 @@ impl JsonlRecorder {
 
             stats_thread.lock().last_flush_elapsed_ms = last_flush.elapsed().as_millis() as u64;
 
-            for event in subscription.drain() {
-                if should_record_event_with_mode(&event, mode) {
-                    match write_event_counted(&mut writer, &event) {
-                        Ok(bytes) => {
-                            let mut s = stats_thread.lock();
-                            s.events_written += 1;
-                            s.bytes_written += bytes;
-                        }
-                        Err(e) => {
-                            let msg = format!("drain write failed: {e}");
-                            {
+            if !discard_pending_thread.load(Ordering::Relaxed) {
+                for event in subscription.drain() {
+                    if should_record_event_with_mode(&event, mode) {
+                        match write_event_counted(&mut writer, &event) {
+                            Ok(bytes) => {
                                 let mut s = stats_thread.lock();
-                                s.last_error = Some(msg.clone());
+                                s.events_written += 1;
+                                s.bytes_written += bytes;
+                                let elapsed = started_at.elapsed().as_secs_f64();
+                                if elapsed > 0.0 {
+                                    s.write_throughput_bytes_per_sec =
+                                        (s.bytes_written as f64 / elapsed) as u64;
+                                }
                             }
-                            *last_error_thread.lock() = Some(msg.clone());
-                            bus.publish(Event::system_log(LogLevel::Error, "recorder", msg));
-                            break;
+                            Err(e) => {
+                                let msg = format!("drain write failed: {e}");
+                                {
+                                    let mut s = stats_thread.lock();
+                                    s.last_error = Some(msg.clone());
+                                }
+                                *last_error_thread.lock() = Some(msg.clone());
+                                bus.publish(Event::system_log(LogLevel::Error, "recorder", msg));
+                                break;
+                            }
                         }
                     }
                 }
@@ -252,9 +314,10 @@ impl JsonlRecorder {
                 let s = stats_thread.lock();
                 (s.events_written, s.bytes_written, s.pause_count)
             };
-            let (is_clean, error_clone) = {
+            let (is_clean, error_clone, incomplete) = {
+                let incomplete = stats_thread.lock().incomplete;
                 let guard = last_error_thread.lock();
-                (guard.is_none(), guard.clone())
+                (guard.is_none() && !incomplete, guard.clone(), incomplete)
             };
             let summary = serde_json::json!({
                 "ended_at_ms": tool_core::now_timestamp_ms(),
@@ -262,6 +325,7 @@ impl JsonlRecorder {
                 "bytes_written": bytes_written,
                 "record_mode": format!("{:?}", mode),
                 "closed_cleanly": is_clean,
+                "incomplete": incomplete,
                 "pause_count": pause_count,
                 "app_version": env!("CARGO_PKG_VERSION"),
                 "error": error_clone,
@@ -280,6 +344,7 @@ impl JsonlRecorder {
 
         self.worker = Some(RecorderWorker {
             stop,
+            discard_pending,
             pause,
             finished,
             last_error,
@@ -296,13 +361,27 @@ impl JsonlRecorder {
     }
 
     pub fn stop(&mut self) {
+        self.stop_with_reason(false, None);
+    }
+
+    fn stop_with_reason(&mut self, discard_pending: bool, reason: Option<String>) {
         if let Some(mut worker) = self.worker.take() {
-            self.stats.lock().stopping = true;
+            {
+                let mut stats = self.stats.lock();
+                stats.stopping = true;
+                if let Some(reason) = reason.as_ref() {
+                    stats.incomplete = true;
+                    stats.stop_reason = Some(reason.clone());
+                }
+            }
             self.bus.publish(Event::system_log(
                 LogLevel::Info,
                 "recorder",
-                "正在停止录制...",
+                reason.as_deref().unwrap_or("正在停止录制..."),
             ));
+            worker
+                .discard_pending
+                .store(discard_pending, Ordering::Relaxed);
             worker.stop.store(true, Ordering::Relaxed);
             // 异步停止：不阻塞 UI，spin 到 Stopping 状态
             let Some(join) = worker.join.take() else {
@@ -314,6 +393,52 @@ impl JsonlRecorder {
                 last_error: worker.last_error,
                 path: self.current_path.take().unwrap_or_default(),
             });
+        }
+    }
+
+    /// 在 UI tick 中调用，监控 lossless 录制队列。
+    ///
+    /// 软阈值只产生一次告警；硬阈值会停止 worker、丢弃尚未写入的尾部并把摘要
+    /// 标记为 incomplete。这样不会静默丢数据，也不会让无界队列把进程拖到 OOM。
+    pub fn tick_backpressure(&mut self) {
+        let Some(backlog) = self.backlog.clone() else {
+            return;
+        };
+        let queued_events = backlog.queued_events();
+        let queued_bytes = backlog.queued_bytes();
+        let seconds_behind = backlog.seconds_behind();
+        {
+            let mut stats = self.stats.lock();
+            stats.queued_events = queued_events;
+            stats.queued_bytes = queued_bytes;
+            stats.seconds_behind = seconds_behind;
+        }
+
+        let soft = queued_events >= self.backpressure.soft_events
+            || queued_bytes >= self.backpressure.soft_bytes
+            || seconds_behind >= self.backpressure.soft_seconds_behind;
+        if soft && !self.backlog_warning_sent {
+            self.backlog_warning_sent = true;
+            self.stats.lock().backlog_warning = true;
+            self.bus.publish(Event::system_log(
+                LogLevel::Warn,
+                "recorder",
+                format!(
+                    "录制写入落后：{} events / {} bytes / {:.1}s",
+                    queued_events, queued_bytes, seconds_behind
+                ),
+            ));
+        }
+
+        let hard = queued_events >= self.backpressure.hard_events
+            || queued_bytes >= self.backpressure.hard_bytes
+            || seconds_behind >= self.backpressure.hard_seconds_behind;
+        if hard && self.worker.is_some() {
+            let reason = format!(
+                "录制积压超过硬阈值，已停止（{} events / {} bytes / {:.1}s behind）",
+                queued_events, queued_bytes, seconds_behind
+            );
+            self.stop_with_reason(true, Some(reason));
         }
     }
 
@@ -403,11 +528,19 @@ impl JsonlRecorder {
                         return Some(Err(e));
                     }
                     None => {
-                        self.bus.publish(Event::system_log(
-                            LogLevel::Info,
-                            "recorder",
-                            format!("录制已保存到 {}", s.path.display()),
-                        ));
+                        let incomplete = self.stats.lock().incomplete;
+                        let level = if incomplete {
+                            LogLevel::Warn
+                        } else {
+                            LogLevel::Info
+                        };
+                        let message = if incomplete {
+                            format!("录制已停止，但文件不完整：{}", s.path.display())
+                        } else {
+                            format!("录制已保存到 {}", s.path.display())
+                        };
+                        self.bus
+                            .publish(Event::system_log(level, "recorder", message));
                         return Some(Ok(s.path));
                     }
                 }

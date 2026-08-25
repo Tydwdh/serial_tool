@@ -265,69 +265,6 @@ pub(crate) fn estimated_wrapped_line_count(text: &str, width: f32, glyph_width: 
         .max(1)
 }
 
-/// 动态消息流的共享行高缓存。
-///
-/// 日志和接收区都可能有换行、长文本折行和字体大小切换。缓存按稳定行 ID、内容签名
-/// 与内容列宽度失效，只在进入视口时重新测量真实高度；离屏行使用保守估算值。
-#[derive(Default)]
-pub(crate) struct MessageList {
-    row_heights: BTreeMap<u64, CachedMessageRowHeight>,
-    last_total_height: f32,
-    last_row_count: usize,
-}
-
-#[derive(Clone, Copy)]
-struct CachedMessageRowHeight {
-    signature: u64,
-    width_key: u64,
-    height: f32,
-}
-
-impl MessageList {
-    pub(crate) fn clear(&mut self) {
-        self.row_heights.clear();
-        self.last_total_height = 0.0;
-        self.last_row_count = 0;
-    }
-
-    pub(crate) fn remove(&mut self, id: u64) {
-        self.row_heights.remove(&id);
-    }
-
-    pub(crate) fn estimated_height(
-        &self,
-        id: u64,
-        signature: u64,
-        width_key: u64,
-        fallback: f32,
-    ) -> f32 {
-        self.row_heights
-            .get(&id)
-            .filter(|cached| cached.signature == signature && cached.width_key == width_key)
-            .map_or(fallback, |cached| cached.height)
-    }
-
-    pub(crate) fn record_height(&mut self, id: u64, signature: u64, width_key: u64, height: f32) {
-        self.row_heights.insert(
-            id,
-            CachedMessageRowHeight {
-                signature,
-                width_key,
-                height,
-            },
-        );
-    }
-
-    /// 记录本帧内容总高；高度变化时要求下一帧重绘，使滚动条和底部跟随立即收敛。
-    pub(crate) fn note_total_height(&mut self, ui: &Ui, total_height: f32, row_count: usize) {
-        if (self.last_total_height - total_height).abs() > 0.5 || self.last_row_count != row_count {
-            ui.ctx().request_repaint();
-        }
-        self.last_total_height = total_height;
-        self.last_row_count = row_count;
-    }
-}
-
 /// 管理表格行高亮和右键菜单的行匹配冻结状态。
 ///
 /// 用法：
@@ -482,14 +419,6 @@ impl RowHighlight {
         should_highlight
     }
 
-    /// 在每行循环内调用：记录该行的 Y 范围，返回行索引。
-    /// 参数 `current_y` 是该行顶部 Y，`entry_height` 是该行高度。
-    pub(crate) fn record_row(&mut self, current_y: f32, entry_height: f32) -> usize {
-        let index = self.row_y_ranges.len();
-        self.record_row_at(index, current_y, entry_height);
-        index
-    }
-
     /// 记录带有绝对行索引的 Y 范围，供虚拟列表使用。
     pub(crate) fn record_row_at(&mut self, index: usize, current_y: f32, entry_height: f32) {
         self.row_y_ranges
@@ -588,6 +517,7 @@ pub struct RowSelection {
     dragging: bool,
     /// Ctrl+Shift 拖拽时设为 true，走 add_range 而非 select_range。
     ctrl_shift_drag: bool,
+    last_sync_generation: Option<u64>,
 }
 
 impl RowSelection {
@@ -600,11 +530,13 @@ impl RowSelection {
             pointer_active: false,
             dragging: false,
             ctrl_shift_drag: false,
+            last_sync_generation: None,
         }
     }
 
     /// 同步当前可见行。选区按稳定 ID 保留，不会因插入、删除或筛选而错位。
     pub fn sync_rows(&mut self, row_keys: impl IntoIterator<Item = u64>) {
+        self.last_sync_generation = None;
         self.row_keys = row_keys.into_iter().collect();
         let visible: BTreeSet<u64> = self.row_keys.iter().copied().collect();
         self.selected.retain(|key| visible.contains(key));
@@ -620,6 +552,19 @@ impl RowSelection {
             self.pointer_active = false;
             self.dragging = false;
         }
+    }
+
+    /// 按调用方维护的稳定 generation 同步行 ID，避免稳定帧重新遍历整张长列表。
+    pub fn sync_rows_with_generation(
+        &mut self,
+        row_keys: impl IntoIterator<Item = u64>,
+        generation: u64,
+    ) {
+        if self.last_sync_generation == Some(generation) {
+            return;
+        }
+        self.sync_rows(row_keys);
+        self.last_sync_generation = Some(generation);
     }
 
     pub fn has_selection(&self) -> bool {
@@ -859,25 +804,10 @@ pub(crate) fn wheel_scroll_during_selection(selection_dragging: bool, wheel_delt
 #[cfg(test)]
 mod tests {
     use super::{
-        MessageList, RowHighlight, RowSelection, TextSelectionRows,
-        bulk_copy_requires_confirmation, claim_copy_focus, copy_text_with_feedback,
-        edge_scroll_delta, estimated_wrapped_line_count, owns_copy_focus, take_copy_feedback,
-        wheel_scroll_during_selection,
+        RowHighlight, RowSelection, TextSelectionRows, bulk_copy_requires_confirmation,
+        claim_copy_focus, copy_text_with_feedback, edge_scroll_delta, estimated_wrapped_line_count,
+        owns_copy_focus, take_copy_feedback, wheel_scroll_during_selection,
     };
-
-    #[test]
-    fn message_list_height_cache_requires_matching_content_and_width() {
-        let mut list = MessageList::default();
-        list.record_height(7, 11, 120, 42.0);
-
-        assert_eq!(list.estimated_height(7, 11, 120, 16.0), 42.0);
-        assert_eq!(list.estimated_height(7, 11, 120, 64.0), 42.0);
-        assert_eq!(list.estimated_height(7, 12, 120, 16.0), 16.0);
-        assert_eq!(list.estimated_height(7, 11, 121, 16.0), 16.0);
-
-        list.remove(7);
-        assert_eq!(list.estimated_height(7, 11, 120, 16.0), 16.0);
-    }
 
     #[test]
     fn message_search_is_unicode_case_insensitive() {
@@ -903,8 +833,8 @@ mod tests {
             frozen_y_id: egui::Id::NULL,
             row_y_ranges: Vec::new(),
         };
-        rows.record_row(10.0, 5.0);
-        rows.record_row(15.0, 20.0);
+        rows.record_row_at(0, 10.0, 5.0);
+        rows.record_row_at(1, 15.0, 20.0);
 
         assert_eq!(rows.row_index_at_y(14.9), Some(0));
         assert_eq!(rows.row_index_at_y(15.0), Some(1));

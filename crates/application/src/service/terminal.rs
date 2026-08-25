@@ -104,22 +104,6 @@ impl TerminalService {
         }
     }
 
-    pub fn total_entries(&self) -> usize {
-        self.store.read().len()
-    }
-
-    pub fn export_text(&self) -> String {
-        self.export_job().render("text")
-    }
-
-    pub fn export_csv(&self) -> String {
-        self.export_job().render("csv")
-    }
-
-    pub fn export_json(&self) -> String {
-        self.export_job().render("json")
-    }
-
     fn push_event(&mut self, event: &Event) {
         let is_serial = matches!(
             event.topic.as_str(),

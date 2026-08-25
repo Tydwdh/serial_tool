@@ -31,7 +31,9 @@ impl WorkbenchApp {
         // 通知队列在 status_bar 渲染时自动清理过期消息。
         self.tick_recorder_status();
         self.tick_replay(ctx);
+        let plugin_started = self.perf.begin_frame();
         self.tick_plugin_lifecycle();
+        self.perf.record_plugin_callback(plugin_started);
         self.sync_marketplace_installed_ids();
         self.handle_keys(ctx);
         self.flush_pending_command();
@@ -45,7 +47,9 @@ impl WorkbenchApp {
     }
 
     pub(crate) fn tick_post_ui(&mut self, ctx: &egui::Context) {
-        self.bottom_log_panel.ingest_pending();
+        let log_started = self.perf.begin_frame();
+        let log_ingested = self.bottom_log_panel.ingest_pending();
+        self.perf.record_log_ingest(log_started, log_ingested);
         self.process_ui_set_status();
         self.command_palette(ctx);
     }

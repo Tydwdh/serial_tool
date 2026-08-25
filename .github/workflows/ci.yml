@@ -99,6 +99,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
 
@@ -114,6 +116,15 @@ jobs:
             libxkbcommon-dev \
             pkg-config
 
+      - name: Linux cargo check
+        run: cargo check --workspace
+
+      - name: Linux clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Linux tests
+        run: cargo test --workspace --all-targets
+
       - name: Build Ubuntu package
         run: bash ./installer/linux/build-deb.sh
 
@@ -122,6 +133,25 @@ jobs:
           deb="$(find dist -maxdepth 1 -type f -name 'hardware-workbench_*.deb' -print -quit)"
           test -n "$deb"
           dpkg-deb --info "$deb"
+
+      - name: Install and smoke-test Debian package
+        run: |
+          deb="$(readlink -f "$(find dist -maxdepth 1 -type f -name 'hardware-workbench_*.deb' -print -quit)")"
+          test -n "$deb"
+          package="$(dpkg-deb -f "$deb" Package)"
+          sudo apt-get install -y "$deb"
+          binary="/usr/lib/hardware-workbench/hardware-workbench-app"
+          desktop="/usr/share/applications/hardware-workbench.desktop"
+          icon="/usr/share/icons/hicolor/256x256/apps/hardware-workbench.png"
+          resource_dir="/usr/lib/hardware-workbench/assets"
+          test -x "$binary"
+          test -f "$desktop"
+          test -f "$icon"
+          test -f "$resource_dir/JetBrainsMonoNerdFontMono-Regular.ttf"
+          test -f "$resource_dir/NotoSansSC-VF.ttf"
+          ! ldd "$binary" | grep -F 'not found'
+          test "$(dpkg -L "$package" | grep -Fx "$desktop")" = "$desktop"
+          sudo apt-get remove -y "$package"
 
       - name: Generate Linux checksum
         if: startsWith(github.ref, 'refs/tags/v')

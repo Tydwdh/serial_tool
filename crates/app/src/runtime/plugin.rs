@@ -135,7 +135,10 @@ impl WorkbenchApp {
                 .retain(|key, _| !key.starts_with(&prefix));
         }
 
-        let _terminal_ingested = self.terminal_panel.ingest_pending();
+        let terminal_started = self.perf.begin_frame();
+        let terminal_ingested = self.terminal_panel.ingest_pending();
+        self.perf
+            .record_terminal_ingest(terminal_started, terminal_ingested);
     }
 
     /// 处理插件通过 ctx.ui.set_contribution_value 对 UI contribution 的状态更新。

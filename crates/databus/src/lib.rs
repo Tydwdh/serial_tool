@@ -6,8 +6,8 @@ use std::sync::{
     Arc, Weak,
     atomic::{AtomicU64, Ordering},
 };
-use std::time::Duration;
-use tool_core::Event;
+use std::time::{Duration, Instant};
+use tool_core::{Direction, Event, Payload};
 
 /// 默认历史记录限制
 pub const DEFAULT_HISTORY_LIMIT: usize = 20_000;
@@ -77,12 +77,24 @@ struct Inner {
     history: Mutex<VecDeque<Arc<Event>>>,
     next_id: AtomicU64,
     history_limit: usize,
+    perf: DataBusPerfCounters,
+}
+
+#[derive(Default)]
+struct DataBusPerfCounters {
+    publish_count: AtomicU64,
+    publish_bytes: AtomicU64,
+    publish_nanos: AtomicU64,
+    rx_bytes: AtomicU64,
+    tx_bytes: AtomicU64,
+    dropped: AtomicU64,
 }
 
 struct Subscriber {
     filter: TopicFilter,
     sink: SubscriberSink,
     dropped: Arc<AtomicU64>,
+    backlog: SubscriptionBacklog,
 }
 
 enum SubscriberSink {
@@ -96,6 +108,104 @@ enum SubscriberSink {
 pub struct Subscription {
     receiver: Receiver<Arc<Event>>,
     dropped: Arc<AtomicU64>,
+    backlog: SubscriptionBacklog,
+}
+
+/// 订阅队列积压的轻量级共享快照句柄。
+///
+/// `queued_bytes` 是按事件字段估算的大小，用于背压告警与性能诊断，
+/// 不承诺等于最终序列化后的文件大小。
+#[derive(Clone, Default)]
+pub struct SubscriptionBacklog {
+    queued_events: Arc<AtomicU64>,
+    queued_bytes: Arc<AtomicU64>,
+    oldest_timestamp_ms: Arc<AtomicU64>,
+}
+
+impl SubscriptionBacklog {
+    pub fn queued_events(&self) -> u64 {
+        self.queued_events.load(Ordering::Relaxed)
+    }
+
+    pub fn queued_bytes(&self) -> u64 {
+        self.queued_bytes.load(Ordering::Relaxed)
+    }
+
+    pub fn seconds_behind(&self) -> f64 {
+        let oldest = self.oldest_timestamp_ms.load(Ordering::Relaxed);
+        if oldest == 0 {
+            return 0.0;
+        }
+        tool_core::now_timestamp_ms().saturating_sub(oldest) as f64 / 1000.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DataBusPerfSnapshot {
+    pub publish_count: u64,
+    pub publish_bytes: u64,
+    pub publish_nanos: u64,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub subscriber_queued_events: u64,
+    pub subscriber_queued_bytes: u64,
+    pub subscriber_dropped: u64,
+}
+
+fn estimated_event_bytes(event: &Event) -> u64 {
+    let payload = match &event.payload {
+        Payload::Empty => 0,
+        Payload::Bytes(bytes) => bytes.len(),
+        Payload::Text(text) => text.len(),
+        Payload::Json(value) => value.to_string().len(),
+    };
+    let metadata = event.metadata.to_string().len();
+    (event.topic.len() + event.source.len() + payload + metadata + 64) as u64
+}
+
+fn event_payload_bytes(event: &Event) -> u64 {
+    match &event.payload {
+        Payload::Empty => 0,
+        Payload::Bytes(bytes) => bytes.len() as u64,
+        Payload::Text(text) => text.len() as u64,
+        Payload::Json(value) => value.to_string().len() as u64,
+    }
+}
+
+fn enqueue_backlog(backlog: &SubscriptionBacklog, event: &Event) {
+    let was_empty = backlog.queued_events.fetch_add(1, Ordering::Relaxed) == 0;
+    if was_empty {
+        backlog
+            .oldest_timestamp_ms
+            .store(event.timestamp_ms, Ordering::Relaxed);
+    }
+    backlog
+        .queued_bytes
+        .fetch_add(estimated_event_bytes(event), Ordering::Relaxed);
+}
+
+fn decrement_counter(counter: &AtomicU64, amount: u64) -> u64 {
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        let next = current.saturating_sub(amount);
+        match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return next,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+fn dequeue_backlog(backlog: &SubscriptionBacklog, event: &Event) {
+    let remaining = decrement_counter(&backlog.queued_events, 1);
+    backlog
+        .queued_bytes
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(current.saturating_sub(estimated_event_bytes(event)))
+        })
+        .ok();
+    if remaining == 0 {
+        backlog.oldest_timestamp_ms.store(0, Ordering::Relaxed);
+    }
 }
 
 /// Minimal event publishing capability used by presentation adapters.
@@ -113,21 +223,38 @@ pub trait EventPublisher {
 pub struct RingSubscription {
     queue: Arc<Mutex<VecDeque<Arc<Event>>>>,
     dropped: Arc<AtomicU64>,
+    backlog: SubscriptionBacklog,
 }
 
 impl RingSubscription {
     pub fn try_recv(&self) -> Option<Event> {
-        self.queue.lock().pop_front().map(|arc| (*arc).clone())
+        self.queue.lock().pop_front().map(|arc| {
+            let event = (*arc).clone();
+            dequeue_backlog(&self.backlog, &event);
+            event
+        })
     }
 
     pub fn drain_limited(&self, max: usize) -> Vec<Event> {
         let mut queue = self.queue.lock();
         let take = max.min(queue.len());
-        queue.drain(..take).map(|arc| (*arc).clone()).collect()
+        queue
+            .drain(..take)
+            .map(|arc| {
+                let event = (*arc).clone();
+                dequeue_backlog(&self.backlog, &event);
+                event
+            })
+            .collect()
     }
 
     pub fn clear(&self) {
-        self.queue.lock().clear();
+        let mut queue = self.queue.lock();
+        queue.clear();
+        self.backlog.queued_events.store(0, Ordering::Relaxed);
+        self.backlog.queued_bytes.store(0, Ordering::Relaxed);
+        self.backlog.oldest_timestamp_ms.store(0, Ordering::Relaxed);
+        drop(queue);
     }
 
     pub fn len(&self) -> usize {
@@ -145,21 +272,38 @@ impl RingSubscription {
     pub fn take_dropped_count(&self) -> u64 {
         self.dropped.swap(0, Ordering::Relaxed)
     }
+
+    pub fn backlog(&self) -> SubscriptionBacklog {
+        self.backlog.clone()
+    }
 }
 
 impl Subscription {
     pub fn try_recv(&self) -> Option<Event> {
-        self.receiver.try_recv().ok().map(|arc| (*arc).clone())
+        self.receiver.try_recv().ok().map(|arc| {
+            let event = (*arc).clone();
+            dequeue_backlog(&self.backlog, &event);
+            event
+        })
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> Result<Event, RecvTimeoutError> {
-        self.receiver
-            .recv_timeout(timeout)
-            .map(|arc| (*arc).clone())
+        self.receiver.recv_timeout(timeout).map(|arc| {
+            let event = (*arc).clone();
+            dequeue_backlog(&self.backlog, &event);
+            event
+        })
     }
 
     pub fn drain(&self) -> Vec<Event> {
-        self.receiver.try_iter().map(|arc| (*arc).clone()).collect()
+        self.receiver
+            .try_iter()
+            .map(|arc| {
+                let event = (*arc).clone();
+                dequeue_backlog(&self.backlog, &event);
+                event
+            })
+            .collect()
     }
 
     /// 有限消费，防止单帧消费过多事件导致卡顿。
@@ -167,14 +311,21 @@ impl Subscription {
         self.receiver
             .try_iter()
             .take(max)
-            .map(|arc| (*arc).clone())
+            .map(|arc| {
+                let event = (*arc).clone();
+                dequeue_backlog(&self.backlog, &event);
+                event
+            })
             .collect()
     }
 
     /// 零 clone 消费：返回 `Arc<Event>` 引用，避免 clone 开销。
     /// 适用于高频场景下只需要读取事件数据的消费者。
     pub fn try_recv_arc(&self) -> Option<Arc<Event>> {
-        self.receiver.try_recv().ok()
+        self.receiver
+            .try_recv()
+            .ok()
+            .inspect(|event| dequeue_backlog(&self.backlog, event))
     }
 
     /// 暴露底层接收端，用于 `crossbeam_channel::select!` 同时等待多个事件源。
@@ -185,17 +336,45 @@ impl Subscription {
 
     /// 零 clone 批量消费：返回 `Arc<Event>` 引用列表。
     pub fn drain_arc(&self) -> Vec<Arc<Event>> {
-        self.receiver.try_iter().collect()
+        self.receiver
+            .try_iter()
+            .inspect(|event| dequeue_backlog(&self.backlog, event))
+            .collect()
     }
 
     /// 零 clone 有限消费。
     pub fn drain_limited_arc(&self, max: usize) -> Vec<Arc<Event>> {
-        self.receiver.try_iter().take(max).collect()
+        self.receiver
+            .try_iter()
+            .take(max)
+            .inspect(|event| dequeue_backlog(&self.backlog, event))
+            .collect()
     }
 
     /// 此订阅自创建以来丢弃的事件总数（仅 bounded channel 有效）。
     pub fn dropped_count(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+
+    pub fn queued_len(&self) -> u64 {
+        self.backlog.queued_events()
+    }
+
+    pub fn queued_bytes(&self) -> u64 {
+        self.backlog.queued_bytes()
+    }
+
+    pub fn backlog(&self) -> SubscriptionBacklog {
+        self.backlog.clone()
+    }
+
+    pub fn clear(&self) {
+        for event in self.receiver.try_iter() {
+            dequeue_backlog(&self.backlog, &event);
+        }
+        self.backlog.queued_events.store(0, Ordering::Relaxed);
+        self.backlog.queued_bytes.store(0, Ordering::Relaxed);
+        self.backlog.oldest_timestamp_ms.store(0, Ordering::Relaxed);
     }
 }
 
@@ -211,11 +390,13 @@ impl DataBus {
                 history: Mutex::new(VecDeque::new()),
                 next_id: AtomicU64::new(1),
                 history_limit,
+                perf: DataBusPerfCounters::default(),
             }),
         }
     }
 
     pub fn publish(&self, mut event: Event) -> Event {
+        let started = Instant::now();
         if event.id == 0 {
             event.id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         }
@@ -236,9 +417,13 @@ impl DataBus {
                 // Arc::clone 只增加引用计数，避免对每个 subscriber 都完整 clone Event
                 match &subscriber.sink {
                     SubscriberSink::Channel(sender) => match sender.try_send(Arc::clone(&arc)) {
-                        Ok(()) => true,
+                        Ok(()) => {
+                            enqueue_backlog(&subscriber.backlog, &arc);
+                            true
+                        }
                         Err(TrySendError::Full(_)) => {
                             subscriber.dropped.fetch_add(1, Ordering::Relaxed);
+                            self.inner.perf.dropped.fetch_add(1, Ordering::Relaxed);
                             true
                         }
                         Err(TrySendError::Disconnected(_)) => false,
@@ -249,10 +434,14 @@ impl DataBus {
                         };
                         let mut queue = queue.lock();
                         if queue.len() >= *capacity {
-                            queue.pop_front();
+                            if let Some(old) = queue.pop_front() {
+                                dequeue_backlog(&subscriber.backlog, &old);
+                            }
                             subscriber.dropped.fetch_add(1, Ordering::Relaxed);
+                            self.inner.perf.dropped.fetch_add(1, Ordering::Relaxed);
                         }
                         queue.push_back(Arc::clone(&arc));
+                        enqueue_backlog(&subscriber.backlog, &arc);
                         true
                     }
                 }
@@ -260,6 +449,32 @@ impl DataBus {
                 true
             }
         });
+
+        self.inner
+            .perf
+            .publish_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .perf
+            .publish_bytes
+            .fetch_add(estimated_event_bytes(&arc), Ordering::Relaxed);
+        let payload_bytes = event_payload_bytes(&arc);
+        if matches!(arc.direction, Direction::Rx) {
+            self.inner
+                .perf
+                .rx_bytes
+                .fetch_add(payload_bytes, Ordering::Relaxed);
+        }
+        if matches!(arc.direction, Direction::Tx) {
+            self.inner
+                .perf
+                .tx_bytes
+                .fetch_add(payload_bytes, Ordering::Relaxed);
+        }
+        self.inner
+            .perf
+            .publish_nanos
+            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
         event
     }
@@ -270,12 +485,18 @@ impl DataBus {
     pub fn subscribe_lossless(&self, filter: TopicFilter) -> Subscription {
         let (sender, receiver) = unbounded();
         let dropped = Arc::new(AtomicU64::new(0));
+        let backlog = SubscriptionBacklog::default();
         self.inner.subscribers.lock().push(Subscriber {
             filter,
             sink: SubscriberSink::Channel(sender),
             dropped: Arc::clone(&dropped),
+            backlog: backlog.clone(),
         });
-        Subscription { receiver, dropped }
+        Subscription {
+            receiver,
+            dropped,
+            backlog,
+        }
     }
 
     /// [`subscribe_lossless`] 的别名，向后兼容。
@@ -289,12 +510,18 @@ impl DataBus {
     pub fn subscribe_lossy_bounded(&self, filter: TopicFilter, capacity: usize) -> Subscription {
         let (sender, receiver) = crossbeam_channel::bounded(capacity);
         let dropped = Arc::new(AtomicU64::new(0));
+        let backlog = SubscriptionBacklog::default();
         self.inner.subscribers.lock().push(Subscriber {
             filter,
             sink: SubscriberSink::Channel(sender),
             dropped: Arc::clone(&dropped),
+            backlog: backlog.clone(),
         });
-        Subscription { receiver, dropped }
+        Subscription {
+            receiver,
+            dropped,
+            backlog,
+        }
     }
 
     /// 有界环形订阅：队列满时丢弃最旧事件，始终优先保留最新状态。
@@ -302,6 +529,7 @@ impl DataBus {
         let capacity = capacity.max(1);
         let queue = Arc::new(Mutex::new(VecDeque::with_capacity(capacity)));
         let dropped = Arc::new(AtomicU64::new(0));
+        let backlog = SubscriptionBacklog::default();
         self.inner.subscribers.lock().push(Subscriber {
             filter,
             sink: SubscriberSink::Ring {
@@ -309,8 +537,13 @@ impl DataBus {
                 capacity,
             },
             dropped: Arc::clone(&dropped),
+            backlog: backlog.clone(),
         });
-        RingSubscription { queue, dropped }
+        RingSubscription {
+            queue,
+            dropped,
+            backlog,
+        }
     }
 
     pub fn history(&self) -> Vec<Event> {
@@ -332,6 +565,28 @@ impl DataBus {
 
     pub fn published_count(&self) -> u64 {
         self.inner.next_id.load(Ordering::Relaxed).saturating_sub(1)
+    }
+
+    pub fn perf_snapshot(&self) -> DataBusPerfSnapshot {
+        let subscribers = self.inner.subscribers.lock();
+        let subscriber_queued_events = subscribers
+            .iter()
+            .map(|subscriber| subscriber.backlog.queued_events())
+            .sum();
+        let subscriber_queued_bytes = subscribers
+            .iter()
+            .map(|subscriber| subscriber.backlog.queued_bytes())
+            .sum();
+        DataBusPerfSnapshot {
+            publish_count: self.inner.perf.publish_count.load(Ordering::Relaxed),
+            publish_bytes: self.inner.perf.publish_bytes.load(Ordering::Relaxed),
+            publish_nanos: self.inner.perf.publish_nanos.load(Ordering::Relaxed),
+            rx_bytes: self.inner.perf.rx_bytes.load(Ordering::Relaxed),
+            tx_bytes: self.inner.perf.tx_bytes.load(Ordering::Relaxed),
+            subscriber_queued_events,
+            subscriber_queued_bytes,
+            subscriber_dropped: self.inner.perf.dropped.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -426,11 +681,15 @@ mod tests {
         bus.publish(ev("transport.serial.default.rx"));
         bus.publish(ev("log.system")); // 不匹配
         bus.publish(ev("transport.serial.default.tx"));
+        assert_eq!(sub.queued_len(), 2);
+        assert!(sub.queued_bytes() > 0);
         let events = sub.drain();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].topic, "transport.serial.default.rx");
         assert_eq!(events[1].topic, "transport.serial.default.tx");
         assert_eq!(sub.dropped_count(), 0);
+        assert_eq!(sub.queued_len(), 0);
+        assert_eq!(sub.queued_bytes(), 0);
     }
 
     #[test]
@@ -510,5 +769,37 @@ mod tests {
         assert_eq!(arcs2.len(), 1);
         // 两个 Arc 指向同一个 Event（引用计数为 2，加上 history 中的 = 3）
         assert!(Arc::ptr_eq(&arcs1[0], &arcs2[0]));
+    }
+
+    #[test]
+    #[ignore = "fixed pressure benchmark; run with --release --ignored --nocapture"]
+    fn pressure_3mbps_rx_publish_and_drain() {
+        let bus = DataBus::new();
+        let subscription = bus.subscribe_lossless(TopicFilter::exact("transport.serial.rx"));
+        let payload = "x".repeat(375);
+        let started = std::time::Instant::now();
+        for _ in 0..1_000 {
+            bus.publish(Event::new(
+                "transport.serial.rx",
+                "COM1",
+                Direction::Rx,
+                Payload::Text(payload.clone()),
+            ));
+        }
+        let queued = subscription.queued_len();
+        let drained = subscription.drain_limited(2_000).len();
+        let elapsed = started.elapsed();
+        let snapshot = bus.perf_snapshot();
+        println!(
+            "databus pressure events={} queued={} drained={} rx_bytes={} elapsed={:?} publish_nanos={}",
+            snapshot.publish_count,
+            queued,
+            drained,
+            snapshot.rx_bytes,
+            elapsed,
+            snapshot.publish_nanos
+        );
+        assert_eq!(queued, 1_000);
+        assert_eq!(drained, 1_000);
     }
 }

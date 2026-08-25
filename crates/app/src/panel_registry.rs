@@ -187,11 +187,13 @@ fn render_settings(app: &mut WorkbenchApp, ui: &mut egui::Ui) {
 }
 
 fn render_terminal(app: &mut WorkbenchApp, ui: &mut egui::Ui) {
+    let started = app.perf.begin_frame();
     // 每帧同步端口别名：别名变更可能发生在 device_panel / settings_panel 等多处，
     // 渲染前统一注入最简单可靠（别名数量少，clone 开销可忽略）。
     app.terminal_panel
         .set_port_aliases(&app.serial.port_aliases);
     app.terminal_panel.ui(ui);
+    app.perf.record_terminal_render(started);
 }
 
 fn render_sender(app: &mut WorkbenchApp, ui: &mut egui::Ui) {
@@ -203,5 +205,7 @@ fn render_sender(app: &mut WorkbenchApp, ui: &mut egui::Ui) {
 }
 
 fn render_logs(app: &mut WorkbenchApp, ui: &mut egui::Ui) {
+    let started = app.perf.begin_frame();
     app.bottom_log_panel.ui(ui);
+    app.perf.record_log_render(started);
 }

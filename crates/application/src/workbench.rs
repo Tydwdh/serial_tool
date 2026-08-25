@@ -208,10 +208,18 @@ impl Workbench {
     pub fn tick(&mut self, _now_secs: f64) {
         self.poll_tasks();
         self.terminal.ingest_pending();
+        self.recorder.tick_backpressure();
     }
 
     pub fn task_snapshots(&self) -> Vec<TaskSnapshot> {
         self.tasks.snapshots()
+    }
+
+    pub fn perf_snapshot(&self) -> crate::perf::ApplicationPerfSnapshot {
+        crate::perf::ApplicationPerfSnapshot {
+            databus: self.bus.perf_snapshot(),
+            recorder: self.recorder.stats(),
+        }
     }
 
     pub fn has_active_task_kind(&self, kind: &str) -> bool {

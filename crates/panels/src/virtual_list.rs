@@ -180,8 +180,54 @@ impl VirtualRowIndex {
         true
     }
 
+    /// 同步带有逐行估算高度的列表。
+    ///
+    /// Log 的换行高度并不是常量，因此它不能直接使用 `sync_ids` 的单一默认高度。
+    /// 估算值只在 ID 列表或布局参数变化时读取；稳定帧不会重新构造整套行高数组。
+    pub(crate) fn sync_rows(
+        &mut self,
+        ids: &[u64],
+        estimated_heights: &[f32],
+        layout_key: u64,
+    ) -> bool {
+        debug_assert_eq!(ids.len(), estimated_heights.len());
+        if ids.len() != estimated_heights.len() {
+            return false;
+        }
+
+        if self.layout_key == Some(layout_key) && self.ids == ids {
+            return false;
+        }
+
+        let layout_changed = self.layout_key != Some(layout_key);
+        let old_heights: HashMap<u64, f32> = if layout_changed {
+            HashMap::new()
+        } else {
+            self.ids
+                .iter()
+                .copied()
+                .zip(self.heights.iter().copied())
+                .collect()
+        };
+
+        self.layout_key = Some(layout_key);
+        self.default_height = estimated_heights.first().copied().unwrap_or(1.0).max(1.0);
+        self.ids = ids.to_vec();
+        self.heights = ids
+            .iter()
+            .zip(estimated_heights.iter().copied())
+            .map(|(id, estimate)| old_heights.get(id).copied().unwrap_or(estimate.max(1.0)))
+            .collect();
+        self.fenwick = FenwickTree::from_values(&self.heights);
+        true
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.ids.len()
+    }
+
+    pub(crate) fn matches_layout(&self, layout_key: u64, row_count: usize) -> bool {
+        self.layout_key == Some(layout_key) && self.len() == row_count
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -201,6 +247,10 @@ impl VirtualRowIndex {
             .get(index)
             .copied()
             .unwrap_or(self.default_height)
+    }
+
+    pub(crate) fn index_at_offset(&self, offset: f32) -> Option<usize> {
+        (!self.is_empty()).then(|| self.fenwick.index_at_offset(offset))
     }
 
     pub(crate) fn set_height(&mut self, index: usize, height: f32) -> bool {
@@ -303,5 +353,32 @@ mod tests {
         index.sync_ids(&[1, 2], 2, 12.0);
         assert_eq!(index.height(0), 12.0);
         assert_eq!(index.total_height(), 24.0);
+    }
+
+    #[test]
+    #[ignore = "fixed pressure benchmark; run with --release --ignored --nocapture"]
+    fn pressure_50k_rows_stays_indexed() {
+        let ids: Vec<u64> = (0..50_000).map(|id| id + 1).collect();
+        let estimates: Vec<f32> = ids
+            .iter()
+            .map(|id| if id % 17 == 0 { 32.0 } else { 16.0 })
+            .collect();
+        let started = std::time::Instant::now();
+        let mut index = VirtualRowIndex::default();
+        index.sync_rows(&ids, &estimates, 1);
+        let mut visited = 0usize;
+        for offset in (0..10_000).step_by(97) {
+            visited += index.visible_range(offset as f32, 480.0, 320.0).len();
+        }
+        let elapsed = started.elapsed();
+        println!(
+            "virtual_rows pressure rows={} visited={} total_height={:.0} elapsed={:?}",
+            index.len(),
+            visited,
+            index.total_height(),
+            elapsed
+        );
+        assert_eq!(index.len(), 50_000);
+        assert!(visited > 0);
     }
 }

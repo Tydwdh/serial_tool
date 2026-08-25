@@ -46,8 +46,10 @@ impl WorkbenchApp {
             Some(crate::panel_registry::PanelRender::Builtin(f)) => f(self, ui),
             Some(crate::panel_registry::PanelRender::Dynamic { suffix }) => {
                 if self.dynamic_panels.contains(&suffix) {
+                    let started = self.perf.begin_frame();
                     let _ = egui::ScrollArea::vertical()
                         .show(ui, |ui| self.dynamic_panels.ui_body(ui, &suffix));
+                    self.perf.record_chart_render(started);
                 } else {
                     ui.colored_label(theme::red(), format!("动态面板不存在：{suffix}"));
                 }

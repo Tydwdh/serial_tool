@@ -70,6 +70,8 @@ pub(crate) struct WorkbenchApp {
     pub(crate) network_proxy_url: String,
     /// 市场索引 URL（None 表示用默认）。
     pub(crate) marketplace: crate::runtime::marketplace::MarketplaceState,
+    /// 固定窗口的帧、吞吐和后台积压诊断。
+    pub(crate) perf: crate::perf::PerfDiagnostics,
 }
 
 pub(crate) struct ReplayAnalyzerJob {
@@ -355,6 +357,7 @@ impl WorkbenchApp {
                 .and_then(|c| c.network_proxy_url.clone())
                 .unwrap_or_default(),
             marketplace: Default::default(),
+            perf: crate::perf::PerfDiagnostics::default(),
         };
         // 从配置恢复等宽字体大小
         app.terminal_panel.font_size = app.monospace_font_size;
@@ -416,6 +419,7 @@ impl eframe::App for WorkbenchApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let frame_started = self.perf.begin_frame();
         let ctx = ui.ctx().clone();
         self.tick_pre_ui(&ctx);
         self.draw_shell(ui, &ctx);
@@ -431,6 +435,9 @@ impl eframe::App for WorkbenchApp {
             self.export_log_data(format);
         }
         self.toast_overlay.show(&ctx, &mut self.notifications);
+
+        let perf_snapshot = self.workbench.perf_snapshot();
+        self.perf.end_frame(frame_started, perf_snapshot);
 
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         let poll_interval_ms = if focused { 80 } else { 250 };
