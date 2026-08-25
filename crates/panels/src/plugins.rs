@@ -661,10 +661,12 @@ impl PluginsPanel {
                         }
                     }
                 });
-                ui.horizontal_wrapped(|ui| {
+                // 路径控件必须使用标签后的剩余宽度；horizontal_wrapped 配合整行宽度
+                // 会把“路径”标签和路径控件挤成两行。
+                ui.horizontal(|ui| {
                     ui.label("路径");
                     let full_path = summary.path.display().to_string();
-                    let available_width = ui.available_width().max(40.0);
+                    let available_width = ui.available_width().max(1.0);
                     let display_path =
                         crate::compact_middle(&full_path, plugin_path_char_limit(available_width));
                     ui.add_sized(
