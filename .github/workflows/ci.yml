@@ -178,6 +178,13 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      - name: Install and verify WASM target
+        shell: bash
+        run: |
+          rustup target add wasm32-unknown-unknown
+          rustup target list --installed
+          test -d "$(rustc --print sysroot)/lib/rustlib/wasm32-unknown-unknown/lib"
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Check Web target

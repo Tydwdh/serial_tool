@@ -4661,6 +4661,7 @@ dependencies = [
  "tool-application",
  "tool-core",
  "tool-databus",
+ "tool-platform",
 ]
 
 [[package]]

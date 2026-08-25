@@ -1,7 +1,6 @@
 use crate::app::WorkbenchApp;
 use crate::config::{pick_recorder_path, record_mode_label};
 use crate::state::StatusLevel;
-use crate::ui::baud_combo;
 use eframe::egui;
 use egui_material_icons::icons::{
     ICON_CABLE, ICON_FIBER_MANUAL_RECORD, ICON_FOLDER_OPEN, ICON_PAUSE, ICON_PLAY_ARROW, ICON_STOP,
@@ -9,7 +8,8 @@ use egui_material_icons::icons::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use tool_application::query::RecordModeView;
-use tool_panels::{design, theme};
+use tool_panels::{SerialPanel, design, theme};
+use tool_platform::{SerialParity, SerialSettings};
 
 // 端口行的实际最小内容宽度约为 500px（状态、名称、别名编辑器和分组选择器）。
 // 留出少量余量即可，不能把卡片的可用宽度误当成 Dock 的断点。
@@ -23,39 +23,35 @@ impl WorkbenchApp {
             design::section_header(ui, ICON_TUNE, "串口参数");
             ui.separator();
 
-            ui.horizontal_wrapped(|ui| {
-                ui.label("波特率");
-                baud_combo(ui, "dev-port-rate", 180.0, &mut self.serial.baud_rate);
-                ui.label("数据位");
-                egui::ComboBox::from_id_salt("dev-db")
-                    .width(60.0)
-                    .selected_text(&self.serial.data_bits)
-                    .show_ui(ui, |ui| {
-                        for &v in &["5", "6", "7", "8"] {
-                            ui.selectable_value(&mut self.serial.data_bits, v.to_owned(), v);
-                        }
-                    });
-
-                ui.label("停止位");
-                egui::ComboBox::from_id_salt("dev-sb")
-                    .width(60.0)
-                    .selected_text(&self.serial.stop_bits)
-                    .show_ui(ui, |ui| {
-                        for &v in &["1", "2"] {
-                            ui.selectable_value(&mut self.serial.stop_bits, v.to_owned(), v);
-                        }
-                    });
-
-                ui.label("校验");
-                egui::ComboBox::from_id_salt("dev-par")
-                    .width(70.0)
-                    .selected_text(&self.serial.parity)
-                    .show_ui(ui, |ui| {
-                        for &(v, l) in &[("none", "无"), ("odd", "奇"), ("even", "偶")] {
-                            ui.selectable_value(&mut self.serial.parity, v.to_owned(), l);
-                        }
-                    });
-            });
+            let mut settings = SerialSettings {
+                baud_rate: self.serial.baud_rate.parse().unwrap_or(115_200),
+                data_bits: self.serial.data_bits.parse().unwrap_or(8),
+                stop_bits: self.serial.stop_bits.parse().unwrap_or(1),
+                parity: match self.serial.parity.as_str() {
+                    "odd" => SerialParity::Odd,
+                    "even" => SerialParity::Even,
+                    _ => SerialParity::None,
+                },
+            };
+            let previous_settings = settings;
+            SerialPanel::settings_ui(ui, &mut settings);
+            if settings != previous_settings {
+                self.serial.baud_rate = settings.baud_rate.to_string();
+                self.serial.data_bits = settings.data_bits.to_string();
+                self.serial.stop_bits = settings.stop_bits.to_string();
+                self.serial.parity = match settings.parity {
+                    SerialParity::None => "none",
+                    SerialParity::Odd => "odd",
+                    SerialParity::Even => "even",
+                }
+                .to_owned();
+                self.workbench.set_serial_parameters(
+                    self.serial.baud_rate.clone(),
+                    self.serial.data_bits.clone(),
+                    self.serial.stop_bits.clone(),
+                    self.serial.parity.clone(),
+                );
+            }
 
             ui.checkbox(&mut self.serial.auto_reconnect, "串口拔出后自动重连");
             if self.serial.auto_reconnect

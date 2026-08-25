@@ -13,7 +13,9 @@ use std::rc::Rc;
 use tool_application::web::{WebAppEvent, WebApplication};
 use tool_application::{AppCommand, CommandOutcome};
 use tool_databus::DataBus;
-use tool_panels::{ChartPanel, TerminalPanel, theme};
+use tool_panels::{
+    ChartPanel, SerialAction, SerialPanel, SerialPortItem, SerialView, TerminalPanel, theme,
+};
 use tool_platform::storage::{SettingsStore, web::WebSettingsStore};
 use tool_platform::{PortDescriptor, PortId, SerialParity, SerialSettings};
 use wasm_bindgen::{JsCast, JsValue, prelude::wasm_bindgen};
@@ -317,176 +319,80 @@ impl WebApp {
 
     fn serial_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        ui.heading("Web Serial");
-        ui.separator();
-
-        let mut settings = self.serial.borrow().settings;
-        let mut settings_changed = false;
-        ui.horizontal_wrapped(|ui| {
-            ui.label("串口参数");
-            egui::ComboBox::from_id_salt("web-baud-rate")
-                .selected_text(settings.baud_rate.to_string())
-                .show_ui(ui, |ui| {
-                    for baud_rate in [9600, 19200, 38400, 57600, 115200, 230400, 460800] {
-                        settings_changed |= ui
-                            .selectable_value(
-                                &mut settings.baud_rate,
-                                baud_rate,
-                                baud_rate.to_string(),
-                            )
-                            .changed();
-                    }
-                });
-            egui::ComboBox::from_id_salt("web-data-bits")
-                .selected_text(settings.data_bits.to_string())
-                .show_ui(ui, |ui| {
-                    for data_bits in [5, 6, 7, 8] {
-                        settings_changed |= ui
-                            .selectable_value(
-                                &mut settings.data_bits,
-                                data_bits,
-                                data_bits.to_string(),
-                            )
-                            .changed();
-                    }
-                });
-            egui::ComboBox::from_id_salt("web-stop-bits")
-                .selected_text(settings.stop_bits.to_string())
-                .show_ui(ui, |ui| {
-                    for stop_bits in [1, 2] {
-                        settings_changed |= ui
-                            .selectable_value(
-                                &mut settings.stop_bits,
-                                stop_bits,
-                                stop_bits.to_string(),
-                            )
-                            .changed();
-                    }
-                });
-            egui::ComboBox::from_id_salt("web-parity")
-                .selected_text(parity_label(settings.parity))
-                .show_ui(ui, |ui| {
-                    for (parity, label) in [
-                        (SerialParity::None, "None"),
-                        (SerialParity::Odd, "Odd"),
-                        (SerialParity::Even, "Even"),
-                    ] {
-                        settings_changed |= ui
-                            .selectable_value(&mut settings.parity, parity, label)
-                            .changed();
-                    }
-                });
-        });
-        if settings_changed {
-            self.serial.borrow_mut().settings = settings;
-            self.persist_settings();
-        }
-
-        ui.horizontal(|ui| {
-            if ui.button("刷新已授权设备").clicked() {
-                self.dispatch_serial(AppCommand::RefreshPorts, &ctx);
-            }
-            if ui.button("添加设备").clicked() {
-                self.dispatch_serial(AppCommand::RequestPort, &ctx);
-            }
-        });
-
-        let snapshot = self.serial.borrow();
-        ui.label(&snapshot.status);
-        let connected = snapshot.connected.clone();
-        let ports = snapshot.ports.clone();
-        let serial_settings = snapshot.settings;
-        drop(snapshot);
-
-        for port in ports {
-            ui.horizontal(|ui| {
-                ui.label(&port.label);
-                ui.label(format!("({})", port.id));
-                if connected.as_ref() == Some(&port.id) {
-                    if ui.button("断开").clicked() {
-                        self.dispatch_serial(
-                            AppCommand::Disconnect {
-                                port_name: port.id.to_string(),
-                            },
-                            &ctx,
-                        );
-                    }
-                } else if ui
-                    .button(format!("连接 {}", settings_label(serial_settings)))
-                    .clicked()
-                {
-                    self.dispatch_serial(
-                        AppCommand::Connect {
-                            port_name: port.id.to_string(),
-                            settings: serial_settings,
-                        },
-                        &ctx,
-                    );
-                }
-            });
-        }
-
-        ui.add_space(12.0);
-        let mut send_input = self.serial.borrow().send_input.clone();
-        let mut tx_hex = self.serial.borrow().tx_hex;
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut tx_hex, false, "TEXT");
-            ui.selectable_value(&mut tx_hex, true, "HEX");
-            ui.text_edit_singleline(&mut send_input);
-            let enabled = connected.is_some();
-            if ui.add_enabled(enabled, egui::Button::new("发送")).clicked()
-                && let Some(port) = connected.clone()
-            {
-                let command = if tx_hex {
-                    AppCommand::SendHex {
-                        port_name: port.to_string(),
-                        hex: send_input.clone(),
-                    }
-                } else {
-                    AppCommand::SendText {
-                        port_name: port.to_string(),
-                        text: send_input.clone(),
-                    }
-                };
-                self.dispatch_serial(command, &ctx);
-            }
-        });
         let mut serial = self.serial.borrow_mut();
-        let mode_changed = serial.tx_hex != tx_hex;
-        serial.tx_hex = tx_hex;
-        serial.send_input = send_input;
+        let previous_settings = serial.settings;
+        let previous_tx_hex = serial.tx_hex;
+        let ports: Vec<SerialPortItem> = serial
+            .ports
+            .iter()
+            .map(|port| SerialPortItem {
+                id: port.id.to_string(),
+                label: port.label.clone(),
+                kind: String::new(),
+            })
+            .collect();
+        let connected = serial.connected.as_ref().map(|port| port.to_string());
+        let status = serial.status.clone();
+        let (actions, settings_changed, tx_mode_changed) = {
+            let state = &mut *serial;
+            let WebSerialState {
+                settings,
+                send_input,
+                tx_hex,
+                dtr,
+                rts,
+                ..
+            } = state;
+            let mut view = SerialView {
+                ports: &ports,
+                connected: connected.as_deref(),
+                status: &status,
+                settings,
+                send_input,
+                tx_hex,
+                dtr,
+                rts,
+                capabilities: tool_platform::TransportCapabilities::WEB_SERIAL,
+                show_ports: true,
+                show_sender: true,
+            };
+            let actions = SerialPanel::ui(ui, &mut view);
+            let settings_changed = *settings != previous_settings;
+            let tx_mode_changed = *tx_hex != previous_tx_hex;
+            (actions, settings_changed, tx_mode_changed)
+        };
         drop(serial);
-        if mode_changed {
+
+        if settings_changed || tx_mode_changed {
             self.persist_settings();
         }
-
-        let mut dtr = self.serial.borrow().dtr;
-        let mut rts = self.serial.borrow().rts;
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut dtr, "DTR");
-            ui.checkbox(&mut rts, "RTS");
-        });
-        if dtr != self.serial.borrow().dtr
-            && let Some(port) = connected.clone()
-        {
-            self.dispatch_serial(
-                AppCommand::SetDtr {
-                    port_name: port.to_string(),
-                    value: dtr,
+        for action in actions {
+            let command = match action {
+                SerialAction::Refresh => AppCommand::RefreshPorts,
+                SerialAction::RequestPort => AppCommand::RequestPort,
+                SerialAction::Connect { port, settings } => AppCommand::Connect {
+                    port_name: port,
+                    settings,
                 },
-                &ctx,
-            );
-        }
-        if rts != self.serial.borrow().rts
-            && let Some(port) = connected
-        {
-            self.dispatch_serial(
-                AppCommand::SetRts {
-                    port_name: port.to_string(),
-                    value: rts,
+                SerialAction::Disconnect { port } => AppCommand::Disconnect { port_name: port },
+                SerialAction::SendText { port, text } => AppCommand::SendText {
+                    port_name: port,
+                    text,
                 },
-                &ctx,
-            );
+                SerialAction::SendHex { port, hex } => AppCommand::SendHex {
+                    port_name: port,
+                    hex,
+                },
+                SerialAction::SetDtr { port, value } => AppCommand::SetDtr {
+                    port_name: port,
+                    value,
+                },
+                SerialAction::SetRts { port, value } => AppCommand::SetRts {
+                    port_name: port,
+                    value,
+                },
+            };
+            self.dispatch_serial(command, &ctx);
         }
     }
 }
@@ -542,14 +448,6 @@ fn apply_web_theme(ctx: &egui::Context, selected_theme: theme::AppTheme) {
     style.visuals.override_text_color = Some(theme::text_primary());
     style.visuals.weak_text_color = Some(theme::text_secondary());
     ctx.set_global_style(style);
-}
-
-fn parity_label(parity: SerialParity) -> &'static str {
-    match parity {
-        SerialParity::None => "None",
-        SerialParity::Odd => "Odd",
-        SerialParity::Even => "Even",
-    }
 }
 
 fn settings_label(settings: SerialSettings) -> String {

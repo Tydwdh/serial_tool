@@ -11,6 +11,7 @@ Web V1 先证明 Hardware Workbench 的 egui UI 和平台无关数据路径可�
 - `PortId` / `PortDescriptor` / `TransportCapabilities` 平台能力模型。
 - Web Serial 的异步 `getPorts`、`requestPort`、`open`、RX/TX、DTR/RTS 和拔出断开事件。
 - Serial 面板支持 TEXT/HEX 发送。
+- Native 与 Web 共用 `tool-panels::SerialPanel` 的串口参数、能力、端口动作和收发 DTO；Native 的分组、别名、网络端口和录制继续作为外层扩展。
 - 事件驱动的 egui repaint：后台 Promise、RX、断开和任务状态事件都会主动唤醒 UI，空闲时不持续重绘。
 
 ## 第一阶段明确关闭
@@ -64,3 +65,7 @@ WASM 编译和 Trunk 打包可以在 CI 验证；真实浏览器硬件矩阵需�
 1. Recorder/Replay：Native 保持文件系统，Web 再接 OPFS/浏览器文件句柄。
 2. Plugin API/manifest/permissions 保持平台无关；Web runtime 另行确定，不能把 `mlua`/Emscripten 带进当前 `wasm32-unknown-unknown` 目标。
 3. Marketplace/Updater 最后处理。
+
+UI convergence 当前进度：串口核心已经 DTO 化并由 Native/Web 共用；下一步再把
+`PanelRegistry` 从 Native `WorkbenchApp` 解耦，之后统一 Terminal、Chart 和 Settings
+的 panel shell。真实 Chrome/Edge 硬件矩阵仍需在带设备的环境中手工验收。

@@ -17,6 +17,7 @@ mod replay;
 #[cfg(not(target_arch = "wasm32"))]
 mod replay_view;
 mod search;
+pub mod serial;
 mod table;
 mod terminal;
 pub mod theme;
@@ -54,6 +55,7 @@ pub use replay::ReplayPanel;
 #[cfg(not(target_arch = "wasm32"))]
 pub use replay_view::{ReplayUiCommand, ReplayView};
 pub use search::SearchQuery;
+pub use serial::{SerialAction, SerialPanel, SerialPortItem, SerialView};
 pub use table::{RowSelection, copy_text_with_feedback, take_copy_feedback};
 pub use terminal::{TerminalExportFormat, TerminalExportJob, TerminalPanel};
 
