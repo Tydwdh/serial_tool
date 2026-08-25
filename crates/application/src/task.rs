@@ -12,40 +12,25 @@ use std::sync::{
 };
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use serde::{Deserialize, Serialize};
-
 use tool_extension::PluginScan;
+use tool_platform::{PortDescriptor, PortId};
 use tool_recorder::ReplayLoadData;
 use tool_transport::SerialPortDescriptor;
 
-/// 后台任务的稳定标识。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct TaskId(pub u64);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TaskState {
-    Pending,
-    Running,
-    Completed,
-    Failed,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskSnapshot {
-    pub id: TaskId,
-    pub kind: String,
-    pub state: TaskState,
-    pub message: String,
-}
+pub use crate::task_model::{TaskId, TaskSnapshot, TaskState};
 
 /// worker 完成后交给 UI/Workbench 应用的结果。
 #[derive(Debug)]
 pub enum TaskResult {
     PortsRefreshed(Vec<SerialPortDescriptor>),
+    PlatformPortsRefreshed(Vec<PortDescriptor>),
     Connected { port_name: String },
     Disconnected { port_name: String },
     Reconnected { port_name: String },
+    TransportConnected { port: PortId },
+    TransportDisconnected { port: PortId },
+    TransportSent { port: PortId, bytes: usize },
+    TransportSignalChanged { port: PortId },
     ReplayLoaded(ReplayLoadData),
     PluginsDiscovered(PluginScan),
     FileExported { path: PathBuf },

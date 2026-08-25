@@ -21,11 +21,17 @@ serde_json.workspace = true
 thiserror.workspace = true
 tool-core = { path = "../core" }
 tool-databus = { path = "../databus" }
+tool-platform = { path = "../platform" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tool-extension = { path = "../extension" }
 tool-marketplace = { path = "../marketplace" }
 tool-lua-host = { path = "../lua_host" }
 tool-recorder = { path = "../recorder" }
 tool-transport = { path = "../transport" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
 
 [dev-dependencies]
 tool-testing = { path = "../testing" }

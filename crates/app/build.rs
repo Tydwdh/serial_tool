@@ -1,5 +1,13 @@
 #[cfg(windows)]
 fn main() {
+    // Build scripts run on the host, so `cfg(windows)` describes the current
+    // machine rather than the requested compilation target. Do not execute
+    // the Windows resource compiler when the app is being cross-compiled to
+    // WebAssembly.
+    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32") {
+        return;
+    }
+
     // 插件和主题不是 Rust 源码，但它们会被复制到 exe 旁边并在运行时加载。
     // 声明目录依赖，避免只改 Lua/manifest 后 target/<profile>/plugins 仍停留在旧版本。
     println!("cargo:rerun-if-changed=../../plugins");

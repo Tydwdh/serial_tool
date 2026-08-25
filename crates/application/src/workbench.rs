@@ -5,8 +5,11 @@ use tool_core::LogLevel;
 use tool_databus::{DataBus, TopicFilter};
 use tool_extension::PluginManager;
 use tool_lua_host::{DialogRequest, FileAccessBroker};
+use tool_platform::native::{NativeTransportBackend, block_on_transport};
+use tool_platform::storage::{FileBlob, native::NativeFileService};
+use tool_platform::{PortDescriptor, PortId, SerialParity, SerialSettings, TransportBackend};
 use tool_recorder::{JsonlRecorder, ReplayManager};
-use tool_transport::{SerialConfig, SerialPortDescriptor, TransportManager};
+use tool_transport::{SerialPortDescriptor, TransportManager};
 
 use crate::command::{AppCommand, CommandOutcome};
 use crate::error::AppError;
@@ -62,6 +65,8 @@ impl Default for ApplicationConfig {
 pub struct Workbench {
     bus: DataBus,
     transport: TransportManager,
+    transport_backend: NativeTransportBackend,
+    file_service: NativeFileService,
     recorder: JsonlRecorder,
     replay: ReplayManager,
     plugin_manager: PluginManager,
@@ -151,6 +156,7 @@ impl TransportEndpoint {
 impl Workbench {
     pub fn new(bus: DataBus) -> Self {
         let transport = TransportManager::new(bus.clone());
+        let transport_backend = NativeTransportBackend::new(transport.clone());
         let (dialog_sender, dialog_receiver) = crossbeam_channel::unbounded::<DialogRequest>();
         let file_broker = std::sync::Arc::new(FileAccessBroker::default());
         let mut pm = PluginManager::new(bus.clone(), transport.clone());
@@ -161,6 +167,8 @@ impl Workbench {
         Self {
             bus,
             transport,
+            transport_backend,
+            file_service: NativeFileService::new("."),
             recorder,
             replay,
             plugin_manager: pm,
@@ -250,13 +258,25 @@ impl Workbench {
     where
         F: FnOnce() -> Result<String, String> + Send + 'static,
     {
+        let file_service = self.file_service.clone();
         let task_id = self.tasks.spawn(kind, move |_context| {
             let content = render()?;
+            let mut bytes = content.into_bytes();
             if format == "csv" {
-                write_utf8_csv(&path, &content).map_err(|error| error.to_string())?;
-            } else {
-                std::fs::write(&path, content).map_err(|error| error.to_string())?;
+                let mut csv_bytes = b"\xEF\xBB\xBF".to_vec();
+                csv_bytes.append(&mut bytes);
+                bytes = csv_bytes;
             }
+            file_service
+                .block_on_write_path(
+                    path.clone(),
+                    FileBlob {
+                        name: path.display().to_string(),
+                        mime: "application/octet-stream".to_owned(),
+                        bytes,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
             Ok(TaskResult::FileExported { path })
         });
         pending(task_id, "正在导出文件")
@@ -268,25 +288,54 @@ impl Workbench {
                 if let Some(task_id) = self.tasks.active_task_id("refresh_ports") {
                     return Ok(pending(task_id, "正在刷新串口列表"));
                 }
-                let transport = self.transport.clone();
+                let backend = self.transport_backend.clone();
                 let task_id = self.tasks.spawn("refresh_ports", move |_context| {
-                    transport
-                        .list_serial_ports()
-                        .map(TaskResult::PortsRefreshed)
+                    block_on_transport(backend.list_known_ports())
+                        .map(TaskResult::PlatformPortsRefreshed)
                         .map_err(|error| error.to_string())
                 });
                 Ok(pending(task_id, "正在刷新串口列表"))
             }
+            AppCommand::RequestPort => {
+                // Native has no browser permission prompt. Returning the first
+                // known port keeps the command portable while preserving the
+                // user-driven request semantics on Web.
+                if let Some(task_id) = self.tasks.active_task_id("request_port") {
+                    return Ok(pending(task_id, "正在获取串口"));
+                }
+                let backend = self.transport_backend.clone();
+                let task_id = self.tasks.spawn("request_port", move |_context| {
+                    block_on_transport(backend.request_port())
+                        .map(|port| TaskResult::PlatformPortsRefreshed(vec![port]))
+                        .map_err(|error| error.to_string())
+                });
+                Ok(pending(task_id, "正在获取串口"))
+            }
             AppCommand::Connect { port_name } => self.connect(&port_name),
             AppCommand::Disconnect { port_name } => {
-                let transport = self.transport.clone();
                 let task_port = port_name.clone();
-                let task_id = self.tasks.spawn("disconnect", move |_context| {
-                    transport.close_port(&task_port);
-                    Ok(TaskResult::Disconnected {
-                        port_name: task_port,
+                let is_network = self
+                    .app_config
+                    .network_ports
+                    .iter()
+                    .any(|config| config.display_name() == port_name);
+                let task_id = if is_network {
+                    let transport = self.transport.clone();
+                    self.tasks.spawn("disconnect", move |_context| {
+                        transport.close_port(&task_port);
+                        Ok(TaskResult::Disconnected {
+                            port_name: task_port,
+                        })
                     })
-                });
+                } else {
+                    let backend = self.transport_backend.clone();
+                    let port = PortId::new(task_port.clone());
+                    self.tasks.spawn("disconnect", move |_context| {
+                        block_on_transport(backend.disconnect(port.clone()))
+                            .map_err(|error| error.to_string())?;
+                        Ok(TaskResult::TransportDisconnected { port })
+                    })
+                };
                 Ok(pending(task_id, format!("正在关闭 {port_name}")))
             }
             AppCommand::Reconnect { port_name } => self.start_reconnect(port_name),
@@ -317,31 +366,22 @@ impl Workbench {
                 }
                 Ok(CommandOutcome::Done)
             }
-            AppCommand::SendText { port_name, text } => self
-                .transport
-                .send_text_to(&port_name, &text)
-                .map(|()| CommandOutcome::Done)
-                .map_err(|e| AppError::Transport(e.to_string())),
-            AppCommand::SendHex { port_name, hex } => self
-                .transport
-                .send_hex_to(&port_name, &hex)
-                .map(|()| CommandOutcome::Done)
-                .map_err(|e| AppError::Transport(e.to_string())),
-            AppCommand::SendRaw { port_name, bytes } => self
-                .transport
-                .send_to(&port_name, bytes)
-                .map(|()| CommandOutcome::Done)
-                .map_err(|e| AppError::Transport(e.to_string())),
-            AppCommand::SetDtr { port_name, value } => self
-                .transport
-                .set_dtr(&port_name, value)
-                .map(|()| CommandOutcome::Done)
-                .map_err(|e| AppError::Transport(e.to_string())),
-            AppCommand::SetRts { port_name, value } => self
-                .transport
-                .set_rts(&port_name, value)
-                .map(|()| CommandOutcome::Done)
-                .map_err(|e| AppError::Transport(e.to_string())),
+            AppCommand::SendText { port_name, text } => {
+                let bytes = text.into_bytes();
+                self.send_transport_bytes(port_name, bytes)
+            }
+            AppCommand::SendHex { port_name, hex } => {
+                let bytes = tool_transport::parse_hex(&hex)
+                    .map_err(|error| AppError::Transport(error.to_string()))?;
+                self.send_transport_bytes(port_name, bytes)
+            }
+            AppCommand::SendRaw { port_name, bytes } => self.send_transport_bytes(port_name, bytes),
+            AppCommand::SetDtr { port_name, value } => {
+                self.set_transport_signal(port_name, value, true)
+            }
+            AppCommand::SetRts { port_name, value } => {
+                self.set_transport_signal(port_name, value, false)
+            }
             AppCommand::StartRecording { path } => self
                 .recorder
                 .start(&path)
@@ -482,14 +522,25 @@ impl Workbench {
                 let export_job = self.terminal.export_job();
                 let task_path = path.clone();
                 let task_format = format.clone();
+                let file_service = self.file_service.clone();
                 let task_id = self.tasks.spawn("export_terminal", move |_context| {
                     let content = export_job.render(&task_format);
+                    let mut bytes = content.into_bytes();
                     if task_format == "csv" {
-                        write_utf8_csv(&task_path, &content)
-                    } else {
-                        std::fs::write(&task_path, content)
+                        let mut csv_bytes = b"\xEF\xBB\xBF".to_vec();
+                        csv_bytes.append(&mut bytes);
+                        bytes = csv_bytes;
                     }
-                    .map_err(|error| error.to_string())?;
+                    file_service
+                        .block_on_write_path(
+                            task_path.clone(),
+                            FileBlob {
+                                name: task_path.display().to_string(),
+                                mime: "application/octet-stream".to_owned(),
+                                bytes,
+                            },
+                        )
+                        .map_err(|error| error.to_string())?;
                     Ok(TaskResult::FileExported { path: task_path })
                 });
                 Ok(pending(task_id, "正在导出终端数据"))
@@ -612,35 +663,46 @@ impl Workbench {
         self.transport.status_port(port).into()
     }
 
-    pub fn set_dtr(&self, port: &str, value: bool) -> Result<(), AppError> {
-        self.transport
-            .set_dtr(port, value)
-            .map_err(|error| AppError::Transport(error.to_string()))
+    pub fn set_dtr(&mut self, port: &str, value: bool) -> Result<CommandOutcome, AppError> {
+        self.dispatch(AppCommand::SetDtr {
+            port_name: port.to_owned(),
+            value,
+        })
     }
 
-    pub fn set_rts(&self, port: &str, value: bool) -> Result<(), AppError> {
-        self.transport
-            .set_rts(port, value)
-            .map_err(|error| AppError::Transport(error.to_string()))
+    pub fn set_rts(&mut self, port: &str, value: bool) -> Result<CommandOutcome, AppError> {
+        self.dispatch(AppCommand::SetRts {
+            port_name: port.to_owned(),
+            value,
+        })
     }
 
     pub fn send_input(
-        &self,
+        &mut self,
         port: &str,
         input: &str,
         hex_mode: bool,
         line_ending: &str,
         hex_strict: bool,
-    ) -> Result<(), AppError> {
-        tool_transport::send_impl_to(
-            port,
-            input,
-            hex_mode,
-            line_ending,
-            hex_strict,
-            &self.transport,
-        )
-        .map_err(|error| AppError::Transport(tool_transport::translate_error(&error)))
+    ) -> Result<CommandOutcome, AppError> {
+        if input.trim().is_empty() {
+            return Ok(CommandOutcome::Done);
+        }
+        let bytes = if hex_mode {
+            if hex_strict {
+                validate_strict_hex(input)?;
+            }
+            tool_transport::parse_hex(input)
+                .map_err(|error| AppError::Transport(error.to_string()))?
+        } else {
+            let mut text = input.to_owned();
+            text.push_str(line_ending);
+            text.into_bytes()
+        };
+        self.dispatch(AppCommand::SendRaw {
+            port_name: port.to_owned(),
+            bytes,
+        })
     }
 
     pub fn recording_is_running(&self) -> bool {
@@ -764,6 +826,17 @@ impl Workbench {
         self.terminal.entries_since(since_seq, limit)
     }
 
+    fn apply_platform_ports(&mut self, available: Vec<PortDescriptor>) {
+        let ports = available
+            .into_iter()
+            .map(|port| SerialPortDescriptor {
+                port_name: port.id.to_string(),
+                port_type: tool_transport::PortType::Unknown,
+            })
+            .collect();
+        self.apply_ports(ports);
+    }
+
     fn apply_ports(&mut self, available: Vec<SerialPortDescriptor>) {
         let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for p in available {
@@ -811,29 +884,99 @@ impl Workbench {
             });
             Ok(pending(task_id, format!("正在连接 {port_name}")))
         } else {
-            let transport = self.transport.clone();
             let task_port = port_name.to_owned();
-            let cfg = self.serial_config(port_name);
+            let backend = self.transport_backend.clone();
+            let port = PortId::new(task_port.clone());
+            let settings = self.platform_serial_settings();
             let task_id = self.tasks.spawn("connect_serial", move |_context| {
-                transport
-                    .open_serial(cfg)
-                    .map(|()| TaskResult::Connected {
-                        port_name: task_port,
-                    })
-                    .map_err(|error| error.to_string())
+                block_on_transport(backend.connect(port.clone(), settings))
+                    .map_err(|error| error.to_string())?;
+                Ok(TaskResult::TransportConnected { port })
             });
             Ok(pending(task_id, format!("正在打开 {port_name}")))
         }
     }
 
-    fn serial_config(&self, port_name: &str) -> SerialConfig {
-        SerialConfig {
-            port_name: port_name.to_owned(),
+    fn platform_serial_settings(&self) -> SerialSettings {
+        SerialSettings {
             baud_rate: self.app_config.baud_rate.parse().unwrap_or(115_200),
-            data_bits: tool_transport::parse_data_bits(&self.app_config.data_bits),
-            stop_bits: tool_transport::parse_stop_bits(&self.app_config.stop_bits),
-            parity: tool_transport::parse_parity(&self.app_config.parity),
+            data_bits: self.app_config.data_bits.parse().unwrap_or(8),
+            stop_bits: self.app_config.stop_bits.parse().unwrap_or(1),
+            parity: match self.app_config.parity.as_str() {
+                "odd" => SerialParity::Odd,
+                "even" => SerialParity::Even,
+                _ => SerialParity::None,
+            },
         }
+    }
+
+    fn is_network_port(&self, port_name: &str) -> bool {
+        self.app_config
+            .network_ports
+            .iter()
+            .any(|config| config.display_name() == port_name)
+    }
+
+    fn send_transport_bytes(
+        &mut self,
+        port_name: String,
+        bytes: Vec<u8>,
+    ) -> Result<CommandOutcome, AppError> {
+        if self.is_network_port(&port_name) {
+            let transport = self.transport.clone();
+            let task_port = port_name.clone();
+            let task_bytes = bytes;
+            let task_id = self.tasks.spawn("send_network", move |_context| {
+                transport
+                    .send_to(&task_port, task_bytes.clone())
+                    .map_err(|error| error.to_string())?;
+                Ok(TaskResult::TransportSent {
+                    port: PortId::new(task_port),
+                    bytes: task_bytes.len(),
+                })
+            });
+            return Ok(pending(task_id, format!("正在发送到 {port_name}")));
+        }
+
+        let backend = self.transport_backend.clone();
+        let port = PortId::new(port_name.clone());
+        let byte_count = bytes.len();
+        let task_id = self.tasks.spawn("send_serial", move |_context| {
+            block_on_transport(backend.send(port.clone(), bytes))
+                .map_err(|error| error.to_string())?;
+            Ok(TaskResult::TransportSent {
+                port,
+                bytes: byte_count,
+            })
+        });
+        Ok(pending(task_id, format!("正在发送到 {port_name}")))
+    }
+
+    fn set_transport_signal(
+        &mut self,
+        port_name: String,
+        value: bool,
+        dtr: bool,
+    ) -> Result<CommandOutcome, AppError> {
+        if self.is_network_port(&port_name) {
+            return Err(AppError::Transport("网络端口不支持 DTR/RTS".to_owned()));
+        }
+        let backend = self.transport_backend.clone();
+        let port = PortId::new(port_name.clone());
+        let task_port = port.clone();
+        let task_id = self.tasks.spawn("set_serial_signal", move |_context| {
+            let result = if dtr {
+                block_on_transport(backend.set_dtr(port, value))
+            } else {
+                block_on_transport(backend.set_rts(port, value))
+            };
+            result.map_err(|error| error.to_string())?;
+            Ok(TaskResult::TransportSignalChanged { port: task_port })
+        });
+        Ok(pending(
+            task_id,
+            format!("正在设置 {}", if dtr { "DTR" } else { "RTS" }),
+        ))
     }
 
     fn start_reconnect(&mut self, port_name: String) -> Result<CommandOutcome, AppError> {
@@ -841,7 +984,6 @@ impl Workbench {
             self.tasks.cancel(previous);
         }
 
-        let transport = self.transport.clone();
         let network = self
             .app_config
             .network_ports
@@ -849,10 +991,11 @@ impl Workbench {
             .find(|config| config.display_name() == port_name)
             .cloned()
             .map(Into::into);
-        let serial_config = (!network.is_some()).then(|| self.serial_config(&port_name));
+        let backend = self.transport_backend.clone();
+        let serial_settings = (!network.is_some()).then(|| self.platform_serial_settings());
         let task_port = port_name.clone();
         let task_id = self.tasks.spawn("reconnect", move |context: TaskContext| {
-            transport.close_port(&task_port);
+            let port = PortId::new(task_port.clone());
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
 
             loop {
@@ -860,24 +1003,36 @@ impl Workbench {
                     .check_cancelled()
                     .map_err(|_| "重连已取消".to_owned())?;
                 let result = if let Some(network) = network.clone() {
-                    transport.open_network_serial(network).map(|_| ())
+                    let transport = backend.manager().clone();
+                    transport
+                        .open_network_serial(network)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
                 } else {
-                    transport.open_serial(serial_config.clone().expect("serial config"))
+                    let backend = backend.clone();
+                    block_on_transport(backend.disconnect(port.clone()))
+                        .and_then(|()| {
+                            block_on_transport(
+                                backend.connect(port.clone(), serial_settings.unwrap_or_default()),
+                            )
+                        })
+                        .map_err(|error| error.to_string())
                 };
 
                 match result {
                     Ok(()) => {
-                        return Ok(TaskResult::Reconnected {
-                            port_name: task_port,
-                        });
+                        return if network.is_some() {
+                            Ok(TaskResult::Reconnected {
+                                port_name: task_port,
+                            })
+                        } else {
+                            Ok(TaskResult::TransportConnected { port })
+                        };
                     }
                     Err(error) => {
-                        let retryable = matches!(
-                            &error,
-                            tool_transport::TransportError::Io(io_error)
-                                if io_error.kind() == std::io::ErrorKind::WouldBlock
-                        );
-                        if !retryable {
+                        let retryable =
+                            network.is_some() && error.to_ascii_lowercase().contains("would block");
+                        if !retryable || network.is_none() {
                             return Err(error.to_string());
                         }
                     }
@@ -901,6 +1056,9 @@ impl Workbench {
                     self.remove_reconnect_task(id);
                     match result {
                         TaskResult::PortsRefreshed(ports) => self.apply_ports(ports),
+                        TaskResult::PlatformPortsRefreshed(ports) => {
+                            self.apply_platform_ports(ports)
+                        }
                         TaskResult::Connected { port_name }
                         | TaskResult::Reconnected { port_name } => {
                             self.selected_port = Some(port_name.clone());
@@ -911,6 +1069,17 @@ impl Workbench {
                                 self.selected_port = None;
                             }
                         }
+                        TaskResult::TransportConnected { port } => {
+                            self.selected_port = Some(port.to_string());
+                            self.app_config.selected_port = Some(port.to_string());
+                        }
+                        TaskResult::TransportDisconnected { port } => {
+                            if self.selected_port.as_ref() == Some(&port.to_string()) {
+                                self.selected_port = None;
+                            }
+                        }
+                        TaskResult::TransportSent { .. }
+                        | TaskResult::TransportSignalChanged { .. } => {}
                         TaskResult::ReplayLoaded(data) => {
                             self.replay.load_prepared(data);
                         }
@@ -953,11 +1122,15 @@ fn pending(task_id: TaskId, message: impl Into<String>) -> CommandOutcome {
     }
 }
 
-fn write_utf8_csv(path: &std::path::Path, content: &str) -> std::io::Result<()> {
-    use std::io::Write as _;
-    let file = std::fs::File::create(path)?;
-    let mut w = std::io::BufWriter::new(file);
-    w.write_all(b"\xEF\xBB\xBF")?;
-    w.write_all(content.as_bytes())?;
-    w.flush()
+fn validate_strict_hex(input: &str) -> Result<(), AppError> {
+    for token in input.split_whitespace() {
+        let token = token
+            .strip_prefix("0x")
+            .or_else(|| token.strip_prefix("0X"))
+            .unwrap_or(token);
+        if token.len() != 2 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(AppError::Transport(format!("无效 HEX：{token}")));
+        }
+    }
+    Ok(())
 }

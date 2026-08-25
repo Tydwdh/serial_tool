@@ -588,7 +588,8 @@ impl WorkbenchApp {
             let dtr_resp = ui.checkbox(&mut dtr, "DTR");
             if dtr_resp.changed() {
                 match self.workbench.set_dtr(&port, dtr) {
-                    Ok(()) => self.send.dtr_high = dtr,
+                    Ok(tool_application::CommandOutcome::Pending { .. })
+                    | Ok(tool_application::CommandOutcome::Done) => self.send.dtr_high = dtr,
                     Err(e) => self.set_status_force(StatusLevel::Error, e.to_string()),
                 }
             }
@@ -600,7 +601,8 @@ impl WorkbenchApp {
             let rts_resp = ui.checkbox(&mut rts, "RTS");
             if rts_resp.changed() {
                 match self.workbench.set_rts(&port, rts) {
-                    Ok(()) => self.send.rts_high = rts,
+                    Ok(tool_application::CommandOutcome::Pending { .. })
+                    | Ok(tool_application::CommandOutcome::Done) => self.send.rts_high = rts,
                     Err(e) => self.set_status_force(StatusLevel::Error, e.to_string()),
                 }
             }

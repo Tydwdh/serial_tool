@@ -1,16 +1,33 @@
-pub mod command;
-pub mod error;
-pub mod event;
-pub mod model;
-pub mod perf;
-pub mod query;
 pub mod service;
+mod task_model;
+
+#[cfg(target_arch = "wasm32")]
+pub mod web;
+
+pub use task_model::{TaskId, TaskSnapshot, TaskState};
+
+pub mod command;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod error;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod event;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod model;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod perf;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod query;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod task;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod workbench;
 
 pub use command::{AppCommand, CommandOutcome};
+#[cfg(not(target_arch = "wasm32"))]
 pub use error::AppError;
-pub use task::{AppEvent, TaskId, TaskManager, TaskResult, TaskSnapshot, TaskState};
+#[cfg(not(target_arch = "wasm32"))]
+pub use task::{AppEvent, TaskManager, TaskResult};
+#[cfg(not(target_arch = "wasm32"))]
 pub use workbench::{
     ApplicationConfig, EventSink, TransportEndpoint, UiEventSubscriptions, Workbench,
 };
@@ -29,6 +46,7 @@ pub mod api {
         pub use ::tool_core::{Direction, Event, LogLevel, Payload, now_timestamp_ms};
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub mod databus {
         pub use ::tool_databus::{
             DataBus, DataBusPerfSnapshot, RingSubscription, Subscription, SubscriptionBacklog,
@@ -36,6 +54,7 @@ pub mod api {
         };
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub mod extension {
         pub use ::tool_extension::{
             PluginDiagnostic, PluginDiagnosticSeverity, PluginState, PluginSummary,
@@ -47,6 +66,7 @@ pub mod api {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub mod lua_host {
         pub use ::tool_lua_host::{
             ConfigStore, DialogRequest, FileAccessBroker, FileFilter, LuaReplayConfig,
@@ -54,6 +74,7 @@ pub mod api {
         };
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub mod marketplace {
         pub use ::tool_marketplace::{
             DEFAULT_REGISTRY_URL, Registry, RegistryFetch, RegistryPlugin, fetch_registry,
@@ -61,12 +82,14 @@ pub mod api {
         };
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub mod recorder {
         pub use ::tool_recorder::{
             RecordMode, ReplayBlockReason, ReplayManager, ReplayPolicy, ReplayState, ReplayStatus,
         };
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub mod transport {
         pub use ::tool_transport::{
             NetworkSerialConfig, PortType, RepaintWaker, SerialPortDescriptor, TransportStatus,

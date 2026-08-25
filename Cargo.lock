@@ -1534,6 +1534,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d"
 
 [[package]]
+name = "futures-executor"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baf29c38818342a3b26b5b923639e7b1f4a61fc5e76102d4b1981c6dc7a7579d"
+dependencies = [
+ "futures-core",
+ "futures-task",
+ "futures-util",
+]
+
+[[package]]
 name = "futures-io"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1820,8 +1831,12 @@ dependencies = [
  "tempfile",
  "tokio",
  "tool-application",
+ "tool-databus",
  "tool-panels",
+ "tool-platform",
  "tool-updater",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "winresource",
 ]
 
@@ -4555,9 +4570,11 @@ dependencies = [
  "tool-extension",
  "tool-lua-host",
  "tool-marketplace",
+ "tool-platform",
  "tool-recorder",
  "tool-testing",
  "tool-transport",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]
@@ -4643,6 +4660,23 @@ dependencies = [
  "tool-application",
  "tool-core",
  "tool-databus",
+]
+
+[[package]]
+name = "tool-platform"
+version = "1.1.2"
+dependencies = [
+ "futures-channel",
+ "futures-executor",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tool-core",
+ "tool-transport",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

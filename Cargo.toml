@@ -8,11 +8,13 @@ members = [
     "crates/lua_host",
     "crates/marketplace",
     "crates/panels",
+    "crates/platform",
     "crates/testing",
     "crates/transport",
     "crates/updater",
     "vendor/egui_tiles",
 ]
+default-members = ["crates/app"]
 resolver = "3"
 
 [workspace.package]

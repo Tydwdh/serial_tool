@@ -17,13 +17,15 @@ egui.workspace = true
 egui_material_icons.workspace = true
 egui_tiles.workspace = true
 log.workspace = true
-open.workspace = true
 regex = "1"
 serde.workspace = true
 serde_json.workspace = true
 tool-application = { path = "../application" }
 tool-core = { path = "../core" }
 tool-databus = { path = "../databus" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+open.workspace = true
 
 [dev-dependencies]
 egui_kittest = "0.35"

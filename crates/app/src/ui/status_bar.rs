@@ -130,7 +130,10 @@ impl WorkbenchApp {
                     ) {
                         let new_dtr = !self.send.dtr_high;
                         match self.workbench.set_dtr(&port, new_dtr) {
-                            Ok(()) => self.send.dtr_high = new_dtr,
+                            Ok(tool_application::CommandOutcome::Pending { .. })
+                            | Ok(tool_application::CommandOutcome::Done) => {
+                                self.send.dtr_high = new_dtr
+                            }
                             Err(e) => self.set_status_force(StatusLevel::Error, e.to_string()),
                         }
                     }
@@ -143,7 +146,10 @@ impl WorkbenchApp {
                     ) {
                         let new_rts = !self.send.rts_high;
                         match self.workbench.set_rts(&port, new_rts) {
-                            Ok(()) => self.send.rts_high = new_rts,
+                            Ok(tool_application::CommandOutcome::Pending { .. })
+                            | Ok(tool_application::CommandOutcome::Done) => {
+                                self.send.rts_high = new_rts
+                            }
                             Err(e) => self.set_status_force(StatusLevel::Error, e.to_string()),
                         }
                     }

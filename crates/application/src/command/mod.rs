@@ -1,11 +1,18 @@
 //! Application Command — 业务意图（不含 UI 操作）。
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
+
+use crate::TaskId;
 
 /// 应用层命令：描述“我要做什么”，由 `Workbench::dispatch` 执行。
 #[derive(Debug, Clone)]
 pub enum AppCommand {
     RefreshPorts,
+
+    /// Browser-only permission request. Native backends may implement this as
+    /// a best-effort selection from already known ports.
+    RequestPort,
 
     Connect {
         port_name: String,
@@ -24,7 +31,7 @@ pub enum AppCommand {
     },
 
     CancelTask {
-        task_id: crate::task::TaskId,
+        task_id: TaskId,
     },
 
     SendText {
@@ -52,62 +59,81 @@ pub enum AppCommand {
         value: bool,
     },
 
+    #[cfg(not(target_arch = "wasm32"))]
     StartRecording {
         path: PathBuf,
     },
 
+    #[cfg(not(target_arch = "wasm32"))]
     StopRecording,
 
+    #[cfg(not(target_arch = "wasm32"))]
     PauseRecording,
 
+    #[cfg(not(target_arch = "wasm32"))]
     ResumeRecording,
 
+    #[cfg(not(target_arch = "wasm32"))]
     AddBookmark {
         name: Option<String>,
     },
 
+    #[cfg(not(target_arch = "wasm32"))]
     LoadReplay {
         path: PathBuf,
     },
 
+    #[cfg(not(target_arch = "wasm32"))]
     ReplayPlay,
+    #[cfg(not(target_arch = "wasm32"))]
     ReplayPause,
+    #[cfg(not(target_arch = "wasm32"))]
     ReplayStop,
 
+    #[cfg(not(target_arch = "wasm32"))]
     ReplaySeek {
         position_ms: u64,
     },
 
+    #[cfg(not(target_arch = "wasm32"))]
     ReplaySeekBy {
         delta_ms: i64,
     },
 
+    #[cfg(not(target_arch = "wasm32"))]
     ReplayStep {
         delta: i32,
     },
 
+    #[cfg(not(target_arch = "wasm32"))]
     SetReplaySpeed {
         speed: f64,
     },
 
+    #[cfg(not(target_arch = "wasm32"))]
     SetReplayPolicy {
         policy: crate::query::ReplayPolicyView,
     },
 
+    #[cfg(not(target_arch = "wasm32"))]
     EnablePlugin {
         plugin_id: String,
     },
 
+    #[cfg(not(target_arch = "wasm32"))]
     DisablePlugin {
         plugin_id: String,
     },
 
+    #[cfg(not(target_arch = "wasm32"))]
     ReloadPlugins,
 
+    #[cfg(not(target_arch = "wasm32"))]
     DiscoverPlugins {
         roots: Vec<std::path::PathBuf>,
     },
 
+    #[cfg(not(target_arch = "wasm32"))]
     ExecutePluginCommand {
         plugin_id: String,
         command_id: String,
@@ -124,14 +150,16 @@ pub enum AppCommand {
         max: usize,
     },
 
+    #[cfg(not(target_arch = "wasm32"))]
     ExportTerminal {
         format: String,
-        path: std::path::PathBuf,
+        path: PathBuf,
     },
 
+    #[cfg(not(target_arch = "wasm32"))]
     ExportLog {
         format: String,
-        path: std::path::PathBuf,
+        path: PathBuf,
     },
 }
 
@@ -141,7 +169,7 @@ pub enum CommandOutcome {
     Done,
     /// 已触发异步操作（如重连），结果通过 Event 回传。
     Pending {
-        task_id: crate::task::TaskId,
+        task_id: TaskId,
         message: String,
     },
 }

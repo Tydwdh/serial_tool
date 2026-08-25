@@ -1,12 +1,15 @@
 use crate::bootstrap::{user_data_dir, user_logs_dir};
 use crate::state::LineEnding;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use tool_application::api::core::config::atomic_write_json;
 use tool_application::api::core::{
-    config::{CURRENT_SCHEMA_VERSION, atomic_write_json, quarantine_corrupt_file},
+    config::{CURRENT_SCHEMA_VERSION, quarantine_corrupt_file},
     now_timestamp_ms,
 };
 use tool_application::query::NetworkPortConfig;
 use tool_application::query::RecordModeView;
+use tool_platform::storage::native::NativeSettingsStore;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -179,7 +182,9 @@ pub(crate) fn load_config() -> ConfigLoadResult {
     let primary = config_path();
 
     // 尝试读主路径
-    if let Ok(t) = std::fs::read_to_string(&primary) {
+    if let Ok(Some(bytes)) = read_native_file(&primary)
+        && let Ok(t) = String::from_utf8(bytes)
+    {
         if let Some(version) = declared_schema_version(&t)
             && version > CURRENT_SCHEMA_VERSION
         {
@@ -214,7 +219,7 @@ pub(crate) fn load_config() -> ConfigLoadResult {
         && let Ok(t) = std::fs::read_to_string(legacy)
         && let Ok((cfg, _)) = parse_persisted_config(&t)
     {
-        let _ = atomic_write_json(&primary, &cfg);
+        let _ = write_native_json(&primary, &cfg);
         return ConfigLoadResult::Ok {
             config: cfg,
             migrated: true,
@@ -232,6 +237,36 @@ pub(crate) fn config_path() -> PathBuf {
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("workspace.json")
+}
+
+fn native_store_key(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(ToOwned::to_owned)
+}
+
+fn read_native_file(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    let root = path
+        .parent()
+        .ok_or_else(|| format!("配置路径没有父目录：{}", path.display()))?;
+    let key =
+        native_store_key(path).ok_or_else(|| format!("无效配置文件名：{}", path.display()))?;
+    NativeSettingsStore::new(root)
+        .load_blocking(key)
+        .map_err(|error| error.to_string())
+}
+
+fn write_native_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    let bytes =
+        serde_json::to_vec_pretty(value).map_err(|error| format!("JSON 序列化失败：{error}"))?;
+    let root = path
+        .parent()
+        .ok_or_else(|| format!("配置路径没有父目录：{}", path.display()))?;
+    let key =
+        native_store_key(path).ok_or_else(|| format!("无效配置文件名：{}", path.display()))?;
+    NativeSettingsStore::new(root)
+        .save_blocking(key, bytes)
+        .map_err(|error| error.to_string())
 }
 
 /// 主题目录内的文件以相对路径保存，便携包或安装目录改变后仍能恢复主题。
@@ -373,11 +408,13 @@ impl WorkbenchApp {
     pub(crate) fn save_config(&self) -> Result<(), String> {
         let cfg = self.build_config_snapshot();
         let path = config_path();
-        atomic_write_json(&path, &cfg)
+        write_native_json(&path, &cfg)
     }
 
     pub(crate) fn load_config_from_path(&mut self, path: &std::path::Path) -> Result<(), String> {
-        let t = std::fs::read_to_string(path).map_err(|e| format!("读取失败：{e}"))?;
+        let bytes = read_native_file(path)?
+            .ok_or_else(|| format!("读取失败：文件不存在：{}", path.display()))?;
+        let t = String::from_utf8(bytes).map_err(|e| format!("读取失败：{e}"))?;
         let (cfg, _) = parse_persisted_config(&t)?;
         self.serial.selected_port = cfg.selected_port.clone();
         self.serial.baud_rate = cfg.baud_rate.clone();

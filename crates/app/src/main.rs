@@ -1,34 +1,58 @@
 // Release 模式下不显示控制台窗口
-#![cfg_attr(windows, windows_subsystem = "windows")]
+#![cfg_attr(
+    all(windows, not(target_arch = "wasm32")),
+    windows_subsystem = "windows"
+)]
 
+#[cfg(not(target_arch = "wasm32"))]
 mod app;
+#[cfg(not(target_arch = "wasm32"))]
 mod bootstrap;
+#[cfg(not(target_arch = "wasm32"))]
 mod command_registry;
+#[cfg(not(target_arch = "wasm32"))]
 mod commands;
+#[cfg(not(target_arch = "wasm32"))]
 mod config;
+#[cfg(not(target_arch = "wasm32"))]
 mod keymap;
+#[cfg(not(target_arch = "wasm32"))]
 mod panel_registry;
+#[cfg(not(target_arch = "wasm32"))]
 mod panels_ops;
+#[cfg(not(target_arch = "wasm32"))]
 mod perf;
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod replay_task;
+#[cfg(not(target_arch = "wasm32"))]
 mod runtime;
+#[cfg(not(target_arch = "wasm32"))]
 mod state;
+#[cfg(not(target_arch = "wasm32"))]
 mod ui;
+#[cfg(target_arch = "wasm32")]
+mod web;
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use bootstrap::*;
 
+#[cfg(not(target_arch = "wasm32"))]
 use app::WorkbenchApp;
+#[cfg(not(target_arch = "wasm32"))]
 use eframe::egui;
 
+#[cfg(not(target_arch = "wasm32"))]
 const APP_ICON_PNG: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../assets/app-icon-256.png"
 ));
 
 /// 加载应用图标，用于运行时窗口标题栏。
+#[cfg(not(target_arch = "wasm32"))]
 fn app_icon() -> egui::IconData {
     eframe::icon_data::from_png_bytes(APP_ICON_PNG).expect("embedded app icon PNG should be valid")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
     #[cfg(windows)]
     {
@@ -102,3 +126,8 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| Ok(Box::new(WorkbenchApp::new(cc)))),
     )
 }
+
+/// The browser entry point is exported from [`web`] and called by the small
+/// JavaScript bootstrap after the canvas has been inserted into the page.
+#[cfg(target_arch = "wasm32")]
+fn main() {}
