@@ -1,22 +1,20 @@
 mod attitude;
 mod chart;
+mod data_settings;
 mod data_table;
 pub mod design;
-#[cfg(not(target_arch = "wasm32"))]
 mod dynamic;
 mod gauge;
-#[cfg(not(target_arch = "wasm32"))]
 mod log;
 mod manager;
-#[cfg(not(target_arch = "wasm32"))]
 mod plugin_view;
-#[cfg(not(target_arch = "wasm32"))]
 mod plugins;
-#[cfg(not(target_arch = "wasm32"))]
+mod recording;
 mod replay;
-#[cfg(not(target_arch = "wasm32"))]
+mod replay_policy;
 mod replay_view;
 mod search;
+pub mod sender;
 pub mod serial;
 mod table;
 mod terminal;
@@ -31,33 +29,33 @@ pub(crate) const MESSAGE_EVENT_BUFFER_CAPACITY: usize = 65_536;
 
 pub use attitude::AttitudePanel;
 pub use chart::ChartPanel;
+pub use data_settings::{DataSettingsView, data_settings_ui};
 pub use data_table::{DataTableColumn, DataTablePanel};
-#[cfg(not(target_arch = "wasm32"))]
 pub use dynamic::DynamicPanels;
-#[cfg(not(target_arch = "wasm32"))]
 pub use dynamic::{
     DynamicField, DynamicFieldKind, FieldFilter, FieldOption, PortItem, dynamic_form_ui,
     parse_fields,
 };
 pub use gauge::GaugePanel;
-#[cfg(not(target_arch = "wasm32"))]
-pub use log::{LogExportJob, LogPanel};
+pub use log::{LogExportCursor, LogExportJob, LogPanel};
 pub use manager::{
-    DockArea, DockLayout, DockStack, PANEL_BUILTIN, PANEL_DEVICES, PANEL_LOGS, PANEL_PLUGINS,
-    PANEL_REPLAY, PANEL_SENDER, PANEL_SETTINGS, PANEL_TERMINAL, PanelId, PanelManager, TilesLayout,
+    DockArea, DockLayout, DockStack, PANEL_BUILTIN, PANEL_CHART, PANEL_DEVICES, PANEL_LOGS,
+    PANEL_PLUGINS, PANEL_REPLAY, PANEL_SENDER, PANEL_SETTINGS, PANEL_TERMINAL, PanelId,
+    PanelManager, TilesLayout,
 };
-#[cfg(not(target_arch = "wasm32"))]
 pub use plugin_view::{InstalledPluginRow, PluginUiCommand, PluginViewState};
-#[cfg(not(target_arch = "wasm32"))]
 pub use plugins::{MarketplaceState, PluginPanelEvent, PluginTab, PluginsPanel};
-#[cfg(not(target_arch = "wasm32"))]
+pub use recording::{RecordingAction, RecordingMode, RecordingView, recording_ui};
 pub use replay::ReplayPanel;
-#[cfg(not(target_arch = "wasm32"))]
+pub use replay_policy::{ReplayPolicyOption, replay_policy_ui};
 pub use replay_view::{ReplayUiCommand, ReplayView};
 pub use search::SearchQuery;
-pub use serial::{SerialAction, SerialPanel, SerialPortItem, SerialView};
+pub use sender::{
+    SendAction, SendLayout, SendLineEnding, SendPortItem, SendView, record_history, sender_ui,
+};
+pub use serial::{SerialAction, SerialPanel, SerialPortItem, SerialPortMetadata, SerialView};
 pub use table::{RowSelection, copy_text_with_feedback, take_copy_feedback};
-pub use terminal::{TerminalExportFormat, TerminalExportJob, TerminalPanel};
+pub use terminal::{TerminalExportCursor, TerminalExportFormat, TerminalExportJob, TerminalPanel};
 
 /// 将毫秒时间戳格式化为本地时间 HH:MM:SS.mmm
 pub fn fmt_ts(ms: u64) -> String {

@@ -1,11 +1,11 @@
 //! Lua ↔ Rust 类型转换工具函数。
 //!
-//! 纯函数集合，负责在 `mlua::Value`/`serde_json::Value`/`tool_core::Payload` 之间互转。
+//! 纯函数集合，负责在 VM value / `PluginValue` / `serde_json::Value` / `Payload` 之间互转。
 //! 被 `install_ctx`、各 `create_*_api`、`install_replay_ctx` 等广泛依赖。
 
 use mlua::{Lua, Table, Value};
-use serde_json::{Map, Number};
 use tool_core::{Event, Payload};
+use tool_plugin_api::{PluginError, PluginValue};
 use tool_transport::{SerialConfig, parse_data_bits, parse_parity, parse_stop_bits};
 
 // ── Event → Lua ──
@@ -44,7 +44,10 @@ pub(crate) fn lua_value_to_serial_config(value: Value) -> mlua::Result<SerialCon
 
         Value::Table(table) => {
             let mut config = SerialConfig {
-                port_name: table.get("port_name").or_else(|_| table.get("port"))?,
+                port_name: table
+                    .get("port_name")
+                    .or_else(|_| table.get("port"))
+                    .or_else(|_| table.get("port_id"))?,
                 ..Default::default()
             };
 
@@ -79,25 +82,41 @@ pub(crate) fn lua_value_to_serial_config(value: Value) -> mlua::Result<SerialCon
 // ── Lua → Payload ──
 
 pub(crate) fn lua_value_to_payload(value: Value) -> mlua::Result<Payload> {
+    let value = lua_value_to_plugin_value(value)?;
     Ok(match value {
-        Value::Nil => Payload::Empty,
-        Value::Boolean(value) => Payload::Json(serde_json::Value::Bool(value)),
-        Value::Integer(value) => Payload::Json(serde_json::Value::Number(value.into())),
-        Value::Number(value) => Payload::Json(number_to_json(value)?),
-        Value::String(value) => Payload::Text(value.to_str()?.to_owned()),
-        Value::Table(value) => Payload::Json(lua_table_to_json(value)?),
+        PluginValue::Null => Payload::Empty,
+        PluginValue::Bool(value) => Payload::Json(serde_json::Value::Bool(value)),
+        PluginValue::Integer(value) => Payload::Json(serde_json::Value::Number(value.into())),
+        PluginValue::Number(value) => Payload::Json(number_to_json(value)?),
+        PluginValue::String(value) => Payload::Text(value),
+        value @ (PluginValue::Array(_) | PluginValue::Object(_)) => {
+            Payload::Json(value.to_json().map_err(plugin_error)?)
+        }
+    })
+}
+
+// ── Lua Value → PluginValue ──
+
+/// Convert the VM-native value only at the Lua adapter boundary. Nothing
+/// beyond this module needs to know about `mlua::Value`.
+pub(crate) fn lua_value_to_plugin_value(value: Value) -> mlua::Result<PluginValue> {
+    Ok(match value {
+        Value::Nil => PluginValue::Null,
+        Value::Boolean(value) => PluginValue::Bool(value),
+        Value::Integer(value) => PluginValue::Integer(value),
+        Value::Number(value) => PluginValue::Number(value),
+        Value::String(value) => PluginValue::String(value.to_str()?.to_owned()),
+        Value::Table(value) => lua_table_to_plugin_value(value)?,
         other => {
             return Err(mlua::Error::RuntimeError(format!(
-                "unsupported payload: {}",
+                "unsupported value: {}",
                 other.type_name()
             )));
         }
     })
 }
 
-// ── Lua Table → JSON ──
-
-pub(crate) fn lua_table_to_json(table: Table) -> mlua::Result<serde_json::Value> {
+pub(crate) fn lua_table_to_plugin_value(table: Table) -> mlua::Result<PluginValue> {
     let mut entries = Vec::new();
     let mut is_array = true;
     let mut max_index = 0_i64;
@@ -109,12 +128,12 @@ pub(crate) fn lua_table_to_json(table: Table) -> mlua::Result<serde_json::Value>
             && index > 0
         {
             max_index = max_index.max(index);
-            entries.push((key, lua_value_to_json(value)?));
+            entries.push((key, lua_value_to_plugin_value(value)?));
             continue;
         }
 
         is_array = false;
-        entries.push((key, lua_value_to_json(value)?));
+        entries.push((key, lua_value_to_plugin_value(value)?));
     }
 
     if is_array && max_index as usize == entries.len() {
@@ -123,37 +142,26 @@ pub(crate) fn lua_table_to_json(table: Table) -> mlua::Result<serde_json::Value>
             _ => 0,
         });
 
-        return Ok(serde_json::Value::Array(
+        return Ok(PluginValue::Array(
             entries.into_iter().map(|(_, value)| value).collect(),
         ));
     }
 
-    let mut object = Map::new();
+    let mut object = std::collections::BTreeMap::new();
 
     for (key, value) in entries {
         object.insert(lua_key_to_string(key)?, value);
     }
 
-    Ok(serde_json::Value::Object(object))
+    Ok(PluginValue::Object(object))
 }
 
 // ── Lua Value → JSON ──
 
 pub(crate) fn lua_value_to_json(value: Value) -> mlua::Result<serde_json::Value> {
-    Ok(match value {
-        Value::Nil => serde_json::Value::Null,
-        Value::Boolean(value) => serde_json::Value::Bool(value),
-        Value::Integer(value) => serde_json::Value::Number(value.into()),
-        Value::Number(value) => number_to_json(value)?,
-        Value::String(value) => serde_json::Value::String(value.to_str()?.to_owned()),
-        Value::Table(value) => lua_table_to_json(value)?,
-        other => {
-            return Err(mlua::Error::RuntimeError(format!(
-                "unsupported value: {}",
-                other.type_name()
-            )));
-        }
-    })
+    lua_value_to_plugin_value(value)?
+        .to_json()
+        .map_err(plugin_error)
 }
 
 // ── Helpers ──
@@ -173,9 +181,7 @@ pub(crate) fn lua_key_to_string(key: Value) -> mlua::Result<String> {
 }
 
 pub(crate) fn number_to_json(value: f64) -> mlua::Result<serde_json::Value> {
-    Number::from_f64(value)
-        .map(serde_json::Value::Number)
-        .ok_or_else(|| mlua::Error::RuntimeError("number is not finite".to_owned()))
+    PluginValue::Number(value).to_json().map_err(plugin_error)
 }
 
 pub(crate) fn payload_to_json(payload: Payload) -> serde_json::Value {
@@ -195,43 +201,35 @@ pub(crate) fn payload_to_json(payload: Payload) -> serde_json::Value {
 // ── JSON → Lua ──
 
 pub(crate) fn json_to_lua_value(lua: &Lua, value: &serde_json::Value) -> mlua::Result<Value> {
+    plugin_value_to_lua(lua, &PluginValue::from_json(value))
+}
+
+pub(crate) fn plugin_value_to_lua(lua: &Lua, value: &PluginValue) -> mlua::Result<Value> {
     Ok(match value {
-        serde_json::Value::Null => Value::Nil,
-
-        serde_json::Value::Bool(value) => Value::Boolean(*value),
-
-        serde_json::Value::Number(value) => {
-            if let Some(value) = value.as_i64() {
-                Value::Integer(value)
-            } else if let Some(value) = value.as_f64() {
-                Value::Number(value)
-            } else {
-                Value::Nil
-            }
-        }
-
-        serde_json::Value::String(value) => Value::String(lua.create_string(value)?),
-
-        serde_json::Value::Array(values) => {
+        PluginValue::Null => Value::Nil,
+        PluginValue::Bool(value) => Value::Boolean(*value),
+        PluginValue::Integer(value) => Value::Integer(*value),
+        PluginValue::Number(value) => Value::Number(*value),
+        PluginValue::String(value) => Value::String(lua.create_string(value)?),
+        PluginValue::Array(values) => {
             let table = lua.create_table()?;
-
             for (index, value) in values.iter().enumerate() {
-                table.set(index + 1, json_to_lua_value(lua, value)?)?;
+                table.set(index + 1, plugin_value_to_lua(lua, value)?)?;
             }
-
             Value::Table(table)
         }
-
-        serde_json::Value::Object(values) => {
+        PluginValue::Object(values) => {
             let table = lua.create_table()?;
-
             for (key, value) in values {
-                table.set(key.as_str(), json_to_lua_value(lua, value)?)?;
+                table.set(key.as_str(), plugin_value_to_lua(lua, value)?)?;
             }
-
             Value::Table(table)
         }
     })
+}
+
+fn plugin_error(error: PluginError) -> mlua::Error {
+    mlua::Error::RuntimeError(error.to_string())
 }
 
 #[cfg(test)]
@@ -618,6 +616,16 @@ mod tests {
         // "port" is an alias for "port_name"
         let config = lua_value_to_serial_config(Value::Table(table)).unwrap();
         assert_eq!(config.port_name, "COM4");
+    }
+
+    #[test]
+    fn serial_config_from_table_with_port_id_alias() {
+        let lua = Lua::new();
+        let table = lua.create_table().unwrap();
+        table.set("port_id", "COM6").unwrap();
+
+        let config = lua_value_to_serial_config(Value::Table(table)).unwrap();
+        assert_eq!(config.port_name, "COM6");
     }
 
     #[test]

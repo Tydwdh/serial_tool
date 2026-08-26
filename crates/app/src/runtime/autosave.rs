@@ -18,7 +18,7 @@ impl WorkbenchApp {
     pub(super) fn tick_recorder_status(&mut self) {
         match self.workbench.reap_recording_stop() {
             Some(Ok(path)) => {
-                self.set_status_force(StatusLevel::Info, format!("录制已保存: {}", path.display()))
+                self.set_status_force(StatusLevel::Info, format!("录制已保存: {path}"))
             }
             Some(Err(e)) => self.set_status_force(StatusLevel::Error, format!("录制失败: {e}")),
             None => {}

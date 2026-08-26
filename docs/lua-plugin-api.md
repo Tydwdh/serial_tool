@@ -1,5 +1,10 @@
 # Lua 实时插件 API
 
+> `docs/plugin-api-v2.md` 是跨 Native/Web 的规范入口。本文记录现有 Native
+> 兼容 API；Web 同样加载 `plugin.json` 的 `main.lua`，并保留这里的旧串口
+> 字段/函数别名（例如 `port_name`、`close_port`、`open_ports`）。新插件优先
+> 使用 opaque `port_id` 和 `ctx.serial.devices()`。
+
 实时插件入口是 `main.lua`。脚本运行时会获得全局对象 `ctx`。
 
 不同 API 是否存在取决于插件在 `plugin.json` 中声明的权限。

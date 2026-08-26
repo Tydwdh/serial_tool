@@ -4,11 +4,31 @@ use crate::state::PendingPortOpenNotice;
 use crate::state::PendingReconnect;
 use crate::state::StatusLevel;
 use std::collections::BTreeSet;
-use tool_application::api::core::now_timestamp_ms;
-use tool_panels::TerminalExportFormat;
+use std::path::PathBuf;
+use tool_core::now_timestamp_ms;
+use tool_panels::{LogExportCursor, TerminalExportCursor, TerminalExportFormat};
+use tool_platform::storage::FileHandle;
+
+pub(crate) enum NativeExportJob {
+    Terminal(TerminalExportCursor),
+    Logs(LogExportCursor),
+}
+
+pub(crate) struct NativeExportState {
+    pub(crate) format: TerminalExportFormat,
+    pub(crate) path: PathBuf,
+    pub(crate) job: NativeExportJob,
+    pub(crate) content: String,
+    pub(crate) exported_rows: usize,
+}
 
 impl WorkbenchApp {
     pub(crate) fn export_terminal_data(&mut self, format: TerminalExportFormat) {
+        if self.native_export.is_some() {
+            self.notifications
+                .push("terminal-export", StatusLevel::Warn, "已有导出任务正在运行");
+            return;
+        }
         let (format_name, extension) = match format {
             TerminalExportFormat::Txt => ("TXT", "txt"),
             TerminalExportFormat::Csv => ("CSV", "csv"),
@@ -33,26 +53,26 @@ impl WorkbenchApp {
             path.set_extension(extension);
         }
 
-        let format_name = format_name.to_ascii_lowercase();
-        let job = self.terminal_panel.export_job();
-        let task_format = format;
-        let outcome = self.workbench.spawn_file_export(
-            "export_terminal",
-            format_name.clone(),
-            path.clone(),
-            move || Ok(job.render(task_format)),
+        self.native_export = Some(NativeExportState {
+            format,
+            path: path.clone(),
+            job: NativeExportJob::Terminal(self.terminal_panel.begin_export_cursor()),
+            content: String::new(),
+            exported_rows: 0,
+        });
+        self.notifications.push(
+            "terminal-export",
+            StatusLevel::Info,
+            format!("正在准备导出：{}", path.display()),
         );
-        match outcome {
-            tool_application::CommandOutcome::Pending { .. } => self.notifications.push(
-                "terminal-export",
-                StatusLevel::Info,
-                format!("正在导出 {format_name}：{}", path.display()),
-            ),
-            tool_application::CommandOutcome::Done => {}
-        }
     }
 
     pub(crate) fn export_log_data(&mut self, format: TerminalExportFormat) {
+        if self.native_export.is_some() {
+            self.notifications
+                .push("log-export", StatusLevel::Warn, "已有导出任务正在运行");
+            return;
+        }
         let (format_name, extension) = match format {
             TerminalExportFormat::Txt => ("TXT", "txt"),
             TerminalExportFormat::Csv => ("CSV", "csv"),
@@ -74,22 +94,92 @@ impl WorkbenchApp {
         {
             path.set_extension(extension);
         }
+        self.native_export = Some(NativeExportState {
+            format,
+            path: path.clone(),
+            job: NativeExportJob::Logs(self.bottom_log_panel.begin_export_cursor()),
+            content: String::new(),
+            exported_rows: 0,
+        });
+        self.notifications.push(
+            "log-export",
+            StatusLevel::Info,
+            format!("正在准备导出：{}", path.display()),
+        );
+    }
 
-        let format_name = format_name.to_ascii_lowercase();
-        let job = self.bottom_log_panel.export_job();
+    pub(crate) fn tick_native_export(&mut self, ctx: &eframe::egui::Context) {
+        const EXPORT_SCAN_BATCH: usize = 512;
+        let Some(state) = self.native_export.as_mut() else {
+            return;
+        };
+        let format = state.format;
+        let notification_source = if matches!(&state.job, NativeExportJob::Terminal(_)) {
+            "terminal-export"
+        } else {
+            "log-export"
+        };
+        let (chunk, done, exported) = match &mut state.job {
+            NativeExportJob::Terminal(cursor) => {
+                self.terminal_panel
+                    .export_cursor_chunk(cursor, format, EXPORT_SCAN_BATCH)
+            }
+            NativeExportJob::Logs(cursor) => {
+                self.bottom_log_panel
+                    .export_cursor_chunk(cursor, format, EXPORT_SCAN_BATCH)
+            }
+        };
+        state.content.push_str(&chunk);
+        state.exported_rows += exported;
+        if !done {
+            self.notifications.push(
+                notification_source,
+                StatusLevel::Info,
+                format!("正在准备导出：已处理 {} 条", state.exported_rows),
+            );
+            ctx.request_repaint();
+            return;
+        }
+
+        let Some(state) = self.native_export.take() else {
+            return;
+        };
+        let is_terminal = matches!(&state.job, NativeExportJob::Terminal(_));
+        let format_name = match state.format {
+            TerminalExportFormat::Txt => "txt",
+            TerminalExportFormat::Csv => "csv",
+            TerminalExportFormat::Json => "json",
+        }
+        .to_owned();
+        let notification_source = if is_terminal {
+            "terminal-export"
+        } else {
+            "log-export"
+        };
+        let path = state.path.clone();
         let outcome = self.workbench.spawn_file_export(
-            "export_log",
+            if is_terminal {
+                "export_terminal"
+            } else {
+                "export_log"
+            },
             format_name.clone(),
-            path.clone(),
-            move || Ok(job.render(format)),
+            FileHandle::from_native_path(path.clone()),
+            move || Ok(state.content),
         );
         match outcome {
-            tool_application::CommandOutcome::Pending { .. } => self.notifications.push(
-                "log-export",
-                StatusLevel::Info,
-                format!("正在导出 {format_name}：{}", path.display()),
-            ),
-            tool_application::CommandOutcome::Done => {}
+            Ok(tool_application::CommandOutcome::Pending { .. }) => {
+                self.notifications.push(
+                    notification_source,
+                    StatusLevel::Info,
+                    format!("正在写入导出文件：{}", path.display()),
+                );
+            }
+            Ok(tool_application::CommandOutcome::Done) => {}
+            Err(error) => {
+                self.notifications
+                    .push(notification_source, StatusLevel::Error, error.to_string())
+            }
         }
     }
 
@@ -219,9 +309,7 @@ impl WorkbenchApp {
                 });
             }
         }
-        new_ports.sort_by_key(|port| {
-            tool_application::api::transport::natural_sort_key(&port.port_name)
-        });
+        new_ports.sort_by_key(|port| tool_transport::natural_sort_key(&port.port_name));
         let new_names: BTreeSet<String> = new_ports
             .iter()
             .map(|port| port.port_name.clone())
@@ -275,16 +363,24 @@ impl WorkbenchApp {
             && new_names.contains(&pending.port_name)
         {
             let name = pending.port_name.clone();
-            self.workbench.set_serial_parameters(
-                self.serial.baud_rate.clone(),
-                self.serial.data_bits.clone(),
-                self.serial.stop_bits.clone(),
-                self.serial.parity.clone(),
-            );
+            let settings = match Self::serial_settings_from_state(&self.serial) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    self.set_status_force(StatusLevel::Warn, error);
+                    return;
+                }
+            };
+            if let Err(error) = self
+                .workbench
+                .dispatch(tool_application::AppCommand::SetSerialSettings { settings })
+            {
+                self.set_status_force(StatusLevel::Warn, error.to_string());
+                return;
+            }
             match self
                 .workbench
                 .dispatch(tool_application::AppCommand::Reconnect {
-                    port_name: name.clone(),
+                    port: tool_platform::PortId::new(name.clone()),
                 }) {
                 Ok(tool_application::CommandOutcome::Pending { .. }) => {
                     self.serial.pending_reconnect = None;
@@ -349,7 +445,7 @@ impl WorkbenchApp {
             match self
                 .workbench
                 .dispatch(tool_application::AppCommand::Disconnect {
-                    port_name: name.to_owned(),
+                    port: tool_platform::PortId::new(name),
                 }) {
                 Ok(tool_application::CommandOutcome::Pending { .. }) => {
                     self.set_status_force(StatusLevel::Info, format!("正在断开 {name}..."));
@@ -366,7 +462,7 @@ impl WorkbenchApp {
             let _ = self
                 .workbench
                 .dispatch(tool_application::AppCommand::Disconnect {
-                    port_name: name.to_owned(),
+                    port: tool_platform::PortId::new(name),
                 });
             self.set_status_force(StatusLevel::Info, format!("已取消 {name} 的连接"));
             return;
@@ -423,16 +519,14 @@ impl WorkbenchApp {
             }
         }
 
-        self.workbench.set_serial_parameters(
-            self.serial.baud_rate.clone(),
-            self.serial.data_bits.clone(),
-            self.serial.stop_bits.clone(),
-            self.serial.parity.clone(),
-        );
+        let settings = Self::serial_settings_from_state(&self.serial)?;
+        self.workbench
+            .dispatch(tool_application::AppCommand::SetSerialSettings { settings })
+            .map_err(|error| error.to_string())?;
         self.workbench
             .dispatch(tool_application::AppCommand::Connect {
-                port_name: p,
-                settings: self.workbench.serial_settings(),
+                port: tool_platform::PortId::new(p),
+                settings,
             })
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -451,16 +545,24 @@ impl WorkbenchApp {
             return;
         }
 
-        self.workbench.set_serial_parameters(
-            self.serial.baud_rate.clone(),
-            self.serial.data_bits.clone(),
-            self.serial.stop_bits.clone(),
-            self.serial.parity.clone(),
-        );
+        let settings = match Self::serial_settings_from_state(&self.serial) {
+            Ok(settings) => settings,
+            Err(error) => {
+                self.set_status_force(StatusLevel::Error, error);
+                return;
+            }
+        };
+        if let Err(error) = self
+            .workbench
+            .dispatch(tool_application::AppCommand::SetSerialSettings { settings })
+        {
+            self.set_status_force(StatusLevel::Error, error.to_string());
+            return;
+        }
         match self
             .workbench
             .dispatch(tool_application::AppCommand::Reconnect {
-                port_name: p.clone(),
+                port: tool_platform::PortId::new(p.clone()),
             }) {
             Ok(tool_application::CommandOutcome::Pending { .. }) => {
                 self.defer_port_open_notice(&p, format!("{p} 已重新连接"));
@@ -469,6 +571,29 @@ impl WorkbenchApp {
             Ok(tool_application::CommandOutcome::Done) => {}
             Err(error) => self.set_status_force(StatusLevel::Error, error.to_string()),
         }
+    }
+
+    fn serial_settings_from_state(
+        serial: &crate::state::SerialUiState,
+    ) -> Result<tool_platform::SerialSettings, String> {
+        let baud_rate = serial
+            .baud_rate
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| "波特率格式错误".to_owned())?;
+        if baud_rate == 0 {
+            return Err("波特率格式错误".to_owned());
+        }
+        Ok(tool_platform::SerialSettings {
+            baud_rate,
+            data_bits: serial.data_bits.parse().unwrap_or(8),
+            stop_bits: serial.stop_bits.parse().unwrap_or(1),
+            parity: match serial.parity.as_str() {
+                "odd" => tool_platform::SerialParity::Odd,
+                "even" => tool_platform::SerialParity::Even,
+                _ => tool_platform::SerialParity::None,
+            },
+        })
     }
 
     /// 打开请求已提交，但成功提示要等下一帧确认 transport 状态后再显示。
@@ -492,19 +617,28 @@ impl WorkbenchApp {
     }
 
     pub(crate) fn start_or_stop_recording(&mut self) {
-        if self.workbench.recording_is_running() || self.workbench.recording_is_stopping() {
-            self.workbench.stop_recording();
-            self.set_status_force(StatusLevel::Info, "正在停止录制...");
+        let recording = self.workbench.query_recording();
+        let command = if recording.stats.running || recording.stats.stopping {
+            tool_application::AppCommand::StopRecording
         } else {
             let recorder_path = resolve_recorder_path(std::path::Path::new(&self.recorder_path));
-            match self.workbench.start_recording(recorder_path) {
-                Ok(()) => {
+            tool_application::AppCommand::StartRecording {
+                file: FileHandle::from_native_path(recorder_path),
+                mode: recording.mode,
+            }
+        };
+        match self.workbench.dispatch(command) {
+            Ok(tool_application::CommandOutcome::Pending { message, .. }) => {
+                self.set_status_force(StatusLevel::Info, message);
+            }
+            Ok(tool_application::CommandOutcome::Done) => {
+                if recording.stats.running || recording.stats.stopping {
+                    self.set_status_force(StatusLevel::Info, "正在停止录制...");
+                } else {
                     self.set_status_force(StatusLevel::Info, "录制中");
                 }
-                Err(e) => {
-                    self.set_status_force(StatusLevel::Error, e.to_string());
-                }
             }
+            Err(error) => self.set_status_force(StatusLevel::Error, error.to_string()),
         }
     }
 }

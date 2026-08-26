@@ -16,20 +16,14 @@ use egui_material_icons::{
     MaterialIcon,
     icons::{ICON_BOLT, ICON_EXTENSION},
 };
-use tool_application::api::extension::PluginSummary;
+use tool_application::query::PluginSummaryView;
 
-// ── 内置命令 ID 常量（Keymap 持久化键的单一来源）──
-
-pub(crate) const CMD_REFRESH_PORTS: &str = "$RefreshPorts";
-pub(crate) const CMD_OPEN_PORT: &str = "$OpenPort";
-pub(crate) const CMD_TOGGLE_BOTTOM_PANEL: &str = "$ToggleBottomPanel";
-pub(crate) const CMD_TOGGLE_RIGHT_DOCK: &str = "$ToggleRightDock";
-pub(crate) const CMD_SEND: &str = "$Send";
-pub(crate) const CMD_START_RECORDING: &str = "$StartRecording";
-pub(crate) const CMD_RECONNECT_PORT: &str = "$ReconnectPort";
-pub(crate) const CMD_ADD_BOOKMARK: &str = "$AddBookmark";
-pub(crate) const CMD_COMMAND_PALETTE: &str = "$CommandPalette";
-pub(crate) const CMD_CLEAR_TERMINAL: &str = "$ClearTerminal";
+// ── 内置命令 ID 常量（Native 兼容导出，共享模型是唯一来源）──
+pub(crate) use crate::shared_keymap::{
+    CMD_ADD_BOOKMARK, CMD_CLEAR_TERMINAL, CMD_COMMAND_PALETTE, CMD_OPEN_PORT, CMD_RECONNECT_PORT,
+    CMD_REFRESH_PORTS, CMD_SEND, CMD_START_RECORDING, CMD_TOGGLE_BOTTOM_PANEL,
+    CMD_TOGGLE_RIGHT_DOCK,
+};
 
 /// 命令分类（命令面板按此分组显示）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -218,7 +212,7 @@ impl CommandRegistry {
 
     /// 插件命令随插件启停重建：先移除全部插件命令，再按当前 summaries 注册。
     /// 内置命令不受影响。
-    pub(crate) fn rebuild_plugin_commands(&mut self, summaries: &[PluginSummary]) {
+    pub(crate) fn rebuild_plugin_commands(&mut self, summaries: &[PluginSummaryView]) {
         self.commands
             .retain(|c| !matches!(&c.handler, CommandHandler::Plugin { .. }));
         for summary in summaries {
@@ -310,25 +304,27 @@ mod tests {
 
     #[test]
     fn plugin_commands_rebuild_and_clear() {
+        use tool_application::query::{PluginCommandView, PluginContributesView, PluginStateView};
+
         let mut registry = CommandRegistry::builtin();
         let builtin_count = registry.all().len();
 
-        let summary = PluginSummary {
+        let summary = PluginSummaryView {
             id: "demo.test".to_owned(),
             name: "Demo Test".to_owned(),
             version: String::new(),
             api_version: String::new(),
             runtime: String::new(),
-            state: tool_application::api::extension::PluginState::Running,
+            state: PluginStateView::Running,
             permissions: Vec::new(),
-            contributes: tool_application::api::extension::manifest::PluginContributes {
-                commands: vec![tool_application::api::extension::manifest::PluginCommand {
+            contributes: PluginContributesView {
+                commands: vec![PluginCommandView {
                     id: "demo.test.run".to_owned(),
                     title: "Run".to_owned(),
                 }],
                 ..Default::default()
             },
-            path: std::path::PathBuf::new(),
+            path: String::new(),
             last_error: None,
             description: None,
             author: None,

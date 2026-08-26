@@ -6,7 +6,6 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 mod app;
-#[cfg(not(target_arch = "wasm32"))]
 mod bootstrap;
 #[cfg(not(target_arch = "wasm32"))]
 mod command_registry;
@@ -16,7 +15,6 @@ mod commands;
 mod config;
 #[cfg(not(target_arch = "wasm32"))]
 mod keymap;
-#[cfg(not(target_arch = "wasm32"))]
 mod panel_registry;
 #[cfg(not(target_arch = "wasm32"))]
 mod panels_ops;
@@ -26,12 +24,20 @@ mod perf;
 pub(crate) mod replay_task;
 #[cfg(not(target_arch = "wasm32"))]
 mod runtime;
+mod shared_keymap;
+mod shared_settings;
+mod shared_shell;
 #[cfg(not(target_arch = "wasm32"))]
 mod state;
 #[cfg(not(target_arch = "wasm32"))]
 mod ui;
 #[cfg(target_arch = "wasm32")]
 mod web;
+#[cfg(target_arch = "wasm32")]
+mod web_perf;
+#[cfg(target_arch = "wasm32")]
+mod web_plugin_host;
+mod workbench_app;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use bootstrap::*;
 

@@ -1,14 +1,13 @@
 use crate::app::WorkbenchApp;
-use crate::config::{pick_recorder_path, record_mode_label};
+use crate::config::pick_recorder_path;
 use crate::state::StatusLevel;
 use eframe::egui;
-use egui_material_icons::icons::{
-    ICON_CABLE, ICON_FIBER_MANUAL_RECORD, ICON_FOLDER_OPEN, ICON_PAUSE, ICON_PLAY_ARROW, ICON_STOP,
-    ICON_TUNE, ICON_WARNING,
-};
+use egui_material_icons::icons::{ICON_CABLE, ICON_TUNE, ICON_WARNING};
 use std::collections::{BTreeMap, BTreeSet};
 use tool_application::query::RecordModeView;
-use tool_panels::{SerialPanel, design, theme};
+use tool_panels::{
+    RecordingAction, RecordingMode, RecordingView, SerialPanel, design, recording_ui, theme,
+};
 use tool_platform::{SerialParity, SerialSettings};
 
 // 端口行的实际最小内容宽度约为 500px（状态、名称、别名编辑器和分组选择器）。
@@ -16,6 +15,69 @@ use tool_platform::{SerialParity, SerialSettings};
 const PORT_INLINE_MIN_WIDTH: f32 = 560.0;
 
 impl WorkbenchApp {
+    fn recording_panel(&mut self, ui: &mut egui::Ui) {
+        let recording = self.workbench.query_recording();
+        let stats = recording.stats.clone();
+        let running = stats.running;
+        let stopping = stats.stopping;
+        let paused = stats.paused;
+        let mut mode = match recording.mode {
+            RecordModeView::StandardReplay => RecordingMode::StandardReplay,
+            RecordModeView::RawSerial => RecordingMode::RawSerial,
+        };
+        let actions = {
+            let mut view = RecordingView {
+                file_name: &mut self.recorder_path,
+                mode: &mut mode,
+                running,
+                stopping,
+                paused,
+                events_written: stats.events_written,
+                bytes_written: Some(stats.bytes_written),
+                flush_elapsed_ms: Some(stats.last_flush_elapsed_ms),
+                backlog_events: None,
+                backlog_bytes: None,
+                current_path: recording.path.as_deref(),
+                last_error: stats.last_error.as_deref(),
+                show_browse: true,
+            };
+            recording_ui(ui, &mut view)
+        };
+
+        let native_mode = match mode {
+            RecordingMode::StandardReplay => RecordModeView::StandardReplay,
+            RecordingMode::RawSerial => RecordModeView::RawSerial,
+        };
+        if native_mode != recording.mode
+            && let Err(error) = self
+                .workbench
+                .dispatch(tool_application::AppCommand::SetRecordingMode { mode: native_mode })
+        {
+            self.set_status_force(StatusLevel::Error, error.to_string());
+        }
+
+        for action in actions {
+            match action {
+                RecordingAction::Browse => {
+                    if let Some(path) = pick_recorder_path(&self.recorder_path) {
+                        self.recorder_path = path.display().to_string();
+                    }
+                }
+                RecordingAction::StartStop => self.start_or_stop_recording(),
+                RecordingAction::PauseResume => {
+                    let command = if paused {
+                        tool_application::AppCommand::ResumeRecording
+                    } else {
+                        tool_application::AppCommand::PauseRecording
+                    };
+                    if let Err(error) = self.workbench.dispatch(command) {
+                        self.set_status_force(StatusLevel::Error, error.to_string());
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn device_panel(&mut self, ui: &mut egui::Ui) {
         // ── 串口参数 ──
         design::card().show(ui, |ui| {
@@ -45,19 +107,19 @@ impl WorkbenchApp {
                     SerialParity::Even => "even",
                 }
                 .to_owned();
-                self.workbench.set_serial_parameters(
-                    self.serial.baud_rate.clone(),
-                    self.serial.data_bits.clone(),
-                    self.serial.stop_bits.clone(),
-                    self.serial.parity.clone(),
-                );
+                if let Err(error) = self
+                    .workbench
+                    .dispatch(tool_application::AppCommand::SetSerialSettings { settings })
+                {
+                    self.set_status_force(StatusLevel::Error, error.to_string());
+                }
             }
 
             ui.checkbox(&mut self.serial.auto_reconnect, "串口拔出后自动重连");
             if self.serial.auto_reconnect
                 && let Some(ref pending) = self.serial.pending_reconnect
             {
-                let now = tool_application::api::core::now_timestamp_ms() as f64 / 1000.0;
+                let now = tool_core::now_timestamp_ms() as f64 / 1000.0;
                 let remaining = (pending.next_try_at - now).max(0.0);
                 ui.label(
                     egui::RichText::new(format!(
@@ -73,131 +135,7 @@ impl WorkbenchApp {
 
         ui.add_space(8.0);
 
-        // ── 录制 ──
-        design::card().show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            design::section_header(ui, ICON_FIBER_MANUAL_RECORD, "录制");
-            ui.separator();
-
-            ui.horizontal_wrapped(|ui| {
-                ui.label("路径");
-
-                let recording = self.workbench.recording_is_running();
-
-                // 录制路径和三个操作按钮在窄 Dock 中不能共用一行，
-                // 先让输入框让出按钮所需空间，再由 wrapped 布局决定是否换行。
-                let path_width = (ui.available_width() - 150.0).clamp(140.0, 360.0);
-                ui.add_enabled(
-                    !recording,
-                    egui::TextEdit::singleline(&mut self.recorder_path).desired_width(path_width),
-                );
-
-                if ui
-                    .add_enabled(
-                        !recording,
-                        egui::Button::new(design::icon_text(ICON_FOLDER_OPEN, "浏览")),
-                    )
-                    .on_hover_text(if recording {
-                        "录制中不能修改保存路径"
-                    } else {
-                        "选择录制保存路径"
-                    })
-                    .clicked()
-                    && let Some(path) = pick_recorder_path(&self.recorder_path)
-                {
-                    self.recorder_path = path.display().to_string();
-                }
-
-                let stopping = self.workbench.recording_is_stopping();
-                if stopping {
-                    ui.ctx().request_repaint();
-                    ui.spinner();
-                }
-                if ui
-                    .add_enabled(
-                        !stopping,
-                        egui::Button::new(design::icon_text(
-                            if recording {
-                                ICON_STOP
-                            } else {
-                                ICON_FIBER_MANUAL_RECORD
-                            },
-                            if recording { "停止" } else { "录制" },
-                        )),
-                    )
-                    .on_disabled_hover_text("正在停止中...")
-                    .clicked()
-                {
-                    self.start_or_stop_recording();
-                }
-                if recording {
-                    let paused = self.workbench.recording_is_paused();
-                    if ui
-                        .add_enabled(
-                            !stopping,
-                            egui::Button::new(design::icon_text(
-                                if paused { ICON_PLAY_ARROW } else { ICON_PAUSE },
-                                if paused { "继续" } else { "暂停" },
-                            )),
-                        )
-                        .on_disabled_hover_text("正在停止中...")
-                        .clicked()
-                    {
-                        if paused {
-                            self.workbench.resume_recording();
-                        } else {
-                            self.workbench.pause_recording();
-                        }
-                    }
-                }
-            });
-
-            ui.horizontal_wrapped(|ui| {
-                ui.label("模式");
-                let recording = self.workbench.recording_is_running();
-                let mut mode = self.workbench.recording_mode();
-                ui.add_enabled_ui(!recording, |ui| {
-                    egui::ComboBox::from_id_salt("record-mode")
-                        .width(160.0)
-                        .selected_text(record_mode_label(mode))
-                        .show_ui(ui, |ui| {
-                            for &m in &[RecordModeView::StandardReplay, RecordModeView::RawSerial] {
-                                ui.selectable_value(&mut mode, m, record_mode_label(m));
-                            }
-                        });
-                });
-                self.workbench.set_recording_mode(mode);
-            });
-
-            // ── 录制健康状态 ──
-            let stats = self.workbench.query_recording().stats;
-            if stats.running || stats.stopping {
-                ui.separator();
-                ui.horizontal_wrapped(|ui| {
-                    if stats.paused {
-                        design::status_pill(ui, theme::yellow(), "已暂停，未写入新事件");
-                    } else if stats.running {
-                        design::status_pill(ui, theme::green(), "录制中");
-                    } else {
-                        design::status_pill(ui, theme::yellow(), "正在停止");
-                    }
-
-                    ui.label(format!("事件 {}", stats.events_written));
-                    ui.label(format!(
-                        "{:.1} MB",
-                        stats.bytes_written as f64 / 1024.0 / 1024.0
-                    ));
-                    ui.label(format!("flush {} ms 前", stats.last_flush_elapsed_ms));
-                });
-
-                if let Some(path) = self.workbench.recording_current_path() {
-                    ui.label(format!("路径：{}", path.display()));
-                }
-                if let Some(ref error) = stats.last_error {
-                    ui.colored_label(theme::red(), format!("录制错误：{error}"));
-                }
-            }
-        });
+        self.recording_panel(ui);
 
         ui.add_space(8.0);
 
@@ -253,8 +191,11 @@ impl WorkbenchApp {
                     );
                 } else {
                     self.serial.network_ports.push(cfg.clone());
-                    self.workbench
-                        .set_network_ports(self.serial.network_ports.clone());
+                    let _ = self.workbench.dispatch(
+                        tool_application::AppCommand::RegisterNetworkPort {
+                            config: cfg.clone(),
+                        },
+                    );
                     if let Err(e) = self.save_config() {
                         log::warn!("save_config failed: {e}");
                     }
@@ -263,7 +204,7 @@ impl WorkbenchApp {
                     match self
                         .workbench
                         .dispatch(tool_application::AppCommand::Connect {
-                            port_name: name.clone(),
+                            port: tool_platform::PortId::new(name.clone()),
                             settings: self.workbench.serial_settings(),
                         }) {
                         Ok(tool_application::CommandOutcome::Pending { .. }) => {
@@ -323,7 +264,7 @@ impl WorkbenchApp {
                                 if armed {
                                     match self.workbench.dispatch(
                                         tool_application::AppCommand::Disconnect {
-                                            port_name: (*port).clone(),
+                                            port: tool_platform::PortId::new((*port).clone()),
                                         },
                                     ) {
                                         Ok(tool_application::CommandOutcome::Pending {
@@ -635,12 +576,15 @@ impl WorkbenchApp {
                 self.serial
                     .network_ports
                     .retain(|n| n.display_name() != name);
-                self.workbench
-                    .set_network_ports(self.serial.network_ports.clone());
+                let _ = self
+                    .workbench
+                    .dispatch(tool_application::AppCommand::RemoveNetworkPort {
+                        port: tool_platform::PortId::new(name.clone()),
+                    });
                 let _ = self
                     .workbench
                     .dispatch(tool_application::AppCommand::Disconnect {
-                        port_name: name.clone(),
+                        port: tool_platform::PortId::new(name.clone()),
                     });
                 if self.serial.selected_port.as_deref() == Some(name.as_str()) {
                     self.serial.selected_port = None;

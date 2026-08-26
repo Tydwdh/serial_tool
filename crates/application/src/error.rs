@@ -11,6 +11,9 @@ pub enum AppError {
     #[error("replay: {0}")]
     Replay(String),
 
+    #[error("storage: {0}")]
+    Storage(String),
+
     #[error("plugin: {0}")]
     Plugin(String),
 

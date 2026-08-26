@@ -90,6 +90,16 @@
           "minimum": 0,
           "description": "zip 包字节数"
         },
+        "manifest_url": {
+          "type": "string",
+          "pattern": "^https://",
+          "description": "可选。统一 Lua 插件 plugin.json 的 URL"
+        },
+        "main_url": {
+          "type": "string",
+          "pattern": "^https://",
+          "description": "可选。统一 Lua 插件 main.lua 的 URL"
+        },
         "published": {
           "type": "string",
           "format": "date-time"

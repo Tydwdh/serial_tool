@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use tool_application::api::extension::{PluginDiagnostic, PluginState};
+use tool_application::plugin::{PluginDiagnosticView, PluginStateView, PluginSummaryView};
 
 /// 已安装插件的只读行 — Panel 不再持有 PluginManager。
 #[derive(Debug, Clone)]
@@ -7,13 +7,13 @@ pub struct InstalledPluginRow {
     pub id: String,
     pub name: String,
     pub version: String,
-    pub state: PluginState,
+    pub state: PluginStateView,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct PluginViewState {
     pub installed: Vec<InstalledPluginRow>,
-    pub diagnostics: Vec<PluginDiagnostic>,
+    pub diagnostics: Vec<PluginDiagnosticView>,
     pub installed_ids: BTreeSet<String>,
 }
 
@@ -25,8 +25,8 @@ pub enum PluginUiCommand {
     DiscoverRoots { root: String },
 }
 
-impl From<&[tool_application::api::extension::PluginSummary]> for PluginViewState {
-    fn from(summaries: &[tool_application::api::extension::PluginSummary]) -> Self {
+impl From<&[PluginSummaryView]> for PluginViewState {
+    fn from(summaries: &[PluginSummaryView]) -> Self {
         let installed = summaries
             .iter()
             .map(|s| InstalledPluginRow {

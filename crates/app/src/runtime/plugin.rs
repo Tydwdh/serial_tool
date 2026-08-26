@@ -1,5 +1,5 @@
 use crate::app::WorkbenchApp;
-use tool_application::api::core::{Direction, Event, Payload, topics};
+use tool_core::{Direction, Event, Payload, topics};
 
 impl WorkbenchApp {
     /// 发布插件命令动作（模拟 UI 按钮点击）。
@@ -34,7 +34,10 @@ impl WorkbenchApp {
             if !input.is_empty() && input.lines().count() == 1 {
                 let path = std::path::PathBuf::from(input.trim_matches('"'));
                 if path.is_file() {
-                    self.workbench.authorize_plugin_file(plugin_id, path);
+                    self.workbench.authorize_plugin_file(
+                        plugin_id,
+                        tool_platform::storage::FileHandle::from_native_path(path),
+                    );
                 }
             }
         }
@@ -99,14 +102,18 @@ impl WorkbenchApp {
 
         // 初始扫描在后台完成后，按配置启用插件；此处只在 Discovered 状态
         // 尝试一次，避免扫描尚未完成时把“未找到”误报成启动错误。
-        let configured = self.workbench.app_config().enabled_plugins.clone();
+        let configured = self.workbench.query_enabled_plugin_ids();
         for plugin_id in configured {
             if self.workbench.plugin_state(&plugin_id)
-                == Some(tool_application::api::extension::PluginState::Discovered)
-                && let Err(error) = self.workbench.enable_plugin(&plugin_id)
+                == Some(tool_application::query::PluginStateView::Discovered)
+                && let Err(error) =
+                    self.workbench
+                        .dispatch(tool_application::AppCommand::EnablePlugin {
+                            plugin_id: plugin_id.clone(),
+                        })
             {
                 self.log(
-                    tool_application::api::core::LogLevel::Warn,
+                    tool_core::LogLevel::Warn,
                     format!("恢复插件 {plugin_id} 失败：{error}"),
                 );
             }
@@ -145,7 +152,7 @@ impl WorkbenchApp {
     /// 使用专用 topic `ui.contribution.set.value`，与动态面板的 `ui.form.set_value` 隔离。
     fn process_contribution_set_value(&mut self) {
         for event in self.ui_events.drain_contribution_set_value(64) {
-            let tool_application::api::core::Payload::Json(payload) = event.payload else {
+            let tool_core::Payload::Json(payload) = event.payload else {
                 continue;
             };
             // 要求 panel_id == "__contribution__" 作为哨兵，防止误消费面板事件

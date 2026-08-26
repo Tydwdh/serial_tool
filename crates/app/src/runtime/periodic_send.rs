@@ -111,8 +111,8 @@ impl WorkbenchApp {
                 if let Some(e) = err {
                     cancel.store(true, std::sync::atomic::Ordering::Release);
                     let msg = format!("周期发送已在第 {count} 次后停止：{e}");
-                    event_sink.publish(tool_application::api::core::Event::system_log(
-                        tool_application::api::core::LogLevel::Error,
+                    event_sink.publish(tool_core::Event::system_log(
+                        tool_core::LogLevel::Error,
                         "periodic",
                         msg.clone(),
                     ));
@@ -128,8 +128,8 @@ impl WorkbenchApp {
                 {
                     cancel.store(true, std::sync::atomic::Ordering::Release);
                     let msg = format!("周期发送已完成（{max} 次）");
-                    event_sink.publish(tool_application::api::core::Event::system_log(
-                        tool_application::api::core::LogLevel::Info,
+                    event_sink.publish(tool_core::Event::system_log(
+                        tool_core::LogLevel::Info,
                         "periodic",
                         msg.clone(),
                     ));

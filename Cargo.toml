@@ -8,6 +8,8 @@ members = [
     "crates/lua_host",
     "crates/marketplace",
     "crates/panels",
+    "crates/plugin_api",
+    "crates/plugin_runtime",
     "crates/platform",
     "crates/testing",
     "crates/transport",
@@ -37,6 +39,7 @@ crossbeam-channel = "0.5"
 dirs-next = "2"
 log = "0.4"
 mlua = { version = "0.11", features = ["lua54", "vendored"] }
+omnilua = { version = "0.7.1", default-features = false, features = ["coroutine", "package", "utf8"] }
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

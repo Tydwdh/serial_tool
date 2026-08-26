@@ -9,11 +9,11 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use js_sys::{Array, JsString, Object, Reflect, Uint8Array};
-use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{
-    Navigator, ReadableStreamDefaultReader, Serial, SerialOptions, SerialOutputSignals, SerialPort,
-    WritableStreamDefaultWriter,
+    Event, EventTarget, Navigator, ReadableStreamDefaultReader, Serial, SerialOptions,
+    SerialOutputSignals, SerialPort, WritableStreamDefaultWriter,
 };
 
 use crate::{
@@ -21,12 +21,21 @@ use crate::{
     TransportCapabilities, TransportError, TransportFuture, TransportResult,
 };
 
+type ConnectionListener = Closure<dyn FnMut(Event)>;
+
 #[derive(Clone)]
 pub struct WebSerialTransport {
     serial: Serial,
     ports: Rc<RefCell<HashMap<PortId, SerialPort>>>,
     readers: Rc<RefCell<HashMap<PortId, ReadableStreamDefaultReader>>>,
     next_session_id: Rc<Cell<u64>>,
+    connection_listeners: Rc<RefCell<Vec<ConnectionListener>>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum WebSerialEvent {
+    Connected(PortDescriptor),
+    Disconnected(PortId),
 }
 
 impl WebSerialTransport {
@@ -41,6 +50,7 @@ impl WebSerialTransport {
             ports: Rc::new(RefCell::new(HashMap::new())),
             readers: Rc::new(RefCell::new(HashMap::new())),
             next_session_id: Rc::new(Cell::new(1)),
+            connection_listeners: Rc::new(RefCell::new(Vec::new())),
         })
     }
 
@@ -48,6 +58,58 @@ impl WebSerialTransport {
         let window = web_sys::window()
             .ok_or_else(|| TransportError::Operation("window unavailable".into()))?;
         Self::from_navigator(window.navigator())
+    }
+
+    /// Listen for browser-level device insertion/removal. This complements
+    /// the readable-stream callback: the browser may report a device being
+    /// connected before it is opened, or removed while no reader is active.
+    pub fn watch_connection_events(
+        &self,
+        callback: Rc<dyn Fn(WebSerialEvent)>,
+    ) -> Result<(), TransportError> {
+        let target: &EventTarget = self.serial.unchecked_ref();
+
+        let connect_backend = self.clone();
+        let connect_callback = callback.clone();
+        let on_connect = Closure::wrap(Box::new(move |event: Event| {
+            let Ok(value) = Reflect::get(event.as_ref(), &JsString::from("port")) else {
+                return;
+            };
+            let Ok(port) = value.dyn_into::<SerialPort>() else {
+                return;
+            };
+            let (id, descriptor) = connect_backend.descriptor(&port, 0);
+            connect_backend.remember(id, port);
+            connect_callback(WebSerialEvent::Connected(descriptor));
+        }) as Box<dyn FnMut(Event)>);
+        target
+            .add_event_listener_with_callback("connect", on_connect.as_ref().unchecked_ref())
+            .map_err(|error| TransportError::Operation(js_error(&error)))?;
+        // Keep the closure alive before installing the second listener. If
+        // the browser rejects the disconnect listener, the connect listener
+        // must not be dropped accidentally.
+        self.connection_listeners.borrow_mut().push(on_connect);
+
+        let disconnect_backend = self.clone();
+        let disconnect_callback = callback;
+        let on_disconnect = Closure::wrap(Box::new(move |event: Event| {
+            let Ok(value) = Reflect::get(event.as_ref(), &JsString::from("port")) else {
+                return;
+            };
+            let Ok(port) = value.dyn_into::<SerialPort>() else {
+                return;
+            };
+            let id = disconnect_backend
+                .find_session_id(&port)
+                .unwrap_or_else(|| disconnect_backend.descriptor(&port, 0).0);
+            disconnect_callback(WebSerialEvent::Disconnected(id));
+        }) as Box<dyn FnMut(Event)>);
+        target
+            .add_event_listener_with_callback("disconnect", on_disconnect.as_ref().unchecked_ref())
+            .map_err(|error| TransportError::Operation(js_error(&error)))?;
+
+        self.connection_listeners.borrow_mut().push(on_disconnect);
+        Ok(())
     }
 
     fn descriptor(&self, port: &SerialPort, ordinal: usize) -> (PortId, PortDescriptor) {
@@ -228,7 +290,8 @@ impl TransportBackend for WebSerialTransport {
         let backend = self.clone();
         Box::pin(async move {
             let port = backend.port(&port_id)?;
-            if let Some(reader) = backend.readers.borrow_mut().remove(&port_id) {
+            let reader = { backend.readers.borrow_mut().remove(&port_id) };
+            if let Some(reader) = reader {
                 // A SerialPort cannot be closed while its readable stream is
                 // locked. Cancelling first also wakes the receive task so it
                 // can publish the matching Disconnected event.

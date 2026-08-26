@@ -44,6 +44,7 @@ impl WorkbenchApp {
         self.tick_auto_save(ctx);
         self.tick_update();
         self.tick_marketplace();
+        self.tick_native_export(ctx);
     }
 
     pub(crate) fn tick_post_ui(&mut self, ctx: &egui::Context) {
@@ -57,7 +58,7 @@ impl WorkbenchApp {
     /// 处理 Lua 插件通过 ctx.ui.set_status() 推送的状态栏通知。
     fn process_ui_set_status(&mut self) {
         for event in self.ui_events.drain_status(32) {
-            if let tool_application::api::core::Payload::Json(payload) = event.payload
+            if let tool_core::Payload::Json(payload) = event.payload
                 && let Some(msg) = payload.get("message").and_then(|v| v.as_str())
             {
                 self.notifications

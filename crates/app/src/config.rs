@@ -1,14 +1,13 @@
 use crate::bootstrap::{user_data_dir, user_logs_dir};
 use crate::state::LineEnding;
 use std::path::{Path, PathBuf};
+use tool_application::query::NetworkPortConfig;
 #[cfg(test)]
-use tool_application::api::core::config::atomic_write_json;
-use tool_application::api::core::{
+use tool_core::config::atomic_write_json;
+use tool_core::{
     config::{CURRENT_SCHEMA_VERSION, quarantine_corrupt_file},
     now_timestamp_ms,
 };
-use tool_application::query::NetworkPortConfig;
-use tool_application::query::RecordModeView;
 use tool_platform::storage::native::NativeSettingsStore;
 
 use serde::{Deserialize, Serialize};
@@ -319,13 +318,6 @@ pub(crate) fn ensure_jsonl_extension(mut path: PathBuf) -> PathBuf {
 
     path
 }
-pub(crate) fn record_mode_label(mode: RecordModeView) -> &'static str {
-    match mode {
-        RecordModeView::StandardReplay => "标准回放",
-        RecordModeView::RawSerial => "原始串口",
-    }
-}
-
 pub(crate) fn default_recorder_path() -> String {
     user_logs_dir()
         .join(format!("session-{}.jsonl", now_timestamp_ms()))
@@ -373,8 +365,8 @@ impl WorkbenchApp {
                 .filter(|s| {
                     matches!(
                         s.state,
-                        tool_application::api::extension::PluginState::Enabled
-                            | tool_application::api::extension::PluginState::Running
+                        tool_application::query::PluginStateView::Enabled
+                            | tool_application::query::PluginStateView::Running
                     )
                 })
                 .map(|s| s.id)
@@ -464,7 +456,6 @@ impl WorkbenchApp {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use tool_application::query::RecordModeView;
 
     fn legacy_workspace_json() -> String {
         serde_json::json!({
@@ -532,30 +523,6 @@ mod tests {
         let path = PathBuf::from("/tmp/session-12345.txt");
         let result = ensure_jsonl_extension(path);
         assert_eq!(result.extension().unwrap(), "jsonl");
-    }
-
-    // ── record_mode_label ──
-
-    #[test]
-    fn record_mode_label_all_variants_non_empty() {
-        let modes = [RecordModeView::StandardReplay, RecordModeView::RawSerial];
-        for mode in &modes {
-            let label = record_mode_label(*mode);
-            assert!(!label.is_empty(), "label for {mode:?} should not be empty");
-        }
-    }
-
-    #[test]
-    fn record_mode_label_standard_replay() {
-        assert_eq!(
-            record_mode_label(RecordModeView::StandardReplay),
-            "标准回放"
-        );
-    }
-
-    #[test]
-    fn record_mode_label_raw_serial() {
-        assert_eq!(record_mode_label(RecordModeView::RawSerial), "原始串口");
     }
 
     // ── default_recorder_path ──

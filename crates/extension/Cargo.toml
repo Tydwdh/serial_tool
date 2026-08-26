@@ -21,5 +21,6 @@ thiserror.workspace = true
 tool-core = { path = "../core" }
 tool-databus = { path = "../databus" }
 tool-lua-host = { path = "../lua_host" }
+tool-plugin-api = { path = "../plugin_api" }
 tool-transport = { path = "../transport" }
 tool-testing = { path = "../testing" }

@@ -21,6 +21,7 @@ log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tool-application = { path = "../application" }
+tool-core = { path = "../core" }
 tool-databus = { path = "../databus" }
 tool-platform = { path = "../platform" }
 tool-panels = { path = "../panels" }
@@ -31,14 +32,37 @@ tempfile = "3"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 dirs-next.workspace = true
 open.workspace = true
+tool-lua-host = { path = "../lua_host" }
+tool-marketplace = { path = "../marketplace" }
+tool-transport = { path = "../transport" }
 tool-updater = { path = "../updater" }
 tokio = { version = "1", features = ["rt"] }
 rfd = "0.17.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+tool-plugin-api = { path = "../plugin_api" }
+tool-plugin-runtime = { path = "../plugin_runtime" }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["console"] }
+web-sys = { version = "0.3", features = [
+    "Blob",
+    "BlobPropertyBag",
+    "Document",
+    "Event",
+    "File",
+    "FileList",
+    "HtmlAnchorElement",
+    "HtmlInputElement",
+    "Response",
+    "Url",
+    "Window",
+    "console",
+    "MessageEvent",
+    "Worker",
+    "WorkerOptions",
+    "WorkerType",
+] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

@@ -1,13 +1,14 @@
 use crate::app::WorkbenchApp;
-use crate::state::{LineEnding, MAX_SEND_HISTORY, StatusLevel};
+use crate::state::{LineEnding, MAX_SEND_HISTORY, SendUiState, StatusLevel};
 use eframe::egui;
 use egui::widgets::text_edit::TextEditState;
 use egui_material_icons::icons::{
     ICON_CANCEL, ICON_DELETE, ICON_DELETE_SWEEP, ICON_HISTORY, ICON_SEARCH, ICON_SEND,
 };
 use tool_panels::{
+    SendAction, SendLayout as SharedSendLayout, SendLineEnding, SendPortItem, SendView,
     design::{self, ButtonKind},
-    theme,
+    record_history as record_shared_send_history, sender_ui as shared_sender_ui, theme,
 };
 
 const SEND_BOTTOM_TOOL_ROW_MAX_HEIGHT: f32 = 44.0;
@@ -98,6 +99,146 @@ impl WorkbenchApp {
     // ── 统一核心渲染 ──
 
     fn send_panel_body(&mut self, ui: &mut egui::Ui, layout: SendLayout) {
+        self.shared_send_panel_body(ui, layout);
+    }
+
+    fn shared_send_panel_body(&mut self, ui: &mut egui::Ui, layout: SendLayout) {
+        self.ensure_send_target_port();
+        let open_ports = self.workbench.open_port_names();
+        let ports = open_ports
+            .iter()
+            .map(|port| SendPortItem {
+                id: port.clone(),
+                label: self.serial.port_label(port),
+            })
+            .collect::<Vec<_>>();
+        let target_open = self.send_target_port_open();
+        let mut line_ending = match self.send.line_ending {
+            LineEnding::None => SendLineEnding::None,
+            LineEnding::Lf => SendLineEnding::Lf,
+            LineEnding::Cr => SendLineEnding::Cr,
+            LineEnding::Crlf => SendLineEnding::Crlf,
+        };
+        let mut history = self.send.send_history.iter().cloned().collect::<Vec<_>>();
+        let shared_layout = match layout {
+            SendLayout::Horizontal => SharedSendLayout::Horizontal,
+            SendLayout::Vertical => SharedSendLayout::Vertical,
+        };
+        let was_periodic = self.send.periodic_enabled;
+        let actions = {
+            let send = &mut self.send;
+            let SendUiState {
+                input,
+                hex_mode,
+                error,
+                target_port,
+                history_search,
+                history_index,
+                saved_input,
+                hex_strict,
+                dtr_high,
+                rts_high,
+                periodic_enabled,
+                periodic_interval_ms,
+                periodic_send_count,
+                ..
+            } = send;
+            let mut view = SendView {
+                ports: &ports,
+                target_port,
+                target_open,
+                input,
+                hex_mode,
+                hex_strict,
+                line_ending: &mut line_ending,
+                error,
+                history: &mut history,
+                history_search,
+                history_index,
+                saved_input,
+                periodic_enabled,
+                periodic_interval_ms,
+                periodic_send_count,
+                dtr: dtr_high,
+                rts: rts_high,
+                max_history: MAX_SEND_HISTORY,
+                layout: shared_layout,
+            };
+            shared_sender_ui(ui, &mut view)
+        };
+        self.send.line_ending = match line_ending {
+            SendLineEnding::None => LineEnding::None,
+            SendLineEnding::Lf => LineEnding::Lf,
+            SendLineEnding::Cr => LineEnding::Cr,
+            SendLineEnding::Crlf => LineEnding::Crlf,
+        };
+        if was_periodic
+            && !self.send.periodic_enabled
+            && let Some(cancel) = self.periodic_send.cancel.take()
+        {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        for action in actions {
+            match action {
+                SendAction::SendText { port, text } => {
+                    let history_text = self.send.input.clone();
+                    match self
+                        .workbench
+                        .dispatch(tool_application::AppCommand::SendText {
+                            port: tool_platform::PortId::new(port),
+                            text,
+                        }) {
+                        Ok(_) => {
+                            record_shared_send_history(&mut history, history_text, MAX_SEND_HISTORY)
+                        }
+                        Err(error) => self.send.error = Some(error.to_string()),
+                    }
+                }
+                SendAction::SendHex { port, hex, strict } => {
+                    let history_text = self.send.input.clone();
+                    match self
+                        .workbench
+                        .dispatch(tool_application::AppCommand::SendHex {
+                            port: tool_platform::PortId::new(port),
+                            hex,
+                            strict,
+                        }) {
+                        Ok(_) => {
+                            record_shared_send_history(&mut history, history_text, MAX_SEND_HISTORY)
+                        }
+                        Err(error) => self.send.error = Some(error.to_string()),
+                    }
+                }
+                SendAction::SetDtr { port, value } => {
+                    if let Err(error) =
+                        self.workbench
+                            .dispatch(tool_application::AppCommand::SetDtr {
+                                port: tool_platform::PortId::new(port),
+                                value,
+                            })
+                    {
+                        self.set_status_force(StatusLevel::Error, error.to_string());
+                    }
+                }
+                SendAction::SetRts { port, value } => {
+                    if let Err(error) =
+                        self.workbench
+                            .dispatch(tool_application::AppCommand::SetRts {
+                                port: tool_platform::PortId::new(port),
+                                value,
+                            })
+                    {
+                        self.set_status_force(StatusLevel::Error, error.to_string());
+                    }
+                }
+            }
+        }
+        self.send.send_history = history.into_iter().collect();
+        self.ui_contribution_slot(ui, "send.toolbar");
+    }
+
+    #[allow(dead_code)]
+    fn legacy_send_panel_body(&mut self, ui: &mut egui::Ui, layout: SendLayout) {
         self.ensure_send_target_port();
         let send_port_open = self.send_target_port_open();
         let constrain_bottom = matches!(layout, SendLayout::Horizontal);
@@ -464,7 +605,7 @@ impl WorkbenchApp {
         // HEX 模式下实时检查输入是否可解析（严格模式 vs 宽松模式）。
         let input_trim = self.send.input.trim();
         let hex_error = if self.send.hex_mode && !input_trim.is_empty() {
-            match tool_application::api::transport::parse_hex(input_trim) {
+            match tool_transport::parse_hex(input_trim) {
                 Ok(_) => None,
                 Err(e) => Some(e.to_string()),
             }
@@ -554,7 +695,7 @@ impl WorkbenchApp {
                     .small(),
             )
             .on_hover_text(if is_err {
-                match tool_application::api::transport::parse_hex(self.send.input.trim()) {
+                match tool_transport::parse_hex(self.send.input.trim()) {
                     Ok(_) => String::new(),
                     Err(e) => format!("HEX 解析失败: {e}"),
                 }
@@ -587,7 +728,10 @@ impl WorkbenchApp {
             let mut dtr = self.send.dtr_high;
             let dtr_resp = ui.checkbox(&mut dtr, "DTR");
             if dtr_resp.changed() {
-                match self.workbench.set_dtr(&port, dtr) {
+                match self.workbench.dispatch(tool_application::AppCommand::SetDtr {
+                    port: tool_platform::PortId::new(port.clone()),
+                    value: dtr,
+                }) {
                     Ok(tool_application::CommandOutcome::Pending { .. })
                     | Ok(tool_application::CommandOutcome::Done) => self.send.dtr_high = dtr,
                     Err(e) => self.set_status_force(StatusLevel::Error, e.to_string()),
@@ -600,7 +744,10 @@ impl WorkbenchApp {
             let mut rts = self.send.rts_high;
             let rts_resp = ui.checkbox(&mut rts, "RTS");
             if rts_resp.changed() {
-                match self.workbench.set_rts(&port, rts) {
+                match self.workbench.dispatch(tool_application::AppCommand::SetRts {
+                    port: tool_platform::PortId::new(port.clone()),
+                    value: rts,
+                }) {
                     Ok(tool_application::CommandOutcome::Pending { .. })
                     | Ok(tool_application::CommandOutcome::Done) => self.send.rts_high = rts,
                     Err(e) => self.set_status_force(StatusLevel::Error, e.to_string()),
@@ -615,25 +762,35 @@ impl WorkbenchApp {
     // ── 发送逻辑 ──
 
     pub(crate) fn do_send(&mut self) {
-        let Some(port) = self.send.target_port.as_deref() else {
+        let Some(port) = self.send.target_port.clone() else {
             self.send.error = Some("请选择发送目标串口".into());
             return;
         };
-        self.send.error = self
-            .workbench
-            .send_input(
-                port,
-                &self.send.input,
-                self.send.hex_mode,
-                self.send.line_ending.suffix(),
-                self.send.hex_strict,
-            )
-            .err()
-            .map(|e| e.to_string());
+        let input = self.send.input.clone();
+        if input.trim().is_empty() {
+            self.send.error = Some("发送内容不能为空".to_owned());
+        } else {
+            let command = if self.send.hex_mode {
+                tool_application::AppCommand::SendHex {
+                    port: tool_platform::PortId::new(port),
+                    hex: input.clone(),
+                    strict: self.send.hex_strict,
+                }
+            } else {
+                tool_application::AppCommand::SendText {
+                    port: tool_platform::PortId::new(port),
+                    text: format!("{}{}", input, self.send.line_ending.suffix()),
+                }
+            };
+            self.send.error = self
+                .workbench
+                .dispatch(command)
+                .err()
+                .map(|e| e.to_string());
+        }
 
         if self.send.error.is_none() && !self.send.input.trim().is_empty() {
-            let text = self.send.input.clone();
-            self.record_send_history(text);
+            self.record_send_history(input);
         }
         self.send.history_index = None;
         self.send.saved_input.clear();
@@ -935,7 +1092,7 @@ impl WorkbenchApp {
     }
 }
 
-use tool_application::api::transport::hex_preview;
+use tool_transport::hex_preview;
 
 #[cfg(test)]
 mod tests {

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tool_application::api::core::LogLevel;
-use tool_application::api::lua_host::{LuaReplayConfig, run_replay_analyzer_with_cancel};
+use tool_core::LogLevel;
+use tool_lua_host::{LuaReplayConfig, run_replay_analyzer_with_cancel};
 
 use crate::app::{ReplayAnalyzerJob, ReplayAnalyzerResult, WorkbenchApp};
 use crate::state::StatusLevel;
@@ -35,14 +35,18 @@ impl WorkbenchApp {
 
         let entries = self.workbench.replay_analyzer_entries();
         if entries.is_empty() {
+            self.workbench
+                .replay_set_analyzer_error("没有可用的 replay analyzer".to_owned());
             self.replay_panel
                 .set_analyzer_error("没有可用的 replay analyzer".to_owned());
             self.set_status(StatusLevel::Error, "回放：没有可用的 replay analyzer");
             return;
         }
 
-        let raw_events = self.replay_panel.manager().raw_serial_events();
+        let raw_events = self.workbench.replay_raw_serial_events();
         if raw_events.is_empty() {
+            self.workbench
+                .replay_set_analyzer_error("录制文件中没有原始串口事件".to_owned());
             self.replay_panel
                 .set_analyzer_error("录制文件中没有原始串口事件".to_owned());
             self.set_status(StatusLevel::Error, "回放：录制文件中没有原始串口事件");
@@ -215,6 +219,7 @@ impl WorkbenchApp {
                         .unwrap_or("未知错误")
                 )
             };
+            self.workbench.replay_set_analyzer_error(msg.clone());
             self.replay_panel.set_analyzer_error(msg.clone());
             self.set_status(StatusLevel::Error, format!("回放：{msg}"));
         } else if result.derived_events.is_empty() && result.failed == 0 {
@@ -223,12 +228,19 @@ impl WorkbenchApp {
                 "{} 个 analyzer 运行成功但未生成任何派生事件",
                 result.succeeded
             );
+            self.workbench.replay_set_analyzer_warning(msg.clone());
             self.replay_panel.set_analyzer_warning(msg.clone());
             self.set_status(StatusLevel::Warn, format!("回放：{msg}"));
         } else {
             // 先设缓存，再用 warning 显示提示（不清缓存）
-            self.replay_panel
-                .set_analyzer_cache(result.derived_events.clone());
+            self.workbench
+                .replay_set_analyzer_cache(result.derived_events.clone());
+            let replay_status = self.workbench.query_replay();
+            if replay_status.total_events > 0
+                && replay_status.state != tool_application::query::ReplayStateView::Playing
+            {
+                self.replay_panel.want_seek_replay = Some(replay_status.position_ms);
+            }
             let summary = format!(
                 "{} 个派生事件，{} 成功",
                 result.derived_events.len(),
@@ -236,15 +248,15 @@ impl WorkbenchApp {
             );
             if result.failed > 0 {
                 let err_detail = result.errors.join("; ");
-                self.replay_panel.set_analyzer_warning(format!(
-                    "{summary}，{} 失败: {err_detail}",
-                    result.failed
-                ));
+                let warning = format!("{summary}，{} 失败: {err_detail}", result.failed);
+                self.workbench.replay_set_analyzer_warning(warning.clone());
+                self.replay_panel.set_analyzer_warning(warning);
                 self.set_status(
                     StatusLevel::Warn,
                     format!("回放：{summary}，{} 失败", result.failed),
                 );
             } else {
+                self.workbench.replay_clear_analyzer_messages();
                 self.replay_panel.clear_analyzer_error();
                 self.set_status(StatusLevel::Info, format!("回放：{summary}"));
             }

@@ -150,6 +150,20 @@ pub struct TerminalExportJob {
     show_raw: bool,
 }
 
+/// Incremental export cursor used by browser composition roots.  Unlike
+/// [`TerminalExportJob`], it does not materialize every visible row when the
+/// export button is clicked.  The owning panel is scanned in stable-id order
+/// in bounded batches, so a 50k-row export does not create a large temporary
+/// allocation on the first UI frame.
+pub struct TerminalExportCursor {
+    filter: TerminalViewFilter,
+    last_id: Option<u64>,
+    max_id: Option<u64>,
+    started: bool,
+    emitted: bool,
+    done: bool,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct TerminalViewFilter {
     port_filter: Option<String>,
@@ -261,7 +275,181 @@ impl VisibleRow<'static> {
     }
 }
 
+fn render_terminal_cursor_chunk(
+    format: TerminalExportFormat,
+    rows: &[VisibleRow<'static>],
+    show_hex: bool,
+    show_raw: bool,
+    first: bool,
+    has_previous: bool,
+    done: bool,
+) -> String {
+    match format {
+        TerminalExportFormat::Txt => {
+            let mut output = String::new();
+            if has_previous && !rows.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(
+                &rows
+                    .iter()
+                    .map(|row| visible_row_content(row, show_hex, show_raw))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+            if done && !rows.is_empty() {
+                output.push('\n');
+            }
+            output
+        }
+        TerminalExportFormat::Csv => {
+            let mut output = String::new();
+            if first {
+                output.push_str("time,port,direction,");
+                output.push_str(if show_hex {
+                    "hex\n"
+                } else if show_raw {
+                    "raw\n"
+                } else {
+                    "text\n"
+                });
+            }
+            for row in rows {
+                let direction = match row.direction {
+                    Direction::Rx => "RX",
+                    Direction::Tx => "TX",
+                    Direction::Internal => "INTERNAL",
+                };
+                output.push_str(
+                    &[
+                        csv_cell(&row.timestamp_label),
+                        csv_cell(row.port.as_deref().unwrap_or("")),
+                        csv_cell(direction),
+                        csv_cell(&visible_row_content(row, show_hex, show_raw)),
+                    ]
+                    .join(","),
+                );
+                output.push('\n');
+            }
+            output
+        }
+        TerminalExportFormat::Json => {
+            let mut output = String::new();
+            if first {
+                output.push('[');
+            } else if has_previous && !rows.is_empty() {
+                output.push(',');
+            }
+            for (index, row) in rows.iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                output.push_str(
+                    &serde_json::to_string(&visible_row_json(row, show_hex, show_raw))
+                        .unwrap_or_else(|_| "null".to_owned()),
+                );
+            }
+            if done {
+                output.push(']');
+            }
+            output
+        }
+    }
+}
+
 impl TerminalExportJob {
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    /// Render one owned chunk. The browser composition root uses this to
+    /// yield between batches instead of building a large export string in a
+    /// single egui frame.
+    pub fn render_chunk(&self, format: TerminalExportFormat, start: usize, end: usize) -> String {
+        let start = start.min(self.rows.len());
+        let end = end.min(self.rows.len()).max(start);
+        let rows = &self.rows[start..end];
+        match format {
+            TerminalExportFormat::Txt => {
+                let mut output = String::new();
+                if start > 0 && !rows.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(
+                    &rows
+                        .iter()
+                        .map(|row| visible_row_content(row, self.show_hex, self.show_raw))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
+                if end == self.rows.len() && !rows.is_empty() {
+                    output.push('\n');
+                }
+                output
+            }
+            TerminalExportFormat::Csv => {
+                let mut output = String::new();
+                if start == 0 {
+                    output.push_str("time,port,direction,");
+                    output.push_str(if self.show_hex {
+                        "hex\n"
+                    } else if self.show_raw {
+                        "raw\n"
+                    } else {
+                        "text\n"
+                    });
+                }
+                for row in rows {
+                    let direction = match row.direction {
+                        Direction::Rx => "RX",
+                        Direction::Tx => "TX",
+                        Direction::Internal => "INTERNAL",
+                    };
+                    output.push_str(
+                        &[
+                            csv_cell(&row.timestamp_label),
+                            csv_cell(row.port.as_deref().unwrap_or("")),
+                            csv_cell(direction),
+                            csv_cell(&visible_row_content(row, self.show_hex, self.show_raw)),
+                        ]
+                        .join(","),
+                    );
+                    output.push('\n');
+                }
+                output
+            }
+            TerminalExportFormat::Json => {
+                let mut output = String::new();
+                if start == 0 {
+                    output.push('[');
+                } else if !rows.is_empty() {
+                    output.push(',');
+                }
+                for (index, row) in rows.iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    output.push_str(
+                        &serde_json::to_string(&visible_row_json(
+                            row,
+                            self.show_hex,
+                            self.show_raw,
+                        ))
+                        .unwrap_or_else(|_| "null".to_owned()),
+                    );
+                }
+                if end == self.rows.len() {
+                    output.push(']');
+                }
+                output
+            }
+        }
+    }
+
     pub fn render(&self, format: TerminalExportFormat) -> String {
         match format {
             TerminalExportFormat::Txt => {
@@ -351,6 +539,27 @@ impl TerminalExportJob {
             }
         }
     }
+}
+
+fn visible_row_json(row: &VisibleRow<'_>, show_hex: bool, show_raw: bool) -> serde_json::Value {
+    let content_key = if show_hex {
+        "hex"
+    } else if show_raw {
+        "raw"
+    } else {
+        "text"
+    };
+    let direction = match row.direction {
+        Direction::Rx => "RX",
+        Direction::Tx => "TX",
+        Direction::Internal => "INTERNAL",
+    };
+    serde_json::json!({
+        "time": row.timestamp_label.to_string(),
+        "port": row.port.as_deref().unwrap_or(""),
+        "direction": direction,
+        content_key: visible_row_content(row, show_hex, show_raw),
+    })
 }
 
 fn terminal_item_matches(
@@ -593,6 +802,72 @@ impl TerminalPanel {
             show_hex: self.show_hex,
             show_raw: self.show_raw,
         }
+    }
+
+    pub fn begin_export_cursor(&self) -> TerminalExportCursor {
+        TerminalExportCursor {
+            filter: self.current_view_filter(),
+            last_id: None,
+            max_id: self.store.iter().next_back().map(TerminalItem::id),
+            started: false,
+            emitted: false,
+            done: false,
+        }
+    }
+
+    /// Render at most `scan_budget` store items and return
+    /// `(text, finished, exported_rows)`.  The scan budget is deliberately
+    /// independent from the number of matching rows: a restrictive filter
+    /// cannot turn one frame into an unbounded full-store scan.
+    pub fn export_cursor_chunk(
+        &self,
+        cursor: &mut TerminalExportCursor,
+        format: TerminalExportFormat,
+        scan_budget: usize,
+    ) -> (String, bool, usize) {
+        if cursor.done {
+            return (String::new(), true, 0);
+        }
+        let query = self.search.query();
+        let mut iter = self.store.iter_after(cursor.last_id).peekable();
+        let mut rows = Vec::new();
+        let mut scanned = 0;
+        let budget = scan_budget.max(1);
+        while scanned < budget {
+            let Some(item) = iter.peek() else {
+                break;
+            };
+            if cursor.max_id.is_some_and(|max_id| item.id() > max_id) {
+                break;
+            }
+            let item = iter.next().expect("peeked terminal item exists");
+            scanned += 1;
+            cursor.last_id = Some(item.id());
+            if terminal_item_matches(item, &cursor.filter, &query) {
+                rows.push(VisibleRow::from_item(item));
+            }
+        }
+        cursor.done = iter
+            .peek()
+            .is_none_or(|item| cursor.max_id.is_some_and(|max_id| item.id() > max_id));
+        let first = !cursor.started;
+        let has_previous = cursor.emitted;
+        cursor.started = true;
+        let exported = rows.len();
+        cursor.emitted |= exported > 0;
+        (
+            render_terminal_cursor_chunk(
+                format,
+                &rows,
+                cursor.filter.show_hex,
+                cursor.filter.show_raw,
+                first,
+                has_previous,
+                cursor.done,
+            ),
+            cursor.done,
+            exported,
+        )
     }
 
     pub fn export_visible_csv(&self) -> String {
@@ -2489,6 +2764,128 @@ mod tests {
             serde_json::from_str(&panel.export_visible_json()).expect("valid HEX JSON array");
         assert_eq!(json[0]["hex"], "68 65 6C 6C 6F 2C 22 77 6F 72 6C 64 22");
         assert!(json[0].get("text").is_none());
+    }
+
+    #[test]
+    fn chunked_export_preserves_format_boundaries() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+        for (direction, payload) in [
+            (Direction::Rx, b"first,\"row\"".to_vec()),
+            (Direction::Tx, b"second\nrow".to_vec()),
+            (Direction::Rx, vec![0, 1, 255]),
+        ] {
+            bus.publish(
+                Event::new(
+                    serial_topics::SERIAL_RX,
+                    "serial:COM1",
+                    direction,
+                    Payload::Bytes(payload),
+                )
+                .with_metadata(serde_json::json!({ "port": "COM1" })),
+            );
+        }
+        assert_eq!(panel.ingest_all_pending(), 3);
+
+        let job = panel.export_job();
+        assert_eq!(job.len(), 3);
+        for format in [
+            TerminalExportFormat::Txt,
+            TerminalExportFormat::Csv,
+            TerminalExportFormat::Json,
+        ] {
+            let mut chunked = String::new();
+            chunked.push_str(&job.render_chunk(format, 0, 1));
+            chunked.push_str(&job.render_chunk(format, 1, 3));
+            match format {
+                TerminalExportFormat::Json => {
+                    let value: serde_json::Value =
+                        serde_json::from_str(&chunked).expect("chunked JSON export is valid");
+                    assert_eq!(value.as_array().expect("JSON array").len(), 3);
+                }
+                TerminalExportFormat::Csv => {
+                    assert!(chunked.starts_with("time,port,direction,text\n"));
+                    assert_eq!(chunked.lines().count(), 4);
+                }
+                TerminalExportFormat::Txt => {
+                    assert!(chunked.ends_with('\n'));
+                    assert!(chunked.contains("first,\"row\""));
+                    assert!(chunked.contains("second"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_export_matches_snapshot_without_scanning_future_rows() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+        for (index, payload) in [b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]
+            .into_iter()
+            .enumerate()
+        {
+            bus.publish(
+                Event::with_timestamp(
+                    1_000 + index as u64 * 10,
+                    serial_topics::SERIAL_RX,
+                    "serial:COM1",
+                    Direction::Rx,
+                    Payload::Bytes(payload),
+                )
+                .with_metadata(serde_json::json!({ "port": "COM1" })),
+            );
+        }
+        assert_eq!(panel.ingest_all_pending(), 3);
+
+        for format in [
+            TerminalExportFormat::Txt,
+            TerminalExportFormat::Csv,
+            TerminalExportFormat::Json,
+        ] {
+            let expected = panel.export_job().render(format);
+            let mut cursor = panel.begin_export_cursor();
+            let mut actual = String::new();
+            loop {
+                let (chunk, done, _) = panel.export_cursor_chunk(&mut cursor, format, 1);
+                actual.push_str(&chunk);
+                if done {
+                    break;
+                }
+            }
+            if format == TerminalExportFormat::Json {
+                let actual_json: serde_json::Value =
+                    serde_json::from_str(&actual).expect("cursor JSON export is valid");
+                let expected_json: serde_json::Value =
+                    serde_json::from_str(&expected).expect("snapshot JSON export is valid");
+                assert_eq!(actual_json, expected_json);
+            } else {
+                assert_eq!(actual, expected);
+            }
+        }
+
+        // The cursor is a snapshot boundary: data received after export
+        // starts must not be appended to an already-running download.
+        let mut cursor = panel.begin_export_cursor();
+        bus.publish(
+            Event::new(
+                serial_topics::SERIAL_RX,
+                "serial:COM1",
+                Direction::Rx,
+                Payload::Bytes(b"future".to_vec()),
+            )
+            .with_metadata(serde_json::json!({ "port": "COM1" })),
+        );
+        assert_eq!(panel.ingest_all_pending(), 1);
+        let mut rows = 0;
+        loop {
+            let (_, done, exported) =
+                panel.export_cursor_chunk(&mut cursor, TerminalExportFormat::Txt, 1);
+            rows += exported;
+            if done {
+                break;
+            }
+        }
+        assert_eq!(rows, 3);
     }
 
     /// 新逻辑：按 \n 拆分行，同包内不合并，跨包只合并未完成行。

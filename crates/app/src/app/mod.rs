@@ -4,75 +4,19 @@ use crate::config::{
 use crate::state::{MAX_SEND_HISTORY, NotificationQueue, SendUiState, SerialUiState, UpdateState};
 use eframe::egui;
 use std::collections::VecDeque;
-use tool_application::api::core::{Event, LogLevel};
-use tool_application::api::databus::DataBus;
 use tool_application::{ApplicationConfig, Workbench};
+use tool_core::{Event, LogLevel};
+use tool_databus::DataBus;
+use tool_marketplace::retire_old_plugin_dirs;
 use tool_panels::{
-    DynamicPanels, LogPanel, PanelManager, PluginsPanel, ReplayPanel, TerminalPanel, theme,
+    ChartPanel, DynamicPanels, LogPanel, PanelManager, PluginsPanel, ReplayPanel, TerminalPanel,
+    theme,
 };
+use tool_transport::RepaintWaker;
 
 use crate::bootstrap::{apply_theme, setup_fonts, user_plugins_dir, user_themes_dir};
 use crate::ui::toast::ToastOverlay;
-
-// ── 数据结构 ──
-
-pub(crate) struct WorkbenchApp {
-    pub(crate) workbench: Workbench,
-    pub(crate) panels: PanelManager,
-    pub(crate) terminal_panel: TerminalPanel,
-    pub(crate) dynamic_panels: DynamicPanels,
-    pub(crate) plugins_panel: PluginsPanel,
-    pub(crate) replay_panel: ReplayPanel,
-    pub(crate) bottom_log_panel: LogPanel,
-    pub(crate) serial: SerialUiState,
-    pub(crate) recorder_path: String,
-    pub(crate) notifications: NotificationQueue,
-    pub(crate) toast_overlay: ToastOverlay,
-    pub(crate) recent_workspaces: Vec<String>,
-    pub(crate) send: SendUiState,
-    /// `egui_tiles` 的拖拽、选中和尺寸变更尚未写入配置。
-    pub(crate) layout_dirty: bool,
-    pub(crate) last_auto_save_time: f64,
-    pub(crate) ui_events: tool_application::UiEventSubscriptions,
-    pub(crate) replay_analyzer: crate::replay_task::ReplayAnalyzerState,
-    /// 周期发送后台线程控制状态。
-    pub(crate) periodic_send: crate::runtime::periodic_send::PeriodicSendState,
-    /// 可配置快捷键映射
-    pub(crate) keymap: crate::keymap::Keymap,
-    /// 统一命令注册表（内置 + 插件命令）
-    pub(crate) commands: crate::command_registry::CommandRegistry,
-    /// 统一面板注册表（内置 + 插件动态面板）
-    pub(crate) panel_registry: crate::panel_registry::PanelRegistry,
-    /// 当前帧触发的快捷键命令 ID（handle_keys/命令面板设置，tick 执行）
-    pub(crate) pending_command: Option<String>,
-    /// 快捷键录制状态：点击"录制"后等待用户按键（命令 ID）
-    pub(crate) key_recording: Option<String>,
-    /// 命令面板状态（搜索、选中、使用顺序）
-    pub(crate) command_palette: crate::ui::command_palette::CommandPaletteState,
-    /// 自动更新状态
-    pub(crate) update_state: UpdateState,
-    /// UI contribution 运行时状态（toggle 值、progress 值等）
-    pub(crate) contribution_states: std::collections::HashMap<String, serde_json::Value>,
-    /// 插件 summaries 帧级缓存：每帧首次需要时计算一次，避免 ui_contribution_slot
-    /// 在 top_bar/status_bar/bottom_panel 每帧共 5+ 次重复全量 clone manifest + 命令对账。
-    /// 在 tick_pre_ui 开头 take() 重置。
-    pub(crate) plugin_summaries_cache:
-        std::cell::OnceCell<Vec<tool_application::api::extension::PluginSummary>>,
-    /// 等宽字体大小（终端/日志区），默认 13.0
-    pub(crate) monospace_font_size: f32,
-    /// 当前主题的运行时风格（由已选 JSON 文件推导）。
-    pub(crate) ui_theme: theme::AppTheme,
-    /// 当前主题 JSON 的路径（内置和用户新增主题共用）。
-    pub(crate) theme_path: Option<std::path::PathBuf>,
-    /// 主题 JSON 文件目录。
-    pub(crate) theme_dir: std::path::PathBuf,
-    /// 网络请求的可选自定义代理；为空时交给系统/环境代理处理。
-    pub(crate) network_proxy_url: String,
-    /// 市场索引 URL（None 表示用默认）。
-    pub(crate) marketplace: crate::runtime::marketplace::MarketplaceState,
-    /// 固定窗口的帧、吞吐和后台积压诊断。
-    pub(crate) perf: crate::perf::PerfDiagnostics,
-}
+pub(crate) use crate::workbench_app::WorkbenchApp;
 
 pub(crate) struct ReplayAnalyzerJob {
     pub(crate) generation: u64,
@@ -123,12 +67,11 @@ impl WorkbenchApp {
         let bus = DataBus::new();
         // waker 注入需在 Workbench 创建前准备好闭包，创建后立即注入
         let ctx_strong = cc.egui_ctx.clone();
-        let waker: std::sync::Arc<dyn tool_application::api::transport::RepaintWaker> =
-            std::sync::Arc::new(move || {
-                if !ctx_strong.has_requested_repaint() {
-                    ctx_strong.request_repaint();
-                }
-            });
+        let waker: std::sync::Arc<dyn RepaintWaker> = std::sync::Arc::new(move || {
+            if !ctx_strong.has_requested_repaint() {
+                ctx_strong.request_repaint();
+            }
+        });
         let config_result = load_config();
         let (config, config_migrated, config_write_protected): (
             Option<PersistedConfig>,
@@ -238,7 +181,7 @@ impl WorkbenchApp {
             let mut w = Workbench::new(bus.clone());
             w.set_transport_repaint_waker(waker);
             let plugin_dir = user_plugins_dir();
-            tool_application::api::marketplace::retire_old_plugin_dirs(&plugin_dir);
+            retire_old_plugin_dirs(&plugin_dir);
             if let Some(cfg) = config.as_ref() {
                 let ac = ApplicationConfig {
                     selected_port: cfg.selected_port.clone(),
@@ -269,9 +212,10 @@ impl WorkbenchApp {
         let mut app = Self {
             workbench,
             terminal_panel: TerminalPanel::new(&bus),
+            chart_panel: ChartPanel::new(&bus),
             dynamic_panels: DynamicPanels::new(&bus),
             plugins_panel: PluginsPanel::new(),
-            replay_panel: ReplayPanel::new(&bus),
+            replay_panel: ReplayPanel::new(),
             bottom_log_panel: LogPanel::new(&bus),
             serial: SerialUiState {
                 ports: Vec::new(),
@@ -358,6 +302,7 @@ impl WorkbenchApp {
                 .unwrap_or_default(),
             marketplace: Default::default(),
             perf: crate::perf::PerfDiagnostics::default(),
+            native_export: None,
         };
         // 从配置恢复等宽字体大小
         app.terminal_panel.font_size = app.monospace_font_size;
@@ -394,7 +339,7 @@ impl WorkbenchApp {
     /// 注意：返回的是 `&[PluginSummary]` 借用，调用方不能在此引用存活期间
     /// 再 `&mut self`。需要 `&mut self` 的逻辑应先把需要的字段 clone 出来
     /// 或在循环外处理。
-    pub(crate) fn plugin_summaries(&self) -> &[tool_application::api::extension::PluginSummary] {
+    pub(crate) fn plugin_summaries(&self) -> &[tool_application::query::PluginSummaryView] {
         self.plugin_summaries_cache
             .get_or_init(|| self.workbench.query_plugins().summaries)
     }
@@ -406,7 +351,9 @@ impl Drop for WorkbenchApp {
         if let Err(e) = self.save_config() {
             log::warn!("save_config failed: {e}")
         };
-        self.workbench.stop_recording();
+        let _ = self
+            .workbench
+            .dispatch(tool_application::AppCommand::StopRecording);
         self.workbench.shutdown_serial();
     }
 }

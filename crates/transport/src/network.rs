@@ -154,9 +154,23 @@ fn network_worker_loop(
         .set_read_timeout(Some(Duration::from_millis(100)));
 
     // 自我标识（Moonraker 系服务器允许客户端 announce，失败不影响功能）。
-    let _ = ws.send(Message::text(
-        r#"{"jsonrpc":"2.0","method":"server.connection.identify","params":{"client_name":"Hardware Workbench","version":"1.0.0","type":"desktop"},"id":1}"#,
-    ));
+    // API key 由旧版 Native UI 已经允许配置，必须和 Web capability 使用
+    // 同一字段，否则两个 composition root 的认证行为会不一致。
+    let mut identify_params = serde_json::json!({
+        "client_name": "Hardware Workbench",
+        "version": "1.0.0",
+        "type": "desktop",
+    });
+    if let Some(api_key) = &config.api_key {
+        identify_params["access_token"] = serde_json::Value::String(api_key.clone());
+    }
+    let identify = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "server.connection.identify",
+        "params": identify_params,
+        "id": 1,
+    });
+    let _ = ws.send(Message::text(identify.to_string()));
 
     let mut next_id: u64 = 2;
     while !stop.load(Ordering::Acquire) {

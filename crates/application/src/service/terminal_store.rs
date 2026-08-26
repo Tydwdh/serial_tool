@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::ops::Bound;
 
 use tool_core::{Direction, Event};
 
@@ -207,6 +208,16 @@ impl TerminalStore {
 
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &TerminalItem> {
         self.items.values()
+    }
+
+    /// Iterate items strictly after a stable terminal id.  Presentation
+    /// export cursors use this to scan a large store over multiple UI ticks
+    /// without rebuilding or rescanning the already exported prefix.
+    pub fn iter_after(&self, id: Option<u64>) -> impl Iterator<Item = &TerminalItem> {
+        let lower = id.map_or(Bound::Unbounded, Bound::Excluded);
+        self.items
+            .range((lower, Bound::Unbounded))
+            .map(|(_, item)| item)
     }
 
     pub fn port_names(&self) -> Vec<String> {

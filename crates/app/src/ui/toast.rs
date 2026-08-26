@@ -43,7 +43,7 @@ impl ToastOverlay {
 
         let dt = ctx.input(|input| input.stable_dt).min(0.1);
         let focused = ctx.input(|input| input.viewport().focused.unwrap_or(true));
-        let now_ms = tool_application::api::core::now_timestamp_ms();
+        let now_ms = tool_core::now_timestamp_ms();
         let mut y = VIEW_MARGIN;
         let mut needs_repaint = false;
 
@@ -103,7 +103,7 @@ impl ToastOverlay {
             self.last_notification_id = notification.id;
             let deadline_ms = notification.deadline_ms;
             let lifetime_ms = notification.level.ttl_ms();
-            let now_ms = tool_application::api::core::now_timestamp_ms();
+            let now_ms = tool_core::now_timestamp_ms();
 
             // 同样的通知重复到达时，只刷新原卡片及倒计时，避免连续错误堆叠。
             if let Some(toast) =

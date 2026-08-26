@@ -27,6 +27,7 @@ tool-platform = { path = "../platform" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 open.workspace = true
+tool-marketplace = { path = "../marketplace" }
 
 [dev-dependencies]
 egui_kittest = "0.35"

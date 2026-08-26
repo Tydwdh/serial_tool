@@ -10,10 +10,12 @@ use egui_material_icons::icons::{
     ICON_SEARCH, ICON_SHOPPING_CART, ICON_TOGGLE_OFF, ICON_TOGGLE_ON,
 };
 use std::collections::{BTreeSet, HashMap};
-use tool_application::api::extension::{
-    PluginDiagnostic, PluginDiagnosticSeverity, PluginState, PluginSummary,
+use tool_application::marketplace::{MarketplacePluginView, MarketplaceView};
+use tool_application::plugin::{
+    PluginDiagnosticSeverityView, PluginDiagnosticView, PluginStateView, PluginSummaryView,
 };
-use tool_application::api::marketplace::{Registry, RegistryPlugin};
+#[cfg(not(target_arch = "wasm32"))]
+use tool_marketplace::{Registry, RegistryPlugin};
 
 const TWO_COLUMN_PLUGIN_WIDTH: f32 = 980.0;
 const TWO_COLUMN_CARD_GAP: f32 = 10.0;
@@ -47,7 +49,9 @@ pub enum PluginPanelEvent {
 /// 由 app 在后台任务完成后通过 setter 回填，panels 自身只负责渲染。
 #[derive(Default)]
 pub struct MarketplaceState {
-    pub registry: Option<Registry>,
+    pub registry: Option<MarketplaceView>,
+    #[cfg(not(target_arch = "wasm32"))]
+    native_registry: Option<Registry>,
     pub refreshing: bool,
     pub error: Option<String>,
     /// 最近一次成功刷新实际使用的网络路径。
@@ -77,7 +81,11 @@ impl PluginsPanel {
             pending_restart: Vec::new(),
             pending_uninstall: None,
             tab: PluginTab::Installed,
-            market: MarketplaceState::default(),
+            market: MarketplaceState {
+                #[cfg(not(target_arch = "wasm32"))]
+                native_registry: None,
+                ..MarketplaceState::default()
+            },
             market_search: String::new(),
             market_category: None,
         }
@@ -85,11 +93,33 @@ impl PluginsPanel {
 
     // ── 市场 UI 状态 setter（供 app 回填） ──
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_market_registry(&mut self, reg: Registry, network_diagnostics: String) {
-        self.market.registry = Some(reg);
+        self.market.registry = Some(reg.clone().into());
+        self.market.native_registry = Some(reg);
         self.market.refreshing = false;
         self.market.error = None;
         self.market.network_diagnostics = Some(network_diagnostics);
+    }
+
+    /// Browser runtimes provide the already-normalized registry view because
+    /// they cannot construct the native filesystem/download model.
+    pub fn set_market_registry_view(
+        &mut self,
+        registry: MarketplaceView,
+        network_diagnostics: String,
+    ) {
+        self.market.registry = Some(registry);
+        self.market.refreshing = false;
+        self.market.error = None;
+        self.market.network_diagnostics = Some(network_diagnostics);
+    }
+
+    pub fn clear_market_registry(&mut self) {
+        self.market.registry = None;
+        self.market.error = None;
+        self.market.refreshing = false;
+        self.market.installing.clear();
     }
 
     pub fn set_market_error(&mut self, msg: String) {
@@ -124,9 +154,10 @@ impl PluginsPanel {
     }
 
     /// 查找市场 registry 中某 id 的插件条目（clone 返回），供 app 安装时使用。
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn find_market_plugin(&self, id: &str) -> Option<RegistryPlugin> {
         self.market
-            .registry
+            .native_registry
             .as_ref()
             .and_then(|r| r.plugins.iter().find(|p| p.id == id).cloned())
     }
@@ -139,8 +170,8 @@ impl PluginsPanel {
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
-        summaries: &[PluginSummary],
-        diagnostics: &[PluginDiagnostic],
+        summaries: &[PluginSummaryView],
+        diagnostics: &[PluginDiagnosticView],
     ) -> Vec<PluginPanelEvent> {
         self.ui_with_view(ui, summaries, diagnostics)
     }
@@ -149,8 +180,8 @@ impl PluginsPanel {
     pub fn ui_with_view(
         &mut self,
         ui: &mut egui::Ui,
-        summaries: &[PluginSummary],
-        diagnostics: &[PluginDiagnostic],
+        summaries: &[PluginSummaryView],
+        diagnostics: &[PluginDiagnosticView],
     ) -> Vec<PluginPanelEvent> {
         let mut events = Vec::new();
 
@@ -216,8 +247,8 @@ impl PluginsPanel {
     fn installed_tab_inner(
         &mut self,
         ui: &mut egui::Ui,
-        summaries: &[PluginSummary],
-        diagnostics: &[PluginDiagnostic],
+        summaries: &[PluginSummaryView],
+        diagnostics: &[PluginDiagnosticView],
     ) -> Option<PluginPanelEvent> {
         // ── 管理 ──
         let toolbar_status = design::card()
@@ -235,7 +266,10 @@ impl PluginsPanel {
                     if design::button(ui, ICON_FOLDER_OPEN, "打开目录", ButtonKind::Secondary)
                         .clicked()
                     {
+                        #[cfg(not(target_arch = "wasm32"))]
                         let _ = open::that(&self.root);
+                        #[cfg(target_arch = "wasm32")]
+                        ui.label("浏览器没有本地插件目录");
                     }
                     None
                 })
@@ -254,11 +288,11 @@ impl PluginsPanel {
         if !summaries.is_empty() {
             let running = summaries
                 .iter()
-                .filter(|summary| matches!(summary.state, PluginState::Running))
+                .filter(|summary| matches!(summary.state, PluginStateView::Running))
                 .count();
             let failed = summaries
                 .iter()
-                .filter(|summary| matches!(summary.state, PluginState::Failed))
+                .filter(|summary| matches!(summary.state, PluginStateView::Failed))
                 .count();
             let inactive = summaries.len().saturating_sub(running + failed);
             ui.add_space(8.0);
@@ -461,7 +495,7 @@ impl PluginsPanel {
         }
 
         let query = crate::search::SearchQuery::new(&self.market_search, false);
-        let visible_plugins: Vec<&RegistryPlugin> = reg
+        let visible_plugins: Vec<&MarketplacePluginView> = reg
             .plugins
             .iter()
             .filter(|plugin| {
@@ -530,7 +564,7 @@ impl PluginsPanel {
     fn market_plugin_row(
         &mut self,
         ui: &mut egui::Ui,
-        plugin: &RegistryPlugin,
+        plugin: &MarketplacePluginView,
         events: &mut Vec<PluginPanelEvent>,
     ) {
         let is_installed = self.market.installed_ids.contains(&plugin.id);
@@ -612,7 +646,7 @@ impl PluginsPanel {
     fn plugin_row(
         &mut self,
         ui: &mut egui::Ui,
-        summary: &PluginSummary,
+        summary: &PluginSummaryView,
     ) -> Option<PluginPanelEvent> {
         design::card()
             .show(ui, |ui| {
@@ -665,7 +699,7 @@ impl PluginsPanel {
                 // 会把“路径”标签和路径控件挤成两行。
                 ui.horizontal(|ui| {
                     ui.label("路径");
-                    let full_path = summary.path.display().to_string();
+                    let full_path = summary.path.clone();
                     let available_width = ui.available_width().max(1.0);
                     let display_path =
                         crate::compact_middle(&full_path, plugin_path_char_limit(available_width));
@@ -699,7 +733,7 @@ impl PluginsPanel {
                 let registered = &summary.registered_commands;
                 let missing = &summary.missing_commands;
                 let undeclared = &summary.undeclared_commands;
-                let is_running = matches!(summary.state, PluginState::Running);
+                let is_running = matches!(summary.state, PluginStateView::Running);
 
                 if !declared.is_empty() || !registered.is_empty() {
                     ui.horizontal_wrapped(|ui| {
@@ -742,8 +776,10 @@ impl PluginsPanel {
                     // 否则显示「启用」并执行启用。
                     // 注意：Finished/Failed 视为未启用 —— disable() 对这两个状态是 no-op
                     // （运行时早已移除），因此把它们归入「启用」分支，保留直接重新启用的入口。
-                    let is_active =
-                        matches!(summary.state, PluginState::Running | PluginState::Enabled);
+                    let is_active = matches!(
+                        summary.state,
+                        PluginStateView::Running | PluginStateView::Enabled
+                    );
                     if is_active {
                         if design::button(ui, ICON_TOGGLE_OFF, "禁用", ButtonKind::Secondary)
                             .clicked()
@@ -758,7 +794,7 @@ impl PluginsPanel {
                     // 重启语义：Running/Enabled 先 disable 再 enable（走 pending_restart 队列等线程退出）；
                     // Disabled/Finished/Failed 已无运行时，直接 enable 即可重新拉起。
                     // 因此「重启」对所有非 Discovered 状态都可点。
-                    let can_restart = !matches!(summary.state, PluginState::Discovered);
+                    let can_restart = !matches!(summary.state, PluginStateView::Discovered);
                     if ui
                         .add_enabled_ui(can_restart, |ui| {
                             design::button(ui, ICON_RESTART_ALT, "重启", ButtonKind::Ghost)
@@ -807,13 +843,13 @@ impl Default for PluginsPanel {
     }
 }
 
-fn state_color(state: PluginState) -> Color32 {
+fn state_color(state: PluginStateView) -> Color32 {
     match state {
-        PluginState::Discovered => theme::text_secondary(),
-        PluginState::Enabled | PluginState::Finished => theme::green(),
-        PluginState::Running => theme::blue(),
-        PluginState::Failed => theme::red(),
-        PluginState::Disabled => theme::yellow(),
+        PluginStateView::Discovered => theme::text_secondary(),
+        PluginStateView::Enabled | PluginStateView::Finished => theme::green(),
+        PluginStateView::Running => theme::blue(),
+        PluginStateView::Failed => theme::red(),
+        PluginStateView::Disabled => theme::yellow(),
     }
 }
 
@@ -825,27 +861,27 @@ fn plugin_path_char_limit(available_width: f32) -> usize {
     (available_width / 8.5).floor().max(12.0) as usize
 }
 
-fn state_label(state: PluginState) -> &'static str {
+fn state_label(state: PluginStateView) -> &'static str {
     match state {
-        PluginState::Discovered => "已发现",
-        PluginState::Enabled => "已启用",
-        PluginState::Running => "运行中",
-        PluginState::Finished => "已结束",
-        PluginState::Failed => "运行失败",
-        PluginState::Disabled => "已禁用",
+        PluginStateView::Discovered => "已发现",
+        PluginStateView::Enabled => "已启用",
+        PluginStateView::Running => "运行中",
+        PluginStateView::Finished => "已结束",
+        PluginStateView::Failed => "运行失败",
+        PluginStateView::Disabled => "已禁用",
     }
 }
 
-fn diagnostic_row(ui: &mut egui::Ui, diagnostic: &PluginDiagnostic) {
+fn diagnostic_row(ui: &mut egui::Ui, diagnostic: &PluginDiagnosticView) {
     let color = match diagnostic.severity {
-        PluginDiagnosticSeverity::Warning => theme::yellow(),
-        PluginDiagnosticSeverity::Error => theme::red(),
+        PluginDiagnosticSeverityView::Warning => theme::yellow(),
+        PluginDiagnosticSeverityView::Error => theme::red(),
     };
 
     ui.horizontal_wrapped(|ui| {
         let severity = match diagnostic.severity {
-            PluginDiagnosticSeverity::Warning => "警告",
-            PluginDiagnosticSeverity::Error => "错误",
+            PluginDiagnosticSeverityView::Warning => "警告",
+            PluginDiagnosticSeverityView::Error => "错误",
         };
         design::badge(ui, severity, color);
         ui.label(
@@ -865,24 +901,26 @@ fn diagnostic_row(ui: &mut egui::Ui, diagnostic: &PluginDiagnostic) {
     ui.horizontal_wrapped(|ui| {
         ui.label("路径");
         ui.label(
-            egui::RichText::new(diagnostic.path.display().to_string())
+            egui::RichText::new(&diagnostic.path)
                 .monospace()
                 .color(theme::text_primary()),
         );
         if design::button(ui, ICON_CONTENT_COPY, "复制", ButtonKind::Ghost).clicked() {
-            copy_text_with_feedback(
-                ui,
-                diagnostic.path.display().to_string(),
-                "已复制插件诊断路径",
-            );
+            copy_text_with_feedback(ui, diagnostic.path.clone(), "已复制插件诊断路径");
         }
         if design::button(ui, ICON_OPEN_IN_NEW, "打开位置", ButtonKind::Ghost).clicked() {
-            let target = if diagnostic.path.is_file() {
-                diagnostic.path.parent().unwrap_or(&diagnostic.path)
-            } else {
-                &diagnostic.path
-            };
-            let _ = open::that(target);
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let path = std::path::Path::new(&diagnostic.path);
+                let target = if path.is_file() {
+                    path.parent().unwrap_or(path)
+                } else {
+                    path
+                };
+                let _ = open::that(target);
+            }
+            #[cfg(target_arch = "wasm32")]
+            ui.label("浏览器无法打开本地路径");
         }
     });
 }
@@ -894,12 +932,12 @@ mod tests {
     #[test]
     fn every_plugin_state_has_a_localized_label() {
         for state in [
-            PluginState::Discovered,
-            PluginState::Enabled,
-            PluginState::Running,
-            PluginState::Finished,
-            PluginState::Failed,
-            PluginState::Disabled,
+            PluginStateView::Discovered,
+            PluginStateView::Enabled,
+            PluginStateView::Running,
+            PluginStateView::Finished,
+            PluginStateView::Failed,
+            PluginStateView::Disabled,
         ] {
             assert!(!state_label(state).is_empty());
             assert!(!state_label(state).is_ascii());

@@ -1,0 +1,19 @@
+[package]
+name = "tool-plugin-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Platform-neutral plugin protocol and Lua engine boundary"
+
+[lib]
+name = "tool_plugin_api"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tool-platform = { path = "../platform" }

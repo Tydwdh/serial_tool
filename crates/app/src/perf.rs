@@ -74,7 +74,7 @@ pub(crate) struct PerfDiagnostics {
     chart_render: DurationSamples,
     last_terminal_ingest_events: u64,
     last_log_ingest_events: u64,
-    last_bus: Option<(Instant, tool_application::api::databus::DataBusPerfSnapshot)>,
+    last_bus: Option<(Instant, tool_databus::DataBusPerfSnapshot)>,
     last_report: Option<PerfReport>,
     last_log_at: Option<Instant>,
 }

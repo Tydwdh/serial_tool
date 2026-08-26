@@ -1,42 +1,23 @@
 use crate::app::WorkbenchApp;
 use crate::bootstrap::apply_theme;
 use crate::config::{config_path, default_recorder_path};
+use crate::shared_settings::{SETTINGS_NAV_ITEMS, settings_nav_button};
 use crate::state::StatusLevel;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use egui_material_icons::icons::{
-    ICON_APPS, ICON_CONTENT_COPY, ICON_DATA_USAGE, ICON_FOLDER, ICON_FOLDER_OPEN, ICON_INFO,
-    ICON_KEYBOARD, ICON_NETWORK_CHECK, ICON_PALETTE, ICON_RESTART_ALT, ICON_SETTINGS, ICON_TUNE,
+    ICON_APPS, ICON_CONTENT_COPY, ICON_FOLDER, ICON_FOLDER_OPEN, ICON_INFO, ICON_KEYBOARD,
+    ICON_NETWORK_CHECK, ICON_PALETTE, ICON_RESTART_ALT, ICON_TUNE,
 };
 use std::path::{Path, PathBuf};
 use tool_panels::{
-    DynamicField, copy_text_with_feedback,
+    DataSettingsView, DynamicField, copy_text_with_feedback, data_settings_ui,
     design::{self, ButtonKind},
     dynamic_form_ui, parse_fields, theme,
 };
 
-const SETTINGS_NAV_BUTTON_SIZE: egui::Vec2 = egui::vec2(136.0, 32.0);
 const CONFIG_LOCATION_LABEL_WIDTH: f32 = 96.0;
 const REPOSITORY_URL: &str = env!("CARGO_PKG_REPOSITORY");
-const SETTINGS_NAV_ITEMS: [(usize, egui_material_icons::MaterialIcon, &str); 5] = [
-    (0, ICON_SETTINGS, "常规"),
-    (1, ICON_DATA_USAGE, "连接与数据"),
-    (2, ICON_KEYBOARD, "快捷键"),
-    (3, ICON_APPS, "插件设置"),
-    (4, ICON_INFO, "关于与重置"),
-];
-
-fn settings_nav_button(
-    ui: &mut egui::Ui,
-    selected: bool,
-    icon: egui_material_icons::MaterialIcon,
-    label: &str,
-) -> egui::Response {
-    ui.add_sized(
-        SETTINGS_NAV_BUTTON_SIZE,
-        egui::Button::selectable(selected, design::icon_text(icon, label)).corner_radius(7.0),
-    )
-}
 
 impl WorkbenchApp {
     pub(crate) fn settings_panel(&mut self, ui: &mut egui::Ui) {
@@ -268,66 +249,22 @@ impl WorkbenchApp {
                 ui.set_min_width(ui.available_width());
                 design::section_header(ui, ICON_TUNE, "数据");
                 ui.separator();
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("终端空闲结束阈值");
-                    let mut ms = self.terminal_panel.merge_window_ms;
-                    let resp = ui.add(
-                        egui::Slider::new(&mut ms, 0..=100)
-                            .step_by(5.0)
-                            .suffix("ms"),
-                    );
-                    if resp.changed() {
-                        self.terminal_panel.merge_window_ms = ms;
-                        if let Err(e) = self.save_config() {
-                            log::warn!("save_config failed: {e}")
-                        };
+                let (changed, terminal_max_entries, log_max_entries) = {
+                    let mut view = DataSettingsView {
+                        merge_window_ms: &mut self.terminal_panel.merge_window_ms,
+                        terminal_max_entries: &mut self.terminal_panel.max_entries,
+                        log_max_entries: &mut self.bottom_log_panel.max_entries,
+                    };
+                    let changed = data_settings_ui(ui, &mut view);
+                    (changed, *view.terminal_max_entries, *view.log_max_entries)
+                };
+                if changed {
+                    self.terminal_panel.set_max_entries(terminal_max_entries);
+                    self.bottom_log_panel.set_max_entries(log_max_entries);
+                    if let Err(error) = self.save_config() {
+                        log::warn!("save_config failed: {error}");
                     }
-                })
-                .response
-                .on_hover_text(
-                    "当前展示块超过此毫秒没有新数据就暂时封存；换行和 4KiB 展示分段会直接封存。\
-                     这只是展示边界，不代表协议帧；高速流可适当调大以减少视觉碎片。",
-                );
-                ui.add_space(4.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("终端保留条数");
-                    let mut n = self.terminal_panel.max_entries.clamp(500, 200_000);
-                    let drag_changed = ui
-                        .add(egui::DragValue::new(&mut n).range(500..=200_000).speed(500))
-                        .changed();
-                    let slider_changed = ui
-                        .add(egui::Slider::new(&mut n, 500..=200_000).step_by(500.0))
-                        .changed();
-                    if drag_changed || slider_changed {
-                        self.terminal_panel.set_max_entries(n);
-                        if let Err(e) = self.save_config() {
-                            log::warn!("save_config failed: {e}")
-                        };
-                    }
-                })
-                .response
-                .on_hover_text(
-                    "接收区保留的最近条数上限，超出后丢弃最旧条目。可拖拽滑块或直接输入数字。",
-                );
-                ui.add_space(4.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("日志保留条数");
-                    let mut n = self.bottom_log_panel.max_entries.clamp(500, 200_000);
-                    let drag_changed = ui
-                        .add(egui::DragValue::new(&mut n).range(500..=200_000).speed(500))
-                        .changed();
-                    let slider_changed = ui
-                        .add(egui::Slider::new(&mut n, 500..=200_000).step_by(500.0))
-                        .changed();
-                    if drag_changed || slider_changed {
-                        self.bottom_log_panel.set_max_entries(n);
-                        if let Err(e) = self.save_config() {
-                            log::warn!("save_config failed: {e}")
-                        };
-                    }
-                })
-                .response
-                .on_hover_text("日志面板保留的最近条数上限。可拖拽滑块或直接输入数字。");
+                }
             });
         }
 
@@ -410,7 +347,12 @@ impl WorkbenchApp {
         let workspace_config = config_path();
         let plugin_config_dir = self.workbench.plugin_config_root();
 
-        self.render_config_location_row(ui, "工作区配置", &workspace_config, false);
+        self.render_config_location_row(
+            ui,
+            "工作区配置",
+            &workspace_config.display().to_string(),
+            false,
+        );
         self.render_config_location_row(ui, "插件配置", &plugin_config_dir, true);
     }
 
@@ -418,10 +360,10 @@ impl WorkbenchApp {
         &mut self,
         ui: &mut egui::Ui,
         label: &str,
-        path: &Path,
+        path: &str,
         open_self: bool,
     ) {
-        let path_text = path.display().to_string();
+        let path_text = path.to_owned();
         ui.horizontal(|ui| {
             // 固定标签列并关闭自动换行，保证两条路径的起点和右侧操作列对齐。
             ui.add_sized(
@@ -452,7 +394,7 @@ impl WorkbenchApp {
                 copy_text_with_feedback(ui, path_text.clone(), format!("已复制{label}路径"));
             }
             if design::icon_button(ui, ICON_FOLDER_OPEN, "打开所在目录").clicked() {
-                match open_config_location(path, open_self) {
+                match open_config_location(Path::new(&path_text), open_self) {
                     Ok(target) => self.set_status_force(
                         StatusLevel::Info,
                         format!("已打开: {}", target.display()),
@@ -559,19 +501,25 @@ impl WorkbenchApp {
             return;
         }
         for (plugin_id, plugin_name, settings) in &plugin_settings {
-            // 从 ConfigStore 读取当前值，构建 DynamicField 列表
-            let config_store = self.workbench.plugin_config_store();
+            // 通过 Application 读取设置；面板不直接持有平台配置存储。
             let mut fields: Vec<DynamicField>;
             let mut fields_json = Vec::with_capacity(settings.len());
 
             for setting in settings {
-                let current_value =
-                    config_store.get(plugin_id, &setting.id, setting.default.clone());
+                let current_value = self.workbench.plugin_setting_value(
+                    plugin_id,
+                    &setting.id,
+                    setting.default.clone(),
+                );
                 // 首次写入默认值
                 if current_value == setting.default {
-                    let keys = config_store.keys(plugin_id);
+                    let keys = self.workbench.plugin_setting_keys(plugin_id);
                     if !keys.contains(&setting.id) {
-                        let _ = config_store.set(plugin_id, &setting.id, setting.default.clone());
+                        let _ = self.workbench.set_plugin_setting(
+                            plugin_id,
+                            &setting.id,
+                            setting.default.clone(),
+                        );
                     }
                 }
 
@@ -679,10 +627,18 @@ mod tests {
         assert_eq!(first_row.len(), second_row.len());
         for (before, after) in first_row.iter().zip(&second_row) {
             assert!((before.left() - after.left()).abs() < 0.1);
-            assert!((before.width() - SETTINGS_NAV_BUTTON_SIZE.x).abs() < 0.1);
-            assert!((after.width() - SETTINGS_NAV_BUTTON_SIZE.x).abs() < 0.1);
-            assert!((before.height() - SETTINGS_NAV_BUTTON_SIZE.y).abs() < 0.1);
-            assert!((after.height() - SETTINGS_NAV_BUTTON_SIZE.y).abs() < 0.1);
+            assert!(
+                (before.width() - crate::shared_settings::SETTINGS_NAV_BUTTON_SIZE.x).abs() < 0.1
+            );
+            assert!(
+                (after.width() - crate::shared_settings::SETTINGS_NAV_BUTTON_SIZE.x).abs() < 0.1
+            );
+            assert!(
+                (before.height() - crate::shared_settings::SETTINGS_NAV_BUTTON_SIZE.y).abs() < 0.1
+            );
+            assert!(
+                (after.height() - crate::shared_settings::SETTINGS_NAV_BUTTON_SIZE.y).abs() < 0.1
+            );
         }
     }
 }

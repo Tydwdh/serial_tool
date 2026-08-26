@@ -209,6 +209,28 @@ pub(crate) fn create_serial_api(
         })?,
     )?;
 
+    let transport_for_devices = transport.clone();
+    table.set(
+        "devices",
+        lua.create_function(move |lua, ()| {
+            let devices = transport_for_devices
+                .list_serial_ports()
+                .map_err(mlua::Error::external)?
+                .into_iter()
+                .map(|port| {
+                    let id = port.port_name;
+                    json!({
+                        "id": id.clone(),
+                        "label": id,
+                        "kind": "serial",
+                        "authorized": true,
+                    })
+                })
+                .collect::<Vec<_>>();
+            json_to_lua_value(lua, &serde_json::Value::Array(devices))
+        })?,
+    )?;
+
     let transport_for_open = transport.clone();
     // 记录本插件通过 ctx.serial.open 打开的端口，供 close() 只关闭自己打开的端口。
     let opened_by_plugin: std::sync::Arc<std::sync::Mutex<Vec<String>>> =

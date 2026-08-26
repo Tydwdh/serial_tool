@@ -20,6 +20,7 @@ pub mod config;
 pub mod convert;
 pub mod globals;
 pub mod host_services;
+mod mlua_engine;
 pub mod replay;
 pub(crate) use crate::api::bus::create_bus_api;
 pub(crate) use crate::api::commands::create_commands_api;
@@ -42,6 +43,7 @@ use crate::globals::{
 };
 use crate::host_services::line_buffer_key;
 pub use config::ConfigStore;
+pub use mlua_engine::MluaEngine;
 pub use replay::{run_replay_analyzer, run_replay_analyzer_with_cancel};
 use tool_transport::{TransportManager, serial_topics};
 

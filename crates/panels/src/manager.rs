@@ -25,9 +25,10 @@ pub const PANEL_SETTINGS: &str = "settings";
 pub const PANEL_TERMINAL: &str = "terminal";
 pub const PANEL_SENDER: &str = "sender";
 pub const PANEL_LOGS: &str = "logs";
+pub const PANEL_CHART: &str = "chart";
 
 /// 内置面板 ID 全集（顺序即默认布局顺序）。
-pub const PANEL_BUILTIN: [&str; 7] = [
+pub const PANEL_BUILTIN: [&str; 8] = [
     PANEL_DEVICES,
     PANEL_REPLAY,
     PANEL_PLUGINS,
@@ -35,6 +36,7 @@ pub const PANEL_BUILTIN: [&str; 7] = [
     PANEL_TERMINAL,
     PANEL_SENDER,
     PANEL_LOGS,
+    PANEL_CHART,
 ];
 
 /// 动态面板 ID 前缀，与内置面板 id 空间隔离。
@@ -345,16 +347,18 @@ impl TilesLayout {
     ///
     /// 该布局来自用户当前工作区：主标签区与发送器上下排列，接收区和日志
     /// 放在右侧。这里只固化面板树，不包含串口、主题、历史记录等个人配置。
+    /// Native/Web 都从这里开始，再由各自的 capability 过滤不可用面板。
     pub fn current_default() -> Self {
         let mut tiles = Tiles::default();
 
-        let center_panes = Self::pane_ids(
+        let center_panes = TilesLayout::pane_ids(
             &mut tiles,
             &[
                 PanelId::builtin(PANEL_SETTINGS),
                 PanelId::builtin(PANEL_DEVICES),
                 PanelId::builtin(PANEL_REPLAY),
                 PanelId::builtin(PANEL_PLUGINS),
+                PanelId::builtin(PANEL_CHART),
             ],
         );
         let sender_pane = Self::pane_ids(&mut tiles, &[PanelId::builtin(PANEL_SENDER)]);
@@ -369,25 +373,35 @@ impl TilesLayout {
         let main_tabs = tiles.insert_tab_tile(center_panes);
         let bottom_tabs = tiles.insert_tab_tile(sender_pane);
         let right_tabs = tiles.insert_tab_tile(side_panes);
-        let settings_pane = tiles
-            .find_pane(&PanelId::builtin(PANEL_SETTINGS))
-            .expect("default settings pane");
+        let devices_pane = tiles
+            .find_pane(&PanelId::builtin(PANEL_DEVICES))
+            .expect("default devices pane");
         let terminal_pane = tiles
             .find_pane(&PanelId::builtin(PANEL_TERMINAL))
             .expect("default terminal pane");
 
         if let Some(Tile::Container(Container::Tabs(tabs))) = tiles.get_mut(main_tabs) {
-            tabs.set_active(settings_pane);
+            tabs.set_active(devices_pane);
         }
         if let Some(Tile::Container(Container::Tabs(tabs))) = tiles.get_mut(right_tabs) {
             tabs.set_active(terminal_pane);
         }
 
-        let main_column = tiles.insert_vertical_tile(vec![main_tabs, bottom_tabs]);
+        // Match the current desktop workspace: the device/replay area keeps
+        // a little more height than the sender, so the shared Native/Web
+        // default does not make the sender consume half the window.
+        let mut main_linear = Linear::new(LinearDir::Vertical, vec![main_tabs, bottom_tabs]);
+        main_linear.shares.set_share(main_tabs, 0.56);
+        main_linear.shares.set_share(bottom_tabs, 0.44);
+        let main_column = tiles.insert_container(main_linear);
         let mut root_linear = Linear::new(LinearDir::Horizontal, vec![main_column, right_tabs]);
         // 与当前工作区保存的左右区域比例保持一致。
-        root_linear.shares.set_share(main_column, 0.45367718);
-        root_linear.shares.set_share(right_tabs, 0.66292167);
+        // Match the current desktop workspace: the receive/log column is
+        // roughly two thirds of the window, while the device/sender column
+        // stays at one third. Shares are relative, so keep them normalized
+        // here instead of carrying the old 40/60 ratio into Web.
+        root_linear.shares.set_share(main_column, 0.34);
+        root_linear.shares.set_share(right_tabs, 0.66);
         let root = tiles.insert_container(root_linear);
         let tree = Tree::new("hardware-workbench-layout", root, tiles);
 

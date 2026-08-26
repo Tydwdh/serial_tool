@@ -2,7 +2,7 @@ use crate::app::WorkbenchApp;
 use eframe::egui;
 use serde_json::json;
 use std::path::PathBuf;
-use tool_application::api::extension::PluginState;
+use tool_application::query::{PluginStateView, PluginSummaryView};
 use tool_panels::theme;
 
 #[derive(Clone)]
@@ -51,11 +51,14 @@ impl WorkbenchApp {
 
         // 帧级缓存：summaries() 全量 clone manifest + 命令对账，每帧被 5+ slot 调用，
         // 缓存到 OnceCell，同帧只算一次。tick_pre_ui 开头已重置。
-        let summaries: &[tool_application::api::extension::PluginSummary] = self.plugin_summaries();
+        let summaries: &[PluginSummaryView] = self.plugin_summaries();
 
         for summary in summaries {
             // 注意：遍历缓存（不可变借用 summaries），后续需要 &mut self 的调用必须延后到循环外。
-            if !matches!(summary.state, PluginState::Enabled | PluginState::Running) {
+            if !matches!(
+                summary.state,
+                PluginStateView::Enabled | PluginStateView::Running
+            ) {
                 continue;
             }
 
@@ -263,7 +266,10 @@ impl WorkbenchApp {
 
         let path = PathBuf::from(input.trim_matches('"'));
         if path.is_file() {
-            self.workbench.authorize_plugin_file(&item.plugin_id, path);
+            self.workbench.authorize_plugin_file(
+                &item.plugin_id,
+                tool_platform::storage::FileHandle::from_native_path(path),
+            );
         }
     }
 

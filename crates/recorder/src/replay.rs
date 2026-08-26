@@ -57,6 +57,135 @@ pub struct ReplayLoadData {
     pub bookmarks: Vec<(u64, Option<String>)>,
 }
 
+/// Cooperative browser-side JSONL parser.
+///
+/// The browser can read a File asynchronously, but JSON parsing itself still
+/// runs on the UI thread.  This loader keeps the parser state between ticks so
+/// the Application layer can consume a bounded number of lines per frame.
+pub struct ReplayTextLoader {
+    path: PathBuf,
+    text: String,
+    offset: usize,
+    line_number: usize,
+    events: Vec<Event>,
+    skipped: usize,
+    first_errors: Vec<String>,
+}
+
+impl ReplayTextLoader {
+    pub fn new(name: impl Into<String>, text: impl Into<String>) -> io::Result<Self> {
+        const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
+        let text = text.into();
+        if text.len() as u64 > MAX_FILE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "录制文件过大 ({} MB)，限制 {} MB",
+                    text.len() / 1024 / 1024,
+                    MAX_FILE_BYTES / 1024 / 1024
+                ),
+            ));
+        }
+        Ok(Self {
+            path: PathBuf::from(name.into()),
+            text,
+            offset: 0,
+            line_number: 1,
+            events: Vec::new(),
+            skipped: 0,
+            first_errors: Vec::new(),
+        })
+    }
+
+    /// Consume at most `budget` lines. `Some` means parsing is complete.
+    pub fn step(&mut self, budget: usize) -> io::Result<Option<ReplayLoadData>> {
+        const MAX_LINE_BYTES: u64 = 4 * 1024 * 1024;
+        let mut consumed = 0;
+        while self.offset < self.text.len() && consumed < budget {
+            let remaining = &self.text[self.offset..];
+            let (line_end, next_offset) = match remaining.find('\n') {
+                Some(relative_end) => {
+                    let end = self.offset + relative_end;
+                    (end, end + 1)
+                }
+                None => (self.text.len(), self.text.len()),
+            };
+            let line_number = self.line_number;
+            let trimmed = self.text[self.offset..line_end].trim();
+            if !trimmed.is_empty() {
+                if trimmed.len() as u64 > MAX_LINE_BYTES {
+                    self.record_error(format!(
+                        "第 {line_number} 行: 行长度 {} 字节，超过限制 4MB",
+                        trimmed.len()
+                    ));
+                    self.skipped += 1;
+                } else {
+                    match serde_json::from_str::<Event>(trimmed) {
+                        Ok(event) => self.events.push(event),
+                        Err(error) => {
+                            self.record_error(format!("第 {line_number} 行: {error}"));
+                            self.skipped += 1;
+                        }
+                    }
+                }
+            }
+            self.offset = next_offset;
+            self.line_number += 1;
+            consumed += 1;
+        }
+
+        if self.offset < self.text.len() {
+            return Ok(None);
+        }
+
+        let loaded = self.events.len();
+        self.events
+            .sort_by_key(|event| (event.timestamp_ms, event.id));
+        let timestamp_index = build_timestamp_index(&self.events);
+        let has_recorded_protocol = self
+            .events
+            .iter()
+            .any(|event| event.topic.starts_with("protocol.") && !event.is_replay());
+        let first_timestamp = self
+            .events
+            .first()
+            .map(|event| event.timestamp_ms)
+            .unwrap_or(0);
+        let mut bookmarks = Vec::new();
+        for event in &self.events {
+            if event.topic == "recorder.bookmark" {
+                let name = event.payload.text_lossy();
+                let name = (!name.is_empty()).then_some(name);
+                let position_ms = event.timestamp_ms.saturating_sub(first_timestamp);
+                if !bookmarks
+                    .iter()
+                    .any(|(position, _)| *position == position_ms)
+                {
+                    bookmarks.push((position_ms, name));
+                }
+            }
+        }
+        Ok(Some(ReplayLoadData {
+            path: self.path.clone(),
+            events: std::mem::take(&mut self.events),
+            report: ReplayLoadReport {
+                loaded,
+                skipped: self.skipped,
+                first_errors: std::mem::take(&mut self.first_errors),
+            },
+            timestamp_index,
+            has_recorded_protocol,
+            bookmarks,
+        }))
+    }
+
+    fn record_error(&mut self, error: String) {
+        if self.first_errors.len() < 5 {
+            self.first_errors.push(error);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ReplayStatus {
     pub state: ReplayState,
@@ -152,7 +281,6 @@ impl ReplayManager {
 
     /// 只做文件读取和解析，不触碰 ReplayManager，可安全放到 worker 线程。
     pub fn prepare_load(path: impl AsRef<std::path::Path>) -> io::Result<ReplayLoadData> {
-        const MAX_LINE_BYTES: u64 = 4 * 1024 * 1024; // 4MB per line
         const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024; // 512MB total
 
         let path = path.as_ref().to_path_buf();
@@ -172,10 +300,31 @@ impl ReplayManager {
         }
 
         let file = File::open(&path)?;
+        Self::prepare_load_lines(path, BufReader::new(file).lines())
+    }
+
+    /// Parse browser-provided JSONL text with the same limits and ordering as
+    /// native file loading. The browser composition root supplies the text
+    /// after its asynchronous file capability has completed.
+    pub fn prepare_load_text(
+        name: impl Into<String>,
+        text: impl Into<String>,
+    ) -> io::Result<ReplayLoadData> {
+        let mut loader = ReplayTextLoader::new(name, text)?;
+        loader
+            .step(usize::MAX)?
+            .ok_or_else(|| io::Error::other("回放文本解析未完成"))
+    }
+
+    fn prepare_load_lines<I>(path: PathBuf, lines: I) -> io::Result<ReplayLoadData>
+    where
+        I: Iterator<Item = io::Result<String>>,
+    {
+        const MAX_LINE_BYTES: u64 = 4 * 1024 * 1024; // 4MB per line
         let mut events = Vec::new();
         let mut skipped = 0usize;
         let mut first_errors: Vec<String> = Vec::new();
-        for (line_num, line) in BufReader::new(file).lines().enumerate() {
+        for (line_num, line) in lines.enumerate() {
             let line = line?;
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -974,6 +1123,31 @@ mod tests {
         assert_eq!(marked.meta_str("original_source"), Some("test"));
         // source 加 replay: 前缀
         assert_eq!(marked.source, "replay:test");
+    }
+
+    #[test]
+    fn prepare_load_text_uses_the_same_parser_as_native_loading() {
+        let valid = serde_json::to_string(&ev("transport.serial.default.rx")).unwrap();
+        let text = format!("{valid}\nnot-json\n");
+        let prepared = ReplayManager::prepare_load_text("browser-session.jsonl", text).unwrap();
+
+        assert_eq!(prepared.path, PathBuf::from("browser-session.jsonl"));
+        assert_eq!(prepared.events.len(), 1);
+        assert_eq!(prepared.report.loaded, 1);
+        assert_eq!(prepared.report.skipped, 1);
+        assert_eq!(prepared.report.first_errors.len(), 1);
+    }
+
+    #[test]
+    fn replay_text_loader_can_finish_incrementally() {
+        let first = serde_json::to_string(&ev("transport.serial.default.rx")).unwrap();
+        let second = serde_json::to_string(&ev("transport.serial.default.tx")).unwrap();
+        let mut loader =
+            ReplayTextLoader::new("incremental.jsonl", format!("{first}\n{second}\n")).unwrap();
+        assert!(loader.step(1).unwrap().is_none());
+        let prepared = loader.step(1).unwrap().unwrap();
+        assert_eq!(prepared.events.len(), 2);
+        assert_eq!(prepared.report.loaded, 2);
     }
 
     #[test]

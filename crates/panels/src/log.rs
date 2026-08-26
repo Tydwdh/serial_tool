@@ -88,7 +88,186 @@ pub struct LogExportJob {
     entries: Vec<LogEntry>,
 }
 
+/// Incremental browser export cursor.  It captures the filter at the moment
+/// export starts and walks the stable entry order in bounded batches.
+pub struct LogExportCursor {
+    filter: LogFilterKey,
+    limit: usize,
+    index: usize,
+    started: bool,
+    emitted: bool,
+    done: bool,
+}
+
+fn render_log_cursor_chunk(
+    format: TerminalExportFormat,
+    entries: &[LogEntry],
+    first: bool,
+    has_previous: bool,
+    done: bool,
+) -> String {
+    match format {
+        TerminalExportFormat::Txt => {
+            let mut output = String::new();
+            if has_previous && !entries.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(
+                &entries
+                    .iter()
+                    .map(|entry| {
+                        format!(
+                            "{} {:<5} {:<18} {}",
+                            entry.timestamp_label,
+                            entry.level.as_str(),
+                            entry.source,
+                            entry.message
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+            if done && !entries.is_empty() {
+                output.push('\n');
+            }
+            output
+        }
+        TerminalExportFormat::Csv => {
+            let mut output = String::new();
+            if first {
+                output.push_str("time,level,source,message\n");
+            }
+            for entry in entries {
+                output.push_str(
+                    &[
+                        log_csv_cell(&entry.timestamp_label),
+                        log_csv_cell(entry.level.as_str()),
+                        log_csv_cell(&entry.source),
+                        log_csv_cell(&entry.message),
+                    ]
+                    .join(","),
+                );
+                output.push('\n');
+            }
+            output
+        }
+        TerminalExportFormat::Json => {
+            let mut output = String::new();
+            if first {
+                output.push('[');
+            } else if has_previous && !entries.is_empty() {
+                output.push(',');
+            }
+            for (index, entry) in entries.iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                output.push_str(
+                    &serde_json::json!({
+                        "time": entry.timestamp_label,
+                        "level": entry.level.as_str(),
+                        "source": entry.source,
+                        "message": entry.message,
+                    })
+                    .to_string(),
+                );
+            }
+            if done {
+                output.push(']');
+            }
+            output
+        }
+    }
+}
+
 impl LogExportJob {
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Render one chunk so browser exports can yield between batches.
+    pub fn render_chunk(&self, format: TerminalExportFormat, start: usize, end: usize) -> String {
+        let start = start.min(self.entries.len());
+        let end = end.min(self.entries.len()).max(start);
+        let entries = &self.entries[start..end];
+        match format {
+            TerminalExportFormat::Txt => {
+                let mut output = String::new();
+                if start > 0 && !entries.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(
+                    &entries
+                        .iter()
+                        .map(|entry| {
+                            format!(
+                                "{} {:<5} {:<18} {}",
+                                entry.timestamp_label,
+                                entry.level.as_str(),
+                                entry.source,
+                                entry.message
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
+                if end == self.entries.len() && !entries.is_empty() {
+                    output.push('\n');
+                }
+                output
+            }
+            TerminalExportFormat::Csv => {
+                let mut output = String::new();
+                if start == 0 {
+                    output.push_str("time,level,source,message\n");
+                }
+                for entry in entries {
+                    output.push_str(
+                        &[
+                            log_csv_cell(&entry.timestamp_label),
+                            log_csv_cell(entry.level.as_str()),
+                            log_csv_cell(&entry.source),
+                            log_csv_cell(&entry.message),
+                        ]
+                        .join(","),
+                    );
+                    output.push('\n');
+                }
+                output
+            }
+            TerminalExportFormat::Json => {
+                let mut output = String::new();
+                if start == 0 {
+                    output.push('[');
+                } else if !entries.is_empty() {
+                    output.push(',');
+                }
+                for (index, entry) in entries.iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    output.push_str(
+                        &serde_json::json!({
+                            "time": entry.timestamp_label,
+                            "level": entry.level.as_str(),
+                            "source": entry.source,
+                            "message": entry.message,
+                        })
+                        .to_string(),
+                    );
+                }
+                if end == self.entries.len() {
+                    output.push(']');
+                }
+                output
+            }
+        }
+    }
+
     pub fn render(&self, format: TerminalExportFormat) -> String {
         match format {
             TerminalExportFormat::Txt => {
@@ -238,6 +417,69 @@ impl LogPanel {
                 .cloned()
                 .collect(),
         }
+    }
+
+    pub fn begin_export_cursor(&self) -> LogExportCursor {
+        LogExportCursor {
+            filter: self.current_filter_key(),
+            limit: self.entry_order.len(),
+            index: 0,
+            started: false,
+            emitted: false,
+            done: false,
+        }
+    }
+
+    /// Render at most `scan_budget` source entries and return
+    /// `(text, finished, exported_rows)`.  Filtering is performed as the
+    /// cursor advances, so a large log does not need a full visible-row
+    /// vector before the first browser export frame.
+    pub fn export_cursor_chunk(
+        &self,
+        cursor: &mut LogExportCursor,
+        format: TerminalExportFormat,
+        scan_budget: usize,
+    ) -> (String, bool, usize) {
+        if cursor.done {
+            return (String::new(), true, 0);
+        }
+        let budget = scan_budget.max(1);
+        let end = (cursor.index + budget).min(cursor.limit);
+        let query = crate::search::SearchQuery::new(
+            &cursor.filter.search_text,
+            cursor.filter.case_sensitive,
+        );
+        let entries = self
+            .entry_order
+            .iter()
+            .skip(cursor.index)
+            .take(end - cursor.index)
+            .filter_map(|id| self.entries.get(id))
+            .filter(|entry| {
+                entry.level >= cursor.filter.min_level
+                    && cursor
+                        .filter
+                        .source_filter
+                        .as_ref()
+                        .is_none_or(|filter| entry.source == *filter)
+                    && (query.is_empty()
+                        || query.matches(&entry.source)
+                        || query.matches(&entry.message))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        cursor.index = end;
+        cursor.done = end >= cursor.limit || end >= self.entry_order.len();
+        let first = !cursor.started;
+        let has_previous = cursor.emitted;
+        cursor.started = true;
+        let exported = entries.len();
+        cursor.emitted |= exported > 0;
+        (
+            render_log_cursor_chunk(format, &entries, first, has_previous, cursor.done),
+            cursor.done,
+            exported,
+        )
     }
 
     fn collect_visible_entries(&self) -> Vec<&LogEntry> {
@@ -1569,6 +1811,102 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(&panel.export_visible_json()).expect("valid JSON");
         assert_eq!(json.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn chunked_export_preserves_csv_and_json_structure() {
+        let bus = DataBus::new();
+        let mut panel = LogPanel::new(&bus);
+        for index in 0..3 {
+            panel.push_test_entry(LogEntry {
+                id: index + 1,
+                timestamp_label: format!("[12:00:0{index}.000]"),
+                level: LogLevel::Info,
+                source: "chunk-test".into(),
+                message: format!("message-{index}, \"quoted\""),
+            });
+        }
+
+        let job = panel.export_job();
+        assert_eq!(job.len(), 3);
+        for format in [TerminalExportFormat::Csv, TerminalExportFormat::Json] {
+            let mut chunked = String::new();
+            chunked.push_str(&job.render_chunk(format, 0, 1));
+            chunked.push_str(&job.render_chunk(format, 1, 3));
+            match format {
+                TerminalExportFormat::Csv => {
+                    assert!(chunked.starts_with("time,level,source,message\n"));
+                    assert_eq!(chunked.lines().count(), 4);
+                    assert!(chunked.contains("\"message-0, \"\"quoted\"\"\""));
+                }
+                TerminalExportFormat::Json => {
+                    let value: serde_json::Value =
+                        serde_json::from_str(&chunked).expect("chunked JSON export is valid");
+                    assert_eq!(value.as_array().expect("JSON array").len(), 3);
+                }
+                TerminalExportFormat::Txt => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_export_matches_snapshot_in_small_batches() {
+        let bus = DataBus::new();
+        let mut panel = LogPanel::new(&bus);
+        for index in 0..3 {
+            panel.push_test_entry(LogEntry {
+                id: index + 1,
+                timestamp_label: format!("[12:00:0{index}.000]"),
+                level: LogLevel::Info,
+                source: "cursor-test".into(),
+                message: format!("message-{index}"),
+            });
+        }
+
+        for format in [
+            TerminalExportFormat::Txt,
+            TerminalExportFormat::Csv,
+            TerminalExportFormat::Json,
+        ] {
+            let expected = panel.export_job().render(format);
+            let mut cursor = panel.begin_export_cursor();
+            let mut actual = String::new();
+            loop {
+                let (chunk, done, _) = panel.export_cursor_chunk(&mut cursor, format, 1);
+                actual.push_str(&chunk);
+                if done {
+                    break;
+                }
+            }
+            if format == TerminalExportFormat::Json {
+                let actual_json: serde_json::Value =
+                    serde_json::from_str(&actual).expect("cursor JSON export is valid");
+                let expected_json: serde_json::Value =
+                    serde_json::from_str(&expected).expect("snapshot JSON export is valid");
+                assert_eq!(actual_json, expected_json);
+            } else {
+                assert_eq!(actual, expected);
+            }
+        }
+
+        let mut cursor = panel.begin_export_cursor();
+        panel.push_test_entry(LogEntry {
+            id: 4,
+            timestamp_label: "[12:00:04.000]".into(),
+            level: LogLevel::Info,
+            source: "cursor-test".into(),
+            message: "future".into(),
+        });
+        let mut rows = 0;
+        loop {
+            let (_, done, exported) =
+                panel.export_cursor_chunk(&mut cursor, TerminalExportFormat::Txt, 1);
+            rows += exported;
+            if done {
+                break;
+            }
+        }
+        assert_eq!(rows, 3);
     }
 
     #[test]

@@ -3,8 +3,8 @@
 [Hardware Workbench](https://github.com/Tydwdh/serial_tool) 的插件市场目录。
 
 本目录既是插件分发存储，也是市场索引来源。客户端通过拉取这里的
-`registry.json` 浏览和安装插件；插件源码与市场产物现在都由 `serial_tool`
-主仓库统一管理。
+`registry.json` 浏览插件。Native 与 Web 都安装同一个 zip、读取同一个
+`plugin.json` 和 `main.lua`；浏览器由纯 Rust Lua VM 执行。
 
 ## 目录结构
 
@@ -50,10 +50,26 @@ plugin-marketplace/
 ## 客户端安装流程
 
 1. 应用从 `https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugin-marketplace/registry.json` 拉取索引
-2. 用户选择插件 → 下载 `download_url` 指向的 zip
-3. 校验 SHA256 → 解压到 `app_dir/plugins/<plugin-id>/`
+2. 桌面端选择插件 → 下载 `download_url` 指向的 zip，校验 SHA256 后解压到 `app_dir/plugins/<plugin-id>/`
+3. 浏览器选择安装 → 异步读取同一份 Lua 清单和入口；文件/串口等能力由浏览器宿主提供
 4. 刷新插件发现 → 启用
 
 安全模型：强制 https + 域白名单（`raw.githubusercontent.com` / `github.com` /
 `objects.githubusercontent.com`）+ SHA256 校验 + 拒绝 zip 内的可执行扩展名
 （dll/exe/sys/bat/ps1 等）。
+
+## Web Replay Analyzer
+
+Lua 插件如果需要参与原始回放重解析，可在 `plugin.json` 声明 `replay`：
+
+```json
+{
+  "replay": {
+    "subscriptions": ["transport.serial.default.rx"],
+    "outputs": ["protocol.example.*"]
+  }
+}
+```
+
+入口模块实现 `on_replay_begin(session)`、`on_replay_event(event)` 和
+`on_replay_end()`；Native/Web 使用同一 Lua API，平台差异只体现在 capability。

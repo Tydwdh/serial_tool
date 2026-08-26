@@ -1823,6 +1823,7 @@ dependencies = [
  "egui_extras",
  "egui_material_icons",
  "egui_tiles",
+ "js-sys",
  "log",
  "open",
  "rfd",
@@ -1831,9 +1832,15 @@ dependencies = [
  "tempfile",
  "tokio",
  "tool-application",
+ "tool-core",
  "tool-databus",
+ "tool-lua-host",
+ "tool-marketplace",
  "tool-panels",
  "tool-platform",
+ "tool-plugin-api",
+ "tool-plugin-runtime",
+ "tool-transport",
  "tool-updater",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -2477,12 +2484,79 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
+name = "lua-code"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d801bee0093eed51092376fa5670de4515d80125f3c518034da7130308877ca"
+dependencies = [
+ "lua-types",
+ "lua-vm",
+]
+
+[[package]]
+name = "lua-gc"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84a67bb3c18be1960ebd3b803d9770c05f0ed2cd3e596430bfc8fa5fe83d8585"
+
+[[package]]
+name = "lua-lex"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e5d072a4af03d16fe2bb86f729054c91bd251037aa13adf76ff8def69a37001"
+dependencies = [
+ "lua-types",
+ "lua-vm",
+]
+
+[[package]]
+name = "lua-parse"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "147a98678f0cafedb1985cf7b0e4fb8950b9211b8e5f1f4c81ef0cc0b9a103a8"
+dependencies = [
+ "lua-code",
+ "lua-lex",
+ "lua-types",
+ "lua-vm",
+]
+
+[[package]]
 name = "lua-src"
 version = "550.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e836dc8ae16806c9bdcf42003a88da27d163433e3f9684c52f0301258004a4fb"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "lua-stdlib"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f9ed447877d41d67a0eb5323409c965e3549c62cadcf6ada6f57a636dbf7c2c"
+dependencies = [
+ "lua-types",
+ "lua-vm",
+]
+
+[[package]]
+name = "lua-types"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a21169cad6b537954443d97d55bc5ee594d7fb57862905e85ab9e19c4c381f3"
+dependencies = [
+ "lua-gc",
+]
+
+[[package]]
+name = "lua-vm"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "127ade4ee0a8273ccec12c0a9e08e95f6170664d19e9237ef17bb56c11c2abda"
+dependencies = [
+ "lua-gc",
+ "lua-types",
 ]
 
 [[package]]
@@ -3046,6 +3120,19 @@ dependencies = [
  "objc2 0.5.2",
  "objc2-core-location",
  "objc2-foundation 0.2.2",
+]
+
+[[package]]
+name = "omnilua"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1160e01597a0e31492c5c6d33821b9d715b9b3da15f4a2337b6c8f828b419760"
+dependencies = [
+ "lua-gc",
+ "lua-parse",
+ "lua-stdlib",
+ "lua-types",
+ "lua-vm",
 ]
 
 [[package]]
@@ -4611,6 +4698,7 @@ dependencies = [
  "tool-core",
  "tool-databus",
  "tool-lua-host",
+ "tool-plugin-api",
  "tool-testing",
  "tool-transport",
 ]
@@ -4629,6 +4717,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tool-core",
  "tool-databus",
+ "tool-platform",
+ "tool-plugin-api",
  "tool-testing",
  "tool-transport",
 ]
@@ -4661,6 +4751,7 @@ dependencies = [
  "tool-application",
  "tool-core",
  "tool-databus",
+ "tool-marketplace",
  "tool-platform",
 ]
 
@@ -4679,6 +4770,27 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "tool-plugin-api"
+version = "1.1.2"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tool-platform",
+]
+
+[[package]]
+name = "tool-plugin-runtime"
+version = "1.1.2"
+dependencies = [
+ "omnilua",
+ "regex",
+ "serde_json",
+ "tool-platform",
+ "tool-plugin-api",
 ]
 
 [[package]]

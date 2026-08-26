@@ -174,7 +174,7 @@ impl WorkbenchApp {
                     match self
                         .workbench
                         .dispatch(tool_application::AppCommand::Disconnect {
-                            port_name: port.clone(),
+                            port: tool_platform::PortId::new(port.clone()),
                         }) {
                         Ok(tool_application::CommandOutcome::Pending { .. }) => {
                             self.set_status(StatusLevel::Info, format!("正在关闭 {port}..."));
@@ -204,7 +204,7 @@ impl WorkbenchApp {
             }
             // 自动重连进度：拔串口后顶部栏直接可见，无需展开 device_panel。
             if let Some(ref pending) = self.serial.pending_reconnect {
-                let now = tool_application::api::core::now_timestamp_ms() as f64 / 1000.0;
+                let now = tool_core::now_timestamp_ms() as f64 / 1000.0;
                 let remaining = (pending.next_try_at - now).max(0.0);
                 let label = format!(
                     "{} 重连中 {} {:.1}s ({}/{})",
@@ -224,7 +224,7 @@ impl WorkbenchApp {
             ui.separator();
             // ── 插件贡献：top_bar.left ──
             self.ui_contribution_slot(ui, "top_bar.left");
-            let rec = self.workbench.recording_is_running();
+            let rec = self.workbench.query_recording().stats.running;
             let record_response = if rec {
                 design::button(ui, ICON_STOP, "停止录制", ButtonKind::Danger)
             } else {

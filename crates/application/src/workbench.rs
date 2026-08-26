@@ -1,21 +1,23 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use tool_core::LogLevel;
 use tool_databus::{DataBus, TopicFilter};
 use tool_extension::PluginManager;
 use tool_lua_host::{DialogRequest, FileAccessBroker};
 use tool_platform::native::{NativeTransportBackend, block_on_transport};
-use tool_platform::storage::{FileBlob, native::NativeFileService};
-use tool_platform::{PortDescriptor, PortId, SerialParity, SerialSettings, TransportBackend};
+use tool_platform::storage::{FileBlob, FileHandle, native::NativeFileService};
+use tool_platform::{
+    PortDescriptor, PortId, PortKind, SerialParity, SerialSettings, TransportBackend,
+};
 use tool_recorder::{JsonlRecorder, ReplayManager};
 use tool_transport::{SerialPortDescriptor, TransportManager};
 
+use crate::TransportView as ApplicationTransportView;
 use crate::command::{AppCommand, CommandOutcome};
 use crate::error::AppError;
 use crate::query::{
-    NetworkPortConfig, PluginView, RecordModeView, RecordingStatusView, ReplayStatusView,
-    TransportStatusView, TransportView,
+    NetworkPortConfig, PluginView, RecordingStatusView, ReplayStatusView, TransportStatusView,
+    TransportView,
 };
 use crate::service::terminal::TerminalService;
 use crate::task::{AppEvent, TaskContext, TaskId, TaskManager, TaskResult, TaskSnapshot};
@@ -192,31 +194,15 @@ impl Workbench {
         self
     }
 
-    pub fn app_config(&self) -> &ApplicationConfig {
-        &self.app_config
-    }
-
-    pub fn set_network_ports(&mut self, ports: Vec<NetworkPortConfig>) {
-        self.app_config.network_ports = ports;
-    }
-
-    pub fn set_serial_parameters(
-        &mut self,
-        baud_rate: String,
-        data_bits: String,
-        stop_bits: String,
-        parity: String,
-    ) {
-        self.app_config.baud_rate = baud_rate;
-        self.app_config.data_bits = data_bits;
-        self.app_config.stop_bits = stop_bits;
-        self.app_config.parity = parity;
-    }
-
     pub fn tick(&mut self, _now_secs: f64) {
         self.poll_tasks();
         self.terminal.ingest_pending();
         self.recorder.tick_backpressure();
+    }
+
+    /// 推进唯一的 Application-owned 回放状态，并返回本帧发布的事件数。
+    pub fn tick_replay(&mut self) -> usize {
+        self.replay.tick()
     }
 
     pub fn task_snapshots(&self) -> Vec<TaskSnapshot> {
@@ -252,13 +238,17 @@ impl Workbench {
         &mut self,
         kind: impl Into<String>,
         format: String,
-        path: PathBuf,
+        file: FileHandle,
         render: F,
-    ) -> CommandOutcome
+    ) -> Result<CommandOutcome, AppError>
     where
         F: FnOnce() -> Result<String, String> + Send + 'static,
     {
         let file_service = self.file_service.clone();
+        let path = file
+            .native_path()
+            .ok_or_else(|| AppError::Storage("Native 导出需要路径型文件句柄".to_owned()))?
+            .to_path_buf();
         let task_id = self.tasks.spawn(kind, move |_context| {
             let content = render()?;
             let mut bytes = content.into_bytes();
@@ -271,19 +261,54 @@ impl Workbench {
                 .block_on_write_path(
                     path.clone(),
                     FileBlob {
-                        name: path.display().to_string(),
+                        name: file.name().to_owned(),
                         mime: "application/octet-stream".to_owned(),
                         bytes,
                     },
                 )
                 .map_err(|error| error.to_string())?;
-            Ok(TaskResult::FileExported { path })
+            Ok(TaskResult::FileExported { file })
         });
-        pending(task_id, "正在导出文件")
+        Ok(pending(task_id, "正在导出文件"))
     }
 
     pub fn dispatch(&mut self, command: AppCommand) -> Result<CommandOutcome, AppError> {
         match command {
+            AppCommand::RegisterNetworkPort { config } => {
+                let name = config.display_name();
+                if let Some(existing) = self
+                    .app_config
+                    .network_ports
+                    .iter_mut()
+                    .find(|existing| existing.display_name() == name)
+                {
+                    *existing = config;
+                } else {
+                    self.app_config.network_ports.push(config);
+                }
+                if !self.ports.iter().any(|port| port.port_name == name) {
+                    self.ports.push(SerialPortDescriptor {
+                        port_name: name,
+                        port_type: tool_transport::PortType::Network,
+                    });
+                }
+                Ok(CommandOutcome::Done)
+            }
+            AppCommand::RemoveNetworkPort { port } => {
+                let port = port.to_string();
+                self.app_config.network_ports.retain(|config| {
+                    config.display_name() != port && config.port_id().to_string() != port
+                });
+                self.ports.retain(|descriptor| {
+                    descriptor.port_type != tool_transport::PortType::Network
+                        || self
+                            .app_config
+                            .network_ports
+                            .iter()
+                            .any(|config| config.display_name() == descriptor.port_name)
+                });
+                Ok(CommandOutcome::Done)
+            }
             AppCommand::RefreshPorts => {
                 if let Some(task_id) = self.tasks.active_task_id("refresh_ports") {
                     return Ok(pending(task_id, "正在刷新串口列表"));
@@ -311,11 +336,21 @@ impl Workbench {
                 });
                 Ok(pending(task_id, "正在获取串口"))
             }
-            AppCommand::Connect {
-                port_name,
-                settings,
-            } => self.connect(&port_name, settings),
-            AppCommand::Disconnect { port_name } => {
+            AppCommand::Connect { port, settings } => self.connect(port.as_str(), settings),
+            AppCommand::SetSerialSettings { settings } => {
+                self.app_config.baud_rate = settings.baud_rate.to_string();
+                self.app_config.data_bits = settings.data_bits.to_string();
+                self.app_config.stop_bits = settings.stop_bits.to_string();
+                self.app_config.parity = match settings.parity {
+                    SerialParity::None => "none",
+                    SerialParity::Odd => "odd",
+                    SerialParity::Even => "even",
+                }
+                .to_owned();
+                Ok(CommandOutcome::Done)
+            }
+            AppCommand::Disconnect { port } => {
+                let port_name = port.to_string();
                 let task_port = port_name.clone();
                 let is_network = self
                     .app_config
@@ -341,8 +376,9 @@ impl Workbench {
                 };
                 Ok(pending(task_id, format!("正在关闭 {port_name}")))
             }
-            AppCommand::Reconnect { port_name } => self.start_reconnect(port_name),
-            AppCommand::CancelReconnect { port_name } => {
+            AppCommand::Reconnect { port } => self.start_reconnect(port.to_string()),
+            AppCommand::CancelReconnect { port } => {
+                let port_name = port.to_string();
                 if let Some(task_id) = self.reconnect_tasks.remove(&port_name) {
                     self.tasks.cancel(task_id);
                 }
@@ -369,27 +405,43 @@ impl Workbench {
                 }
                 Ok(CommandOutcome::Done)
             }
-            AppCommand::SendText { port_name, text } => {
+            AppCommand::SendText { port, text } => {
                 let bytes = text.into_bytes();
-                self.send_transport_bytes(port_name, bytes)
+                self.send_transport_bytes(port.to_string(), bytes)
             }
-            AppCommand::SendHex { port_name, hex } => {
-                let bytes = tool_transport::parse_hex(&hex)
-                    .map_err(|error| AppError::Transport(error.to_string()))?;
-                self.send_transport_bytes(port_name, bytes)
+            AppCommand::SendHex { port, hex, strict } => {
+                let bytes = if strict {
+                    tool_transport::parse_hex_strict(&hex)
+                } else {
+                    tool_transport::parse_hex(&hex)
+                }
+                .map_err(|error| AppError::Transport(error.to_string()))?;
+                self.send_transport_bytes(port.to_string(), bytes)
             }
-            AppCommand::SendRaw { port_name, bytes } => self.send_transport_bytes(port_name, bytes),
-            AppCommand::SetDtr { port_name, value } => {
-                self.set_transport_signal(port_name, value, true)
+            AppCommand::SendRaw { port, bytes } => {
+                self.send_transport_bytes(port.to_string(), bytes)
             }
-            AppCommand::SetRts { port_name, value } => {
-                self.set_transport_signal(port_name, value, false)
+            AppCommand::SetDtr { port, value } => {
+                self.set_transport_signal(port.to_string(), value, true)
             }
-            AppCommand::StartRecording { path } => self
-                .recorder
-                .start(&path)
-                .map(|()| CommandOutcome::Done)
-                .map_err(|e| AppError::Recording(e.to_string())),
+            AppCommand::SetRts { port, value } => {
+                self.set_transport_signal(port.to_string(), value, false)
+            }
+            AppCommand::StartRecording { file, mode } => {
+                let path = file
+                    .native_path()
+                    .ok_or_else(|| AppError::Recording("Native 录制需要路径型文件句柄".to_owned()))?
+                    .to_path_buf();
+                self.recorder.set_mode(mode.into());
+                self.recorder
+                    .start(path)
+                    .map(|()| CommandOutcome::Done)
+                    .map_err(|e| AppError::Recording(e.to_string()))
+            }
+            AppCommand::SetRecordingMode { mode } => {
+                self.recorder.set_mode(mode.into());
+                Ok(CommandOutcome::Done)
+            }
             AppCommand::StopRecording => {
                 self.recorder.stop();
                 Ok(CommandOutcome::Done)
@@ -407,7 +459,15 @@ impl Workbench {
                 self.recorder.add_bookmark(&n);
                 Ok(CommandOutcome::Done)
             }
-            AppCommand::LoadReplay { path } => {
+            AppCommand::AddReplayBookmark { name } => {
+                self.replay.add_bookmark(name);
+                Ok(CommandOutcome::Done)
+            }
+            AppCommand::LoadReplay { file } => {
+                let path = file
+                    .native_path()
+                    .ok_or_else(|| AppError::Replay("Native 回放需要路径型文件句柄".to_owned()))?
+                    .to_path_buf();
                 let task_id = self.tasks.spawn("load_replay", move |_context| {
                     ReplayManager::prepare_load(&path)
                         .map(TaskResult::ReplayLoaded)
@@ -461,6 +521,10 @@ impl Workbench {
                 self.replay.set_policy(policy.into());
                 Ok(CommandOutcome::Done)
             }
+            AppCommand::RemoveReplayBookmark { position_ms } => {
+                self.replay.remove_bookmark(position_ms);
+                Ok(CommandOutcome::Done)
+            }
             AppCommand::EnablePlugin { plugin_id } => self
                 .plugin_manager
                 .enable(&plugin_id)
@@ -480,6 +544,9 @@ impl Workbench {
                 });
                 Ok(pending(task_id, "正在扫描插件"))
             }
+            AppCommand::RefreshMarketplace { .. } | AppCommand::CheckForUpdate => Err(
+                AppError::InvalidCommand("市场和更新由桌面组合根负责".to_owned()),
+            ),
             AppCommand::DiscoverPlugins { roots } => {
                 let task_id = self.tasks.spawn("discover_plugins", move |_context| {
                     tool_extension::PluginManager::scan_roots(&roots)
@@ -521,9 +588,12 @@ impl Workbench {
                 self.app_config.terminal_max_entries = max;
                 Ok(CommandOutcome::Done)
             }
-            AppCommand::ExportTerminal { format, path } => {
+            AppCommand::ExportTerminal { format, file } => {
                 let export_job = self.terminal.export_job();
-                let task_path = path.clone();
+                let task_path = file
+                    .native_path()
+                    .ok_or_else(|| AppError::Storage("Native 导出需要路径型文件句柄".to_owned()))?
+                    .to_path_buf();
                 let task_format = format.clone();
                 let file_service = self.file_service.clone();
                 let task_id = self.tasks.spawn("export_terminal", move |_context| {
@@ -538,17 +608,17 @@ impl Workbench {
                         .block_on_write_path(
                             task_path.clone(),
                             FileBlob {
-                                name: task_path.display().to_string(),
+                                name: file.name().to_owned(),
                                 mime: "application/octet-stream".to_owned(),
                                 bytes,
                             },
                         )
                         .map_err(|error| error.to_string())?;
-                    Ok(TaskResult::FileExported { path: task_path })
+                    Ok(TaskResult::FileExported { file })
                 });
                 Ok(pending(task_id, "正在导出终端数据"))
             }
-            AppCommand::ExportLog { format: _, path: _ } => {
+            AppCommand::ExportLog { format: _, file: _ } => {
                 // 日志导出仍由 LogPanel 负责（Presentation），此处占位避免 UI 直接触及 recorder
                 Ok(CommandOutcome::Done)
             }
@@ -576,10 +646,41 @@ impl Workbench {
         }
     }
 
+    /// Platform-neutral transport projection used by shared presentation
+    /// code. The legacy `query_transport` above remains available to Native
+    /// controls that still need per-port status and reconnect metadata.
+    pub fn query_transport_capability(&self) -> ApplicationTransportView {
+        let open_ports = self.transport.open_ports();
+        let mut view = ApplicationTransportView::new(self.transport_backend.capabilities());
+        view.ports = self
+            .ports
+            .iter()
+            .map(|port| PortDescriptor {
+                id: PortId::new(port.port_name.clone()),
+                label: port.port_name.clone(),
+                kind: PortKind::Serial,
+                vendor_id: None,
+                product_id: None,
+                authorized: true,
+            })
+            .collect();
+        view.connected = open_ports.first().cloned().map(PortId::new);
+        view.connecting = self
+            .transport
+            .status_all()
+            .into_iter()
+            .any(|status| status.connecting);
+        view.settings = self.serial_settings();
+        view
+    }
+
     pub fn query_recording(&self) -> RecordingStatusView {
         RecordingStatusView {
             stats: self.recorder.stats().into(),
-            path: self.recorder.current_path().map(PathBuf::from),
+            path: self
+                .recorder
+                .current_path()
+                .map(|path| path.display().to_string()),
             mode: self.recorder.mode().into(),
         }
     }
@@ -588,7 +689,7 @@ impl Workbench {
         let status = self.replay.status();
         ReplayStatusView {
             state: status.state.into(),
-            path: status.path,
+            path: status.path.map(|path| path.display().to_string()),
             total_events: status.total_events,
             cursor: status.cursor,
             speed: status.speed,
@@ -598,17 +699,88 @@ impl Workbench {
             effective_policy: status.effective_policy.into(),
             has_recorded_protocol: status.has_recorded_protocol,
             analyzer_cache_entries: status.analyzer_cache_entries,
+            analyzer_cache_valid: self.replay.analyzer_cache_valid(),
             analyzer_error: status.analyzer_error,
             analyzer_warning: status.analyzer_warning,
+            can_play: self.replay.can_play(),
+            can_seek: self.replay.can_seek(),
+            block_reason: self.replay.replay_block_reason().map(Into::into),
+            bookmarks: self
+                .replay
+                .bookmarks()
+                .iter()
+                .map(|bookmark| crate::query::ReplayBookmarkView {
+                    position_ms: bookmark.pos_ms,
+                    name: bookmark.name.clone(),
+                })
+                .collect(),
             load_report: status.load_report.map(Into::into),
         }
     }
 
+    pub fn replay_raw_serial_events(&self) -> Vec<tool_core::Event> {
+        self.replay.raw_serial_events()
+    }
+
+    pub fn replay_set_analyzer_cache(&mut self, events: Vec<tool_core::Event>) {
+        self.replay.set_analyzer_cache(events);
+    }
+
+    pub fn replay_set_analyzer_error(&mut self, error: String) {
+        self.replay.set_analyzer_error(error);
+    }
+
+    pub fn replay_set_analyzer_warning(&mut self, warning: String) {
+        self.replay.set_analyzer_warning(warning);
+    }
+
+    pub fn replay_clear_analyzer_messages(&mut self) {
+        self.replay.clear_analyzer_error();
+    }
+
+    pub fn replay_seek_panel_phase(&mut self, position_ms: u64) -> usize {
+        self.replay.seek_panel_phase(position_ms)
+    }
+
+    pub fn replay_seek_data_phase(&mut self, position_ms: u64) -> usize {
+        self.replay.seek_data_phase(position_ms)
+    }
+
+    pub fn replay_seek_cursor_panel_phase(&mut self, target_cursor: usize) -> usize {
+        self.replay.seek_cursor_panel_phase(target_cursor)
+    }
+
+    pub fn replay_seek_cursor_data_phase(&mut self, target_cursor: usize) -> usize {
+        self.replay.seek_cursor_data_phase(target_cursor)
+    }
+
+    pub fn replay_backward_cursor_by(&self, steps: usize) -> Option<usize> {
+        self.replay.backward_cursor_by(steps)
+    }
+
     pub fn query_plugins(&self) -> PluginView {
         PluginView {
-            summaries: self.plugin_manager.summaries(),
-            diagnostics: self.plugin_manager.diagnostics().to_vec(),
+            summaries: self
+                .plugin_manager
+                .summaries()
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            diagnostics: self
+                .plugin_manager
+                .diagnostics()
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect(),
         }
+    }
+
+    /// Persisted plugin enablement is application state, not a UI config
+    /// implementation detail.  The Native composition uses this projection
+    /// during startup to turn discovered plugins into running plugins.
+    pub fn query_enabled_plugin_ids(&self) -> Vec<String> {
+        self.app_config.enabled_plugins.clone()
     }
 
     /// 发布应用事件。UI/runtime 不需要持有 DataBus 或其他业务管理器。
@@ -670,92 +842,10 @@ impl Workbench {
         self.platform_serial_settings()
     }
 
-    pub fn set_dtr(&mut self, port: &str, value: bool) -> Result<CommandOutcome, AppError> {
-        self.dispatch(AppCommand::SetDtr {
-            port_name: port.to_owned(),
-            value,
-        })
-    }
-
-    pub fn set_rts(&mut self, port: &str, value: bool) -> Result<CommandOutcome, AppError> {
-        self.dispatch(AppCommand::SetRts {
-            port_name: port.to_owned(),
-            value,
-        })
-    }
-
-    pub fn send_input(
-        &mut self,
-        port: &str,
-        input: &str,
-        hex_mode: bool,
-        line_ending: &str,
-        hex_strict: bool,
-    ) -> Result<CommandOutcome, AppError> {
-        if input.trim().is_empty() {
-            return Ok(CommandOutcome::Done);
-        }
-        let bytes = if hex_mode {
-            if hex_strict {
-                validate_strict_hex(input)?;
-            }
-            tool_transport::parse_hex(input)
-                .map_err(|error| AppError::Transport(error.to_string()))?
-        } else {
-            let mut text = input.to_owned();
-            text.push_str(line_ending);
-            text.into_bytes()
-        };
-        self.dispatch(AppCommand::SendRaw {
-            port_name: port.to_owned(),
-            bytes,
-        })
-    }
-
-    pub fn recording_is_running(&self) -> bool {
-        self.recorder.is_running()
-    }
-
-    pub fn recording_is_stopping(&self) -> bool {
-        self.recorder.is_stopping()
-    }
-
-    pub fn recording_is_paused(&self) -> bool {
-        self.recorder.is_paused()
-    }
-
-    pub fn recording_mode(&self) -> RecordModeView {
-        self.recorder.mode().into()
-    }
-
-    pub fn set_recording_mode(&mut self, mode: RecordModeView) {
-        self.recorder.set_mode(mode.into());
-    }
-
-    pub fn start_recording(&mut self, path: impl AsRef<std::path::Path>) -> Result<(), AppError> {
+    pub fn reap_recording_stop(&mut self) -> Option<Result<String, String>> {
         self.recorder
-            .start(path)
-            .map_err(|error| AppError::Recording(error.to_string()))
-    }
-
-    pub fn stop_recording(&mut self) {
-        self.recorder.stop();
-    }
-
-    pub fn pause_recording(&mut self) {
-        self.recorder.pause();
-    }
-
-    pub fn resume_recording(&mut self) {
-        self.recorder.resume();
-    }
-
-    pub fn recording_current_path(&self) -> Option<std::path::PathBuf> {
-        self.recorder.current_path().map(|p| p.to_path_buf())
-    }
-
-    pub fn reap_recording_stop(&mut self) -> Option<Result<std::path::PathBuf, String>> {
-        self.recorder.reap_stopping()
+            .reap_stopping()
+            .map(|result| result.map(|path| path.display().to_string()))
     }
 
     pub fn reap_recording_error(&mut self) -> Option<String> {
@@ -767,24 +857,12 @@ impl Workbench {
             .publish(tool_core::Event::system_log(lv, "app", msg.into()));
     }
 
-    pub fn plugin_state(&self, plugin_id: &str) -> Option<tool_extension::PluginState> {
-        self.plugin_manager.plugin_state(plugin_id)
+    pub fn plugin_state(&self, plugin_id: &str) -> Option<crate::query::PluginStateView> {
+        self.plugin_manager.plugin_state(plugin_id).map(Into::into)
     }
 
     pub fn plugin_ids(&self) -> Vec<String> {
         self.plugin_manager.plugin_ids()
-    }
-
-    pub fn enable_plugin(&mut self, plugin_id: &str) -> Result<(), AppError> {
-        self.plugin_manager
-            .enable(plugin_id)
-            .map_err(|error| AppError::Plugin(error.to_string()))
-    }
-
-    pub fn disable_plugin(&mut self, plugin_id: &str) -> Result<(), AppError> {
-        self.plugin_manager
-            .disable(plugin_id)
-            .map_err(|error| AppError::Plugin(error.to_string()))
     }
 
     pub fn process_plugin_lifecycle(&mut self) -> usize {
@@ -795,18 +873,49 @@ impl Workbench {
         self.plugin_manager.take_cleanup_requests()
     }
 
-    pub fn plugin_config_root(&self) -> std::path::PathBuf {
-        self.plugin_manager.config_root().to_path_buf()
+    pub fn plugin_config_root(&self) -> String {
+        self.plugin_manager.config_root().display().to_string()
     }
 
-    pub fn plugin_settings(
+    pub fn plugin_settings(&self) -> Vec<(String, String, Vec<crate::query::PluginSettingView>)> {
+        self.plugin_manager
+            .plugin_settings()
+            .into_iter()
+            .map(|(plugin_id, plugin_name, settings)| {
+                (
+                    plugin_id,
+                    plugin_name,
+                    settings.into_iter().map(Into::into).collect(),
+                )
+            })
+            .collect()
+    }
+
+    pub fn plugin_setting_value(
         &self,
-    ) -> Vec<(String, String, Vec<tool_extension::manifest::PluginSetting>)> {
-        self.plugin_manager.plugin_settings()
+        plugin_id: &str,
+        key: &str,
+        default: serde_json::Value,
+    ) -> serde_json::Value {
+        self.plugin_manager
+            .config_store()
+            .get(plugin_id, key, default)
     }
 
-    pub fn plugin_config_store(&self) -> std::sync::Arc<tool_lua_host::ConfigStore> {
-        self.plugin_manager.config_store().clone()
+    pub fn plugin_setting_keys(&self, plugin_id: &str) -> Vec<String> {
+        self.plugin_manager.config_store().keys(plugin_id)
+    }
+
+    pub fn set_plugin_setting(
+        &self,
+        plugin_id: &str,
+        key: &str,
+        value: serde_json::Value,
+    ) -> Result<(), AppError> {
+        self.plugin_manager
+            .config_store()
+            .set(plugin_id, key, value)
+            .map_err(|error| AppError::Plugin(error.to_string()))
     }
 
     pub fn replay_analyzer_entries(&self) -> Vec<tool_extension::manifest::ReplayAnalyzerEntry> {
@@ -817,8 +926,10 @@ impl Workbench {
         self._dialog_receiver.try_recv().ok()
     }
 
-    pub fn authorize_plugin_file(&self, plugin_id: &str, path: PathBuf) {
-        self._file_broker.authorize(plugin_id, path);
+    pub fn authorize_plugin_file(&self, plugin_id: &str, file: FileHandle) {
+        if let Some(path) = file.native_path() {
+            self._file_broker.authorize(plugin_id, path.to_path_buf());
+        }
     }
 
     pub fn clear_plugin_file_authorization(&self, plugin_id: &str) {
@@ -883,7 +994,11 @@ impl Workbench {
             .cloned()
         {
             let transport = self.transport.clone();
-            let net: tool_transport::NetworkSerialConfig = net.into();
+            let net = tool_transport::NetworkSerialConfig {
+                host: net.host,
+                port: net.port,
+                api_key: net.api_key,
+            };
             let task_port = port_name.to_owned();
             let task_id = self.tasks.spawn("connect_network", move |_context| {
                 transport
@@ -1000,7 +1115,11 @@ impl Workbench {
             .iter()
             .find(|config| config.display_name() == port_name)
             .cloned()
-            .map(Into::into);
+            .map(|config| tool_transport::NetworkSerialConfig {
+                host: config.host,
+                port: config.port,
+                api_key: config.api_key,
+            });
         let backend = self.transport_backend.clone();
         let serial_settings = (!network.is_some()).then(|| self.platform_serial_settings());
         let task_port = port_name.clone();
@@ -1096,11 +1215,11 @@ impl Workbench {
                         TaskResult::PluginsDiscovered(scan) => {
                             self.plugin_manager.apply_scan(scan);
                         }
-                        TaskResult::FileExported { path } => {
+                        TaskResult::FileExported { file } => {
                             self.bus.publish(tool_core::Event::system_log(
                                 LogLevel::Info,
                                 "app",
-                                format!("已导出 {}", path.display()),
+                                format!("已导出 {}", file.name()),
                             ));
                         }
                     }
@@ -1125,22 +1244,23 @@ impl Workbench {
     }
 }
 
+impl crate::AppRuntime for Workbench {
+    fn capabilities(&self) -> crate::AppCapabilities {
+        crate::AppCapabilities::native()
+    }
+
+    fn tick(&mut self) {
+        self.tick(0.0);
+    }
+
+    fn dispatch(&mut self, command: crate::AppCommand) -> Result<crate::CommandOutcome, String> {
+        Workbench::dispatch(self, command).map_err(|error| error.to_string())
+    }
+}
+
 fn pending(task_id: TaskId, message: impl Into<String>) -> CommandOutcome {
     CommandOutcome::Pending {
         task_id,
         message: message.into(),
     }
-}
-
-fn validate_strict_hex(input: &str) -> Result<(), AppError> {
-    for token in input.split_whitespace() {
-        let token = token
-            .strip_prefix("0x")
-            .or_else(|| token.strip_prefix("0X"))
-            .unwrap_or(token);
-        if token.len() != 2 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(AppError::Transport(format!("无效 HEX：{token}")));
-        }
-    }
-    Ok(())
 }

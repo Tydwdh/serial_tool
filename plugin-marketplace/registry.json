@@ -1,7 +1,7 @@
 {
     "$schema":  "./registry.schema.json",
     "version":  1,
-    "updated":  "2026-08-24T17:22:21.4374164Z",
+    "updated":  "2026-08-26T00:00:00.0000000Z",
     "plugins":  [
                     {
                         "id":  "demo.widget-showcase",
@@ -24,6 +24,8 @@
                         "download_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugin-marketplace/plugins/demo.widget-showcase/0.1.0/demo.widget-showcase-0.1.0.zip",
                         "sha256":  "ce5fc964f57633c0ef1eb369294361de25fbe14df4f9490c4353e87ab8e308ed",
                         "size":  2490,
+                        "manifest_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugins/demo.widget-showcase/plugin.json",
+                        "main_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugins/demo.widget-showcase/main.lua",
                         "published":  "2026-08-01T17:23:00.6764725Z"
                     },
                     {
@@ -49,6 +51,8 @@
                         "download_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugin-marketplace/plugins/template.file-tool/0.2.0/template.file-tool-0.2.0.zip",
                         "sha256":  "3545a7a77d914bad52370184ae746d25cca9cc0e0604842f39a8bdaaf601f152",
                         "size":  2667,
+                        "manifest_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugins/template.file-tool/plugin.json",
+                        "main_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugins/template.file-tool/main.lua",
                         "published":  "2026-08-01T17:23:00.6503129Z"
                     },
                     {
@@ -72,6 +76,8 @@
                         "download_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugin-marketplace/plugins/template.hello/0.1.0/template.hello-0.1.0.zip",
                         "sha256":  "c2609ef1567cae585ceb895992b90f5245fe8c82b2011b1fe5304ddbae073f7e",
                         "size":  2386,
+                        "manifest_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugins/template.hello/plugin.json",
+                        "main_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugins/template.hello/main.lua",
                         "published":  "2026-08-01T17:23:00.6142564Z"
                     },
                     {
@@ -96,6 +102,8 @@
                         "download_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugin-marketplace/plugins/template.serial-chart/0.1.0/template.serial-chart-0.1.0.zip",
                         "sha256":  "9fe8a4eed92372e1b474fa785b0e5255e18cb53b2015213f36e49ab71d696ba4",
                         "size":  4587,
+                        "manifest_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugins/template.serial-chart/plugin.json",
+                        "main_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugins/template.serial-chart/main.lua",
                         "published":  "2026-08-01T17:23:00.6634523Z"
                     },
                     {
@@ -123,6 +131,8 @@
                         "download_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugin-marketplace/plugins/gcode-sender/0.7.0/gcode-sender-0.7.0.zip",
                         "sha256":  "2a4f5265f406442549b53d573acf46b3169095066c3d605078a7555ca7d75f03",
                         "size":  14068,
+                        "manifest_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugins/gcode-sender/plugin.json",
+                        "main_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugins/gcode-sender/main.lua",
                         "published":  "2026-08-24T17:22:21.4374164Z"
                     }
                 ]

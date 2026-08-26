@@ -1166,6 +1166,14 @@ pub fn parse_hex(input: &str) -> TransportResult<Vec<u8>> {
     Ok(out)
 }
 
+/// Parse HEX without the compatibility padding rules used by [`parse_hex`].
+///
+/// The strictness choice belongs to the Application command, so both Native
+/// and Web can validate the same input before the backend sends it.
+pub fn parse_hex_strict(input: &str) -> TransportResult<Vec<u8>> {
+    parse_hex_strict_line(input)
+}
+
 /// 解析单个 HEX token，返回其对应的字节。
 ///
 /// 规则（单 token 与多 token 一致）：
@@ -1476,6 +1484,7 @@ mod tests {
             vec![0x0A, 0x0B, 0x0C]
         );
         assert_eq!(parse_hex_strict_line("0xFF").unwrap(), vec![0xFF]);
+        assert_eq!(parse_hex_strict("0A 0B").unwrap(), vec![0x0A, 0x0B]);
     }
 
     #[test]

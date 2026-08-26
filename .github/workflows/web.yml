@@ -26,6 +26,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.92.0
         with:
           targets: wasm32-unknown-unknown
+          components: clippy
 
       - name: Install and verify WASM target
         run: |
@@ -39,9 +40,23 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build Web V1
+      - name: Build Web application
         working-directory: web
         run: trunk build --release --public-url /serial_tool/
+
+      - name: Validate Web artifact
+        working-directory: web
+        shell: bash
+        run: |
+          test -s ../dist-web/index.html
+          grep -F 'hardware-workbench' ../dist-web/index.html
+          wasm_file="$(find ../dist-web -type f -name '*.wasm' -size +0c -print -quit)"
+          test -n "$wasm_file"
+          js_file="$(find ../dist-web -type f -name '*.js' -size +0c -print -quit)"
+          test -n "$js_file"
+
+      - name: Web target clippy
+        run: cargo clippy --target wasm32-unknown-unknown -p hardware-workbench-app -- -D warnings
 
       - uses: actions/upload-pages-artifact@v3
         with:

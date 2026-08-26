@@ -1,68 +1,50 @@
 use std::collections::VecDeque;
 
-use crate::{design, theme};
-use egui::{Color32, ComboBox, ProgressBar, RichText, Sense, TextEdit};
+use crate::{ReplayPolicyOption, ReplayUiCommand, design, replay_policy_ui, theme};
+use egui::{Color32, ProgressBar, RichText, Sense, TextEdit};
 use egui_material_icons::icons::{
     ICON_FOLDER_OPEN, ICON_PAUSE, ICON_PLAY_ARROW, ICON_REPLAY, ICON_SKIP_NEXT, ICON_SKIP_PREVIOUS,
     ICON_STOP, ICON_TUNE, ICON_UPLOAD_FILE,
 };
-use tool_application::api::recorder::{
-    ReplayBlockReason, ReplayManager, ReplayPolicy, ReplayState,
+use tool_application::replay::{
+    ReplayBlockReasonView, ReplayPolicyView, ReplayStateView, ReplayStatusView,
 };
-use tool_databus::DataBus;
 
+/// Native/Web 共用的回放展示状态。
+///
+/// 回放数据和控制器归 Application 所有；Panel 只保存交互状态，并把用户
+/// 意图放入 `ReplayUiCommand` 队列。这样 UI 不会再持有第二个 ReplayManager。
 pub struct ReplayPanel {
-    manager: ReplayManager,
-
     pub path: String,
-
-    speed: f64,
-    loop_playback: bool,
-    step_size: usize,
-    message: Option<String>,
+    pub speed: f64,
+    pub loop_playback: bool,
+    pub step_size: usize,
+    pub message: Option<String>,
 
     pub want_pick_file: bool,
     pub auto_load: bool,
-
-    /// main.rs 清空终端/日志后开始播放
     pub want_clear_on_play: bool,
-
-    /// Some(pos_ms): main.rs 清空终端/日志后重放到该位置
     pub want_seek_replay: Option<u64>,
-
-    /// Some(steps): main.rs 清空终端/日志后回退指定事件数
     pub want_step_backward: Option<usize>,
-
-    /// main.rs 消费后运行 replay analyzer
     pub want_run_analyzers: bool,
-
-    /// main.rs 消费后取消正在运行的 analyzer
     pub want_cancel_analyzers: bool,
-
     pub analyzer_busy: bool,
     pub analyzer_logs: VecDeque<String>,
-}
 
-pub struct ReplayTickOutcome {
-    pub published: usize,
-    pub loop_restarted: bool,
+    load_pending: bool,
+    commands: Vec<ReplayUiCommand>,
 }
 
 impl ReplayPanel {
-    pub fn new(bus: &DataBus) -> Self {
+    pub fn new() -> Self {
         Self {
-            manager: ReplayManager::new(bus.clone()),
-
             path: "logs/session.jsonl".to_owned(),
-
             speed: 1.0,
             loop_playback: false,
             step_size: 1,
             message: None,
-
             want_pick_file: false,
             auto_load: false,
-
             want_clear_on_play: false,
             want_seek_replay: None,
             want_step_backward: None,
@@ -70,113 +52,30 @@ impl ReplayPanel {
             want_cancel_analyzers: false,
             analyzer_busy: false,
             analyzer_logs: VecDeque::new(),
+            load_pending: false,
+            commands: Vec::new(),
         }
     }
 
-    pub fn try_load(&mut self) {
-        match self.manager.load(&self.path) {
-            Ok(count) => {
-                let effective = self.manager.effective_policy();
-                let mut msg = format!("已加载 {count} 个事件");
-                if effective == ReplayPolicy::ReparseRaw {
-                    msg.push_str(" (需要运行 analyzer)");
-                }
-                self.message = Some(msg);
-                self.manager.set_speed(self.speed);
-                // 加载新文件后，标记需要运行 analyzer
-                self.want_run_analyzers = self.manager.needs_analyzer();
-            }
-            Err(error) => {
-                self.message = Some(error.to_string());
-            }
-        }
+    pub fn set_load_pending(&mut self, pending: bool) {
+        self.load_pending = pending;
     }
 
-    /// 执行 seek 重放：调用方需要先清空终端/日志
-    pub fn do_seek_replay(&mut self, position_ms: u64) {
-        self.manager.seek_with_replay(position_ms);
-    }
-
-    /// 两阶段回放 - 阶段 1：只发布 ui.panel.create 事件。
-    /// 返回发布的事件数。调用方应在此之后调用 dynamic_panels.ingest() 创建图表面板。
-    pub fn do_seek_panel_phase(&mut self, position_ms: u64) -> usize {
-        self.manager.seek_panel_phase(position_ms)
-    }
-
-    /// 两阶段回放 - 阶段 2：发布剩余事件 + analyzer cache。
-    /// 返回发布的事件数。
-    pub fn do_seek_data_phase(&mut self, position_ms: u64) -> usize {
-        self.manager.seek_data_phase(position_ms)
-    }
-
-    /// 执行步进退后：调用方需要先清空终端/日志
-    pub fn do_step_backward(&mut self, steps: usize) {
-        let steps = steps.max(1);
-
-        if let Some(target_cursor) = self.manager.backward_cursor_by(steps) {
-            self.manager.seek_cursor_with_replay(target_cursor);
-        }
-    }
-
-    pub fn tick_playback(&mut self) -> ReplayTickOutcome {
-        let published = self.manager.tick();
-        if published > 0 {
-            self.message = Some(format!("回放中 ({published} 事件)"));
-        }
-
-        let status = self.manager.status();
-        let mut loop_restarted = false;
-        if self.loop_playback && status.state == ReplayState::Finished {
-            self.want_clear_on_play = true;
-            self.manager.stop();
-            self.manager.play();
-            loop_restarted = true;
-        }
-
-        ReplayTickOutcome {
-            published,
-            loop_restarted,
-        }
-    }
-
-    pub fn do_seek_cursor_panel_phase(&mut self, target_cursor: usize) -> usize {
-        self.manager.seek_cursor_panel_phase(target_cursor)
-    }
-
-    pub fn do_seek_cursor_data_phase(&mut self, target_cursor: usize) -> usize {
-        self.manager.seek_cursor_data_phase(target_cursor)
-    }
-
-    // ── Coordinator accessors ──
-
-    pub fn manager(&self) -> &ReplayManager {
-        &self.manager
-    }
-
-    pub fn manager_mut(&mut self) -> &mut ReplayManager {
-        &mut self.manager
-    }
-
-    pub fn set_analyzer_cache(&mut self, events: Vec<tool_core::Event>) {
-        let status = self.manager.status();
-        self.manager.set_analyzer_cache(events);
-        self.want_run_analyzers = false;
-        if status.total_events > 0 && status.state != ReplayState::Playing {
-            self.want_seek_replay = Some(status.position_ms);
-        }
+    pub fn take_commands(&mut self) -> Vec<ReplayUiCommand> {
+        std::mem::take(&mut self.commands)
     }
 
     pub fn set_analyzer_error(&mut self, error: String) {
-        self.manager.set_analyzer_error(error);
         self.want_run_analyzers = false;
+        self.message = Some(error);
     }
 
     pub fn set_analyzer_warning(&mut self, warning: String) {
-        self.manager.set_analyzer_warning(warning);
+        self.message = Some(warning);
     }
 
     pub fn clear_analyzer_error(&mut self) {
-        self.manager.clear_analyzer_error();
+        self.message = None;
     }
 
     pub fn push_analyzer_log(&mut self, msg: impl Into<String>) {
@@ -187,15 +86,14 @@ impl ReplayPanel {
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, status: &ReplayStatusView) {
         if self.auto_load {
             self.auto_load = false;
-            self.try_load();
+            self.commands.push(ReplayUiCommand::Load {
+                path: self.path.clone(),
+            });
         }
 
-        let mut status = self.manager.status();
-
-        // ── 回放文件 ──
         design::card().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             design::section_header(ui, ICON_FOLDER_OPEN, "回放文件");
@@ -205,50 +103,38 @@ impl ReplayPanel {
 
         ui.add_space(8.0);
 
-        // ── 回放策略 ──
         design::card().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             design::section_header(ui, ICON_TUNE, "回放策略");
             ui.separator();
-            self.policy_controls(ui);
+            self.policy_controls(ui, status);
         });
 
         ui.add_space(8.0);
 
-        // ── 播放控制 ──
         design::card().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             design::section_header(ui, ICON_REPLAY, "播放控制");
             ui.separator();
-
-            // 控件可能修改了 manager 状态，这里重新取一次。
-            status = self.manager.status();
-
-            self.playback_controls(ui, &status);
-
-            status = self.manager.status();
-            self.progress_bar(ui, &status);
-            self.bookmark_controls(ui, &status);
+            self.playback_controls(ui, status);
+            self.progress_bar(ui, status);
+            self.bookmark_controls(ui, status);
         });
 
         ui.add_space(4.0);
-
-        // ── 状态信息（卡片外） ──
-        status = self.manager.status();
-        self.status_line(ui, &status);
+        self.status_line(ui, status);
 
         if let Some(message) = &self.message {
             ui.label(message);
         }
 
-        if self.manager.needs_analyzer()
+        if status.effective_policy == ReplayPolicyView::ReparseRaw
             || self.analyzer_busy
-            || self.manager.analyzer_cache_valid()
+            || status.analyzer_cache_valid
         {
             ui.collapsing("Replay Analyzer", |ui| {
                 if self.analyzer_busy {
                     ui.colored_label(theme::blue(), "Analyzer 正在运行");
-
                     if ui.button("取消").clicked() {
                         self.want_cancel_analyzers = true;
                     }
@@ -256,21 +142,16 @@ impl ReplayPanel {
                     self.want_run_analyzers = true;
                 }
 
-                let status = self.manager.status();
-
                 if let Some(error) = &status.analyzer_error {
                     ui.colored_label(theme::red(), error);
                 }
-
                 if let Some(warning) = &status.analyzer_warning {
                     ui.colored_label(theme::yellow(), warning);
                 }
-
                 ui.label(format!(
                     "Analyzer cache: {} events",
                     status.analyzer_cache_entries
                 ));
-
                 egui::ScrollArea::vertical()
                     .max_height(120.0)
                     .show(ui, |ui| {
@@ -285,131 +166,79 @@ impl ReplayPanel {
     fn file_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.label("文件");
-
             let path_width = (ui.available_width() - 120.0).clamp(140.0, 280.0);
             ui.add(
                 TextEdit::singleline(&mut self.path)
                     .desired_width(path_width)
                     .hint_text("选择 JSONL 回放文件"),
             );
-
             if design::button(ui, ICON_FOLDER_OPEN, "浏览", design::ButtonKind::Secondary).clicked()
             {
                 self.want_pick_file = true;
             }
-
-            if design::button(ui, ICON_UPLOAD_FILE, "加载", design::ButtonKind::Primary).clicked()
+            if ui
+                .add_enabled(
+                    !self.load_pending,
+                    egui::Button::new(design::icon_text(ICON_UPLOAD_FILE, "加载")),
+                )
+                .clicked()
             {
-                self.try_load();
+                self.commands.push(ReplayUiCommand::Load {
+                    path: self.path.clone(),
+                });
+            }
+            if self.load_pending {
+                ui.spinner();
+                ui.label("后台解析中…");
+                ui.ctx().request_repaint();
             }
         });
     }
 
-    fn policy_controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            ui.label("回放策略");
-
-            let mut policy = self.manager.policy();
-            let policy_changed = ComboBox::from_id_salt("replay-policy")
-                .width(160.0)
-                .selected_text(policy_label(policy))
-                .show_ui(ui, |ui| {
-                    let mut changed = false;
-                    for &p in &[
-                        ReplayPolicy::AutoPreferRecorded,
-                        ReplayPolicy::ExactRecorded,
-                        ReplayPolicy::ReparseRaw,
-                    ] {
-                        if ui
-                            .selectable_value(&mut policy, p, policy_label(p))
-                            .on_hover_text(policy_description(p))
-                            .changed()
-                        {
-                            changed = true;
-                        }
-                    }
-                    changed
-                });
-
-            if policy_changed.inner.unwrap_or(false) {
-                let status = self.manager.status();
-                self.manager.set_policy(policy);
-                self.want_run_analyzers = self.manager.needs_analyzer();
-                if self.manager.replay_ready()
-                    && status.total_events > 0
-                    && status.state != ReplayState::Playing
-                {
-                    self.want_seek_replay = Some(status.position_ms);
-                }
-            }
-        });
-
-        // 显示实际生效的策略
-        let effective = self.manager.effective_policy();
-        let status_text = match effective {
-            ReplayPolicy::AutoPreferRecorded => "自动 (使用录制解析结果)",
-            ReplayPolicy::ExactRecorded => "使用录制解析结果",
-            ReplayPolicy::ReparseRaw => {
-                if self.manager.analyzer_cache_valid() {
-                    "使用 Replay Analyzer 重新解析 (已缓存)"
-                } else if self.manager.analyzer_error().is_some() {
-                    "Replay Analyzer 失败"
-                } else {
-                    "需要运行 Replay Analyzer"
-                }
-            }
-        };
-        ui.label(egui::RichText::new(status_text).color(theme::text_secondary()));
-
-        if let Some(error) = self.manager.analyzer_error() {
+    fn policy_controls(&mut self, ui: &mut egui::Ui, status: &ReplayStatusView) {
+        let mut policy = replay_policy_option(status.policy);
+        let effective = replay_policy_option(status.effective_policy);
+        if replay_policy_ui(ui, &mut policy, Some(effective)) {
+            self.commands
+                .push(ReplayUiCommand::SetPolicy(policy_view(policy)));
+        }
+        if let Some(error) = &status.analyzer_error {
             ui.colored_label(theme::red(), format!("错误: {error}"));
         }
-        if let Some(warning) = self.manager.analyzer_warning() {
-            ui.colored_label(theme::yellow(), warning.to_string());
+        if let Some(warning) = &status.analyzer_warning {
+            ui.colored_label(theme::yellow(), warning);
         }
     }
 
-    fn playback_controls(
-        &mut self,
-        ui: &mut egui::Ui,
-        status: &tool_application::api::recorder::ReplayStatus,
-    ) {
+    fn playback_controls(&mut self, ui: &mut egui::Ui, status: &ReplayStatusView) {
         let has_events = status.total_events > 0;
-        let can_play = self.manager.can_play();
-        let can_seek = self.manager.can_seek();
-        let can_control = has_events && status.state != ReplayState::Empty;
-        let block_reason = self.manager.replay_block_reason();
+        let can_control = has_events && status.state != ReplayStateView::Empty;
+        let can_play = status.can_play;
+        let can_seek = status.can_seek;
 
         ui.horizontal_wrapped(|ui| {
-            if status.state == ReplayState::Playing {
+            if status.state == ReplayStateView::Playing {
                 if design::button(ui, ICON_PAUSE, "暂停", design::ButtonKind::Secondary).clicked()
                 {
-                    self.manager.pause();
+                    self.commands.push(ReplayUiCommand::Pause);
                 }
             } else {
                 let (icon, label) = match status.state {
-                    ReplayState::Finished => (ICON_REPLAY, "重播"),
+                    ReplayStateView::Finished => (ICON_REPLAY, "重播"),
                     _ => (ICON_PLAY_ARROW, "播放"),
                 };
-
                 if ui
                     .add_enabled(can_play, egui::Button::new(design::icon_text(icon, label)))
                     .on_disabled_hover_text("当前回放策略需要先完成 Replay Analyzer")
                     .clicked()
                 {
-                    match status.state {
-                        ReplayState::Finished => {
-                            self.want_clear_on_play = true;
-                            self.manager.stop();
-                            self.manager.play();
-                        }
-                        _ => {
-                            if status.position_ms == 0 {
-                                self.want_clear_on_play = true;
-                            }
-                            self.manager.play();
-                        }
+                    if status.state == ReplayStateView::Finished {
+                        self.want_clear_on_play = true;
+                        self.commands.push(ReplayUiCommand::Stop);
+                    } else if status.position_ms == 0 {
+                        self.want_clear_on_play = true;
                     }
+                    self.commands.push(ReplayUiCommand::Play);
                 }
             }
 
@@ -420,14 +249,12 @@ impl ReplayPanel {
                 )
                 .clicked()
             {
-                self.manager.stop();
+                self.commands.push(ReplayUiCommand::Stop);
                 self.message = Some("已停止".to_owned());
             }
 
             ui.separator();
-
             ui.label("步进");
-
             egui::ComboBox::from_id_salt("step-size")
                 .width(56.0)
                 .selected_text(format!("{}", self.step_size))
@@ -447,7 +274,6 @@ impl ReplayPanel {
             {
                 self.want_step_backward = Some(self.step_size);
             }
-
             if ui
                 .add_enabled(
                     can_seek && status.cursor < status.total_events,
@@ -456,205 +282,148 @@ impl ReplayPanel {
                 .on_hover_text("前进指定事件数")
                 .clicked()
             {
-                for _ in 0..self.step_size {
-                    self.manager.step_forward();
-
-                    let current = self.manager.status();
-                    if current.cursor >= current.total_events {
-                        break;
-                    }
-                }
+                self.commands.push(ReplayUiCommand::SeekCursorDataPhase {
+                    target_cursor: (status.cursor + self.step_size).min(status.total_events),
+                });
             }
-
             ui.label(format!("{}/{}", status.cursor, status.total_events));
 
             ui.separator();
-
             ui.checkbox(&mut self.loop_playback, "循环");
-
             ui.separator();
-
             ui.label("速度");
 
             let mut speed_log = (self.speed.ln() / 2_f64.ln()).clamp(-3.32, 4.0);
-
             let speed_resp = ui.add(
                 egui::Slider::new(&mut speed_log, -3.32..=4.0)
                     .text(format!("{:.2}x", self.speed))
                     .step_by(0.01),
             );
-
             if speed_resp.changed() {
-                let new_speed = (2_f64.powf(speed_log) * 100.0).round() / 100.0;
-                self.speed = new_speed.clamp(0.1, 16.0);
-                self.manager.set_speed(self.speed);
+                self.speed = (2_f64.powf(speed_log) * 100.0).round() / 100.0;
+                self.speed = self.speed.clamp(0.1, 16.0);
+                self.commands.push(ReplayUiCommand::SetSpeed(self.speed));
             }
-
-            if ui
-                .small_button("1x")
-                .on_hover_text("重置为 1 倍速")
-                .clicked()
-            {
+            if ui.small_button("1x").clicked() {
                 self.speed = 1.0;
-                self.manager.set_speed(1.0);
+                self.commands.push(ReplayUiCommand::SetSpeed(1.0));
             }
-
-            // 常用速度预设：点击直接跳到对应倍速，免去对数滑块拖不准。
             for &preset in &[0.5_f64, 2.0, 5.0, 10.0] {
                 if ui.small_button(format!("{preset}x")).clicked() {
                     self.speed = preset;
-                    self.manager.set_speed(preset);
+                    self.commands.push(ReplayUiCommand::SetSpeed(preset));
                 }
             }
-
             speed_resp.on_hover_text(format!("回放速度 {:.2}x  |  范围 0.1x ~ 16x", self.speed));
         });
 
-        if let Some(reason) = block_reason {
+        if let Some(reason) = &status.block_reason {
             ui.separator();
-
             match reason {
-                ReplayBlockReason::NeedAnalyzer => {
+                ReplayBlockReasonView::NeedAnalyzer => {
                     ui.colored_label(theme::yellow(), "重新解析模式需要先运行 Replay Analyzer");
-
                     if ui.button("运行 Analyzer").clicked() {
                         self.want_run_analyzers = true;
                     }
                 }
-
-                ReplayBlockReason::AnalyzerFailed(ref error) => {
+                ReplayBlockReasonView::AnalyzerFailed(error) => {
                     ui.colored_label(theme::red(), format!("Analyzer 失败：{error}"));
-
                     if ui.button("重试 Analyzer").clicked() {
                         self.want_run_analyzers = true;
                     }
-
                     if ui.button("切换到精确回放").clicked() {
-                        self.manager.set_policy(ReplayPolicy::ExactRecorded);
+                        self.commands
+                            .push(ReplayUiCommand::SetPolicy(ReplayPolicyView::ExactRecorded));
                     }
                 }
             }
         }
     }
 
-    fn progress_bar(
-        &mut self,
-        ui: &mut egui::Ui,
-        status: &tool_application::api::recorder::ReplayStatus,
-    ) {
+    fn progress_bar(&mut self, ui: &mut egui::Ui, status: &ReplayStatusView) {
         let progress = if status.duration_ms == 0 {
             0.0
         } else {
             status.position_ms as f32 / status.duration_ms as f32
         };
-
-        let bar_text = format!(
+        let bar_resp = ui.add(ProgressBar::new(progress.clamp(0.0, 1.0)).text(format!(
             "{} / {}",
             ms_to_hms(status.position_ms),
             ms_to_hms(status.duration_ms),
-        );
-
-        let bar = ProgressBar::new(progress.clamp(0.0, 1.0)).text(bar_text);
-        let bar_resp = ui.add(bar);
-
-        if status.total_events == 0 || status.duration_ms == 0 {
+        )));
+        if status.total_events == 0 || status.duration_ms == 0 || !status.can_seek {
             return;
         }
-
-        if !self.manager.can_seek() {
-            bar_resp.on_hover_text("当前回放策略需要先完成 Replay Analyzer");
-            return;
-        }
-
         let drag = ui.interact(
             bar_resp.rect,
             ui.make_persistent_id("replay-progress-drag"),
             Sense::click_and_drag(),
         );
-
         if (drag.clicked() || drag.dragged())
             && let Some(mpos) = ui.ctx().pointer_latest_pos()
         {
-            let click_frac =
+            let fraction =
                 ((mpos.x - bar_resp.rect.left()) / bar_resp.rect.width()).clamp(0.0, 1.0);
-
-            let target = (click_frac * status.duration_ms as f32) as u64;
-
-            self.want_seek_replay = Some(target);
+            self.want_seek_replay = Some((fraction * status.duration_ms as f32) as u64);
         }
     }
 
-    fn bookmark_controls(
-        &mut self,
-        ui: &mut egui::Ui,
-        status: &tool_application::api::recorder::ReplayStatus,
-    ) {
-        let bookmarks = self.manager.bookmarks().to_vec();
-        if bookmarks.is_empty() && status.total_events == 0 {
+    fn bookmark_controls(&mut self, ui: &mut egui::Ui, status: &ReplayStatusView) {
+        if status.bookmarks.is_empty() && status.total_events == 0 {
             return;
         }
-        let can_seek = self.manager.can_seek();
         ui.horizontal_wrapped(|ui| {
             if ui
                 .small_button("+书签")
                 .on_hover_text("在当前时间点添加书签")
                 .clicked()
             {
-                self.manager.add_bookmark(None);
+                self.commands
+                    .push(ReplayUiCommand::AddReplayBookmark { name: None });
             }
-            for bookmark in &bookmarks {
-                let label = bookmark.name.as_deref().unwrap_or("").to_owned();
+            for bookmark in &status.bookmarks {
+                let label = bookmark.name.as_deref().unwrap_or("");
                 let display = if label.is_empty() {
-                    ms_to_hms(bookmark.pos_ms).to_string()
+                    ms_to_hms(bookmark.position_ms)
                 } else {
-                    format!("{} {}", ms_to_hms(bookmark.pos_ms), label)
+                    format!("{} {}", ms_to_hms(bookmark.position_ms), label)
                 };
                 if ui
-                    .add_enabled(can_seek, egui::Button::new(display))
-                    .on_disabled_hover_text("当前回放策略需要先完成 Replay Analyzer")
+                    .add_enabled(status.can_seek, egui::Button::new(display))
                     .clicked()
                 {
-                    self.want_seek_replay = Some(bookmark.pos_ms);
+                    self.want_seek_replay = Some(bookmark.position_ms);
                 }
-                if ui.small_button("×").on_hover_text("删除此书签").clicked() {
-                    self.manager.remove_bookmark(bookmark.pos_ms);
+                if ui.small_button("×").clicked() {
+                    self.commands.push(ReplayUiCommand::RemoveReplayBookmark {
+                        position_ms: bookmark.position_ms,
+                    });
                 }
             }
         });
     }
 
-    fn status_line(
-        &mut self,
-        ui: &mut egui::Ui,
-        status: &tool_application::api::recorder::ReplayStatus,
-    ) {
+    fn status_line(&self, ui: &mut egui::Ui, status: &ReplayStatusView) {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(state_label(status.state)).color(state_color(status.state)));
-
             ui.separator();
-
             ui.label(format!("事件 {}/{}", status.cursor, status.total_events));
-
             ui.separator();
-
             ui.label(format!("{:.1}x", status.speed));
-
             if let Some(path) = &status.path {
                 ui.separator();
-
                 ui.label(
-                    egui::RichText::new(
-                        path.file_name()
+                    RichText::new(
+                        std::path::Path::new(path)
+                            .file_name()
                             .map(|name| name.to_string_lossy().to_string())
-                            .unwrap_or_else(|| path.display().to_string()),
+                            .unwrap_or_else(|| path.clone()),
                     )
                     .monospace()
                     .color(theme::text_primary()),
                 );
             }
         });
-
-        // 加载报告：坏行警告
         if let Some(report) = status.load_report.as_ref()
             && report.skipped > 0
         {
@@ -669,13 +438,44 @@ impl ReplayPanel {
     }
 }
 
-fn state_label(state: ReplayState) -> &'static str {
+impl Default for ReplayPanel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn replay_policy_option(policy: ReplayPolicyView) -> ReplayPolicyOption {
+    match policy {
+        ReplayPolicyView::AutoPreferRecorded => ReplayPolicyOption::AutoPreferRecorded,
+        ReplayPolicyView::ExactRecorded => ReplayPolicyOption::ExactRecorded,
+        ReplayPolicyView::ReparseRaw => ReplayPolicyOption::ReparseRaw,
+    }
+}
+
+fn policy_view(policy: ReplayPolicyOption) -> ReplayPolicyView {
+    match policy {
+        ReplayPolicyOption::AutoPreferRecorded => ReplayPolicyView::AutoPreferRecorded,
+        ReplayPolicyOption::ExactRecorded => ReplayPolicyView::ExactRecorded,
+        ReplayPolicyOption::ReparseRaw => ReplayPolicyView::ReparseRaw,
+    }
+}
+
+fn state_label(state: ReplayStateView) -> &'static str {
     match state {
-        ReplayState::Empty => "空",
-        ReplayState::Loaded => "就绪",
-        ReplayState::Playing => "播放中",
-        ReplayState::Paused => "已暂停",
-        ReplayState::Finished => "已完成",
+        ReplayStateView::Empty => "空",
+        ReplayStateView::Loaded => "就绪",
+        ReplayStateView::Playing => "播放中",
+        ReplayStateView::Paused => "已暂停",
+        ReplayStateView::Finished => "已完成",
+    }
+}
+
+fn state_color(state: ReplayStateView) -> Color32 {
+    match state {
+        ReplayStateView::Empty => theme::text_secondary(),
+        ReplayStateView::Loaded | ReplayStateView::Paused => theme::yellow(),
+        ReplayStateView::Playing => theme::blue(),
+        ReplayStateView::Finished => theme::green(),
     }
 }
 
@@ -685,35 +485,9 @@ fn ms_to_hms(ms: u64) -> String {
     let m = (total_s % 3600) / 60;
     let s = total_s % 60;
     let ms_part = ms % 1000;
-
     if h > 0 {
         format!("{h}:{m:02}:{s:02}.{ms_part:03}")
     } else {
         format!("{m}:{s:02}.{ms_part:03}")
-    }
-}
-
-fn policy_label(policy: ReplayPolicy) -> &'static str {
-    match policy {
-        ReplayPolicy::AutoPreferRecorded => "自动",
-        ReplayPolicy::ExactRecorded => "精确回放",
-        ReplayPolicy::ReparseRaw => "重新解析",
-    }
-}
-
-fn policy_description(policy: ReplayPolicy) -> &'static str {
-    match policy {
-        ReplayPolicy::AutoPreferRecorded => "有录制解析结果则直接使用，否则自动重新解析",
-        ReplayPolicy::ExactRecorded => "强制使用录制时的解析结果，不运行 Analyzer",
-        ReplayPolicy::ReparseRaw => "忽略录制时的解析，强制运行 Replay Analyzer 重新解析原始数据",
-    }
-}
-
-fn state_color(state: ReplayState) -> Color32 {
-    match state {
-        ReplayState::Empty => theme::text_secondary(),
-        ReplayState::Loaded | ReplayState::Paused => theme::yellow(),
-        ReplayState::Playing => theme::blue(),
-        ReplayState::Finished => theme::green(),
     }
 }

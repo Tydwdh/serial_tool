@@ -186,6 +186,8 @@ $registry = Get-Content $registryPath -Raw -Encoding UTF8 | ConvertFrom-Json
 # 拼下载 URL（GitHub raw）
 $marketplaceUrlPath = $MarketplacePath.Trim('/')
 $downloadUrl = "https://raw.githubusercontent.com/$Owner/$Repo/$Branch/$marketplaceUrlPath/plugins/$PluginId/$Version/$zipName"
+$sourceManifestUrl = "https://raw.githubusercontent.com/$Owner/$Repo/$Branch/plugins/$PluginId/plugin.json"
+$sourceMainUrl = "https://raw.githubusercontent.com/$Owner/$Repo/$Branch/plugins/$PluginId/main.lua"
 
 # 查找或新建条目
 $entryIndex = -1
@@ -213,6 +215,8 @@ $entry = [ordered]@{
     icon          = $manifest.icon
     permissions   = @($manifest.permissions)
     download_url  = $downloadUrl
+    manifest_url = $sourceManifestUrl
+    main_url     = $sourceMainUrl
     sha256        = $sha256
     size          = $size
     published     = $now

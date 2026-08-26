@@ -23,4 +23,6 @@ thiserror.workspace = true
 tool-core = { path = "../core" }
 tool-databus = { path = "../databus" }
 tool-testing = { path = "../testing" }
+tool-plugin-api = { path = "../plugin_api" }
+tool-platform = { path = "../platform" }
 tool-transport = { path = "../transport" }

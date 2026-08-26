@@ -1,11 +1,15 @@
 use eframe::egui;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 use tool_panels::theme;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub const DEFAULT_WINDOW_WIDTH: f32 = 1280.0; //默认窗口宽度
+#[cfg(not(target_arch = "wasm32"))]
 pub const DEFAULT_WINDOW_HEIGHT: f32 = 820.0; //默认窗口高度
 
 /// 应用所在目录（基于 exe 路径，不依赖 CWD）。
+#[cfg(not(target_arch = "wasm32"))]
 pub fn app_dir() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -28,6 +32,7 @@ pub fn app_dir() -> PathBuf {
 /// Ubuntu 的 `.deb` 会把程序安装到 `/usr/lib/hardware-workbench`，该目录
 /// 只应存放只读资源。插件、主题和录制文件必须放在当前用户的数据目录，
 /// 这样从应用菜单启动时不需要 root 权限。
+#[cfg(not(target_arch = "wasm32"))]
 pub fn user_data_dir() -> PathBuf {
     #[cfg(target_os = "linux")]
     {
@@ -42,18 +47,22 @@ pub fn user_data_dir() -> PathBuf {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn user_plugins_dir() -> PathBuf {
     user_data_dir().join("plugins")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn user_themes_dir() -> PathBuf {
     user_data_dir().join("themes")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn user_logs_dir() -> PathBuf {
     user_data_dir().join("logs")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn setup_fonts(cc: &eframe::CreationContext<'_>) {
     let dir = app_dir();
 
@@ -105,6 +114,7 @@ pub fn setup_fonts(cc: &eframe::CreationContext<'_>) {
     egui_material_icons::initialize(&cc.egui_ctx);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn load_font(fonts: &mut egui::FontDefinitions, name: &str, paths: &[PathBuf]) {
     for path in paths {
         if let Ok(bytes) = std::fs::read(path) {
@@ -116,6 +126,7 @@ fn load_font(fonts: &mut egui::FontDefinitions, name: &str, paths: &[PathBuf]) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn set_family(fonts: &mut egui::FontDefinitions, family: egui::FontFamily, names: &[&str]) {
     let list = fonts.families.entry(family).or_default();
 

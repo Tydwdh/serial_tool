@@ -1,6 +1,6 @@
 use crate::app::WorkbenchApp;
 use serde_json::Value;
-use tool_application::api::core::{Direction, Event, LogLevel, Payload};
+use tool_core::{Direction, Event, LogLevel, Payload};
 
 impl WorkbenchApp {
     /// 处理 Lua ctx.dialog.open_file 请求。每帧最多处理一个。
@@ -21,8 +21,10 @@ impl WorkbenchApp {
             }
             let result = dialog.pick_file();
             if let Some(ref path) = result {
-                self.workbench
-                    .authorize_plugin_file(&request.plugin_id, path.clone());
+                self.workbench.authorize_plugin_file(
+                    &request.plugin_id,
+                    tool_platform::storage::FileHandle::from_native_path(path.clone()),
+                );
             }
             let _ = request.response_sender.send(result);
         }
@@ -36,12 +38,12 @@ impl WorkbenchApp {
         if let Payload::Json(value) = event.payload {
             let panel_id = value.get("panel_id").and_then(Value::as_str).unwrap_or("");
             let field_id = value.get("field_id").and_then(Value::as_str).unwrap_or("");
-            let filters: Vec<tool_application::api::lua_host::FileFilter> = value
+            let filters: Vec<tool_lua_host::FileFilter> = value
                 .get("filters")
                 .and_then(Value::as_array)
                 .map(|arr| {
                     arr.iter()
-                        .map(|f| tool_application::api::lua_host::FileFilter {
+                        .map(|f| tool_lua_host::FileFilter {
                             name: f
                                 .get("name")
                                 .and_then(Value::as_str)
@@ -78,8 +80,10 @@ impl WorkbenchApp {
 
             if let Some(ref selected_path) = result {
                 if let Some(owner) = self.dynamic_panels.panel_owner(panel_id) {
-                    self.workbench
-                        .authorize_plugin_file(owner, selected_path.clone());
+                    self.workbench.authorize_plugin_file(
+                        owner,
+                        tool_platform::storage::FileHandle::from_native_path(selected_path.clone()),
+                    );
                 } else {
                     self.log(
                         LogLevel::Warn,
@@ -88,7 +92,7 @@ impl WorkbenchApp {
                 }
 
                 self.workbench.publish_event(Event::new(
-                    tool_application::api::core::topics::UI_FORM_FILE_SELECTED,
+                    tool_core::topics::UI_FORM_FILE_SELECTED,
                     "ui",
                     Direction::Internal,
                     Payload::Json(serde_json::json!({

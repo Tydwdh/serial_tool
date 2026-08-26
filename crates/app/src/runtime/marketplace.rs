@@ -3,8 +3,8 @@ use crate::bootstrap::user_plugins_dir;
 use crate::state::StatusLevel;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tool_application::api::core::LogLevel;
-use tool_application::api::marketplace::{RegistryFetch, RegistryPlugin};
+use tool_core::LogLevel;
+use tool_marketplace::{RegistryFetch, RegistryPlugin};
 
 /// 市场索引 + 安装任务的运行时状态。
 pub(crate) struct MarketplaceState {
@@ -128,10 +128,11 @@ impl WorkbenchApp {
             return; // 已有刷新在进行
         }
         self.plugins_panel.set_market_refreshing(true);
-        let url =
-            self.marketplace.url.clone().unwrap_or_else(|| {
-                tool_application::api::marketplace::DEFAULT_REGISTRY_URL.to_owned()
-            });
+        let url = self
+            .marketplace
+            .url
+            .clone()
+            .unwrap_or_else(|| tool_marketplace::DEFAULT_REGISTRY_URL.to_owned());
         let network = tool_updater::NetworkSettings::with_proxy(
             (!self.network_proxy_url.trim().is_empty()).then(|| self.network_proxy_url.clone()),
         );
@@ -141,9 +142,7 @@ impl WorkbenchApp {
                 .enable_all()
                 .build()
                 .map_err(|e| format!("创建 tokio runtime 失败：{e}"))?;
-            rt.block_on(async {
-                tool_application::api::marketplace::fetch_registry(&url, &network).await
-            })
+            rt.block_on(async { tool_marketplace::fetch_registry(&url, &network).await })
         }));
     }
 
@@ -159,11 +158,17 @@ impl WorkbenchApp {
         // 导致替换失败，也保证重装后用户重新启用才加载新代码。
         let was_active = matches!(
             self.workbench.plugin_state(&id),
-            Some(tool_application::api::extension::PluginState::Running)
-                | Some(tool_application::api::extension::PluginState::Enabled)
-                | Some(tool_application::api::extension::PluginState::Finished)
+            Some(tool_application::query::PluginStateView::Running)
+                | Some(tool_application::query::PluginStateView::Enabled)
+                | Some(tool_application::query::PluginStateView::Finished)
         );
-        if was_active && let Err(e) = self.workbench.disable_plugin(&id) {
+        if was_active
+            && let Err(e) = self
+                .workbench
+                .dispatch(tool_application::AppCommand::DisablePlugin {
+                    plugin_id: id.clone(),
+                })
+        {
             log::warn!("marketplace: 重装前禁用 {id} 失败（继续安装）：{e}");
         }
         // disable 后的动态面板/资源由 PluginManager 统一请求宿主回收。
@@ -183,7 +188,7 @@ impl WorkbenchApp {
                 .build()
                 .map_err(|e| format!("创建 tokio runtime 失败：{e}"))?;
             rt.block_on(async {
-                tool_application::api::marketplace::install_plugin(
+                tool_marketplace::install_plugin(
                     &entry,
                     &install_dir,
                     &network,
@@ -234,12 +239,18 @@ impl WorkbenchApp {
         // 1. 先 disable（若活跃）
         let was_active = matches!(
             self.workbench.plugin_state(plugin_id),
-            Some(tool_application::api::extension::PluginState::Running)
-                | Some(tool_application::api::extension::PluginState::Enabled)
-                | Some(tool_application::api::extension::PluginState::Finished)
-                | Some(tool_application::api::extension::PluginState::Failed)
+            Some(tool_application::query::PluginStateView::Running)
+                | Some(tool_application::query::PluginStateView::Enabled)
+                | Some(tool_application::query::PluginStateView::Finished)
+                | Some(tool_application::query::PluginStateView::Failed)
         );
-        if was_active && let Err(e) = self.workbench.disable_plugin(plugin_id) {
+        if was_active
+            && let Err(e) = self
+                .workbench
+                .dispatch(tool_application::AppCommand::DisablePlugin {
+                    plugin_id: plugin_id.to_owned(),
+                })
+        {
             log::warn!("marketplace: 卸载前禁用 {plugin_id} 失败（继续卸载）：{e}");
         }
 

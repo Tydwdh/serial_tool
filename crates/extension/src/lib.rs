@@ -209,6 +209,27 @@ mod tests {
             }
 
             assert_manifest_is_valid(&manifest_path);
+            let manifest: PluginManifest = serde_json::from_str(
+                &fs::read_to_string(&manifest_path)
+                    .unwrap_or_else(|error| panic!("{}: {error}", manifest_path.display())),
+            )
+            .unwrap_or_else(|error| panic!("{}: {error}", manifest_path.display()));
+            let live_path = path.join(manifest.live_main());
+            assert!(
+                live_path.is_file(),
+                "{} declares live entry '{}' but it is missing",
+                manifest_path.display(),
+                manifest.live_main()
+            );
+            if let Some(replay) = manifest.replay_main() {
+                let replay_path = path.join(replay);
+                assert!(
+                    replay_path.is_file(),
+                    "{} declares replay entry '{}' but it is missing",
+                    manifest_path.display(),
+                    replay
+                );
+            }
             checked += 1;
         }
 

@@ -15,5 +15,5 @@ pub use format::RecordMode;
 pub use recorder::{JsonlRecorder, RecorderBackpressureConfig, RecorderStats};
 pub use replay::{
     ReplayBlockReason, ReplayLoadData, ReplayLoadReport, ReplayManager, ReplayPolicy, ReplayState,
-    ReplayStatus,
+    ReplayStatus, ReplayTextLoader,
 };

@@ -24,15 +24,23 @@ futures-executor = "0.3"
 tool-transport = { path = "../transport" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+futures-channel = "0.3"
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [
+    "Event",
+    "EventTarget",
+    "BinaryType",
+    "CloseEvent",
+    "MessageEvent",
     "Navigator",
+    "Location",
     "console",
     "ParityType",
     "ReadableStream",
     "ReadableStreamDefaultReader",
+    "Response",
     "Serial",
     "SerialInputSignals",
     "SerialOptions",
@@ -43,4 +51,5 @@ web-sys = { version = "0.3", features = [
     "WritableStream",
     "WritableStreamDefaultWriter",
     "Window",
+    "WebSocket",
 ] }

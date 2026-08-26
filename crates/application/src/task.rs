@@ -5,7 +5,6 @@
 
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::PathBuf;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -13,6 +12,7 @@ use std::sync::{
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use tool_extension::PluginScan;
+use tool_platform::storage::FileHandle;
 use tool_platform::{PortDescriptor, PortId};
 use tool_recorder::ReplayLoadData;
 use tool_transport::SerialPortDescriptor;
@@ -33,7 +33,7 @@ pub enum TaskResult {
     TransportSignalChanged { port: PortId },
     ReplayLoaded(ReplayLoadData),
     PluginsDiscovered(PluginScan),
-    FileExported { path: PathBuf },
+    FileExported { file: FileHandle },
 }
 
 #[derive(Debug)]
@@ -242,7 +242,7 @@ mod tests {
         let mut manager = TaskManager::new();
         let id = manager.spawn("test", |_context| {
             Ok(TaskResult::FileExported {
-                path: PathBuf::from("test.txt"),
+                file: FileHandle::named("test.txt"),
             })
         });
 

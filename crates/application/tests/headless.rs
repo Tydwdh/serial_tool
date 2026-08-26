@@ -30,7 +30,7 @@ fn headless_workbench_can_dispatch_and_query() {
 
     // Invalid connect should return transport error, not panic.
     let connect = wb.dispatch(AppCommand::Connect {
-        port_name: "COM_NOT_EXIST_999".into(),
+        port: tool_platform::PortId::new("COM_NOT_EXIST_999"),
         settings: tool_platform::SerialSettings::default(),
     });
     assert!(matches!(

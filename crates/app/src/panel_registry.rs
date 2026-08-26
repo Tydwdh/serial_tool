@@ -1,20 +1,9 @@
-//! 统一面板注册表（PanelRegistry）。
+//! Platform-neutral panel metadata registry.
 //!
-//! 所有面板——内置面板与插件动态面板——注册为同一份 [`PanelDef`]（标题、
-//! 图标、渲染方式），布局树只保存 [`tool_panels::PanelId`]。渲染时按 id
-//! 查询注册表统一分派，不再区分 built-in / dynamic。
-//!
-//! 与 [`crate::command_registry`] 同理：built-in 只是注册得比较早的普通
-//! 面板，插件面板随插件启停动态同步。
-//!
-//! # 借用设计
-//!
-//! [`PanelDef`] 的渲染方式用可 Clone 的 [`PanelRender`] 表达：内置面板是
-//! 函数指针，动态面板只携带裸 id。渲染前先 clone 出来再独占借用 `&mut
-//! WorkbenchApp`，避免「从 `self.panel_registry` 借出 def 的同时又要
-//! `&mut self`」的借用冲突。
+//! The registry describes which panels exist, their presentation metadata and
+//! the capabilities they require. Rendering is dispatched by the UI host, so
+//! this module does not depend on `WorkbenchApp` or a platform runtime.
 
-use crate::app::WorkbenchApp;
 use egui_material_icons::{
     MaterialIcon,
     icons::{
@@ -22,88 +11,153 @@ use egui_material_icons::{
         ICON_USB, ICON_VIEW_IN_AR,
     },
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use tool_application::{AppCapabilities, Capability};
+use tool_panels::DynamicPanels;
 use tool_panels::{
-    DynamicPanels, PANEL_DEVICES, PANEL_LOGS, PANEL_PLUGINS, PANEL_REPLAY, PANEL_SENDER,
+    PANEL_CHART, PANEL_DEVICES, PANEL_LOGS, PANEL_PLUGINS, PANEL_REPLAY, PANEL_SENDER,
     PANEL_SETTINGS, PANEL_TERMINAL, PanelId,
 };
 
-/// 面板渲染方式。
-#[derive(Clone)]
-pub(crate) enum PanelRender {
-    /// 内置面板：渲染函数。
-    Builtin(fn(&mut WorkbenchApp, &mut egui::Ui)),
-    /// 插件动态面板：裸 id（DynamicPanels 查询键）。
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinPanel {
+    Devices,
+    Replay,
+    Plugins,
+    Settings,
+    Terminal,
+    Sender,
+    Logs,
+    Chart,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) enum PanelKind {
+    Builtin(BuiltinPanel),
     Dynamic { suffix: String },
 }
 
-/// 一个面板的完整定义（id 即布局树中的 pane 标识）。
+#[derive(Clone)]
 pub(crate) struct PanelDef {
     pub(crate) id: PanelId,
     pub(crate) title: String,
     pub(crate) icon: MaterialIcon,
-    render: PanelRender,
+    pub(crate) kind: PanelKind,
+    required_capability: Option<Capability>,
 }
 
-/// 面板注册表：内置面板构造时注册；插件动态面板随插件启停动态同步。
-#[derive(Default)]
 pub(crate) struct PanelRegistry {
     defs: HashMap<PanelId, PanelDef>,
+    capabilities: AppCapabilities,
+    disabled: HashSet<PanelId>,
+}
+
+impl Default for PanelRegistry {
+    fn default() -> Self {
+        Self {
+            defs: HashMap::new(),
+            capabilities: AppCapabilities::native(),
+            disabled: HashSet::new(),
+        }
+    }
 }
 
 impl PanelRegistry {
-    /// 注册全部内置面板。
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn builtin() -> Self {
-        let mut registry = Self::default();
+        Self::for_capabilities(AppCapabilities::native())
+    }
 
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn web() -> Self {
+        let registry = Self::for_capabilities(AppCapabilities::web());
+        // Web keeps the native Dock positions. Panels whose capability has no
+        // browser equivalent yet remain explicitly unavailable; implemented
+        // panels use the same registry/layout rather than a second shell.
+        registry
+    }
+
+    pub(crate) fn for_capabilities(capabilities: AppCapabilities) -> Self {
+        let mut registry = Self {
+            capabilities,
+            ..Self::default()
+        };
         registry.register(PanelDef {
             id: PanelId::builtin(PANEL_DEVICES),
             title: "设备".to_owned(),
             icon: ICON_USB,
-            render: PanelRender::Builtin(render_devices),
-        });
-        registry.register(PanelDef {
-            id: PanelId::builtin(PANEL_REPLAY),
-            title: "回放".to_owned(),
-            icon: ICON_HISTORY,
-            render: PanelRender::Builtin(render_replay),
-        });
-        registry.register(PanelDef {
-            id: PanelId::builtin(PANEL_PLUGINS),
-            title: "插件".to_owned(),
-            icon: ICON_EXTENSION,
-            render: PanelRender::Builtin(render_plugins),
+            kind: PanelKind::Builtin(BuiltinPanel::Devices),
+            required_capability: Some(Capability::Serial),
         });
         registry.register(PanelDef {
             id: PanelId::builtin(PANEL_SETTINGS),
             title: "设置".to_owned(),
             icon: ICON_SETTINGS,
-            render: PanelRender::Builtin(render_settings),
+            kind: PanelKind::Builtin(BuiltinPanel::Settings),
+            required_capability: None,
         });
         registry.register(PanelDef {
             id: PanelId::builtin(PANEL_TERMINAL),
             title: "接收".to_owned(),
             icon: ICON_TERMINAL,
-            render: PanelRender::Builtin(render_terminal),
+            kind: PanelKind::Builtin(BuiltinPanel::Terminal),
+            required_capability: None,
+        });
+        registry.register(PanelDef {
+            id: PanelId::builtin(PANEL_REPLAY),
+            title: "回放".to_owned(),
+            icon: ICON_HISTORY,
+            kind: PanelKind::Builtin(BuiltinPanel::Replay),
+            required_capability: Some(Capability::Replay),
+        });
+        registry.register(PanelDef {
+            id: PanelId::builtin(PANEL_PLUGINS),
+            title: "插件".to_owned(),
+            icon: ICON_EXTENSION,
+            kind: PanelKind::Builtin(BuiltinPanel::Plugins),
+            required_capability: Some(Capability::Plugins),
         });
         registry.register(PanelDef {
             id: PanelId::builtin(PANEL_SENDER),
             title: "发送器".to_owned(),
             icon: ICON_SEND,
-            render: PanelRender::Builtin(render_sender),
+            kind: PanelKind::Builtin(BuiltinPanel::Sender),
+            required_capability: Some(Capability::Serial),
         });
         registry.register(PanelDef {
             id: PanelId::builtin(PANEL_LOGS),
             title: "日志".to_owned(),
             icon: ICON_VIEW_IN_AR,
-            render: PanelRender::Builtin(render_logs),
+            kind: PanelKind::Builtin(BuiltinPanel::Logs),
+            required_capability: None,
         });
-
+        registry.register(PanelDef {
+            id: PanelId::builtin(PANEL_CHART),
+            title: "图表".to_owned(),
+            icon: ICON_VIEW_IN_AR,
+            kind: PanelKind::Builtin(BuiltinPanel::Chart),
+            required_capability: None,
+        });
         registry
     }
 
     fn register(&mut self, def: PanelDef) {
         self.defs.insert(def.id.clone(), def);
+    }
+
+    pub(crate) fn contains(&self, id: &PanelId) -> bool {
+        self.defs.contains_key(id)
+    }
+
+    pub(crate) fn is_available(&self, id: &PanelId) -> bool {
+        !self.disabled.contains(id)
+            && self
+                .defs
+                .get(id)
+                .and_then(|def| def.required_capability)
+                .is_none_or(|capability| self.capabilities.supports(capability))
     }
 
     pub(crate) fn title(&self, id: &PanelId) -> String {
@@ -117,13 +171,10 @@ impl PanelRegistry {
         self.defs.get(id).map(|def| def.icon).unwrap_or(ICON_CABLE)
     }
 
-    /// 渲染方式（clone 后调用，避免借用冲突；见模块文档）。
-    pub(crate) fn render_for(&self, id: &PanelId) -> Option<PanelRender> {
-        self.defs.get(id).map(|def| def.render.clone())
+    pub(crate) fn kind_for(&self, id: &PanelId) -> Option<PanelKind> {
+        self.defs.get(id).map(|def| def.kind.clone())
     }
 
-    /// 同步插件动态面板到注册表：先移除全部动态面板定义，再按当前
-    /// DynamicPanels 重建。内置面板不受影响。
     pub(crate) fn sync_dynamic_panels(&mut self, dynamic: &DynamicPanels) {
         self.defs.retain(|id, _| !id.is_dynamic());
         for id in dynamic.ids() {
@@ -135,77 +186,12 @@ impl PanelRegistry {
                     id: panel_id,
                     title,
                     icon: ICON_CABLE,
-                    render: PanelRender::Dynamic {
+                    kind: PanelKind::Dynamic {
                         suffix: id.to_owned(),
                     },
+                    required_capability: None,
                 },
             );
         }
     }
-}
-
-// ── 内置面板渲染函数 ──
-
-fn render_devices(app: &mut WorkbenchApp, ui: &mut egui::Ui) {
-    egui::ScrollArea::vertical()
-        .id_salt("scroll-devices")
-        .show(ui, |ui| app.device_panel(ui));
-}
-
-fn render_replay(app: &mut WorkbenchApp, ui: &mut egui::Ui) {
-    egui::ScrollArea::vertical()
-        .id_salt("scroll-replay")
-        .show(ui, |ui| app.replay_panel.ui(ui));
-}
-
-fn render_plugins(app: &mut WorkbenchApp, ui: &mut egui::Ui) {
-    // Panel 不再持有 PluginManager，经 Workbench 的 summaries/diagnostics 构 DTO
-    let plugin_view = app.workbench.query_plugins();
-    let summaries = plugin_view.summaries;
-    let diagnostics = plugin_view.diagnostics;
-    let events = egui::ScrollArea::vertical()
-        .id_salt("scroll-plugins")
-        .show(ui, |ui| {
-            app.plugins_panel.ui_with_view(ui, &summaries, &diagnostics)
-        })
-        .inner;
-    // pending_restart 需经 Workbench 重试（原 Panel 内直接 manager.enable(...) 已去业务）
-    for id in app.plugins_panel.take_pending_restart() {
-        if let Err(tool_application::AppError::Plugin(message)) = app.workbench.enable_plugin(&id)
-            && message.contains("shutting down")
-        {
-            app.plugins_panel.push_pending_restart(id);
-        }
-    }
-    app.handle_plugin_panel_events(events);
-}
-
-fn render_settings(app: &mut WorkbenchApp, ui: &mut egui::Ui) {
-    egui::ScrollArea::vertical()
-        .id_salt("scroll-settings")
-        .show(ui, |ui| app.settings_panel(ui));
-}
-
-fn render_terminal(app: &mut WorkbenchApp, ui: &mut egui::Ui) {
-    let started = app.perf.begin_frame();
-    // 每帧同步端口别名：别名变更可能发生在 device_panel / settings_panel 等多处，
-    // 渲染前统一注入最简单可靠（别名数量少，clone 开销可忽略）。
-    app.terminal_panel
-        .set_port_aliases(&app.serial.port_aliases);
-    app.terminal_panel.ui(ui);
-    app.perf.record_terminal_render(started);
-}
-
-fn render_sender(app: &mut WorkbenchApp, ui: &mut egui::Ui) {
-    if ui.available_width() < 420.0 {
-        app.send_panel_vertical(ui);
-    } else {
-        app.send_panel_horizontal(ui);
-    }
-}
-
-fn render_logs(app: &mut WorkbenchApp, ui: &mut egui::Ui) {
-    let started = app.perf.begin_frame();
-    app.bottom_log_panel.ui(ui);
-    app.perf.record_log_render(started);
 }

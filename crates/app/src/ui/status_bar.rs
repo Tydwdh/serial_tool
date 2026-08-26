@@ -50,9 +50,10 @@ impl WorkbenchApp {
             design::status_pill(ui, dot_color, label);
 
             // 录制状态
-            let rec = self.workbench.recording_is_running();
+            let recording = self.workbench.query_recording();
+            let rec = recording.stats.running;
             let recording_label = if rec {
-                let stats = self.workbench.query_recording().stats;
+                let stats = &recording.stats;
                 if stats.paused {
                     format!(
                         "已暂停 {} 条 {:.1}MB",
@@ -78,11 +79,8 @@ impl WorkbenchApp {
                 },
                 recording_label,
             );
-            if rec {
-                let stats = self.workbench.query_recording().stats;
-                if let Some(ref err) = stats.last_error {
-                    ui.colored_label(theme::red(), format!("错误: {err}"));
-                }
+            if rec && let Some(ref err) = recording.stats.last_error {
+                ui.colored_label(theme::red(), format!("错误: {err}"));
             }
 
             // DTR/RTS 标签：可点击切换，复用发送面板的信号控制路径。
@@ -129,7 +127,10 @@ impl WorkbenchApp {
                         "数据终端就绪 (DTR)。点击切换会立即驱动该线路，部分设备会用它触发复位/进入 bootload，请谨慎。",
                     ) {
                         let new_dtr = !self.send.dtr_high;
-                        match self.workbench.set_dtr(&port, new_dtr) {
+                        match self.workbench.dispatch(tool_application::AppCommand::SetDtr {
+                            port: tool_platform::PortId::new(port.clone()),
+                            value: new_dtr,
+                        }) {
                             Ok(tool_application::CommandOutcome::Pending { .. })
                             | Ok(tool_application::CommandOutcome::Done) => {
                                 self.send.dtr_high = new_dtr
@@ -145,7 +146,10 @@ impl WorkbenchApp {
                         "请求发送 (RTS)。点击切换会立即驱动该线路，部分设备会用它触发复位/进入 bootload，请谨慎。",
                     ) {
                         let new_rts = !self.send.rts_high;
-                        match self.workbench.set_rts(&port, new_rts) {
+                        match self.workbench.dispatch(tool_application::AppCommand::SetRts {
+                            port: tool_platform::PortId::new(port.clone()),
+                            value: new_rts,
+                        }) {
                             Ok(tool_application::CommandOutcome::Pending { .. })
                             | Ok(tool_application::CommandOutcome::Done) => {
                                 self.send.rts_high = new_rts

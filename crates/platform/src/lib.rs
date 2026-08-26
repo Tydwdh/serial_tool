@@ -15,6 +15,12 @@ pub mod storage;
 #[cfg(target_arch = "wasm32")]
 pub mod web_serial;
 
+#[cfg(target_arch = "wasm32")]
+pub mod web_network;
+
+#[cfg(target_arch = "wasm32")]
+pub mod web_fetch;
+
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native;
 
@@ -24,7 +30,7 @@ pub mod native;
 /// with the existing serial worker. Web values are generated from the
 /// browser's authorized `SerialPort` object and must not be interpreted as a
 /// filesystem or device path by application code.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct PortId(String);
 
 impl PortId {
@@ -61,6 +67,54 @@ pub enum PortKind {
     Serial,
     Network,
     Unknown,
+}
+
+/// Configuration for the optional WebSocket-backed network serial endpoint.
+///
+/// The native transport crate has the same wire protocol, but the
+/// configuration belongs here so both composition roots can use the same
+/// platform-neutral value. A network port is represented as a normal
+/// [`PortDescriptor`] with [`PortKind::Network`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetworkSerialConfig {
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+impl Default for NetworkSerialConfig {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: 7125,
+            api_key: None,
+        }
+    }
+}
+
+impl NetworkSerialConfig {
+    pub fn display_name(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+
+    /// Stable browser identity. The prefix prevents a network endpoint from
+    /// colliding with a browser-owned SerialPort whose opaque id happens to
+    /// have the same display text.
+    pub fn port_id(&self) -> PortId {
+        PortId::new(format!("network://{}:{}", self.host, self.port))
+    }
+
+    pub fn descriptor(&self) -> PortDescriptor {
+        PortDescriptor {
+            id: self.port_id(),
+            label: self.display_name(),
+            kind: PortKind::Network,
+            vendor_id: None,
+            product_id: None,
+            authorized: true,
+        }
+    }
 }
 
 /// Serial line parameters accepted by both Native serialport and Web Serial.
@@ -123,6 +177,16 @@ impl TransportCapabilities {
         send: true,
         set_dtr: true,
         set_rts: true,
+    };
+
+    pub const WEB_NETWORK: Self = Self {
+        list_known_ports: false,
+        request_port: false,
+        connect: true,
+        disconnect: true,
+        send: true,
+        set_dtr: false,
+        set_rts: false,
     };
 }
 

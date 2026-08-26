@@ -72,8 +72,8 @@ impl super::DynamicPanels {
                 }
             });
         }
-        // file browse 事件由 main.rs 处理
-        let _ = self.file_browse_subscription.drain_limited(500);
+        // file browse 事件由 composition root 处理；Web 用浏览器文件选择器，
+        // Native 使用 Workbench 的桌面文件服务。
 
         // file selected 事件：更新字段值，并触发 form.changed（视为用户输入）
         // 只接受来自 ui/app 的事件，防止插件伪造文件选择结果

@@ -1,10 +1,8 @@
 //! Application Command — 业务意图（不含 UI 操作）。
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::path::PathBuf;
-
 use crate::TaskId;
-use tool_platform::SerialSettings;
+use tool_platform::storage::FileHandle;
+use tool_platform::{NetworkSerialConfig, PortId, SerialSettings};
 
 /// 应用层命令：描述“我要做什么”，由 `Workbench::dispatch` 执行。
 #[derive(Debug, Clone)]
@@ -15,21 +13,38 @@ pub enum AppCommand {
     /// a best-effort selection from already known ports.
     RequestPort,
 
+    /// Register a user-configured network endpoint in the platform port list.
+    /// Native and Web compositions can then use the same connect/send flow.
+    RegisterNetworkPort {
+        config: NetworkSerialConfig,
+    },
+
+    RemoveNetworkPort {
+        port: PortId,
+    },
+
     Connect {
-        port_name: String,
+        port: PortId,
+        settings: SerialSettings,
+    },
+
+    /// Update the active serial line parameters used by subsequent connects
+    /// and reconnects.  Keeping this as an application command prevents the
+    /// presentation layer from mutating a platform-specific config mirror.
+    SetSerialSettings {
         settings: SerialSettings,
     },
 
     Disconnect {
-        port_name: String,
+        port: PortId,
     },
 
     Reconnect {
-        port_name: String,
+        port: PortId,
     },
 
     CancelReconnect {
-        port_name: String,
+        port: PortId,
     },
 
     CancelTask {
@@ -37,105 +52,126 @@ pub enum AppCommand {
     },
 
     SendText {
-        port_name: String,
+        port: PortId,
         text: String,
     },
 
     SendHex {
-        port_name: String,
+        port: PortId,
         hex: String,
+        /// Reject odd/single-nibble tokens when enabled.
+        strict: bool,
     },
 
     SendRaw {
-        port_name: String,
+        port: PortId,
         bytes: Vec<u8>,
     },
 
     SetDtr {
-        port_name: String,
+        port: PortId,
         value: bool,
     },
 
     SetRts {
-        port_name: String,
+        port: PortId,
         value: bool,
     },
 
-    #[cfg(not(target_arch = "wasm32"))]
     StartRecording {
-        path: PathBuf,
+        /// The platform-specific FileService owns the actual handle/path
+        /// semantics. Native carries an opaque path-backed handle; Web keeps
+        /// only the browser download name.
+        file: FileHandle,
+        mode: crate::recording::RecordModeView,
     },
 
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Change the recorder format for the next/current recording. The
+    /// backend owns the actual recorder implementation; the UI only submits
+    /// the platform-neutral mode.
+    SetRecordingMode {
+        mode: crate::recording::RecordModeView,
+    },
+
     StopRecording,
 
-    #[cfg(not(target_arch = "wasm32"))]
     PauseRecording,
 
-    #[cfg(not(target_arch = "wasm32"))]
     ResumeRecording,
 
-    #[cfg(not(target_arch = "wasm32"))]
     AddBookmark {
+        name: Option<String>,
+    },
+    AddReplayBookmark {
         name: Option<String>,
     },
 
     #[cfg(not(target_arch = "wasm32"))]
     LoadReplay {
-        path: PathBuf,
+        file: FileHandle,
+    },
+    #[cfg(target_arch = "wasm32")]
+    LoadReplayText {
+        name: String,
+        text: String,
     },
 
-    #[cfg(not(target_arch = "wasm32"))]
     ReplayPlay,
-    #[cfg(not(target_arch = "wasm32"))]
     ReplayPause,
-    #[cfg(not(target_arch = "wasm32"))]
     ReplayStop,
 
-    #[cfg(not(target_arch = "wasm32"))]
     ReplaySeek {
         position_ms: u64,
     },
 
-    #[cfg(not(target_arch = "wasm32"))]
     ReplaySeekBy {
         delta_ms: i64,
     },
 
-    #[cfg(not(target_arch = "wasm32"))]
     ReplayStep {
         delta: i32,
     },
+    RemoveReplayBookmark {
+        position_ms: u64,
+    },
 
-    #[cfg(not(target_arch = "wasm32"))]
     SetReplaySpeed {
         speed: f64,
     },
 
-    #[cfg(not(target_arch = "wasm32"))]
     SetReplayPolicy {
-        policy: crate::query::ReplayPolicyView,
+        policy: crate::replay::ReplayPolicyView,
     },
 
-    #[cfg(not(target_arch = "wasm32"))]
     EnablePlugin {
         plugin_id: String,
     },
 
-    #[cfg(not(target_arch = "wasm32"))]
     DisablePlugin {
         plugin_id: String,
     },
 
-    #[cfg(not(target_arch = "wasm32"))]
     ReloadPlugins,
 
-    #[cfg(not(target_arch = "wasm32"))]
+    RefreshMarketplace {
+        url: String,
+    },
+
+    /// Install the same plugin.json + main.lua sources published by a
+    /// marketplace registry. Application owns the asynchronous fetch task.
+    #[cfg(target_arch = "wasm32")]
+    InstallMarketplacePlugin {
+        plugin_id: String,
+        manifest_url: String,
+        main_url: String,
+    },
+
+    CheckForUpdate,
+
     DiscoverPlugins {
         roots: Vec<std::path::PathBuf>,
     },
 
-    #[cfg(not(target_arch = "wasm32"))]
     ExecutePluginCommand {
         plugin_id: String,
         command_id: String,
@@ -155,13 +191,13 @@ pub enum AppCommand {
     #[cfg(not(target_arch = "wasm32"))]
     ExportTerminal {
         format: String,
-        path: PathBuf,
+        file: FileHandle,
     },
 
     #[cfg(not(target_arch = "wasm32"))]
     ExportLog {
         format: String,
-        path: PathBuf,
+        file: FileHandle,
     },
 }
 

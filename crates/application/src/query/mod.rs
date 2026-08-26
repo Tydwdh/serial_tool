@@ -1,51 +1,21 @@
 //! Query — 只读视图，UI 通过 `Workbench::query_*()` 读取状态。
 
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use tool_platform::NetworkSerialConfig;
 use tool_transport::{SerialPortDescriptor, TransportStatus};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct NetworkPortConfig {
-    pub host: String,
-    pub port: u16,
-    pub api_key: Option<String>,
-}
+pub use crate::recording::{RecordModeView, RecorderStatsView, RecordingStatusView};
 
-impl Default for NetworkPortConfig {
-    fn default() -> Self {
-        Self {
-            host: String::new(),
-            port: 7125,
-            api_key: None,
-        }
-    }
-}
+pub use crate::plugin::{
+    PluginCommandView, PluginContributesView, PluginDiagnosticSeverityView, PluginDiagnosticView,
+    PluginPanelContributionView, PluginSettingView, PluginStateView, PluginSummaryView,
+    PluginUiContributionView, PluginView,
+};
+pub use crate::replay::{
+    ReplayBlockReasonView, ReplayBookmarkView, ReplayLoadReportView, ReplayPolicyView,
+    ReplayStateView, ReplayStatusView,
+};
 
-impl NetworkPortConfig {
-    pub fn display_name(&self) -> String {
-        format!("{}:{}", self.host, self.port)
-    }
-}
-
-impl From<tool_transport::NetworkSerialConfig> for NetworkPortConfig {
-    fn from(config: tool_transport::NetworkSerialConfig) -> Self {
-        Self {
-            host: config.host,
-            port: config.port,
-            api_key: config.api_key,
-        }
-    }
-}
-
-impl From<NetworkPortConfig> for tool_transport::NetworkSerialConfig {
-    fn from(config: NetworkPortConfig) -> Self {
-        Self {
-            host: config.host,
-            port: config.port,
-            api_key: config.api_key,
-        }
-    }
-}
+pub type NetworkPortConfig = NetworkSerialConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PortTypeView {
@@ -141,73 +111,6 @@ pub struct SerialConfigView {
     pub parity: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecordModeView {
-    RawSerial,
-    StandardReplay,
-}
-
-impl From<tool_recorder::RecordMode> for RecordModeView {
-    fn from(mode: tool_recorder::RecordMode) -> Self {
-        match mode {
-            tool_recorder::RecordMode::RawSerial => Self::RawSerial,
-            tool_recorder::RecordMode::StandardReplay => Self::StandardReplay,
-        }
-    }
-}
-
-impl From<RecordModeView> for tool_recorder::RecordMode {
-    fn from(mode: RecordModeView) -> Self {
-        match mode {
-            RecordModeView::RawSerial => Self::RawSerial,
-            RecordModeView::StandardReplay => Self::StandardReplay,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct RecorderStatsView {
-    pub events_written: u64,
-    pub bytes_written: u64,
-    pub last_flush_elapsed_ms: u64,
-    pub last_error: Option<String>,
-    pub running: bool,
-    pub stopping: bool,
-    pub paused: bool,
-    pub pause_count: u64,
-}
-
-impl From<tool_recorder::RecorderStats> for RecorderStatsView {
-    fn from(stats: tool_recorder::RecorderStats) -> Self {
-        Self {
-            events_written: stats.events_written,
-            bytes_written: stats.bytes_written,
-            last_flush_elapsed_ms: stats.last_flush_elapsed_ms,
-            last_error: stats.last_error,
-            running: stats.running,
-            stopping: stats.stopping,
-            paused: stats.paused,
-            pause_count: stats.pause_count,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct RecordingStatusView {
-    pub stats: RecorderStatsView,
-    pub path: Option<PathBuf>,
-    pub mode: RecordModeView,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReplayStateView {
-    Empty,
-    Loaded,
-    Playing,
-    Paused,
-    Finished,
-}
-
 impl From<tool_recorder::ReplayState> for ReplayStateView {
     fn from(state: tool_recorder::ReplayState) -> Self {
         match state {
@@ -220,11 +123,13 @@ impl From<tool_recorder::ReplayState> for ReplayStateView {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReplayPolicyView {
-    AutoPreferRecorded,
-    ExactRecorded,
-    ReparseRaw,
+impl From<tool_recorder::ReplayBlockReason> for ReplayBlockReasonView {
+    fn from(reason: tool_recorder::ReplayBlockReason) -> Self {
+        match reason {
+            tool_recorder::ReplayBlockReason::NeedAnalyzer => Self::NeedAnalyzer,
+            tool_recorder::ReplayBlockReason::AnalyzerFailed(error) => Self::AnalyzerFailed(error),
+        }
+    }
 }
 
 impl From<tool_recorder::ReplayPolicy> for ReplayPolicyView {
@@ -247,13 +152,6 @@ impl From<ReplayPolicyView> for tool_recorder::ReplayPolicy {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct ReplayLoadReportView {
-    pub loaded: usize,
-    pub skipped: usize,
-    pub first_errors: Vec<String>,
-}
-
 impl From<tool_recorder::ReplayLoadReport> for ReplayLoadReportView {
     fn from(report: tool_recorder::ReplayLoadReport) -> Self {
         Self {
@@ -265,24 +163,6 @@ impl From<tool_recorder::ReplayLoadReport> for ReplayLoadReportView {
 }
 
 #[derive(Debug, Clone)]
-pub struct ReplayStatusView {
-    pub state: ReplayStateView,
-    pub path: Option<PathBuf>,
-    pub total_events: usize,
-    pub cursor: usize,
-    pub speed: f64,
-    pub position_ms: u64,
-    pub duration_ms: u64,
-    pub policy: ReplayPolicyView,
-    pub effective_policy: ReplayPolicyView,
-    pub has_recorded_protocol: bool,
-    pub analyzer_cache_entries: usize,
-    pub analyzer_error: Option<String>,
-    pub analyzer_warning: Option<String>,
-    pub load_report: Option<ReplayLoadReportView>,
-}
-
-#[derive(Debug, Clone)]
 pub struct TransportView {
     pub ports: Vec<PortView>,
     pub open_ports: Vec<String>,
@@ -291,8 +171,137 @@ pub struct TransportView {
     pub auto_reconnect: bool,
 }
 
-#[derive(Debug, Clone)]
-pub struct PluginView {
-    pub summaries: Vec<tool_extension::PluginSummary>,
-    pub diagnostics: Vec<tool_extension::PluginDiagnostic>,
+/// 插件清单的应用层只读视图。
+///
+/// 这里刻意不暴露 `tool_extension` 的 manifest 类型，也不把本地
+/// `PathBuf` 穿过 Application 边界。插件管理器仍然可以使用自己的内部
+/// 模型，但 UI 只依赖这些稳定的展示 DTO。
+impl From<tool_extension::PluginState> for PluginStateView {
+    fn from(state: tool_extension::PluginState) -> Self {
+        match state {
+            tool_extension::PluginState::Discovered => Self::Discovered,
+            tool_extension::PluginState::Enabled => Self::Enabled,
+            tool_extension::PluginState::Running => Self::Running,
+            tool_extension::PluginState::Finished => Self::Finished,
+            tool_extension::PluginState::Failed => Self::Failed,
+            tool_extension::PluginState::Disabled => Self::Disabled,
+        }
+    }
+}
+
+impl From<tool_extension::PluginDiagnosticSeverity> for PluginDiagnosticSeverityView {
+    fn from(severity: tool_extension::PluginDiagnosticSeverity) -> Self {
+        match severity {
+            tool_extension::PluginDiagnosticSeverity::Warning => Self::Warning,
+            tool_extension::PluginDiagnosticSeverity::Error => Self::Error,
+        }
+    }
+}
+
+impl From<tool_extension::PluginDiagnostic> for PluginDiagnosticView {
+    fn from(diagnostic: tool_extension::PluginDiagnostic) -> Self {
+        Self {
+            severity: diagnostic.severity.into(),
+            code: diagnostic.code,
+            plugin_id: diagnostic.plugin_id,
+            path: diagnostic.path.display().to_string(),
+            message: diagnostic.message,
+        }
+    }
+}
+
+impl From<tool_extension::manifest::PluginCommand> for PluginCommandView {
+    fn from(command: tool_extension::manifest::PluginCommand) -> Self {
+        Self {
+            id: command.id,
+            title: command.title,
+        }
+    }
+}
+
+impl From<tool_extension::manifest::PluginUiContribution> for PluginUiContributionView {
+    fn from(contribution: tool_extension::manifest::PluginUiContribution) -> Self {
+        Self {
+            id: contribution.id,
+            slot: contribution.slot,
+            kind: contribution.kind,
+            title: contribution.title,
+            command: contribution.command,
+            tooltip: contribution.tooltip,
+            order: contribution.order,
+            enabled: contribution.enabled,
+            visible: contribution.visible,
+            record_send_input: contribution.record_send_input,
+            default: contribution.default,
+        }
+    }
+}
+
+impl From<tool_extension::manifest::PluginPanelContribution> for PluginPanelContributionView {
+    fn from(panel: tool_extension::manifest::PluginPanelContribution) -> Self {
+        Self {
+            id: panel.id,
+            title: panel.title,
+            kind: panel.kind,
+            config: panel.config,
+        }
+    }
+}
+
+impl From<tool_extension::manifest::PluginSetting> for PluginSettingView {
+    fn from(setting: tool_extension::manifest::PluginSetting) -> Self {
+        Self {
+            id: setting.id,
+            title: setting.title,
+            kind: setting.kind,
+            default: setting.default,
+            options: setting.options,
+            min: setting.min,
+            max: setting.max,
+            step: setting.step,
+            rows: setting.rows,
+            description: setting.description,
+        }
+    }
+}
+
+impl From<tool_extension::manifest::PluginContributes> for PluginContributesView {
+    fn from(contributes: tool_extension::manifest::PluginContributes) -> Self {
+        Self {
+            commands: contributes.commands.into_iter().map(Into::into).collect(),
+            ui: contributes.ui.into_iter().map(Into::into).collect(),
+            panels: contributes.panels.into_iter().map(Into::into).collect(),
+            settings: contributes.settings.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<tool_extension::PluginSummary> for PluginSummaryView {
+    fn from(summary: tool_extension::PluginSummary) -> Self {
+        Self {
+            id: summary.id,
+            name: summary.name,
+            version: summary.version,
+            api_version: summary.api_version,
+            runtime: summary.runtime,
+            state: summary.state.into(),
+            permissions: summary.permissions,
+            contributes: summary.contributes.into(),
+            path: summary.path.display().to_string(),
+            last_error: summary.last_error,
+            description: summary.description,
+            author: summary.author,
+            homepage: summary.homepage,
+            repository: summary.repository,
+            license: summary.license,
+            category: summary.category,
+            icon: summary.icon,
+            has_replay_analyzer: summary.has_replay_analyzer,
+            replay_subscriptions: summary.replay_subscriptions,
+            replay_outputs: summary.replay_outputs,
+            registered_commands: summary.registered_commands,
+            missing_commands: summary.missing_commands,
+            undeclared_commands: summary.undeclared_commands,
+        }
+    }
 }

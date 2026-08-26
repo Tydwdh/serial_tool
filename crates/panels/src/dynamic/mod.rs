@@ -253,6 +253,15 @@ impl DynamicPanels {
     pub fn set_ports(&mut self, ports: &[PortItem]) {
         self.ports = ports.to_vec();
     }
+
+    /// Drain browser/native UI file-browse requests for the composition root.
+    ///
+    /// Native uses `Workbench`'s shared UI event subscription; Web needs the
+    /// same request to open an `<input type=file>` without introducing a
+    /// second dynamic-panel implementation.
+    pub fn drain_file_browse_requests(&mut self) -> Vec<tool_core::Event> {
+        self.file_browse_subscription.drain_limited(500)
+    }
 }
 
 /// 渲染动态面板的实际内容（不含外层卡片包装）

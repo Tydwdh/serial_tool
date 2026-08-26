@@ -8,6 +8,8 @@ use std::future::Future;
 use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -20,6 +22,53 @@ impl FileId {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// A user-selected file without exposing a native path in application
+/// commands.  Native creates this from a dialog-selected path; Web creates a
+/// name-only handle and supplies the bytes obtained from the browser picker.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FileHandle {
+    id: FileId,
+    name: String,
+    #[cfg(not(target_arch = "wasm32"))]
+    native_path: Option<PathBuf>,
+}
+
+impl FileHandle {
+    pub fn named(name: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            id: FileId::new(name.clone()),
+            name,
+            #[cfg(not(target_arch = "wasm32"))]
+            native_path: None,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn from_native_path(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let name = path.display().to_string();
+        Self {
+            id: FileId::new(name.clone()),
+            name,
+            native_path: Some(path),
+        }
+    }
+
+    pub fn id(&self) -> &FileId {
+        &self.id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn native_path(&self) -> Option<&Path> {
+        self.native_path.as_deref()
     }
 }
 
@@ -249,7 +298,7 @@ pub mod web {
             let storage = window
                 .local_storage()
                 .map_err(js_error)?
-                .ok_or_else(|| StorageError::Unsupported)?;
+                .ok_or(StorageError::Unsupported)?;
             Ok(Self {
                 storage,
                 namespace: namespace.into(),

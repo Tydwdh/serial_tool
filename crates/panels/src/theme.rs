@@ -236,15 +236,17 @@ pub fn custom_theme_is_dark() -> bool {
 
 pub fn load_theme_file(path: &Path) -> Result<String, String> {
     migrate_theme_file(path)?;
-    let custom = match parse_theme_file(path, 0) {
-        Ok(custom) => custom,
-        Err(error) => {
-            let backup = quarantine_corrupt_file(path).ok().flatten();
-            let backup_note =
-                backup.map_or_else(String::new, |path| format!("，已备份为 {}", path.display()));
-            return Err(format!("{error}{backup_note}"));
-        }
-    };
+    let source = std::fs::read_to_string(path)
+        .map_err(|error| format!("读取主题 {} 失败：{error}", path.display()))?;
+    load_theme_text(&source, &path.display().to_string())
+}
+
+/// 从已经由宿主读取的文本加载自定义主题。
+///
+/// Native 通过 `load_theme_file` 调用此入口，Web 则通过浏览器文件选择器
+/// 提供文本。这样主题格式、继承和颜色校验不会因为平台而分叉。
+pub fn load_theme_text(source: &str, source_name: &str) -> Result<String, String> {
+    let custom = parse_theme_source(source, source_name, 0)?;
     let name = custom.name.clone();
     *custom_theme_store()
         .write()
@@ -300,15 +302,6 @@ fn migrate_theme_file(path: &Path) -> Result<(), String> {
             .map_err(|error| format!("升级主题 {} 失败：{error}", path.display()))?;
     }
     Ok(())
-}
-
-fn parse_theme_file(path: &Path, depth: u8) -> Result<CustomTheme, String> {
-    if depth > 8 {
-        return Err("主题 base 继承层级过深或存在循环".to_owned());
-    }
-    let source = std::fs::read_to_string(path)
-        .map_err(|error| format!("读取主题 {} 失败：{error}", path.display()))?;
-    parse_theme_source(&source, &path.display().to_string(), depth)
 }
 
 fn parse_theme_source(source: &str, source_name: &str, depth: u8) -> Result<CustomTheme, String> {

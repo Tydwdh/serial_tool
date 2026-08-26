@@ -777,14 +777,15 @@ local function handle_send_file(payload)
     local port = require_open_port(sc.target_port)
     if not port then return end
 
-    local path = resolve_file_path(sc.input)
-    if not path then
-        log("warn", "未选择 G-code 文件")
-        return
-    end
-
     start_task(port, function(s, task)
         task:set_status("正在检查 G-code 文件")
+        -- File dialogs are asynchronous in Web. Resolve the path/opaque file
+        -- handle inside the task so the same Lua source works in Native too.
+        local path = resolve_file_path(sc.input)
+        if not path then
+            log("warn", "未选择 G-code 文件")
+            return
+        end
         local builder = entries_from_file(path, s, task)
         if builder then
             log("info", string.format("文件预检完成: %s (%d 条命令)",

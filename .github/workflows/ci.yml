@@ -177,6 +177,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.92.0
         with:
           targets: wasm32-unknown-unknown
+          components: clippy
 
       - name: Install and verify WASM target
         shell: bash
@@ -189,6 +190,9 @@ jobs:
 
       - name: Check Web target
         run: cargo check --target wasm32-unknown-unknown -p hardware-workbench-app
+
+      - name: Lint Web target
+        run: cargo clippy --target wasm32-unknown-unknown -p hardware-workbench-app -- -D warnings
 
   release:
     name: GitHub Release
