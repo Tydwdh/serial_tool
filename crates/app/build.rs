@@ -35,6 +35,7 @@ fn main() {
     sync_themes();
 }
 
+#[cfg(windows)]
 fn sync_themes() {
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
     let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap_or_else(|_| ".".into()));
@@ -48,6 +49,7 @@ fn sync_themes() {
     }
 }
 
+#[cfg(windows)]
 fn sync_plugins() {
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
     let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap_or_else(|_| ".".into()));
@@ -69,6 +71,7 @@ fn sync_plugins() {
     }
 }
 
+#[cfg(windows)]
 fn copy_dir(src: &std::path::Path, dest: &std::path::Path) -> Result<(), std::io::Error> {
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
