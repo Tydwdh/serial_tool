@@ -19,13 +19,13 @@ use eframe::egui;
 use egui::FontFamily;
 use egui_material_icons::icons::{
     ICON_APPS, ICON_CABLE, ICON_CANCEL, ICON_FIBER_MANUAL_RECORD, ICON_FOLDER, ICON_INFO,
-    ICON_KEYBOARD, ICON_LINK_OFF, ICON_NETWORK_CHECK, ICON_PALETTE, ICON_POWER_SETTINGS_NEW,
-    ICON_REFRESH, ICON_SEARCH, ICON_STOP, ICON_TUNE,
+    ICON_KEYBOARD, ICON_NETWORK_CHECK, ICON_PALETTE, ICON_REFRESH, ICON_RESTART_ALT, ICON_SEARCH,
+    ICON_STOP, ICON_TUNE,
 };
 use js_sys::Array;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use tool_application::plugin::{
     PluginCommandView, PluginContributesView, PluginPanelContributionView, PluginSettingView,
@@ -38,14 +38,19 @@ use tool_core::Event;
 use tool_core::{Direction, Payload, topic_matches, topics};
 use tool_databus::DataBus;
 use tool_panels::{
-    ChartPanel, DataSettingsView, LogExportCursor, LogPanel, PanelId, PanelManager, PluginsPanel,
-    RecordingAction, RecordingMode, RecordingView, ReplayPanel, ReplayPolicyOption, SerialAction,
-    SerialPanel, SerialPortItem, SerialPortMetadata, SerialView, TerminalExportCursor,
-    TerminalExportFormat, TerminalPanel, data_settings_ui, design, recording_ui, theme,
+    ChartPanel, DataSettingsView, KeymapAction, KeymapEntry, LogExportCursor, LogPanel,
+    NetworkSerialAction, NetworkSerialFormView, PANEL_DEVICES, PanelId, PanelManager,
+    PluginPanelOptions, PluginSettingsView, PluginsPanel, RecordingAction, RecordingMode,
+    RecordingView, ReplayPanel, ReplayPolicyOption, SerialAction, SerialPanel, SerialPortItem,
+    SerialPortMetadata, SerialTopBarAction, SerialTopBarView, SerialView, StatusBarAction,
+    StatusBarView, StatusSignalView, TerminalExportCursor, TerminalExportFormat, TerminalPanel,
+    copy_text_with_feedback, data_settings_ui, design, keymap_ui, network_serial_form_ui,
+    plugin_settings_ui, recording_ui, status_bar_contents_ui, theme,
 };
 use tool_panels::{
-    SendAction, SendLayout, SendLineEnding, SendPortItem, SendView,
-    record_history as record_shared_send_history, sender_ui as shared_sender_ui,
+    SendAction, SendLineEnding, SendPortItem, SendToolbarButton, SendView,
+    record_history as record_shared_send_history, send_layout_for_width,
+    sender_ui as shared_sender_ui,
 };
 use tool_platform::storage::{SettingsStore, web::WebSettingsStore};
 use tool_platform::{
@@ -69,6 +74,7 @@ const WEB_MAX_SEND_HISTORY: usize = 200;
 const WEB_PLUGIN_API_VERSION: &str = "1";
 const WEB_MARKETPLACE_REGISTRY_URL: &str =
     "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugin-marketplace/registry.json";
+const REPOSITORY_URL: &str = env!("CARGO_PKG_REPOSITORY");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WebNotificationLevel {
@@ -227,6 +233,7 @@ pub(crate) struct WebSerialState {
     network_port: String,
     network_api_key: String,
     status: String,
+    refresh_on_page_entry: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -879,7 +886,8 @@ impl Default for WebSerialState {
             network_host: String::new(),
             network_port: "7125".to_owned(),
             network_api_key: String::new(),
-            status: "Web Serial：点击“刷新”读取已授权设备".to_owned(),
+            status: String::new(),
+            refresh_on_page_entry: true,
         }
     }
 }
@@ -923,7 +931,7 @@ impl WorkbenchApp {
             });
         }
         let serial_status = if runtime.as_ref().is_some_and(WebRuntime::serial_supported) {
-            "Web Serial：点击“刷新”读取已授权设备"
+            ""
         } else {
             "当前浏览器不支持 Web Serial"
         };
@@ -1210,133 +1218,6 @@ impl WorkbenchApp {
             }
             Ok(CommandOutcome::Done) => {}
             Err(error) => self.serial.borrow_mut().status = format!("停止录制失败：{error}"),
-        }
-    }
-
-    #[cfg(any())]
-    fn poll_web_recording(&mut self, ctx: &egui::Context) {
-        if !self.recording.running {
-            self.poll_web_recording_export(ctx);
-            return;
-        }
-        if self.recording.backlog_exceeded() {
-            let reason = format!(
-                "录制积压超过安全阈值（{} 个事件，{} 字节，落后 {:.1}s）",
-                self.recording.queued_events(),
-                self.recording.queued_bytes(),
-                self.recording.seconds_behind()
-            );
-            self.stop_web_recording(true, Some(reason));
-            return;
-        }
-
-        let paused = self.recording.paused;
-        let mode = self.recording.mode;
-        let mut drained = 0usize;
-        let mut pending = Vec::new();
-        if let Some(subscription) = self.recording.subscription.as_ref() {
-            while drained < 2_000 {
-                let Some(event) = subscription.try_recv() else {
-                    break;
-                };
-                drained += 1;
-                pending.push(event);
-            }
-        }
-        let mut recorded_limit_hit = false;
-        if !paused {
-            for event in pending {
-                if should_record_web_event(&event, mode)
-                    && !self.recording.push_recorded_event(event)
-                {
-                    recorded_limit_hit = true;
-                    break;
-                }
-            }
-        }
-        if recorded_limit_hit {
-            let reason = self.recording.recorded_limit_message();
-            self.stop_web_recording(true, Some(reason));
-            return;
-        }
-        if self.recording.backlog_exceeded() {
-            let reason = format!(
-                "录制消费速度不足（{} 个事件，{} 字节，落后 {:.1}s）",
-                self.recording.queued_events(),
-                self.recording.queued_bytes(),
-                self.recording.seconds_behind()
-            );
-            self.stop_web_recording(true, Some(reason));
-        }
-
-        self.poll_web_recording_export(ctx);
-    }
-
-    #[cfg(any())]
-    fn poll_web_recording_export(&mut self, ctx: &egui::Context) {
-        const EXPORT_BATCH: usize = 512;
-        if let Some(task_id) = self.recording.export_task
-            && let Some(runtime) = self.runtime.as_ref()
-            && !runtime.task_is_active(task_id)
-        {
-            self.recording.export = None;
-            self.recording.export_task = None;
-            self.recording.export_started_at = None;
-            self.serial.borrow_mut().status = "录制导出任务已取消".to_owned();
-            return;
-        }
-        let Some(export) = self.recording.export.as_mut() else {
-            return;
-        };
-        let start = export.offset;
-        let end = (start + EXPORT_BATCH).min(export.events.len());
-        for event in &export.events[start..end] {
-            match serde_json::to_string(event) {
-                Ok(line) => {
-                    export.content.push_str(&line);
-                    export.content.push('\n');
-                }
-                Err(error) => self.recording.last_error = Some(error.to_string()),
-            }
-        }
-        export.offset = end;
-        if end >= export.events.len() {
-            let write_bytes_per_sec = self.recording.export_write_bytes_per_sec();
-            let Some(export) = self.recording.export.take() else {
-                return;
-            };
-            self.recording.last_write_bytes_per_sec = write_bytes_per_sec;
-            self.recording.export_started_at = None;
-            let incomplete = self.recording.incomplete;
-            let result =
-                download_text_file(&export.file_name, "application/x-ndjson", export.content);
-            if let Err(error) = &result {
-                self.recording.last_error = Some(format!("导出录制失败：{error}"));
-            }
-            if let Some(task_id) = self.recording.export_task.take()
-                && let Some(runtime) = self.runtime.as_ref()
-            {
-                match result {
-                    Ok(()) => runtime.complete_task(
-                        task_id,
-                        if incomplete {
-                            "录制已导出（数据不完整）"
-                        } else {
-                            "录制已导出"
-                        },
-                    ),
-                    Err(error) => runtime.fail_task(task_id, error),
-                };
-            }
-            self.serial.borrow_mut().status = if incomplete {
-                "录制已停止（数据不完整）".to_owned()
-            } else {
-                "录制已导出".to_owned()
-            };
-        } else {
-            self.serial.borrow_mut().status =
-                format!("正在导出录制：{end}/{} 条", export.events.len());
-            ctx.request_repaint();
         }
     }
 
@@ -2279,43 +2160,7 @@ impl WorkbenchApp {
                     command_id,
                     context,
                 } => {
-                    let Some(index) = self
-                        .plugins
-                        .records
-                        .iter()
-                        .position(|record| record.persisted.manifest.id == plugin_id)
-                    else {
-                        self.serial.borrow_mut().status = format!("Web 插件不存在：{plugin_id}");
-                        continue;
-                    };
-                    if let Some(instance) = self
-                        .plugins
-                        .records
-                        .get(index)
-                        .and_then(|record| record.lua_instance)
-                    {
-                        let context = PluginValue::from_json(&context);
-                        match self
-                            .web_lua
-                            .dispatch_command(instance, &command_id, context)
-                        {
-                            Ok(PluginCallResult::Completed(value)) => {
-                                self.serial.borrow_mut().status = format!(
-                                    "{}：{}",
-                                    plugin_id,
-                                    value
-                                        .to_json()
-                                        .map(|value| value.to_string())
-                                        .unwrap_or_default()
-                                );
-                            }
-                            Ok(PluginCallResult::Yielded { .. }) => {
-                                self.serial.borrow_mut().status =
-                                    format!("{plugin_id}：命令已进入异步任务");
-                            }
-                            Err(error) => self.serial.borrow_mut().status = error.to_string(),
-                        }
-                    }
+                    self.execute_web_plugin_command(plugin_id, command_id, context);
                 }
             }
         }
@@ -2568,6 +2413,7 @@ impl WorkbenchApp {
             let mut theme_import = None;
             let mut serial = self.serial.borrow_mut();
             match event {
+                WebAppEvent::TaskStateChanged(snapshot) if snapshot.kind == "refresh_ports" => {}
                 WebAppEvent::TaskStateChanged(snapshot) => {
                     serial.status = snapshot.message;
                 }
@@ -2652,7 +2498,7 @@ impl WorkbenchApp {
                     serial.status = format!("异步任务完成：{kind}");
                 }
                 WebAppEvent::PortsRefreshed(ports) => {
-                    serial.status = format!("已授权设备 {} 个", ports.len());
+                    serial.status.clear();
                     serial.ports = ports;
                     if serial.selected_port.as_ref().is_some_and(|selected| {
                         !serial.ports.iter().any(|port| &port.id == selected)
@@ -2727,10 +2573,10 @@ impl WorkbenchApp {
                     serial.connected = Some(port.clone());
                     serial.status = format!("已连接 {port} @ {}", settings_label(serial.settings));
                 }
-                WebAppEvent::Disconnected { port } => {
+                WebAppEvent::Disconnected { port, manual } => {
                     if serial.connected.as_ref() == Some(&port) {
                         serial.connected = None;
-                        if serial.auto_reconnect {
+                        if serial.auto_reconnect && !manual {
                             let descriptor =
                                 serial.ports.iter().find(|item| item.id == port).cloned();
                             serial.reconnect = Some(WebReconnectState {
@@ -2746,7 +2592,7 @@ impl WorkbenchApp {
                     serial.status = "设备已断开".to_owned();
                 }
                 WebAppEvent::Sent { bytes, .. } => {
-                    serial.status = format!("发送成功（{bytes} 字节）");
+                    serial.status = format!("发送已提交（{bytes} 字节）");
                 }
                 WebAppEvent::SignalsChanged { signal, value, .. } => {
                     match signal {
@@ -3205,6 +3051,11 @@ impl WorkbenchApp {
     }
 
     fn dispatch_serial(&mut self, command: AppCommand, ctx: &egui::Context) {
+        let silent_refresh = matches!(&command, AppCommand::RefreshPorts)
+            && self
+                .runtime
+                .as_ref()
+                .is_some_and(WebRuntime::serial_supported);
         if matches!(
             &command,
             AppCommand::Connect { .. }
@@ -3213,15 +3064,19 @@ impl WorkbenchApp {
         ) {
             self.serial.borrow_mut().reconnect = None;
         }
-        let status = match self.runtime.as_ref() {
+        let (status, failed) = match self.runtime.as_ref() {
             Some(runtime) => match runtime.dispatch(command) {
-                Ok(CommandOutcome::Pending { message, .. }) => message,
-                Ok(CommandOutcome::Done) => "操作完成".to_owned(),
-                Err(error) => format!("操作失败：{error}"),
+                Ok(CommandOutcome::Pending { message, .. }) => (message, false),
+                Ok(CommandOutcome::Done) => ("操作完成".to_owned(), false),
+                Err(error) => (format!("操作失败：{error}"), true),
             },
-            None => "当前浏览器不支持 Web Serial".to_owned(),
+            None => ("当前浏览器不支持 Web Serial".to_owned(), true),
         };
-        self.serial.borrow_mut().status = status;
+        if silent_refresh && !failed {
+            self.serial.borrow_mut().status.clear();
+        } else {
+            self.serial.borrow_mut().status = status;
+        }
         ctx.request_repaint();
     }
 
@@ -3404,18 +3259,15 @@ impl WorkbenchApp {
                 let Some((plugin_id, plugin_command_id)) = command_id.split_once(':') else {
                     return;
                 };
-                if let Some(runtime) = self.runtime.as_ref()
-                    && let Err(error) = runtime.dispatch(AppCommand::ExecutePluginCommand {
-                        plugin_id: plugin_id.to_owned(),
-                        command_id: plugin_command_id.to_owned(),
-                        context: serde_json::json!({
-                            "source": "web_command_palette",
-                            "command": plugin_command_id,
-                        }),
-                    })
-                {
-                    self.serial.borrow_mut().status = error;
-                }
+                self.execute_web_plugin_command(
+                    plugin_id.to_owned(),
+                    plugin_command_id.to_owned(),
+                    serde_json::json!({
+                        "source": "web_command_palette",
+                        "command": plugin_command_id,
+                    }),
+                );
+                self.poll_web_lua_host_requests();
             }
         }
     }
@@ -3481,6 +3333,7 @@ impl DockHost for WorkbenchApp {
     }
 
     fn render_panel(&mut self, ui: &mut egui::Ui, id: &PanelId) {
+        self.panels.active_tab = id.clone();
         if !self.panel_registry.is_available(id) {
             ui.vertical_centered(|ui| {
                 ui.add_space(32.0);
@@ -3492,8 +3345,16 @@ impl DockHost for WorkbenchApp {
         }
         match self.panel_registry.kind_for(id) {
             Some(PanelKind::Builtin(BuiltinPanel::Devices)) => self.serial_ui(ui),
-            Some(PanelKind::Builtin(BuiltinPanel::Replay)) => self.web_replay_panel_ui(ui),
-            Some(PanelKind::Builtin(BuiltinPanel::Plugins)) => self.web_plugins_ui(ui),
+            Some(PanelKind::Builtin(BuiltinPanel::Replay)) => {
+                egui::ScrollArea::vertical()
+                    .id_salt("scroll-replay")
+                    .show(ui, |ui| self.web_replay_panel_ui(ui));
+            }
+            Some(PanelKind::Builtin(BuiltinPanel::Plugins)) => {
+                egui::ScrollArea::vertical()
+                    .id_salt("scroll-plugins")
+                    .show(ui, |ui| self.web_plugins_ui(ui));
+            }
             Some(PanelKind::Builtin(BuiltinPanel::Chart)) => {
                 let started = self.perf.begin_frame();
                 self.chart_panel.ui(ui);
@@ -3501,6 +3362,14 @@ impl DockHost for WorkbenchApp {
             }
             Some(PanelKind::Builtin(BuiltinPanel::Terminal)) => {
                 let started = self.perf.begin_frame();
+                let port_aliases: HashMap<String, String> = self
+                    .serial
+                    .borrow()
+                    .port_aliases
+                    .clone()
+                    .into_iter()
+                    .collect();
+                self.terminal_panel.set_port_aliases(&port_aliases);
                 self.terminal_panel.ui(ui);
                 self.perf.record_terminal_render(started);
             }
@@ -3510,8 +3379,21 @@ impl DockHost for WorkbenchApp {
                 self.bottom_log_panel.ui(ui);
                 self.perf.record_log_render(started);
             }
-            Some(PanelKind::Builtin(BuiltinPanel::Settings)) => self.settings_ui(ui),
-            Some(PanelKind::Dynamic { suffix }) => self.dynamic_panels.ui_body(ui, &suffix),
+            Some(PanelKind::Builtin(BuiltinPanel::Settings)) => {
+                egui::ScrollArea::vertical()
+                    .id_salt("scroll-settings")
+                    .show(ui, |ui| self.settings_ui(ui));
+            }
+            Some(PanelKind::Dynamic { suffix }) => {
+                if self.dynamic_panels.contains(&suffix) {
+                    let started = self.perf.begin_frame();
+                    let _ = egui::ScrollArea::vertical()
+                        .show(ui, |ui| self.dynamic_panels.ui_body(ui, &suffix));
+                    self.perf.record_chart_render(started);
+                } else {
+                    ui.colored_label(theme::red(), format!("动态面板不存在：{suffix}"));
+                }
+            }
             _ => {
                 ui.colored_label(theme::red(), format!("面板不存在：{id}"));
             }
@@ -3569,133 +3451,50 @@ impl AppShellHost for WorkbenchApp {
                 }),
             )
         };
-        let mut selected_port = selected.clone();
+        let selected_id = selected.as_ref().map(ToString::to_string);
+        let connected_id = connected.as_ref().map(ToString::to_string);
+        let serial_ports: Vec<SerialPortItem> = ports
+            .iter()
+            .map(|port| SerialPortItem {
+                id: port.id.to_string(),
+                label: port.label.clone(),
+                kind: match port.kind {
+                    PortKind::Serial => "Serial",
+                    PortKind::Network => "网络",
+                    PortKind::Unknown => "",
+                }
+                .to_owned(),
+                open: connected_id.as_deref() == Some(port.id.as_str()),
+                connecting: connecting && selected.as_ref() == Some(&port.id),
+                pending_reconnect: reconnect
+                    .as_ref()
+                    .is_some_and(|(pending_port, _, _)| pending_port == port.id.as_str()),
+            })
+            .collect();
+        let mut selected_port = selected_id;
+        let mut collapsed_state = collapsed;
+        let mut serial_actions = Vec::new();
         let mut command = None;
         let mut cancel_reconnect = false;
         let reconnect_port = reconnect
             .as_ref()
             .map(|(port, _, _)| PortId::new(port.clone()));
-        let mut collapsed_changed = false;
         ui.horizontal_wrapped(|ui| {
-            let color = if connecting {
-                theme::yellow()
-            } else if connected.is_some() {
-                theme::green()
-            } else {
-                theme::red()
-            };
-            let connected_label = connected
-                .as_ref()
-                .and_then(|id| ports.iter().find(|port| &port.id == id))
-                .map(|port| web_port_display_name(port, &port_aliases))
-                .unwrap_or_else(|| "未连接".to_owned());
-            let connected_label = if connecting {
-                format!("{connected_label} · 连接中")
-            } else {
-                connected_label
-            };
-            if ui
-                .selectable_label(
-                    !collapsed,
-                    egui::RichText::new(format!(
-                        "{} 串口 ▸ {}",
-                        ICON_CABLE.codepoint, connected_label
-                    ))
-                    .color(color),
-                )
-                .clicked()
-            {
-                collapsed_changed = true;
-            }
-            if !collapsed {
-                let selected_text = selected_port
+            let mut view = SerialTopBarView {
+                ports: &serial_ports,
+                aliases: &port_aliases,
+                selected: &mut selected_port,
+                connected: connected_id.as_deref(),
+                connecting,
+                collapsed: &mut collapsed_state,
+                settings,
+                show_request_port: self
+                    .runtime
                     .as_ref()
-                    .and_then(|id| ports.iter().find(|port| &port.id == id))
-                    .map(|port| web_port_display_name(port, &port_aliases))
-                    .or_else(|| selected_port.as_ref().map(ToString::to_string))
-                    .unwrap_or_else(|| {
-                        if ports.is_empty() {
-                            "无已授权设备".to_owned()
-                        } else {
-                            "请选择设备".to_owned()
-                        }
-                    });
-                egui::ComboBox::from_id_salt("web-top-port")
-                    .width(120.0)
-                    .selected_text(selected_text)
-                    .show_ui(ui, |ui| {
-                        if ports.is_empty() {
-                            ui.add_enabled(false, egui::Label::new("无已授权设备"));
-                        } else {
-                            for port in &ports {
-                                let label = web_port_display_name(port, &port_aliases);
-                                if ui
-                                    .selectable_label(
-                                        selected_port.as_ref() == Some(&port.id),
-                                        label,
-                                    )
-                                    .clicked()
-                                {
-                                    selected_port = Some(port.id.clone());
-                                    ui.close();
-                                }
-                            }
-                        }
-                    });
-                let selected_open = selected_port
-                    .as_ref()
-                    .is_some_and(|port| connected.as_ref() == Some(port));
-                if !connecting && selected_open {
-                    if design::icon_button(ui, ICON_REFRESH, "重连").clicked()
-                        && let Some(port) = selected_port.clone()
-                    {
-                        command = Some(AppCommand::Reconnect { port: port.clone() });
-                    }
-                } else if connecting {
-                    ui.add_enabled_ui(false, |ui| {
-                        let _ = design::button(
-                            ui,
-                            ICON_POWER_SETTINGS_NEW,
-                            "连接中",
-                            design::ButtonKind::Ghost,
-                        );
-                    });
-                } else if selected_port.is_some() {
-                    if design::button(
-                        ui,
-                        ICON_POWER_SETTINGS_NEW,
-                        "打开",
-                        design::ButtonKind::Ghost,
-                    )
-                    .clicked()
-                        && let Some(port) = selected_port.clone()
-                    {
-                        command = Some(AppCommand::Connect { port, settings });
-                    }
-                } else {
-                    let _ = ui.add_enabled(
-                        false,
-                        egui::Button::new(design::icon_text(ICON_POWER_SETTINGS_NEW, "打开")),
-                    );
-                }
-                let mut close = ui.add_enabled(
-                    selected_open,
-                    egui::Button::new(design::icon_text(ICON_LINK_OFF, "关闭")),
-                );
-                if !selected_open {
-                    close = close.on_disabled_hover_text("端口未打开");
-                }
-                if close.clicked()
-                    && let Some(port) = selected_port.clone()
-                {
-                    command = Some(AppCommand::Disconnect { port });
-                }
-            } else if connected.is_some() {
-                ui.label(
-                    egui::RichText::new(format!("· {}", settings_label(settings)))
-                        .color(theme::text_secondary()),
-                );
-            }
+                    .is_some_and(WebRuntime::serial_supported),
+            };
+            serial_actions = SerialPanel::top_bar_contents_ui(ui, &mut view);
+
             if let Some((port, attempts, next_attempt_at)) = reconnect {
                 let remaining = (next_attempt_at - web_now_seconds()).max(0.0);
                 let label = format!(
@@ -3735,8 +3534,8 @@ impl AppShellHost for WorkbenchApp {
                 self.web_ui_contribution_slot(ui, "top_bar.right");
             });
         });
-        if collapsed_changed {
-            self.serial.borrow_mut().top_bar_serial_collapsed = !collapsed;
+        if collapsed_state != collapsed {
+            self.serial.borrow_mut().top_bar_serial_collapsed = collapsed_state;
             self.persist_settings();
         }
         if cancel_reconnect {
@@ -3747,8 +3546,24 @@ impl AppShellHost for WorkbenchApp {
                 self.serial.borrow_mut().status = "已取消自动重连".to_owned();
             }
         }
-        if selected_port != selected {
-            self.select_web_port(selected_port);
+        if selected_port.as_deref() != selected.as_ref().map(PortId::as_str) {
+            self.select_web_port(selected_port.clone().map(PortId::new));
+        }
+        if let Some(action) = serial_actions.into_iter().next() {
+            command = Some(match action {
+                SerialTopBarAction::Refresh => AppCommand::RefreshPorts,
+                SerialTopBarAction::RequestPort => AppCommand::RequestPort,
+                SerialTopBarAction::Connect { port } => AppCommand::Connect {
+                    port: PortId::new(port),
+                    settings,
+                },
+                SerialTopBarAction::Disconnect { port } => AppCommand::Disconnect {
+                    port: PortId::new(port),
+                },
+                SerialTopBarAction::Reconnect { port } => AppCommand::Reconnect {
+                    port: PortId::new(port),
+                },
+            });
         }
         if let Some(command) = command {
             self.dispatch_serial(command, ui.ctx());
@@ -3870,65 +3685,44 @@ impl AppShellHost for WorkbenchApp {
             self.bottom_log_panel.truncated = false;
         }
         let notifications = self.current_web_notifications();
-        let mut signal_command = None;
+        let serial_status_label = if connecting {
+            format!("{} 连接中", port_label)
+        } else if connected.is_some() {
+            format!("{} @ {}", port_label, settings_label(settings))
+        } else {
+            port_label
+        };
+        let status_view = StatusBarView {
+            serial_color: if connecting {
+                theme::yellow()
+            } else if connected.is_some() {
+                theme::green()
+            } else {
+                theme::text_secondary()
+            },
+            serial_label: serial_status_label,
+            recording_color: if recording {
+                theme::red()
+            } else {
+                theme::text_dimmed()
+            },
+            recording_label: if recording {
+                if paused {
+                    format!(
+                        "录制已暂停 {events} 条 {:.1}MB",
+                        bytes as f64 / 1024.0 / 1024.0
+                    )
+                } else {
+                    format!("录制中 {events} 条 {:.1}MB", bytes as f64 / 1024.0 / 1024.0)
+                }
+            } else {
+                "未录制".to_owned()
+            },
+            signals: connected.is_some().then_some(StatusSignalView { dtr, rts }),
+        };
+        let mut signal_action = None;
         ui.horizontal(|ui| {
-            design::status_pill(
-                ui,
-                if connecting {
-                    theme::yellow()
-                } else if connected.is_some() {
-                    theme::green()
-                } else {
-                    theme::text_secondary()
-                },
-                if connecting {
-                    format!("{} 连接中", port_label)
-                } else if connected.is_some() {
-                    format!("{} @ {}", port_label, settings_label(settings))
-                } else {
-                    port_label
-                },
-            );
-            design::status_pill(
-                ui,
-                if recording {
-                    theme::red()
-                } else {
-                    theme::text_dimmed()
-                },
-                if recording {
-                    if paused {
-                        format!(
-                            "录制已暂停 {events} 条 {:.1}MB",
-                            bytes as f64 / 1024.0 / 1024.0
-                        )
-                    } else {
-                        format!("录制中 {events} 条 {:.1}MB", bytes as f64 / 1024.0 / 1024.0)
-                    }
-                } else {
-                    "未录制".to_owned()
-                },
-            );
-            if let Some(port) = connected {
-                ui.separator();
-                if ui
-                    .add(egui::Button::new(if dtr { "DTR 高" } else { "DTR 低" }).small())
-                    .on_hover_text("切换 DTR")
-                    .clicked()
-                {
-                    signal_command = Some(AppCommand::SetDtr {
-                        port: port.clone(),
-                        value: !dtr,
-                    });
-                }
-                if ui
-                    .add(egui::Button::new(if rts { "RTS 高" } else { "RTS 低" }).small())
-                    .on_hover_text("切换 RTS")
-                    .clicked()
-                {
-                    signal_command = Some(AppCommand::SetRts { port, value: !rts });
-                }
-            }
+            signal_action = status_bar_contents_ui(ui, &status_view).into_iter().next();
             self.web_ui_contribution_slot(ui, "status_bar.left");
             if let Some(notification) = notifications.first() {
                 ui.separator();
@@ -3998,7 +3792,13 @@ impl AppShellHost for WorkbenchApp {
                 }
             });
         });
-        if let Some(command) = signal_command {
+        if let Some(action) = signal_action
+            && let Some(port) = connected
+        {
+            let command = match action {
+                StatusBarAction::SetDtr { value } => AppCommand::SetDtr { port, value },
+                StatusBarAction::SetRts { value } => AppCommand::SetRts { port, value },
+            };
             self.dispatch_serial(command, ui.ctx());
         }
     }
@@ -4047,6 +3847,12 @@ impl eframe::App for WorkbenchApp {
         self.dynamic_panels.ingest_all_pending();
         self.panel_registry
             .sync_dynamic_panels(&self.dynamic_panels);
+        if !self
+            .panels
+            .is_panel_visible(&PanelId::builtin(PANEL_DEVICES))
+        {
+            self.serial.borrow_mut().refresh_on_page_entry = true;
+        }
         crate::shared_shell::show_shell(self, ui);
         let log_started = self.perf.begin_frame();
         let log_ingested = self.bottom_log_panel.ingest_pending();
@@ -4373,9 +4179,7 @@ impl WorkbenchApp {
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("设置");
-        ui.separator();
-        let nav_id = ui.id().with("web-settings-category");
+        let nav_id = ui.id().with("settings_category");
         let mut category = ui
             .ctx()
             .data_mut(|data| data.get_persisted::<usize>(nav_id))
@@ -4412,11 +4216,6 @@ impl WorkbenchApp {
                         self.layout_dirty = true;
                     }
                 });
-                let mut bottom_visible = self.panels.bottom_visible();
-                if ui.checkbox(&mut bottom_visible, "显示底部面板").changed() {
-                    self.panels.set_bottom_visible(bottom_visible);
-                    self.persist_settings();
-                }
             });
 
             ui.add_space(8.0);
@@ -4426,7 +4225,7 @@ impl WorkbenchApp {
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
                     ui.label("界面主题");
-                    egui::ComboBox::from_id_salt("web-theme")
+                    egui::ComboBox::from_id_salt("app-theme")
                         .selected_text(self.ui_theme.label())
                         .show_ui(ui, |ui| {
                             for candidate in theme::AppTheme::ALL {
@@ -4478,12 +4277,19 @@ impl WorkbenchApp {
                     .add(
                         egui::Slider::new(&mut font_size, 10.0..=24.0)
                             .step_by(1.0)
-                            .text("等宽字体"),
+                            .text("等宽字体大小")
+                            .suffix("px"),
                     )
                     .changed()
                 {
                     self.terminal_panel.font_size = font_size;
                     self.bottom_log_panel.font_size = font_size;
+                    self.persist_settings();
+                }
+                ui.add_space(4.0);
+                let mut bottom_visible = self.panels.bottom_visible();
+                if ui.checkbox(&mut bottom_visible, "显示底部面板").changed() {
+                    self.panels.set_bottom_visible(bottom_visible);
                     self.persist_settings();
                 }
             });
@@ -4495,15 +4301,8 @@ impl WorkbenchApp {
                 ui.set_min_width(ui.available_width());
                 design::section_header(ui, ICON_NETWORK_CHECK, "网络");
                 ui.separator();
-                ui.label("串口能力通过浏览器 Web Serial 提供，仅支持已授权设备。");
-                let reconnect_changed = {
-                    let mut serial = self.serial.borrow_mut();
-                    ui.checkbox(&mut serial.auto_reconnect, "设备拔出后自动重连")
-                        .changed()
-                };
-                if reconnect_changed {
-                    self.persist_settings();
-                }
+                ui.label("浏览器网络请求遵循当前浏览器的代理和安全策略。");
+                ui.label("串口权限与自动重连在“串口”面板中配置。");
             });
             ui.add_space(8.0);
             design::card().show(ui, |ui| {
@@ -4541,65 +4340,44 @@ impl WorkbenchApp {
                 ui.set_min_width(ui.available_width());
                 design::section_header(ui, ICON_KEYBOARD, "快捷键");
                 ui.separator();
-                ui.label("快捷键配置与桌面端使用相同的命令 ID，并保存在当前浏览器。");
-                ui.add_space(4.0);
                 let commands = self.web_keymap_commands();
-                for command in &commands {
-                    let bindings = self.keymap.get_bindings(&command.id);
-                    let recording = self.key_recording.as_deref() == Some(command.id.as_str());
-                    ui.horizontal(|ui| {
-                        ui.set_min_height(28.0);
-                        ui.label(egui::RichText::new(&command.title).size(14.0));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if !bindings.is_empty() && ui.small_button("清除").clicked() {
-                                self.keymap.set_bindings(&command.id, Vec::new());
-                                self.persist_settings();
-                            }
-                            if recording {
-                                ui.colored_label(theme::yellow(), "按下按键…");
-                            } else if ui.small_button("录制").clicked() {
-                                self.key_recording = Some(command.id.clone());
-                            }
-                            let text = if bindings.is_empty() {
-                                "未绑定".to_owned()
-                            } else {
-                                bindings
-                                    .iter()
-                                    .map(KeyBinding::display)
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            };
-                            ui.label(egui::RichText::new(text).color(theme::cyan()));
-                        });
-                    });
-                    ui.separator();
-                }
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("恢复默认快捷键").clicked() {
-                        self.keymap = Keymap::default();
-                        self.key_recording = None;
-                        self.persist_settings();
+                let entries = commands
+                    .iter()
+                    .map(|command| KeymapEntry {
+                        id: command.id.clone(),
+                        title: command.title.clone(),
+                        bindings: self
+                            .keymap
+                            .get_bindings(&command.id)
+                            .iter()
+                            .map(KeyBinding::display)
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        recording: self.key_recording.as_deref() == Some(command.id.as_str()),
+                    })
+                    .collect::<Vec<_>>();
+                for action in keymap_ui(ui, &entries) {
+                    match action {
+                        KeymapAction::Record(command_id) => {
+                            self.key_recording = Some(command_id);
+                        }
+                        KeymapAction::Clear(command_id) => {
+                            self.keymap.set_bindings(&command_id, Vec::new());
+                            self.persist_settings();
+                        }
+                        KeymapAction::RestoreDefaults => {
+                            self.keymap = Keymap::default();
+                            self.key_recording = None;
+                            self.persist_settings();
+                        }
                     }
-                    ui.label("↑/↓ 浏览发送历史；Ctrl+Enter 发送当前内容。");
-                });
-                ui.small("浏览器保留系统级快捷键；录制时按 Escape 取消。");
+                }
             });
         }
 
         if category == 3 {
             ui.add_space(8.0);
-            design::card().show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                design::section_header(ui, ICON_APPS, "插件设置");
-                ui.separator();
-                ui.label("浏览器与桌面端执行同一份 Lua 插件；浏览器使用纯 Rust Lua VM。");
-                ui.label("权限会在导入时显示，插件默认关闭，启用状态保存在当前浏览器。");
-                if ui.button("打开插件面板").clicked() {
-                    self.panels
-                        .open_tab(PanelId::builtin(tool_panels::PANEL_PLUGINS));
-                    self.layout_dirty = true;
-                }
-            });
+            self.web_plugin_settings_ui(ui);
         }
 
         if category == 4 {
@@ -4609,14 +4387,35 @@ impl WorkbenchApp {
                 .map(WebRuntime::query_update)
                 .unwrap_or_default();
             ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                if design::button(
+                    ui,
+                    ICON_RESTART_ALT,
+                    "恢复所有默认设置",
+                    design::ButtonKind::Danger,
+                )
+                .clicked()
+                {
+                    self.reset_web_settings(ui.ctx());
+                }
+            });
+            ui.add_space(8.0);
             design::card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                design::section_header(ui, ICON_INFO, "关于与重置");
+                design::section_header(ui, ICON_INFO, "关于");
                 ui.separator();
-                ui.label(format!(
-                    "硬件调试工作台 v{} · Web",
-                    env!("CARGO_PKG_VERSION")
-                ));
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(format!("硬件调试工作台 v{}", env!("CARGO_PKG_VERSION")));
+                    ui.hyperlink_to(REPOSITORY_URL, REPOSITORY_URL)
+                        .on_hover_text("打开项目仓库");
+                    if ui.small_button("复制版本号").clicked() {
+                        copy_text_with_feedback(
+                            ui,
+                            format!("v{}", env!("CARGO_PKG_VERSION")),
+                            format!("已复制 v{}", env!("CARGO_PKG_VERSION")),
+                        );
+                    }
+                });
                 ui.label("浏览器版本使用 Web Serial、localStorage 和 Blob 下载能力。");
                 ui.horizontal_wrapped(|ui| {
                     if ui
@@ -4646,65 +4445,65 @@ impl WorkbenchApp {
                         ui.label(format!("已是最新版本（v{current}）"));
                     }
                 }
-                if ui.button("恢复默认布局").clicked() {
-                    self.panels.reset_tiles_layout();
-                    self.layout_dirty = true;
-                }
-                if ui.button("恢复默认设置").clicked() {
-                    let network_ports = {
-                        let mut serial = self.serial.borrow_mut();
-                        let network_ports = serial
-                            .network_ports
-                            .iter()
-                            .map(NetworkSerialConfig::port_id)
-                            .collect::<Vec<_>>();
-                        serial.settings = SerialSettings::default();
-                        serial.network_ports.clear();
-                        serial.port_aliases.clear();
-                        serial.port_groups.clear();
-                        serial.port_profiles.clear();
-                        serial.auto_reconnect = default_auto_reconnect();
-                        serial.top_bar_serial_collapsed = false;
-                        serial.reconnect = None;
-                        serial.tx_hex = false;
-                        serial.line_ending = WebLineEnding::None;
-                        serial.hex_strict = true;
-                        serial.send_history.clear();
-                        serial.periodic_interval_ms = default_periodic_interval_ms();
-                        network_ports
-                    };
-                    if let Some(runtime) = self.runtime.as_ref() {
-                        for port in network_ports {
-                            let _ = runtime.dispatch(AppCommand::RemoveNetworkPort { port });
-                        }
-                    }
-                    self.ui_theme = theme::AppTheme::default();
-                    self.theme_source = None;
-                    self.keymap = Keymap::default();
-                    self.command_usage_order.clear();
-                    self.command_palette_open = false;
-                    self.command_palette_query.clear();
-                    self.command_palette_selected = None;
-                    self.terminal_panel.merge_window_ms = default_terminal_merge_window_ms();
-                    self.terminal_panel
-                        .set_max_entries(default_terminal_max_entries());
-                    if let Some(runtime) = self.runtime.as_ref() {
-                        let _ = runtime.dispatch(AppCommand::SetTerminalMergeWindow {
-                            ms: default_terminal_merge_window_ms(),
-                        });
-                        let _ = runtime.dispatch(AppCommand::SetTerminalMaxEntries {
-                            max: default_terminal_max_entries(),
-                        });
-                    }
-                    self.bottom_log_panel
-                        .set_max_entries(default_terminal_max_entries());
-                    self.terminal_panel.font_size = default_font_size();
-                    self.bottom_log_panel.font_size = default_font_size();
-                    apply_web_theme(ui.ctx(), self.ui_theme);
-                    self.persist_settings();
-                }
             });
         }
+    }
+
+    fn reset_web_settings(&mut self, ctx: &egui::Context) {
+        let network_ports = {
+            let mut serial = self.serial.borrow_mut();
+            let network_ports = serial
+                .network_ports
+                .iter()
+                .map(NetworkSerialConfig::port_id)
+                .collect::<Vec<_>>();
+            serial.selected_port = None;
+            serial.settings = SerialSettings::default();
+            serial.network_ports.clear();
+            serial.port_aliases.clear();
+            serial.port_groups.clear();
+            serial.port_profiles.clear();
+            serial.auto_reconnect = default_auto_reconnect();
+            serial.top_bar_serial_collapsed = false;
+            serial.reconnect = None;
+            serial.tx_hex = false;
+            serial.line_ending = WebLineEnding::None;
+            serial.hex_strict = true;
+            serial.send_history.clear();
+            serial.periodic_interval_ms = default_periodic_interval_ms();
+            network_ports
+        };
+        if let Some(runtime) = self.runtime.as_ref() {
+            for port in network_ports {
+                let _ = runtime.dispatch(AppCommand::RemoveNetworkPort { port });
+            }
+        }
+        self.panels.reset_tiles_layout();
+        self.layout_dirty = true;
+        self.ui_theme = theme::AppTheme::default();
+        self.theme_source = None;
+        self.keymap = Keymap::default();
+        self.command_usage_order.clear();
+        self.command_palette_open = false;
+        self.command_palette_query.clear();
+        self.command_palette_selected = None;
+        self.terminal_panel.merge_window_ms = default_terminal_merge_window_ms();
+        self.terminal_panel
+            .set_max_entries(default_terminal_max_entries());
+        if let Some(runtime) = self.runtime.as_ref() {
+            let _ = runtime.dispatch(AppCommand::SetTerminalMergeWindow {
+                ms: default_terminal_merge_window_ms(),
+            });
+            let _ = runtime.dispatch(AppCommand::SetTerminalMaxEntries {
+                max: default_terminal_max_entries(),
+            });
+        }
+        self.bottom_log_panel
+            .set_max_entries(default_terminal_max_entries());
+        self.terminal_panel.font_size = default_font_size();
+        self.bottom_log_panel.font_size = default_font_size();
+        apply_web_theme(ctx, self.ui_theme);
+        self.persist_settings();
     }
 
     fn serial_panel_ui(&mut self, ui: &mut egui::Ui, show_settings: bool, show_ports: bool) {
@@ -4713,7 +4512,6 @@ impl WorkbenchApp {
         let previous_settings = self.serial.borrow().settings;
         let mut actions = Vec::new();
         let mut network_to_add = None;
-        let mut network_to_remove = None;
         let mut auto_reconnect_changed = false;
 
         // Keep the same visual order as Native: serial parameters, recording,
@@ -4741,6 +4539,18 @@ impl WorkbenchApp {
             let mut serial = self.serial.borrow_mut();
             let previous_aliases = serial.port_aliases.clone();
             let previous_groups = serial.port_groups.clone();
+            let connected_port = transport_view
+                .as_ref()
+                .and_then(|view| view.connected.clone())
+                .or_else(|| serial.connected.clone());
+            let connecting_port = transport_view
+                .as_ref()
+                .filter(|view| view.connecting)
+                .and_then(|_| serial.selected_port.clone());
+            let pending_reconnect_port = serial
+                .reconnect
+                .as_ref()
+                .map(|pending| pending.port.clone());
             let ports: Vec<SerialPortItem> = transport_view
                 .as_ref()
                 .map(|view| &view.ports)
@@ -4754,6 +4564,9 @@ impl WorkbenchApp {
                     } else {
                         String::new()
                     },
+                    open: connected_port.as_ref() == Some(&port.id),
+                    connecting: connecting_port.as_ref() == Some(&port.id),
+                    pending_reconnect: pending_reconnect_port.as_ref() == Some(&port.id),
                 })
                 .collect();
             let connected = transport_view
@@ -4823,70 +4636,35 @@ impl WorkbenchApp {
                     ui.set_min_width(ui.available_width());
                     design::section_header(ui, ICON_CABLE, "可用端口");
                     ui.separator();
-                    actions.extend(SerialPanel::port_list_ui(ui, &mut view));
-                    SerialPanel::signal_ui(ui, &mut view, &mut actions);
-                    ui.add_space(8.0);
-                    ui.set_min_width(ui.available_width());
-                    design::section_header(ui, ICON_NETWORK_CHECK, "网络串口");
-                    ui.separator();
-                    ui.label("通过 WebSocket 连接 Nexus/Moonraker 的 G-code 接口。");
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("地址");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut state.network_host)
-                                .desired_width((ui.available_width() - 120.0).clamp(110.0, 190.0))
-                                .hint_text("IP 或主机名"),
-                        );
-                        ui.add(
-                            egui::TextEdit::singleline(&mut state.network_port)
-                                .desired_width(64.0)
-                                .hint_text("7125"),
-                        );
-                    });
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("密钥");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut state.network_api_key)
-                                .desired_width((ui.available_width() - 100.0).clamp(120.0, 220.0))
-                                .password(true)
-                                .hint_text("API Key（可选）"),
-                        );
-                        if ui.button("添加并连接").clicked() {
-                            let host = state.network_host.trim().to_owned();
-                            let port = state.network_port.trim().parse::<u16>();
-                            if host.is_empty() {
-                                state.status = "请输入网络串口地址".to_owned();
-                            } else if !matches!(port, Ok(port) if port > 0) {
-                                state.status = "网络端口格式错误（1-65535）".to_owned();
-                            } else {
-                                let config = NetworkSerialConfig {
-                                    host,
-                                    port: port.unwrap_or(7125),
-                                    api_key: (!state.network_api_key.trim().is_empty())
-                                        .then(|| state.network_api_key.trim().to_owned()),
-                                };
-                                if state
-                                    .network_ports
-                                    .iter()
-                                    .any(|item| item.port_id() == config.port_id())
-                                {
-                                    state.status = "网络串口已存在，正在连接".to_owned();
-                                }
-                                network_to_add = Some(config);
+                    // Keep the same order as Native: the network endpoint is
+                    // added from the available-port card, then all endpoints
+                    // (serial and network) use the same grouped list below.
+                    let network_action = {
+                        let mut form = NetworkSerialFormView {
+                            host: &mut state.network_host,
+                            port: &mut state.network_port,
+                            api_key: &mut state.network_api_key,
+                        };
+                        network_serial_form_ui(ui, &mut form).into_iter().next()
+                    };
+                    match network_action {
+                        Some(NetworkSerialAction::Submit(config)) => {
+                            if state
+                                .network_ports
+                                .iter()
+                                .any(|item| item.port_id() == config.port_id())
+                            {
+                                state.status = "网络串口已存在，正在连接".to_owned();
                             }
+                            network_to_add = Some(config);
                         }
-                    });
-                    if !state.network_ports.is_empty() {
-                        ui.small("已保存的网络串口：");
-                        for config in &state.network_ports {
-                            ui.horizontal(|ui| {
-                                ui.label(format!("• {}", config.display_name()));
-                                if ui.small_button("移除").clicked() {
-                                    network_to_remove = Some(config.port_id());
-                                }
-                            });
+                        Some(NetworkSerialAction::Error(error)) => {
+                            state.status = error;
                         }
+                        None => {}
                     }
+                    ui.separator();
+                    actions.extend(SerialPanel::port_list_ui(ui, &mut view));
                 });
             }
             (
@@ -4914,17 +4692,6 @@ impl WorkbenchApp {
                 });
                 let settings = self.serial.borrow().settings;
                 self.dispatch_serial(AppCommand::Connect { port, settings }, &ctx);
-            }
-            self.persist_settings();
-        }
-
-        if let Some(port) = network_to_remove {
-            self.serial
-                .borrow_mut()
-                .network_ports
-                .retain(|config| config.port_id() != port);
-            if let Some(runtime) = self.runtime.as_ref() {
-                let _ = runtime.dispatch(AppCommand::RemoveNetworkPort { port });
             }
             self.persist_settings();
         }
@@ -4974,17 +4741,166 @@ impl WorkbenchApp {
                     port: PortId::new(port),
                     value,
                 },
+                SerialAction::CancelReconnect { port } => AppCommand::CancelReconnect {
+                    port: PortId::new(port),
+                },
+                SerialAction::RemoveNetwork { port } => {
+                    let port = PortId::new(port);
+                    {
+                        let mut serial = self.serial.borrow_mut();
+                        serial
+                            .network_ports
+                            .retain(|config| config.port_id() != port);
+                        if serial.selected_port.as_ref() == Some(&port) {
+                            serial.selected_port = None;
+                        }
+                    }
+                    self.persist_settings();
+                    AppCommand::RemoveNetworkPort { port }
+                }
             };
             self.dispatch_serial(command, &ctx);
         }
     }
 
     fn serial_ui(&mut self, ui: &mut egui::Ui) {
+        let refresh_on_entry = {
+            let mut serial = self.serial.borrow_mut();
+            std::mem::take(&mut serial.refresh_on_page_entry)
+        };
+        if refresh_on_entry
+            && self
+                .runtime
+                .as_ref()
+                .is_some_and(WebRuntime::serial_supported)
+        {
+            self.dispatch_serial(AppCommand::RefreshPorts, ui.ctx());
+        }
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 self.serial_panel_ui(ui, true, true);
             });
+    }
+
+    fn web_send_toolbar_buttons(&self) -> Vec<SendToolbarButton> {
+        let mut buttons = self
+            .plugins
+            .summaries()
+            .into_iter()
+            .filter(|summary| summary.state == PluginStateView::Running)
+            .flat_map(|summary| {
+                let plugin_id = summary.id;
+                let commands = summary.contributes.commands;
+                summary
+                    .contributes
+                    .ui
+                    .into_iter()
+                    .filter(|item| {
+                        item.slot == "send.toolbar"
+                            && item.visible
+                            && matches!(
+                                item.kind.to_ascii_lowercase().as_str(),
+                                "button" | "small_button" | ""
+                            )
+                    })
+                    .map(move |item| {
+                        let contribution_id = item.id;
+                        let title = item.title.or_else(|| {
+                            item.command.as_ref().and_then(|command_id| {
+                                commands
+                                    .iter()
+                                    .find(|command| command.id == *command_id)
+                                    .map(|command| command.title.clone())
+                            })
+                        });
+                        SendToolbarButton {
+                            plugin_id: plugin_id.clone(),
+                            contribution_id: contribution_id.clone(),
+                            title: title.unwrap_or(contribution_id),
+                            tooltip: item.tooltip,
+                            order: item.order,
+                            enabled: item.enabled,
+                        }
+                    })
+            })
+            .collect::<Vec<_>>();
+        buttons.sort_by(|left, right| {
+            left.order
+                .cmp(&right.order)
+                .then_with(|| left.title.cmp(&right.title))
+        });
+        buttons
+    }
+
+    fn activate_web_send_toolbar_button(&mut self, plugin_id: &str, contribution_id: &str) {
+        let Some((command, record_send_input)) = self
+            .plugins
+            .records
+            .iter()
+            .find(|record| record.persisted.manifest.id == plugin_id)
+            .and_then(|record| {
+                (record.persisted.enabled && record.lua_instance.is_some()).then(|| {
+                    record
+                        .persisted
+                        .manifest
+                        .contributes
+                        .ui
+                        .iter()
+                        .find(|item| {
+                            item.id == contribution_id
+                                && item.slot == "send.toolbar"
+                                && item.visible
+                                && matches!(
+                                    item.kind.to_ascii_lowercase().as_str(),
+                                    "button" | "small_button" | ""
+                                )
+                        })
+                        .map(|item| (item.command.clone(), item.record_send_input))
+                })
+            })
+            .flatten()
+        else {
+            return;
+        };
+
+        if record_send_input {
+            let input = self.serial.borrow().send_input.clone();
+            record_shared_send_history(
+                &mut self.serial.borrow_mut().send_history,
+                input,
+                WEB_MAX_SEND_HISTORY,
+            );
+        }
+
+        let mut context = self.web_ui_contribution_context("send.toolbar");
+        if let Some(object) = context.as_object_mut() {
+            object.insert(
+                "source".to_owned(),
+                serde_json::json!("web_ui_contribution"),
+            );
+            object.insert(
+                "contribution_id".to_owned(),
+                serde_json::json!(contribution_id),
+            );
+        }
+        if let Some(command) = command {
+            // Plugin commands receive an action payload.  The actual UI
+            // state is intentionally nested under `context`; this is the
+            // same shape Native uses and is what shared Lua plugins read.
+            self.execute_web_plugin_command(
+                plugin_id.to_owned(),
+                command,
+                serde_json::json!({
+                    "plugin_id": plugin_id,
+                    "contribution_id": contribution_id,
+                    "slot": "send.toolbar",
+                    "kind": "button",
+                    "context": context,
+                }),
+            );
+            self.poll_web_lua_host_requests();
+        }
     }
 
     /// Render the same rich sender used by the Native composition root.
@@ -4995,6 +4911,7 @@ impl WorkbenchApp {
     /// periodic controls and signal controls.
     fn shared_sender_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        let toolbar_buttons = self.web_send_toolbar_buttons();
         let transport = self.runtime.as_ref().map(WebRuntime::query_transport);
         let (ports, connected) = {
             let serial = self.serial.borrow();
@@ -5066,8 +4983,9 @@ impl WorkbenchApp {
                 periodic_send_count,
                 dtr,
                 rts,
+                toolbar_buttons: &toolbar_buttons,
                 max_history: WEB_MAX_SEND_HISTORY,
-                layout: SendLayout::Vertical,
+                layout: send_layout_for_width(ui.available_width()),
             };
             let actions = shared_sender_ui(ui, &mut view);
             *selected_port = target_port.as_deref().map(PortId::new);
@@ -5140,286 +5058,16 @@ impl WorkbenchApp {
                         &ctx,
                     );
                 }
+                SendAction::ActivateToolbar {
+                    plugin_id,
+                    contribution_id,
+                } => {
+                    self.activate_web_send_toolbar_button(&plugin_id, &contribution_id);
+                }
             }
         }
         self.web_ui_contribution_slot(ui, "send.toolbar");
         self.persist_settings();
-    }
-
-    // Kept in source only as a migration reference while old persisted Web
-    // state is rolled forward. The production composition root uses the
-    // shared sender above; do not call this legacy duplicate.
-    #[cfg(any())]
-    fn sender_ui(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        let mut commands = Vec::new();
-        let mut persist = false;
-        let application_connected = self
-            .runtime
-            .as_ref()
-            .and_then(|runtime| runtime.query_transport().connected);
-
-        {
-            let mut serial = self.serial.borrow_mut();
-            let connected = application_connected.or_else(|| serial.connected.clone());
-            let connected_label = connected.as_ref().map_or("未连接", PortId::as_str);
-
-            ui.heading("发送器");
-            ui.separator();
-            ui.horizontal_wrapped(|ui| {
-                ui.label("发送到");
-                ui.add_enabled(false, egui::Button::new(connected_label));
-                ui.separator();
-                if ui
-                    .add(egui::Button::selectable(!serial.tx_hex, "文本").corner_radius(6.0))
-                    .clicked()
-                {
-                    serial.tx_hex = false;
-                    serial.send_error = None;
-                    persist = true;
-                }
-                if ui
-                    .add(egui::Button::selectable(serial.tx_hex, "HEX").corner_radius(6.0))
-                    .clicked()
-                {
-                    serial.tx_hex = true;
-                    serial.send_error = None;
-                    persist = true;
-                }
-                if serial.tx_hex
-                    && ui
-                        .checkbox(&mut serial.hex_strict, "严格")
-                        .on_hover_text("严格模式：每个 HEX token 必须是完整的两位字节")
-                        .changed()
-                {
-                    serial.send_error = None;
-                    persist = true;
-                }
-                ui.add_enabled_ui(!serial.tx_hex, |ui| {
-                    egui::ComboBox::from_id_salt("web-send-line-ending")
-                        .selected_text(serial.line_ending.label())
-                        .show_ui(ui, |ui| {
-                            for ending in WebLineEnding::ALL {
-                                if ui
-                                    .selectable_value(
-                                        &mut serial.line_ending,
-                                        ending,
-                                        ending.label(),
-                                    )
-                                    .changed()
-                                {
-                                    persist = true;
-                                }
-                            }
-                        });
-                });
-            });
-
-            let input_height = (ui.available_height() - 150.0).max(110.0);
-            let response = egui::ScrollArea::vertical()
-                .id_salt("web-send-input-scroll")
-                .max_height(input_height)
-                .show(ui, |ui| {
-                    ui.add_sized(
-                        egui::vec2(ui.available_width(), input_height),
-                        egui::TextEdit::multiline(&mut serial.send_input)
-                            .desired_width(f32::INFINITY)
-                            .hint_text(if connected.is_some() {
-                                "输入要发送的文本或 HEX，Ctrl+Enter 发送"
-                            } else {
-                                "请选择或打开串口后发送"
-                            }),
-                    )
-                })
-                .inner;
-            if response.changed() {
-                serial.send_error = None;
-                serial.periodic_send_count = 0;
-                serial.history_index = None;
-                serial.saved_input.clear();
-            }
-
-            if response.has_focus() && !serial.send_history.is_empty() {
-                if ui.input(|input| input.key_pressed(egui::Key::ArrowUp)) {
-                    match serial.history_index {
-                        None => {
-                            serial.saved_input = serial.send_input.clone();
-                            serial.history_index = Some(0);
-                            serial.send_input = serial.send_history[0].clone();
-                        }
-                        Some(index) if index + 1 < serial.send_history.len() => {
-                            serial.history_index = Some(index + 1);
-                            serial.send_input = serial.send_history[index + 1].clone();
-                        }
-                        _ => {}
-                    }
-                } else if ui.input(|input| input.key_pressed(egui::Key::ArrowDown)) {
-                    match serial.history_index {
-                        Some(0) => {
-                            serial.history_index = None;
-                            serial.send_input = std::mem::take(&mut serial.saved_input);
-                        }
-                        Some(index) => {
-                            serial.history_index = Some(index - 1);
-                            serial.send_input = serial.send_history[index - 1].clone();
-                        }
-                        None => {}
-                    }
-                }
-            } else if !response.has_focus() {
-                serial.history_index = None;
-                serial.saved_input.clear();
-            }
-
-            let input_trimmed = serial.send_input.trim().to_owned();
-            let hex_error = if serial.tx_hex && !input_trimmed.is_empty() {
-                web_hex_error(&input_trimmed, serial.hex_strict)
-            } else {
-                None
-            };
-            let can_send = connected.is_some() && !input_trimmed.is_empty() && hex_error.is_none();
-            let ctrl_enter = response.has_focus()
-                && ui.input(|input| input.key_pressed(egui::Key::Enter) && input.modifiers.command);
-
-            ui.horizontal_wrapped(|ui| {
-                let send = ui
-                    .add_enabled(can_send, egui::Button::new("发送"))
-                    .on_disabled_hover_text(
-                        hex_error
-                            .as_deref()
-                            .unwrap_or("请先连接串口并输入要发送的内容"),
-                    );
-                if can_send && (send.clicked() || ctrl_enter) {
-                    let port = connected.clone().expect("send enabled only with a port");
-                    let command = if serial.tx_hex {
-                        AppCommand::SendHex {
-                            port,
-                            hex: serial.send_input.clone(),
-                            strict: serial.hex_strict,
-                        }
-                    } else {
-                        AppCommand::SendText {
-                            port,
-                            text: format!("{}{}", serial.send_input, serial.line_ending.suffix()),
-                        }
-                    };
-                    commands.push(command);
-                    let history_text = serial.send_input.clone();
-                    record_web_send_history(&mut serial, history_text);
-                    serial.send_error = None;
-                    serial.periodic_send_count = 0;
-                    persist = true;
-                }
-                if ui.button("清空").clicked() {
-                    serial.send_input.clear();
-                    serial.send_error = None;
-                    serial.periodic_send_count = 0;
-                }
-                ui.menu_button("历史", |ui| {
-                    if serial.send_history.is_empty() {
-                        ui.label("暂无发送历史");
-                    } else {
-                        let history = serial.send_history.clone();
-                        egui::ScrollArea::vertical()
-                            .max_height(240.0)
-                            .show(ui, |ui| {
-                                for item in history.iter().take(WEB_MAX_SEND_HISTORY) {
-                                    let label = if item.chars().count() > 80 {
-                                        format!("{}…", item.chars().take(80).collect::<String>())
-                                    } else {
-                                        item.clone()
-                                    };
-                                    if ui.button(label).clicked() {
-                                        serial.send_input = item.clone();
-                                        serial.history_index = None;
-                                        ui.close();
-                                    }
-                                }
-                            });
-                    }
-                });
-            });
-
-            ui.horizontal_wrapped(|ui| {
-                let interval = serial.periodic_interval_ms.clone();
-                let interval_valid = interval
-                    .trim()
-                    .parse::<f64>()
-                    .map(|value| value > 0.0)
-                    .unwrap_or(false);
-                let can_toggle = interval_valid || serial.periodic_enabled;
-                if ui
-                    .add_enabled(
-                        can_toggle,
-                        egui::Checkbox::new(&mut serial.periodic_enabled, "周期发送"),
-                    )
-                    .changed()
-                {
-                    serial.periodic_send_count = 0;
-                    serial.periodic_next_at = serial.periodic_enabled.then(|| {
-                        ui.ctx().input(|input| input.time)
-                            + interval.trim().parse::<f64>().unwrap_or(1000.0) / 1000.0
-                    });
-                    persist = true;
-                }
-                if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut serial.periodic_interval_ms)
-                            .desired_width(72.0),
-                    )
-                    .changed()
-                {
-                    serial.periodic_next_at = None;
-                    persist = true;
-                }
-                ui.label("ms");
-                if let Some(error) = hex_error.as_deref() {
-                    ui.colored_label(theme::red(), error);
-                }
-                if !interval_valid && serial.periodic_enabled {
-                    ui.colored_label(theme::red(), "间隔必须 > 0ms");
-                }
-            });
-
-            ui.horizontal_wrapped(|ui| {
-                let enabled = connected.is_some();
-                ui.add_enabled_ui(enabled, |ui| {
-                    if ui.checkbox(&mut serial.dtr, "DTR").changed()
-                        && let Some(port) = connected.clone()
-                    {
-                        commands.push(AppCommand::SetDtr {
-                            port,
-                            value: serial.dtr,
-                        });
-                    }
-                    if ui.checkbox(&mut serial.rts, "RTS").changed()
-                        && let Some(port) = connected.clone()
-                    {
-                        commands.push(AppCommand::SetRts {
-                            port,
-                            value: serial.rts,
-                        });
-                    }
-                });
-            });
-
-            if let Some(error) = serial.send_error.as_deref() {
-                ui.colored_label(theme::red(), error);
-            }
-        }
-
-        // Native renders send.toolbar beside the built-in send/history
-        // controls. The standalone Web sender keeps the same contribution
-        // contract; it is placed after the shared controls so the browser
-        // runtime never needs a second plugin UI implementation.
-        self.web_ui_contribution_slot(ui, "send.toolbar");
-
-        for command in commands {
-            self.dispatch_serial(command, &ctx);
-        }
-        if persist {
-            self.persist_settings();
-        }
     }
 
     fn web_recording_ui(&mut self, ui: &mut egui::Ui) {
@@ -5519,45 +5167,6 @@ impl WorkbenchApp {
         let plugin_view = runtime.query_plugins();
         let marketplace_view = runtime.query_marketplace();
 
-        design::card().show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.heading("Web 插件");
-            ui.separator();
-            ui.label("浏览器与桌面端使用同一份 Lua 插件和宿主 API，不维护第二套插件源码。");
-            ui.label("manifest、源码和启用状态保存在当前浏览器本地存储中。");
-            if ui
-                .button("导入 Lua 插件（plugin.json + main.lua）")
-                .clicked()
-            {
-                self.request_web_plugin_files(ui.ctx());
-            }
-        });
-        ui.add_space(design::SECTION_GAP);
-
-        let mut marketplace_url_changed = false;
-        design::card().show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.horizontal_wrapped(|ui| {
-                ui.label("市场索引");
-                marketplace_url_changed = ui
-                    .add(
-                        egui::TextEdit::singleline(&mut self.marketplace_url)
-                            .desired_width(420.0)
-                            .hint_text("https://…/registry.json"),
-                    )
-                    .changed();
-                if ui
-                    .add_enabled(!marketplace_view.refreshing, egui::Button::new("刷新市场"))
-                    .clicked()
-                {
-                    self.request_web_marketplace_refresh(ui.ctx());
-                }
-            });
-        });
-        if marketplace_url_changed {
-            self.persist_settings();
-        }
-
         if let Some(registry) = marketplace_view.registry.clone() {
             self.plugins_panel
                 .set_market_registry_view(registry, self.marketplace_url.clone());
@@ -5586,9 +5195,16 @@ impl WorkbenchApp {
             }
         }
 
-        let events =
-            self.plugins_panel
-                .ui_with_view(ui, &plugin_view.summaries, &plugin_view.diagnostics);
+        let events = self.plugins_panel.ui_with_view_options(
+            ui,
+            &plugin_view.summaries,
+            &plugin_view.diagnostics,
+            PluginPanelOptions {
+                show_root: false,
+                show_import: true,
+                marketplace_url: Some(&mut self.marketplace_url),
+            },
+        );
         for event in events {
             match event {
                 tool_panels::PluginPanelEvent::Status(message, _is_error) => {
@@ -5606,6 +5222,13 @@ impl WorkbenchApp {
                 }
                 tool_panels::PluginPanelEvent::RefreshMarket => {
                     self.request_web_marketplace_refresh(ui.ctx());
+                }
+                tool_panels::PluginPanelEvent::ImportPlugin => {
+                    self.request_web_plugin_files(ui.ctx());
+                }
+                tool_panels::PluginPanelEvent::MarketplaceUrlChanged(url) => {
+                    self.marketplace_url = url;
+                    self.persist_settings();
                 }
                 tool_panels::PluginPanelEvent::InstallPlugin(plugin_id) => {
                     if let Some(entry) = marketplace_view.registry.as_ref().and_then(|registry| {
@@ -5642,147 +5265,77 @@ impl WorkbenchApp {
                 self.serial.borrow_mut().status = error;
             }
         }
-        self.web_plugin_settings_ui(ui);
     }
 
     fn web_plugin_settings_ui(&mut self, ui: &mut egui::Ui) {
         let mut changed = Vec::new();
+        let mut has_settings = false;
+        let ports = self
+            .runtime
+            .as_ref()
+            .map(WebRuntime::query_transport)
+            .map(|view| {
+                view.ports
+                    .iter()
+                    .map(|port| port.id.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| {
+                self.serial
+                    .borrow()
+                    .ports
+                    .iter()
+                    .map(|port| port.id.to_string())
+                    .collect()
+            });
         for (index, record) in self.plugins.records.iter_mut().enumerate() {
-            let settings = record.persisted.manifest.contributes.settings.clone();
+            let settings: Vec<PluginSettingView> = record
+                .persisted
+                .manifest
+                .contributes
+                .settings
+                .iter()
+                .map(|setting| PluginSettingView {
+                    id: setting.id.clone(),
+                    title: setting.title.clone(),
+                    kind: setting.kind.clone(),
+                    default: setting.default.clone().unwrap_or(serde_json::Value::Null),
+                    options: setting.options.clone(),
+                    min: setting.min,
+                    max: setting.max,
+                    step: setting.step,
+                    rows: setting.rows,
+                    description: setting.description.clone(),
+                })
+                .collect();
             if settings.is_empty() {
                 continue;
             }
+            has_settings = true;
+            let before = record.persisted.settings.clone();
+            let plugin_id = record.persisted.manifest.id.clone();
+            let plugin_name = record.persisted.manifest.name.clone();
+            let mut view = PluginSettingsView {
+                plugin_id: &plugin_id,
+                plugin_name: &plugin_name,
+                settings: &settings,
+                ports: &ports,
+                values: &mut record.persisted.settings,
+            };
+            plugin_settings_ui(ui, &mut view);
+            if record.persisted.settings != before {
+                changed.push((
+                    index,
+                    serde_json::to_string(&record.persisted.settings)
+                        .unwrap_or_else(|_| "{}".to_owned()),
+                ));
+            }
+        }
+        if !has_settings {
             design::card().show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.heading(format!("{} 设置", record.persisted.manifest.name));
-                ui.separator();
-                for setting in settings {
-                    let entry = record
-                        .persisted
-                        .settings
-                        .entry(setting.id.clone())
-                        .or_insert_with(|| {
-                            setting
-                                .default
-                                .clone()
-                                .unwrap_or_else(|| serde_json::Value::String(String::new()))
-                        });
-                    let mut did_change = false;
-                    match setting.kind.as_str() {
-                        "boolean" | "bool" | "checkbox" => {
-                            let mut value = entry.as_bool().unwrap_or(false);
-                            did_change = ui.checkbox(&mut value, &setting.title).changed();
-                            if did_change {
-                                *entry = serde_json::Value::Bool(value);
-                            }
-                        }
-                        "number" => {
-                            let min = setting.min.unwrap_or(f64::NEG_INFINITY);
-                            let max = setting.max.unwrap_or(f64::INFINITY);
-                            let mut value = entry.as_f64().unwrap_or_default().clamp(min, max);
-                            ui.horizontal(|ui| {
-                                ui.label(&setting.title);
-                                let mut drag = egui::DragValue::new(&mut value);
-                                if let Some(step) = setting.step.filter(|step| *step > 0.0) {
-                                    drag = drag.speed(step);
-                                }
-                                if min.is_finite() && max.is_finite() {
-                                    drag = drag.range(min..=max);
-                                }
-                                did_change = ui.add(drag).changed();
-                            });
-                            if did_change {
-                                *entry = serde_json::json!(value.clamp(min, max));
-                            }
-                        }
-                        "slider" | "range" => {
-                            let min = setting.min.unwrap_or(0.0);
-                            let max = setting.max.unwrap_or(100.0).max(min);
-                            let mut value = entry.as_f64().unwrap_or(min).clamp(min, max);
-                            ui.horizontal(|ui| {
-                                ui.label(&setting.title);
-                                let mut slider = egui::Slider::new(&mut value, min..=max);
-                                if let Some(step) = setting.step.filter(|step| *step > 0.0) {
-                                    slider = slider.step_by(step);
-                                }
-                                did_change = ui.add(slider).changed();
-                            });
-                            if did_change {
-                                *entry = serde_json::json!(value);
-                            }
-                        }
-                        "select" | "choice" | "enum" | "dropdown" => {
-                            let options = setting.options.clone();
-                            let mut selected = entry.clone();
-                            let selected_text = options
-                                .iter()
-                                .find(|option| web_setting_option_value(option) == selected)
-                                .map(web_setting_option_label)
-                                .unwrap_or_else(|| web_setting_option_label(&selected));
-                            ui.horizontal(|ui| {
-                                ui.label(&setting.title);
-                                egui::ComboBox::from_id_salt((
-                                    "web-plugin-setting",
-                                    index,
-                                    &setting.id,
-                                ))
-                                .selected_text(selected_text)
-                                .show_ui(ui, |ui| {
-                                    for option in &options {
-                                        let value = web_setting_option_value(option);
-                                        let label = web_setting_option_label(option);
-                                        if ui
-                                            .selectable_value(&mut selected, value, label)
-                                            .changed()
-                                        {
-                                            did_change = true;
-                                        }
-                                    }
-                                });
-                            });
-                            if did_change {
-                                *entry = selected;
-                            }
-                        }
-                        "textarea" => {
-                            let mut value = entry.as_str().unwrap_or_default().to_owned();
-                            ui.label(&setting.title);
-                            did_change = ui
-                                .add(
-                                    egui::TextEdit::multiline(&mut value)
-                                        .desired_rows(setting.rows.unwrap_or(4).clamp(2, 20))
-                                        .desired_width(ui.available_width()),
-                                )
-                                .changed();
-                            if did_change {
-                                *entry = serde_json::Value::String(value);
-                            }
-                        }
-                        _ => {
-                            let mut value = entry.as_str().unwrap_or_default().to_owned();
-                            ui.horizontal(|ui| {
-                                ui.label(&setting.title);
-                                did_change =
-                                    ui.add(egui::TextEdit::singleline(&mut value)).changed();
-                            });
-                            if did_change {
-                                *entry = serde_json::Value::String(value);
-                            }
-                        }
-                    }
-                    if let Some(description) = setting.description.as_deref() {
-                        ui.small(description);
-                    }
-                    if did_change {
-                        changed.push((
-                            index,
-                            serde_json::to_string(&record.persisted.settings)
-                                .unwrap_or_else(|_| "{}".to_owned()),
-                        ));
-                    }
-                }
+                design::empty_state(ui, ICON_APPS, "暂无插件设置");
             });
-            ui.add_space(6.0);
         }
         for (index, settings_json) in changed {
             if let Some(instance) = self
@@ -5803,393 +5356,6 @@ impl WorkbenchApp {
         }
     }
 
-    #[cfg(any())]
-    #[allow(dead_code)]
-    fn web_plugins_legacy_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("插件");
-        ui.separator();
-        let plugin_summaries = self
-            .runtime
-            .as_ref()
-            .map(WebRuntime::query_plugins)
-            .map(|view| view.summaries)
-            .unwrap_or_default();
-        let running_plugins = plugin_summaries
-            .iter()
-            .filter(|plugin| plugin.state == PluginStateView::Running)
-            .count();
-        let failed_plugins = plugin_summaries
-            .iter()
-            .filter(|plugin| plugin.state == PluginStateView::Failed)
-            .count();
-        ui.horizontal_wrapped(|ui| {
-            design::status_pill(
-                ui,
-                theme::cyan(),
-                format!("已发现 {}", plugin_summaries.len()),
-            );
-            design::status_pill(ui, theme::green(), format!("运行 {running_plugins}"));
-            if failed_plugins > 0 {
-                design::status_pill(ui, theme::red(), format!("异常 {failed_plugins}"));
-            }
-        });
-        ui.add_space(4.0);
-        let tab = self.plugins.tab;
-        design::elevated_card().show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for (selected, next, label) in [
-                    (
-                        tab == WebPluginTab::Installed,
-                        WebPluginTab::Installed,
-                        "已安装",
-                    ),
-                    (
-                        tab == WebPluginTab::Marketplace,
-                        WebPluginTab::Marketplace,
-                        "市场",
-                    ),
-                ] {
-                    if ui
-                        .add(
-                            egui::Button::selectable(
-                                selected,
-                                design::icon_text(
-                                    if next == WebPluginTab::Installed {
-                                        ICON_APPS
-                                    } else {
-                                        ICON_SHOPPING_CART
-                                    },
-                                    label,
-                                ),
-                            )
-                            .corner_radius(7.0)
-                            .min_size(egui::vec2(112.0, 32.0)),
-                        )
-                        .clicked()
-                    {
-                        self.plugins.tab = next;
-                    }
-                }
-            });
-        });
-        ui.add_space(design::SECTION_GAP);
-        if tab == WebPluginTab::Marketplace {
-            if self.marketplace.entries.is_empty()
-                && !self.marketplace.loading
-                && self.marketplace.error.is_none()
-            {
-                self.request_web_marketplace_refresh(ui.ctx());
-            }
-            let mut marketplace_url_changed = false;
-            design::card().show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.heading("插件市场");
-                ui.separator();
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("索引");
-                    marketplace_url_changed = ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.marketplace.url)
-                                .desired_width(420.0)
-                                .hint_text("https://…/registry.json"),
-                        )
-                        .changed();
-                    if ui
-                        .add_enabled(!self.marketplace.loading, egui::Button::new("刷新"))
-                        .clicked()
-                    {
-                        self.request_web_marketplace_refresh(ui.ctx());
-                    }
-                });
-                if self.marketplace.loading {
-                    ui.label("正在读取插件市场…");
-                }
-                if let Some(error) = &self.marketplace.error {
-                    ui.colored_label(theme::red(), error);
-                }
-                if self.marketplace.entries.is_empty() && !self.marketplace.loading {
-                    ui.label("暂无可用插件");
-                }
-            });
-            if marketplace_url_changed {
-                self.persist_settings();
-            }
-            let marketplace_entries = self.marketplace.entries.clone();
-            for entry in marketplace_entries {
-                design::card().show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    ui.horizontal_wrapped(|ui| {
-                        ui.heading(&entry.name);
-                        ui.label(format!("{} v{}", entry.id, entry.version));
-                        if let Some(runtime) = &entry.runtime {
-                            ui.label(format!("runtime={runtime}"));
-                        }
-                    });
-                    if let Some(description) = &entry.description {
-                        ui.label(description);
-                    }
-                    if !entry.permissions.is_empty() {
-                        ui.small(format!("权限：{}", entry.permissions.join(", ")));
-                    }
-                    let web_package = entry.manifest_url.is_some() && entry.main_url.is_some();
-                    ui.horizontal_wrapped(|ui| {
-                        if web_package {
-                            let installing =
-                                self.marketplace.installing.as_deref() == Some(&entry.id);
-                            if ui
-                                .add_enabled(
-                                    !installing && self.marketplace.installing.is_none(),
-                                    egui::Button::new(if installing {
-                                        "安装中…"
-                                    } else {
-                                        "安装 Lua 插件"
-                                    }),
-                                )
-                                .clicked()
-                            {
-                                self.install_web_marketplace_entry(entry.clone(), ui.ctx());
-                            }
-                        } else {
-                            ui.label("仅提供桌面插件包");
-                        }
-                    });
-                });
-                ui.add_space(6.0);
-            }
-            return;
-        }
-
-        ui.add_space(2.0);
-        design::card().show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.heading("Web 插件");
-            ui.separator();
-            ui.label(
-                "浏览器与桌面端使用同一份 Lua 插件和 plugin.json；浏览器由纯 Rust Lua VM 执行。",
-            );
-            ui.label("文件、串口权限等平台能力由宿主异步提供，插件 API 不随平台分叉。");
-            if ui
-                .button("导入 Lua 插件（plugin.json + main.lua）")
-                .clicked()
-            {
-                self.request_web_plugin_files(ui.ctx());
-            }
-            ui.label("导入后清单、源码和启用状态保存在当前浏览器本地存储中。");
-        });
-
-        ui.add_space(8.0);
-        if plugin_summaries.is_empty() {
-            design::empty_state(ui, ICON_CABLE, "尚未导入 Web 插件");
-            return;
-        }
-
-        let mut changes = Vec::new();
-        let mut commands = Vec::new();
-        let mut settings_updates = Vec::new();
-        for (index, record) in self.plugins.records.iter_mut().enumerate() {
-            let summary = plugin_summaries
-                .iter()
-                .find(|summary| summary.id == record.persisted.manifest.id);
-            let enabled_from_view =
-                summary.is_some_and(|summary| !matches!(summary.state, PluginStateView::Disabled));
-            design::card().show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.horizontal_wrapped(|ui| {
-                    ui.heading(&record.persisted.manifest.name);
-                    ui.label(format!(
-                        "{} v{} · Plugin API {}",
-                        record.persisted.manifest.id,
-                        record.persisted.manifest.version,
-                        record.persisted.manifest.api_version
-                    ));
-                    let mut enabled = enabled_from_view;
-                    if ui.checkbox(&mut enabled, "启用").changed() {
-                        changes.push((index, enabled));
-                    }
-                });
-                if let Some(description) = &record.persisted.manifest.description {
-                    ui.label(description);
-                }
-                ui.label(format!("入口：{}", record.persisted.manifest.live_main()));
-                if !record.persisted.manifest.live_permissions().is_empty() {
-                    ui.label(format!(
-                        "权限：{}",
-                        record.persisted.manifest.live_permissions().join(", ")
-                    ));
-                }
-                if !record.persisted.manifest.contributes.settings.is_empty() {
-                    ui.collapsing("设置", |ui| {
-                        for setting in &record.persisted.manifest.contributes.settings {
-                            let entry = record
-                                .persisted
-                                .settings
-                                .entry(setting.id.clone())
-                                .or_insert_with(|| {
-                                    setting
-                                        .default
-                                        .clone()
-                                        .unwrap_or_else(|| serde_json::Value::String(String::new()))
-                                });
-                            let mut changed = false;
-                            match setting.kind.as_str() {
-                                "boolean" => {
-                                    let mut value = entry.as_bool().unwrap_or(false);
-                                    changed = ui.checkbox(&mut value, &setting.title).changed();
-                                    if changed {
-                                        *entry = serde_json::Value::Bool(value);
-                                    }
-                                }
-                                "number" => {
-                                    let mut value = entry.as_f64().unwrap_or_default();
-                                    ui.horizontal(|ui| {
-                                        ui.label(&setting.title);
-                                        changed =
-                                            ui.add(egui::DragValue::new(&mut value)).changed();
-                                    });
-                                    if changed {
-                                        *entry = serde_json::json!(value);
-                                    }
-                                }
-                                "textarea" => {
-                                    let mut value = entry.as_str().unwrap_or_default().to_owned();
-                                    ui.label(&setting.title);
-                                    changed = ui
-                                        .add(
-                                            egui::TextEdit::multiline(&mut value)
-                                                .desired_rows(6)
-                                                .desired_width(ui.available_width()),
-                                        )
-                                        .changed();
-                                    if changed {
-                                        *entry = serde_json::Value::String(value);
-                                    }
-                                }
-                                _ => {
-                                    let mut value = entry.as_str().unwrap_or_default().to_owned();
-                                    ui.horizontal(|ui| {
-                                        ui.label(&setting.title);
-                                        changed = ui
-                                            .add(egui::TextEdit::singleline(&mut value))
-                                            .changed();
-                                    });
-                                    if changed {
-                                        *entry = serde_json::Value::String(value);
-                                    }
-                                }
-                            }
-                            if let Some(description) = setting.description.as_deref() {
-                                ui.small(description);
-                            }
-                            if changed {
-                                settings_updates.push((
-                                    index,
-                                    serde_json::to_string(&record.persisted.settings)
-                                        .unwrap_or_else(|_| "{}".to_owned()),
-                                ));
-                            }
-                        }
-                    });
-                }
-                if enabled_from_view && record.lua_instance.is_some() {
-                    for command in &record.persisted.manifest.contributes.commands {
-                        if ui.button(&command.title).clicked() {
-                            commands.push((index, command.id.clone()));
-                        }
-                    }
-                    for contribution in &record.persisted.manifest.contributes.ui {
-                        if contribution.kind == "button"
-                            && contribution.slot == "plugins.toolbar"
-                            && let Some(command_id) = contribution.command.as_deref()
-                        {
-                            let title = contribution.title.as_deref().unwrap_or(command_id);
-                            let response = ui.button(title);
-                            let response = if let Some(tooltip) = contribution.tooltip.as_deref() {
-                                response.on_hover_text(tooltip)
-                            } else {
-                                response
-                            };
-                            if response.clicked() {
-                                commands.push((index, command_id.to_owned()));
-                            }
-                        }
-                    }
-                }
-                if record.loading {
-                    ui.label("正在加载模块…");
-                } else if record.lua_instance.is_some() && enabled_from_view {
-                    design::status_pill(ui, theme::green(), "运行中");
-                } else if let Some(error) = &record.error {
-                    ui.colored_label(theme::red(), error);
-                } else if enabled_from_view {
-                    ui.label("等待模块加载");
-                } else {
-                    design::status_pill(ui, theme::text_dimmed(), "已禁用");
-                }
-            });
-            ui.add_space(6.0);
-        }
-        for (index, command_id) in commands {
-            let Some(plugin_id) = self
-                .plugins
-                .records
-                .get(index)
-                .map(|record| record.persisted.manifest.id.clone())
-            else {
-                continue;
-            };
-            let context = serde_json::json!({
-                "source": "web_plugin_panel",
-                "plugin_index": index,
-            });
-            if let Some(runtime) = self.runtime.as_ref()
-                && let Err(error) = runtime.dispatch(AppCommand::ExecutePluginCommand {
-                    plugin_id,
-                    command_id,
-                    context,
-                })
-            {
-                self.serial.borrow_mut().status = error;
-            }
-        }
-        for (index, settings_json) in settings_updates {
-            if let Some(instance) = self
-                .plugins
-                .records
-                .get(index)
-                .and_then(|record| record.lua_instance)
-            {
-                let settings = serde_json::from_str::<serde_json::Value>(&settings_json)
-                    .map(|value| PluginValue::from_json(&value));
-                if let Ok(settings) = settings
-                    && let Err(error) = self.web_lua.update_settings(instance, settings)
-                {
-                    self.serial.borrow_mut().status = error.to_string();
-                }
-            }
-            self.persist_settings();
-        }
-        for (index, enabled) in changes {
-            let Some(plugin_id) = self
-                .plugins
-                .records
-                .get(index)
-                .map(|record| record.persisted.manifest.id.clone())
-            else {
-                continue;
-            };
-            let command = if enabled {
-                AppCommand::EnablePlugin { plugin_id }
-            } else {
-                AppCommand::DisablePlugin { plugin_id }
-            };
-            if let Some(runtime) = self.runtime.as_ref()
-                && let Err(error) = runtime.dispatch(command)
-            {
-                self.serial.borrow_mut().status = error;
-            }
-        }
-    }
-
     fn web_ui_contribution_context(&self, slot: &str) -> serde_json::Value {
         let serial = self.serial.borrow();
         let transport = self.runtime.as_ref().map(WebRuntime::query_transport);
@@ -6197,6 +5363,14 @@ impl WorkbenchApp {
             .as_ref()
             .and_then(|view| view.connected.clone())
             .or_else(|| serial.connected.clone());
+        // The sender target is user-selectable.  Falling back to the active
+        // connection keeps the plugin usable immediately after connect, but
+        // an explicitly selected unopened port must remain unopened in the
+        // command context.
+        let target_port = serial.selected_port.clone().or_else(|| connected.clone());
+        let target_port_open = target_port
+            .as_ref()
+            .is_some_and(|port| connected.as_ref() == Some(port));
         let open_ports = transport
             .as_ref()
             .map(|view| {
@@ -6213,8 +5387,8 @@ impl WorkbenchApp {
                 "slot": slot,
                 "send": {
                     "input": serial.send_input,
-                    "target_port": connected,
-                    "target_port_open": connected.is_some(),
+                    "target_port": target_port,
+                    "target_port_open": target_port_open,
                     "hex_mode": serial.tx_hex,
                     "line_ending": {
                         "label": serial.line_ending.label(),
@@ -6248,7 +5422,15 @@ impl WorkbenchApp {
                     .contributes
                     .ui
                     .into_iter()
-                    .filter(|item| item.slot == slot && item.visible)
+                    .filter(|item| {
+                        item.slot == slot
+                            && item.visible
+                            && !(slot == "send.toolbar"
+                                && matches!(
+                                    item.kind.to_ascii_lowercase().as_str(),
+                                    "button" | "small_button" | ""
+                                ))
+                    })
                     .map(move |item| {
                         let contribution_id = item.id;
                         (
@@ -6351,39 +5533,77 @@ impl WorkbenchApp {
                     serde_json::json!(contribution_id),
                 );
             }
-            if let Some(runtime) = self.runtime.as_ref()
-                && let Err(error) = runtime.dispatch(AppCommand::ExecutePluginCommand {
-                    plugin_id,
-                    command_id,
-                    context,
-                })
-            {
-                self.serial.borrow_mut().status = error;
-            }
+            // Browser file/serial capability requests must be started in the
+            // same UI turn as the clicked contribution. Queueing the command
+            // in WebRuntime would move requestPort()/input.click() to the
+            // next frame, after transient user activation expires.
+            self.execute_web_plugin_command(
+                plugin_id.clone(),
+                command_id.clone(),
+                serde_json::json!({
+                    "plugin_id": plugin_id.clone(),
+                    "contribution_id": contribution_id,
+                    "slot": slot,
+                    "kind": "button",
+                    "command": command_id.clone(),
+                    "context": context,
+                }),
+            );
+            self.poll_web_lua_host_requests();
         }
     }
-}
 
-fn web_setting_option_value(option: &serde_json::Value) -> serde_json::Value {
-    option
-        .as_object()
-        .and_then(|object| object.get("value"))
-        .cloned()
-        .unwrap_or_else(|| option.clone())
-}
+    /// Execute a Web Lua command at the composition root.
+    ///
+    /// Ordinary commands may be queued and handled by `poll_web_plugins`, but
+    /// commands originating from a visible browser button need an immediate
+    /// path: a plugin can synchronously create a pending file picker or
+    /// `requestPort()` request, and both APIs require the current user gesture.
+    fn execute_web_plugin_command(
+        &mut self,
+        plugin_id: String,
+        command_id: String,
+        context: serde_json::Value,
+    ) {
+        let Some(index) = self
+            .plugins
+            .records
+            .iter()
+            .position(|record| record.persisted.manifest.id == plugin_id)
+        else {
+            self.serial.borrow_mut().status = format!("Web 插件不存在：{plugin_id}");
+            return;
+        };
+        let Some(instance) = self
+            .plugins
+            .records
+            .get(index)
+            .and_then(|record| record.lua_instance)
+        else {
+            self.serial.borrow_mut().status = format!("Web 插件未运行：{plugin_id}");
+            return;
+        };
 
-fn web_setting_option_label(option: &serde_json::Value) -> String {
-    if let Some(label) = option
-        .as_object()
-        .and_then(|object| object.get("label"))
-        .and_then(serde_json::Value::as_str)
-    {
-        return label.to_owned();
-    }
-    match option {
-        serde_json::Value::String(value) => value.clone(),
-        serde_json::Value::Null => String::new(),
-        _ => option.to_string(),
+        let context = PluginValue::from_json(&context);
+        match self
+            .web_lua
+            .dispatch_command(instance, &command_id, context)
+        {
+            Ok(PluginCallResult::Completed(value)) => {
+                self.serial.borrow_mut().status = format!(
+                    "{}：{}",
+                    plugin_id,
+                    value
+                        .to_json()
+                        .map(|value| value.to_string())
+                        .unwrap_or_default()
+                );
+            }
+            Ok(PluginCallResult::Yielded { .. }) => {
+                self.serial.borrow_mut().status = format!("{plugin_id}：命令已进入异步任务");
+            }
+            Err(error) => self.serial.borrow_mut().status = error.to_string(),
+        }
     }
 }
 

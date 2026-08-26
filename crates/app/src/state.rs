@@ -228,6 +228,9 @@ pub(crate) struct SerialUiState {
     pub(crate) last_port_refresh: f64,
     pub(crate) auto_reconnect: bool,
     pub(crate) pending_reconnect: Option<PendingReconnect>,
+    /// Ports manually closed by the user must not be treated as unexpected
+    /// disconnects by the periodic port-list refresh.
+    pub(crate) manual_disconnects: std::collections::HashSet<String>,
     pub(crate) pending_open_notice: Option<PendingPortOpenNotice>,
     pub(crate) port_aliases: std::collections::HashMap<String, String>,
     pub(crate) port_groups: std::collections::HashMap<String, String>,
@@ -239,6 +242,8 @@ pub(crate) struct SerialUiState {
     pub(crate) network_host: String,
     /// “网络端口”连接表单的端口输入。
     pub(crate) network_port: String,
+    /// “网络端口”连接表单的 API Key 输入（仅作为编辑缓冲，不单独持久化）。
+    pub(crate) network_api_key: String,
 }
 
 impl SerialUiState {
@@ -263,6 +268,7 @@ impl Default for SerialUiState {
             last_port_refresh: 0.0,
             auto_reconnect: true,
             pending_reconnect: None,
+            manual_disconnects: std::collections::HashSet::new(),
             pending_open_notice: None,
             port_aliases: std::collections::HashMap::new(),
             port_groups: std::collections::HashMap::new(),
@@ -271,6 +277,7 @@ impl Default for SerialUiState {
             network_ports: Vec::new(),
             network_host: String::new(),
             network_port: "7125".to_owned(),
+            network_api_key: String::new(),
         }
     }
 }

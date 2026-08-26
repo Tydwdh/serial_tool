@@ -68,10 +68,12 @@ Web 应用的启动和刷新不会主动触发浏览器权限请求。用户必�
 ```text
 cargo check --target wasm32-unknown-unknown -p hardware-workbench-app
 cd web
-trunk serve
+trunk serve --release
 ```
 
-`trunk serve` 默认打开 `http://127.0.0.1:8080/`。生产构建使用：
+`trunk serve --release` 默认打开 `http://127.0.0.1:8080/`，用于本地验证接近生产的 WASM 性能。
+如只需要快速迭代编译，也可以使用 `trunk serve`，但它是 debug 构建，交互性能会明显下降。
+生产构建使用：
 
 ```text
 trunk build --release --public-url /serial_tool/

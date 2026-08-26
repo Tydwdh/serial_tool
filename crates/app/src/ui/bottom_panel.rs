@@ -6,7 +6,8 @@ use egui_material_icons::icons::{
     ICON_CANCEL, ICON_DELETE, ICON_DELETE_SWEEP, ICON_HISTORY, ICON_SEARCH, ICON_SEND,
 };
 use tool_panels::{
-    SendAction, SendLayout as SharedSendLayout, SendLineEnding, SendPortItem, SendView,
+    SendAction, SendLayout as SharedSendLayout, SendLineEnding, SendPortItem, SendToolbarButton,
+    SendView,
     design::{self, ButtonKind},
     record_history as record_shared_send_history, sender_ui as shared_sender_ui, theme,
 };
@@ -125,6 +126,7 @@ impl WorkbenchApp {
             SendLayout::Vertical => SharedSendLayout::Vertical,
         };
         let was_periodic = self.send.periodic_enabled;
+        let toolbar_buttons: Vec<SendToolbarButton> = self.send_toolbar_buttons();
         let actions = {
             let send = &mut self.send;
             let SendUiState {
@@ -161,6 +163,7 @@ impl WorkbenchApp {
                 periodic_send_count,
                 dtr: dtr_high,
                 rts: rts_high,
+                toolbar_buttons: &toolbar_buttons,
                 max_history: MAX_SEND_HISTORY,
                 layout: shared_layout,
             };
@@ -231,10 +234,16 @@ impl WorkbenchApp {
                         self.set_status_force(StatusLevel::Error, error.to_string());
                     }
                 }
+                SendAction::ActivateToolbar {
+                    plugin_id,
+                    contribution_id,
+                } => {
+                    self.activate_send_toolbar_button(&plugin_id, &contribution_id);
+                }
             }
         }
         self.send.send_history = history.into_iter().collect();
-        self.ui_contribution_slot(ui, "send.toolbar");
+        self.ui_contribution_non_button_slot(ui, "send.toolbar");
     }
 
     #[allow(dead_code)]

@@ -5,7 +5,7 @@ use crate::panel_registry::BuiltinPanel;
 use crate::shared_shell::DockHost;
 use crate::state::StatusLevel;
 use eframe::egui;
-use tool_panels::{PanelId, PluginPanelEvent, theme};
+use tool_panels::{PanelId, PluginPanelEvent, send_layout_for_width, theme};
 
 impl WorkbenchApp {
     fn tile_panel_body(&mut self, ui: &mut egui::Ui, id: &PanelId) {
@@ -67,13 +67,10 @@ impl WorkbenchApp {
                     self.terminal_panel.ui(ui);
                     self.perf.record_terminal_render(started);
                 }
-                BuiltinPanel::Sender => {
-                    if ui.available_width() < 420.0 {
-                        self.send_panel_vertical(ui);
-                    } else {
-                        self.send_panel_horizontal(ui);
-                    }
-                }
+                BuiltinPanel::Sender => match send_layout_for_width(ui.available_width()) {
+                    tool_panels::SendLayout::Horizontal => self.send_panel_horizontal(ui),
+                    tool_panels::SendLayout::Vertical => self.send_panel_vertical(ui),
+                },
                 BuiltinPanel::Logs => {
                     let started = self.perf.begin_frame();
                     self.bottom_log_panel.ui(ui);
@@ -151,6 +148,11 @@ impl WorkbenchApp {
                     }
                 }
                 PluginPanelEvent::RefreshMarket => self.start_marketplace_refresh(),
+                PluginPanelEvent::ImportPlugin => self.set_status(
+                    StatusLevel::Info,
+                    "桌面端插件通过插件目录发现，无需导入文件",
+                ),
+                PluginPanelEvent::MarketplaceUrlChanged(_) => {}
                 PluginPanelEvent::InstallPlugin(id) => {
                     match self.plugins_panel.find_market_plugin(&id) {
                         Some(entry) => self.start_marketplace_install(entry),

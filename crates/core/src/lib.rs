@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// JSON 配置文件的通用读写与恢复工具。
 pub mod config {
@@ -353,6 +354,29 @@ pub fn now_timestamp_ms() -> u64 {
     SystemClock.now_ms()
 }
 
+/// 返回用于计算耗时的跨平台时钟，单位为纳秒。
+///
+/// `wasm32-unknown-unknown` 没有 `std::time::Instant` 的实现，因此 Web
+/// 构建必须使用浏览器提供的时间源。Native 使用进程内单调时钟；Web 使用
+/// `Date.now()`，它足以支持短耗时统计，并且不会触发标准库的 unsupported
+/// time panic。
+pub fn monotonic_now_nanos() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        (js_sys::Date::now().max(0.0) * 1_000_000.0) as u64
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        START
+            .get_or_init(Instant::now)
+            .elapsed()
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64
+    }
+}
+
 /// 时间源抽象，使依赖时间戳的代码可测试。
 pub trait Clock: Send + Sync {
     fn now_ms(&self) -> u64;
@@ -363,13 +387,23 @@ pub struct SystemClock;
 
 impl Clock for SystemClock {
     fn now_ms(&self) -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-            .unwrap_or_else(|e| {
-                log::warn!("system clock before UNIX_EPOCH: {e}");
-                1
-            })
+        #[cfg(target_arch = "wasm32")]
+        {
+            // `wasm32-unknown-unknown` has no OS-backed implementation of
+            // `std::time::SystemTime`.  Use the browser wall clock instead.
+            js_sys::Date::now().max(0.0) as u64
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+                .unwrap_or_else(|e| {
+                    log::warn!("system clock before UNIX_EPOCH: {e}");
+                    1
+                })
+        }
     }
 }
 

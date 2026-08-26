@@ -5,9 +5,11 @@
 //! the browser's already-authorized `navigator.serial.getPorts()` instead.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use futures_channel::{mpsc, oneshot};
+use futures_util::StreamExt;
 use js_sys::{Array, JsString, Object, Reflect, Uint8Array};
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
@@ -23,11 +25,34 @@ use crate::{
 
 type ConnectionListener = Closure<dyn FnMut(Event)>;
 
+enum WebSerialCommand {
+    Write {
+        bytes: Vec<u8>,
+        completion: oneshot::Sender<TransportResult<()>>,
+    },
+    SetSignals {
+        dtr: Option<bool>,
+        rts: Option<bool>,
+        completion: oneshot::Sender<TransportResult<()>>,
+    },
+    Close {
+        completion: oneshot::Sender<TransportResult<()>>,
+    },
+}
+
 #[derive(Clone)]
 pub struct WebSerialTransport {
     serial: Serial,
     ports: Rc<RefCell<HashMap<PortId, SerialPort>>>,
     readers: Rc<RefCell<HashMap<PortId, ReadableStreamDefaultReader>>>,
+    /// One writer actor per open port. Every TX and modem-control operation
+    /// enters this FIFO, so concurrent Application tasks cannot contend for
+    /// the browser WritableStream lock or reorder operations.
+    command_senders: Rc<RefCell<HashMap<PortId, mpsc::Sender<WebSerialCommand>>>>,
+    submission_locks: Rc<RefCell<HashMap<PortId, Rc<RefCell<()>>>>>,
+    closing_sessions: Rc<RefCell<HashSet<PortId>>>,
+    active_sessions: Rc<RefCell<HashSet<PortId>>>,
+    manual_disconnects: Rc<RefCell<HashSet<PortId>>>,
     next_session_id: Rc<Cell<u64>>,
     connection_listeners: Rc<RefCell<Vec<ConnectionListener>>>,
 }
@@ -49,6 +74,11 @@ impl WebSerialTransport {
             serial: navigator.serial(),
             ports: Rc::new(RefCell::new(HashMap::new())),
             readers: Rc::new(RefCell::new(HashMap::new())),
+            command_senders: Rc::new(RefCell::new(HashMap::new())),
+            submission_locks: Rc::new(RefCell::new(HashMap::new())),
+            closing_sessions: Rc::new(RefCell::new(HashSet::new())),
+            active_sessions: Rc::new(RefCell::new(HashSet::new())),
+            manual_disconnects: Rc::new(RefCell::new(HashSet::new())),
             next_session_id: Rc::new(Cell::new(1)),
             connection_listeners: Rc::new(RefCell::new(Vec::new())),
         })
@@ -102,6 +132,13 @@ impl WebSerialTransport {
             let id = disconnect_backend
                 .find_session_id(&port)
                 .unwrap_or_else(|| disconnect_backend.descriptor(&port, 0).0);
+            // The browser event is the lifecycle owner for an unplug. Remove
+            // the active session before the reader loop observes the same
+            // condition, so only one edge is surfaced to the application.
+            disconnect_backend.active_sessions.borrow_mut().remove(&id);
+            disconnect_backend.command_senders.borrow_mut().remove(&id);
+            disconnect_backend.closing_sessions.borrow_mut().remove(&id);
+            disconnect_backend.submission_locks.borrow_mut().remove(&id);
             disconnect_callback(WebSerialEvent::Disconnected(id));
         }) as Box<dyn FnMut(Event)>);
         target
@@ -179,11 +216,19 @@ impl WebSerialTransport {
         on_disconnect: Rc<dyn Fn(PortId)>,
     ) -> Result<(), TransportError> {
         let port = self.port(&id)?;
+        if self.readers.borrow().contains_key(&id) {
+            return Ok(());
+        }
         let readable = port.readable();
         let reader_object = readable.get_reader();
         let reader: ReadableStreamDefaultReader = reader_object.unchecked_into();
         self.readers.borrow_mut().insert(id.clone(), reader.clone());
         let readers = self.readers.clone();
+        let active_sessions = self.active_sessions.clone();
+        let manual_disconnects = self.manual_disconnects.clone();
+        let command_senders = self.command_senders.clone();
+        let closing_sessions = self.closing_sessions.clone();
+        let submission_locks = self.submission_locks.clone();
         spawn_local(async move {
             loop {
                 let result = match JsFuture::from(reader.read()).await {
@@ -210,7 +255,14 @@ impl WebSerialTransport {
             }
             readers.borrow_mut().remove(&id);
             reader.release_lock();
-            on_disconnect(id);
+            let manual = manual_disconnects.borrow_mut().remove(&id);
+            let active = active_sessions.borrow_mut().remove(&id);
+            command_senders.borrow_mut().remove(&id);
+            closing_sessions.borrow_mut().remove(&id);
+            submission_locks.borrow_mut().remove(&id);
+            if active && !manual {
+                on_disconnect(id);
+            }
         });
         Ok(())
     }
@@ -272,6 +324,9 @@ impl TransportBackend for WebSerialTransport {
     fn connect(&self, port_id: PortId, settings: SerialSettings) -> TransportFuture<()> {
         let backend = self.clone();
         Box::pin(async move {
+            if backend.command_senders.borrow().contains_key(&port_id) {
+                return Ok(());
+            }
             let port = backend.port(&port_id)?;
             let options = SerialOptions::new(settings.baud_rate);
             options.set_data_bits(settings.data_bits);
@@ -282,6 +337,76 @@ impl TransportBackend for WebSerialTransport {
                 SerialParity::Even => web_sys::ParityType::Even,
             });
             WebSerialTransport::await_promise(port.open(&options)).await?;
+            let writer_object = port.writable().get_writer().map_err(|error| {
+                TransportError::Operation(format!("get writer failed: {}", js_error(&error)))
+            })?;
+            let writer: WritableStreamDefaultWriter = writer_object;
+            let command_port = port.clone();
+            let (sender, mut receiver) = mpsc::channel(1024);
+            backend
+                .command_senders
+                .borrow_mut()
+                .insert(port_id.clone(), sender);
+            backend
+                .submission_locks
+                .borrow_mut()
+                .insert(port_id.clone(), Rc::new(RefCell::new(())));
+            backend.active_sessions.borrow_mut().insert(port_id.clone());
+            spawn_local(async move {
+                while let Some(command) = receiver.next().await {
+                    match command {
+                        WebSerialCommand::Write { bytes, completion } => {
+                            let value: JsValue = Uint8Array::from(bytes.as_slice()).into();
+                            // Calling write() submits the chunk to the
+                            // browser's own FIFO. Do not make the command
+                            // actor wait for the underlying driver to drain;
+                            // backpressure must not turn a UI send into a
+                            // permanently pending application task.
+                            let promise = writer.write_with_chunk(&value);
+                            let _ = completion.send(Ok(()));
+                            spawn_local(async move {
+                                if let Err(error) = WebSerialTransport::await_promise(promise).await
+                                {
+                                    web_sys::console::error_1(&JsValue::from_str(&format!(
+                                        "Web Serial 写入失败：{error}"
+                                    )));
+                                }
+                            });
+                        }
+                        WebSerialCommand::SetSignals {
+                            dtr,
+                            rts,
+                            completion,
+                        } => {
+                            let signals = SerialOutputSignals::new();
+                            if let Some(value) = dtr {
+                                signals.set_data_terminal_ready(value);
+                            }
+                            if let Some(value) = rts {
+                                signals.set_request_to_send(value);
+                            }
+                            let result = WebSerialTransport::await_promise(
+                                command_port.set_signals_with_signals(&signals),
+                            )
+                            .await
+                            .map(|_| ());
+                            let _ = completion.send(result);
+                        }
+                        WebSerialCommand::Close { completion } => {
+                            // Cancel queued/in-flight browser writes so a
+                            // manual close cannot wait behind a stalled
+                            // device. The close task then proceeds to cancel
+                            // the reader and close the port itself.
+                            let result = WebSerialTransport::await_promise(writer.abort())
+                                .await
+                                .map(|_| ());
+                            let _ = completion.send(result);
+                            break;
+                        }
+                    }
+                }
+                writer.release_lock();
+            });
             Ok(())
         })
     }
@@ -290,6 +415,31 @@ impl TransportBackend for WebSerialTransport {
         let backend = self.clone();
         Box::pin(async move {
             let port = backend.port(&port_id)?;
+            backend.active_sessions.borrow_mut().remove(&port_id);
+            backend
+                .manual_disconnects
+                .borrow_mut()
+                .insert(port_id.clone());
+            let submission_lock = backend.submission_locks.borrow().get(&port_id).cloned();
+            let sender = if let Some(lock) = submission_lock {
+                let _guard = lock.borrow_mut();
+                backend
+                    .closing_sessions
+                    .borrow_mut()
+                    .insert(port_id.clone());
+                backend.command_senders.borrow().get(&port_id).cloned()
+            } else {
+                None
+            };
+            if let Some(mut sender) = sender {
+                let (completion, result) = oneshot::channel();
+                sender
+                    .try_send(WebSerialCommand::Close { completion })
+                    .map_err(|_| TransportError::PortNotConnected(port_id.clone()))?;
+                result
+                    .await
+                    .map_err(|_| TransportError::PortNotConnected(port_id.clone()))??;
+            }
             let reader = { backend.readers.borrow_mut().remove(&port_id) };
             if let Some(reader) = reader {
                 // A SerialPort cannot be closed while its readable stream is
@@ -299,6 +449,10 @@ impl TransportBackend for WebSerialTransport {
                 reader.release_lock();
             }
             WebSerialTransport::await_promise(port.close()).await?;
+            backend.command_senders.borrow_mut().remove(&port_id);
+            backend.submission_locks.borrow_mut().remove(&port_id);
+            backend.closing_sessions.borrow_mut().remove(&port_id);
+            backend.manual_disconnects.borrow_mut().remove(&port_id);
             Ok(())
         })
     }
@@ -306,15 +460,11 @@ impl TransportBackend for WebSerialTransport {
     fn send(&self, port_id: PortId, bytes: Vec<u8>) -> TransportFuture<()> {
         let backend = self.clone();
         Box::pin(async move {
-            let port = backend.port(&port_id)?;
-            let writer_object = port.writable().get_writer().map_err(|error| {
-                TransportError::Operation(format!("get writer failed: {}", js_error(&error)))
-            })?;
-            let writer: WritableStreamDefaultWriter = writer_object;
-            let value: JsValue = Uint8Array::from(bytes.as_slice()).into();
-            WebSerialTransport::await_promise(writer.write_with_chunk(&value)).await?;
-            writer.release_lock();
-            Ok(())
+            let (completion, result) = oneshot::channel();
+            backend.enqueue_command(&port_id, WebSerialCommand::Write { bytes, completion })?;
+            result
+                .await
+                .map_err(|_| TransportError::PortNotConnected(port_id.clone()))?
         })
     }
 
@@ -336,16 +486,40 @@ impl WebSerialTransport {
     ) -> TransportFuture<()> {
         let backend = self.clone();
         Box::pin(async move {
-            let port = backend.port(&port_id)?;
-            let signals = SerialOutputSignals::new();
-            if let Some(value) = dtr {
-                signals.set_data_terminal_ready(value);
-            }
-            if let Some(value) = rts {
-                signals.set_request_to_send(value);
-            }
-            WebSerialTransport::await_promise(port.set_signals_with_signals(&signals)).await?;
-            Ok(())
+            let (completion, result) = oneshot::channel();
+            backend.enqueue_command(
+                &port_id,
+                WebSerialCommand::SetSignals {
+                    dtr,
+                    rts,
+                    completion,
+                },
+            )?;
+            result
+                .await
+                .map_err(|_| TransportError::PortNotConnected(port_id.clone()))?
+        })
+    }
+
+    fn enqueue_command(&self, port_id: &PortId, command: WebSerialCommand) -> TransportResult<()> {
+        let lock = self
+            .submission_locks
+            .borrow()
+            .get(port_id)
+            .cloned()
+            .ok_or_else(|| TransportError::PortNotConnected(port_id.clone()))?;
+        let _guard = lock.borrow_mut();
+        if self.closing_sessions.borrow().contains(port_id) {
+            return Err(TransportError::PortNotConnected(port_id.clone()));
+        }
+        let mut sender = self
+            .command_senders
+            .borrow()
+            .get(port_id)
+            .cloned()
+            .ok_or_else(|| TransportError::PortNotConnected(port_id.clone()))?;
+        sender.try_send(command).map_err(|error| {
+            TransportError::Operation(format!("Web Serial TX 队列不可用：{error}"))
         })
     }
 }

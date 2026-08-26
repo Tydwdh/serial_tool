@@ -359,20 +359,30 @@ impl Workbench {
                     .any(|config| config.display_name() == port_name);
                 let task_id = if is_network {
                     let transport = self.transport.clone();
-                    self.tasks.spawn("disconnect", move |_context| {
-                        transport.close_port(&task_port);
-                        Ok(TaskResult::Disconnected {
-                            port_name: task_port,
-                        })
-                    })
+                    self.tasks.spawn_ordered(
+                        format!("serial:{task_port}"),
+                        "disconnect",
+                        move |_context| {
+                            transport
+                                .close_port_blocking(&task_port, std::time::Duration::from_secs(3))
+                                .map_err(|error| error.to_string())?;
+                            Ok(TaskResult::Disconnected {
+                                port_name: task_port,
+                            })
+                        },
+                    )
                 } else {
                     let backend = self.transport_backend.clone();
                     let port = PortId::new(task_port.clone());
-                    self.tasks.spawn("disconnect", move |_context| {
-                        block_on_transport(backend.disconnect(port.clone()))
-                            .map_err(|error| error.to_string())?;
-                        Ok(TaskResult::TransportDisconnected { port })
-                    })
+                    self.tasks.spawn_ordered(
+                        format!("serial:{task_port}"),
+                        "disconnect",
+                        move |_context| {
+                            block_on_transport(backend.disconnect(port.clone()))
+                                .map_err(|error| error.to_string())?;
+                            Ok(TaskResult::TransportDisconnected { port })
+                        },
+                    )
                 };
                 Ok(pending(task_id, format!("正在关闭 {port_name}")))
             }
@@ -387,12 +397,16 @@ impl Workbench {
                 if self.transport.status_port(&port_name).connecting {
                     let transport = self.transport.clone();
                     let task_port = port_name.clone();
-                    self.tasks.spawn("cancel_reconnect", move |_context| {
-                        transport.close_port(&task_port);
-                        Ok(TaskResult::Disconnected {
-                            port_name: task_port,
-                        })
-                    });
+                    self.tasks.spawn_ordered(
+                        format!("serial:{task_port}"),
+                        "cancel_reconnect",
+                        move |_context| {
+                            transport.close_port(&task_port);
+                            Ok(TaskResult::Disconnected {
+                                port_name: task_port,
+                            })
+                        },
+                    );
                 }
                 Ok(CommandOutcome::Done)
             }
@@ -1000,24 +1014,32 @@ impl Workbench {
                 api_key: net.api_key,
             };
             let task_port = port_name.to_owned();
-            let task_id = self.tasks.spawn("connect_network", move |_context| {
-                transport
-                    .open_network_serial(net)
-                    .map(|_| TaskResult::Connected {
-                        port_name: task_port,
-                    })
-                    .map_err(|error| error.to_string())
-            });
+            let task_id = self.tasks.spawn_ordered(
+                format!("serial:{task_port}"),
+                "connect_network",
+                move |_context| {
+                    transport
+                        .open_network_serial(net)
+                        .map(|_| TaskResult::Connected {
+                            port_name: task_port,
+                        })
+                        .map_err(|error| error.to_string())
+                },
+            );
             Ok(pending(task_id, format!("正在连接 {port_name}")))
         } else {
             let task_port = port_name.to_owned();
             let backend = self.transport_backend.clone();
             let port = PortId::new(task_port.clone());
-            let task_id = self.tasks.spawn("connect_serial", move |_context| {
-                block_on_transport(backend.connect(port.clone(), settings))
-                    .map_err(|error| error.to_string())?;
-                Ok(TaskResult::TransportConnected { port })
-            });
+            let task_id = self.tasks.spawn_ordered(
+                format!("serial:{task_port}"),
+                "connect_serial",
+                move |_context| {
+                    block_on_transport(backend.connect(port.clone(), settings))
+                        .map_err(|error| error.to_string())?;
+                    Ok(TaskResult::TransportConnected { port })
+                },
+            );
             Ok(pending(task_id, format!("正在打开 {port_name}")))
         }
     }
@@ -1051,29 +1073,37 @@ impl Workbench {
             let transport = self.transport.clone();
             let task_port = port_name.clone();
             let task_bytes = bytes;
-            let task_id = self.tasks.spawn("send_network", move |_context| {
-                transport
-                    .send_to(&task_port, task_bytes.clone())
-                    .map_err(|error| error.to_string())?;
-                Ok(TaskResult::TransportSent {
-                    port: PortId::new(task_port),
-                    bytes: task_bytes.len(),
-                })
-            });
+            let task_id = self.tasks.spawn_ordered(
+                format!("serial:{task_port}"),
+                "send_network",
+                move |_context| {
+                    transport
+                        .send_to(&task_port, task_bytes.clone())
+                        .map_err(|error| error.to_string())?;
+                    Ok(TaskResult::TransportSent {
+                        port: PortId::new(task_port),
+                        bytes: task_bytes.len(),
+                    })
+                },
+            );
             return Ok(pending(task_id, format!("正在发送到 {port_name}")));
         }
 
         let backend = self.transport_backend.clone();
         let port = PortId::new(port_name.clone());
         let byte_count = bytes.len();
-        let task_id = self.tasks.spawn("send_serial", move |_context| {
-            block_on_transport(backend.send(port.clone(), bytes))
-                .map_err(|error| error.to_string())?;
-            Ok(TaskResult::TransportSent {
-                port,
-                bytes: byte_count,
-            })
-        });
+        let task_id = self.tasks.spawn_ordered(
+            format!("serial:{port_name}"),
+            "send_serial",
+            move |_context| {
+                block_on_transport(backend.send(port.clone(), bytes))
+                    .map_err(|error| error.to_string())?;
+                Ok(TaskResult::TransportSent {
+                    port,
+                    bytes: byte_count,
+                })
+            },
+        );
         Ok(pending(task_id, format!("正在发送到 {port_name}")))
     }
 
@@ -1089,15 +1119,19 @@ impl Workbench {
         let backend = self.transport_backend.clone();
         let port = PortId::new(port_name.clone());
         let task_port = port.clone();
-        let task_id = self.tasks.spawn("set_serial_signal", move |_context| {
-            let result = if dtr {
-                block_on_transport(backend.set_dtr(port, value))
-            } else {
-                block_on_transport(backend.set_rts(port, value))
-            };
-            result.map_err(|error| error.to_string())?;
-            Ok(TaskResult::TransportSignalChanged { port: task_port })
-        });
+        let task_id = self.tasks.spawn_ordered(
+            format!("serial:{port_name}"),
+            "set_serial_signal",
+            move |_context| {
+                let result = if dtr {
+                    block_on_transport(backend.set_dtr(port, value))
+                } else {
+                    block_on_transport(backend.set_rts(port, value))
+                };
+                result.map_err(|error| error.to_string())?;
+                Ok(TaskResult::TransportSignalChanged { port: task_port })
+            },
+        );
         Ok(pending(
             task_id,
             format!("正在设置 {}", if dtr { "DTR" } else { "RTS" }),
@@ -1123,56 +1157,61 @@ impl Workbench {
         let backend = self.transport_backend.clone();
         let serial_settings = (!network.is_some()).then(|| self.platform_serial_settings());
         let task_port = port_name.clone();
-        let task_id = self.tasks.spawn("reconnect", move |context: TaskContext| {
-            let port = PortId::new(task_port.clone());
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let task_id = self.tasks.spawn_ordered(
+            format!("serial:{port_name}"),
+            "reconnect",
+            move |context: TaskContext| {
+                let port = PortId::new(task_port.clone());
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
 
-            loop {
-                context
-                    .check_cancelled()
-                    .map_err(|_| "重连已取消".to_owned())?;
-                let result = if let Some(network) = network.clone() {
-                    let transport = backend.manager().clone();
-                    transport
-                        .open_network_serial(network)
-                        .map(|_| ())
-                        .map_err(|error| error.to_string())
-                } else {
-                    let backend = backend.clone();
-                    block_on_transport(backend.disconnect(port.clone()))
-                        .and_then(|()| {
-                            block_on_transport(
-                                backend.connect(port.clone(), serial_settings.unwrap_or_default()),
-                            )
-                        })
-                        .map_err(|error| error.to_string())
-                };
-
-                match result {
-                    Ok(()) => {
-                        return if network.is_some() {
-                            Ok(TaskResult::Reconnected {
-                                port_name: task_port,
+                loop {
+                    context
+                        .check_cancelled()
+                        .map_err(|_| "重连已取消".to_owned())?;
+                    let result = if let Some(network) = network.clone() {
+                        let transport = backend.manager().clone();
+                        transport
+                            .open_network_serial(network)
+                            .map(|_| ())
+                            .map_err(|error| error.to_string())
+                    } else {
+                        let backend = backend.clone();
+                        block_on_transport(backend.disconnect(port.clone()))
+                            .and_then(|()| {
+                                block_on_transport(
+                                    backend
+                                        .connect(port.clone(), serial_settings.unwrap_or_default()),
+                                )
                             })
-                        } else {
-                            Ok(TaskResult::TransportConnected { port })
-                        };
-                    }
-                    Err(error) => {
-                        let retryable =
-                            network.is_some() && error.to_ascii_lowercase().contains("would block");
-                        if !retryable || network.is_none() {
-                            return Err(error.to_string());
+                            .map_err(|error| error.to_string())
+                    };
+
+                    match result {
+                        Ok(()) => {
+                            return if network.is_some() {
+                                Ok(TaskResult::Reconnected {
+                                    port_name: task_port,
+                                })
+                            } else {
+                                Ok(TaskResult::TransportConnected { port })
+                            };
+                        }
+                        Err(error) => {
+                            let retryable = network.is_some()
+                                && error.to_ascii_lowercase().contains("would block");
+                            if !retryable || network.is_none() {
+                                return Err(error.to_string());
+                            }
                         }
                     }
-                }
 
-                if std::time::Instant::now() >= deadline {
-                    return Err("重连超时（3 秒）".to_owned());
+                    if std::time::Instant::now() >= deadline {
+                        return Err("重连超时（3 秒）".to_owned());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        });
+            },
+        );
         self.reconnect_tasks.insert(port_name.clone(), task_id);
         Ok(pending(task_id, format!("正在重连 {port_name}")))
     }

@@ -5,14 +5,26 @@
 //! [`SerialAction`] values for the composition root to dispatch.
 
 use egui::Ui;
+use egui_material_icons::icons::{
+    ICON_CABLE, ICON_CHEVRON_RIGHT, ICON_LINK_OFF, ICON_POWER_SETTINGS_NEW, ICON_REFRESH,
+};
 use std::collections::BTreeMap;
 use tool_platform::{SerialParity, SerialSettings, TransportCapabilities};
+
+// The grouped row contains status, port name, alias editor and group selector.
+// Below this width it is rendered as two explicit rows instead of relying on
+// `horizontal_wrapped`, whose nested layout can place the wrapped editor on
+// top of the status row in narrow docks.
+const PORT_INLINE_MIN_WIDTH: f32 = 560.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SerialPortItem {
     pub id: String,
     pub label: String,
     pub kind: String,
+    pub open: bool,
+    pub connecting: bool,
+    pub pending_reconnect: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +54,39 @@ pub enum SerialAction {
         port: String,
         value: bool,
     },
+    CancelReconnect {
+        port: String,
+    },
+    RemoveNetwork {
+        port: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SerialTopBarAction {
+    Refresh,
+    RequestPort,
+    Connect { port: String },
+    Disconnect { port: String },
+    Reconnect { port: String },
+}
+
+/// The platform-neutral serial controls shown in the application top bar.
+///
+/// Native and Web only adapt their transport state into this view and handle
+/// the returned actions. Keeping the widget here prevents the two composition
+/// roots from drifting in labels, spacing and button states.
+pub struct SerialTopBarView<'a> {
+    pub ports: &'a [SerialPortItem],
+    pub aliases: &'a BTreeMap<String, String>,
+    pub selected: &'a mut Option<String>,
+    pub connected: Option<&'a str>,
+    pub connecting: bool,
+    pub collapsed: &'a mut bool,
+    pub settings: SerialSettings,
+    /// Web exposes the browser permission request from the shared top bar.
+    /// Native keeps this disabled because its ports are already enumerated.
+    pub show_request_port: bool,
 }
 
 /// Mutable UI state plus read-only transport data for one frame.
@@ -74,6 +119,151 @@ pub struct SerialPortMetadata<'a> {
 pub struct SerialPanel;
 
 impl SerialPanel {
+    pub fn top_bar_ui(ui: &mut Ui, view: &mut SerialTopBarView<'_>) -> Vec<SerialTopBarAction> {
+        ui.horizontal_wrapped(|ui| Self::top_bar_contents_ui(ui, view))
+            .inner
+    }
+
+    pub fn top_bar_contents_ui(
+        ui: &mut Ui,
+        view: &mut SerialTopBarView<'_>,
+    ) -> Vec<SerialTopBarAction> {
+        let mut actions = Vec::new();
+        let ports = view.ports;
+        let aliases = view.aliases;
+        let selected = &mut *view.selected;
+        let connected = view.connected;
+        let connecting = view.connecting;
+        let collapsed = &mut *view.collapsed;
+        let settings = view.settings;
+        let connected_label = connected
+            .and_then(|id| ports.iter().find(|port| port.id == id))
+            .map(|port| port_display_label(port, aliases))
+            .unwrap_or_else(|| "未连接".to_owned());
+
+        let color = if connecting {
+            crate::theme::yellow()
+        } else if connected.is_some() {
+            crate::theme::green()
+        } else {
+            crate::theme::red()
+        };
+        if ui
+            .selectable_label(
+                !*collapsed,
+                egui::RichText::new(format!(
+                    "{} 串口 {} {}",
+                    ICON_CABLE.codepoint, ICON_CHEVRON_RIGHT.codepoint, connected_label,
+                ))
+                .color(color),
+            )
+            .clicked()
+        {
+            let was_collapsed = *collapsed;
+            *collapsed = !*collapsed;
+            if was_collapsed {
+                actions.push(SerialTopBarAction::Refresh);
+            }
+        }
+
+        if !*collapsed {
+            let selected_text = selected
+                .as_deref()
+                .and_then(|id| ports.iter().find(|port| port.id == id))
+                .map(|port| port_display_label(port, aliases))
+                .or_else(|| selected.clone())
+                .unwrap_or_else(|| {
+                    if ports.is_empty() {
+                        "无可用串口".to_owned()
+                    } else {
+                        "请选择串口".to_owned()
+                    }
+                });
+            let combo_response = egui::ComboBox::from_id_salt("shared-top-port")
+                .width(120.0)
+                .selected_text(selected_text)
+                .show_ui(ui, |ui| {
+                    if ports.is_empty() {
+                        ui.add_enabled(false, egui::Label::new("无可用串口"));
+                    } else {
+                        for port in ports {
+                            ui.selectable_value(
+                                selected,
+                                Some(port.id.clone()),
+                                port_display_label(port, aliases),
+                            );
+                        }
+                    }
+                });
+            if combo_response.response.clicked() {
+                actions.push(SerialTopBarAction::Refresh);
+            }
+
+            let selected_open = selected
+                .as_deref()
+                .is_some_and(|port| connected == Some(port));
+            if !connecting && selected_open {
+                if crate::design::icon_button(ui, ICON_REFRESH, "重连").clicked()
+                    && let Some(port) = selected.clone()
+                {
+                    actions.push(SerialTopBarAction::Reconnect { port });
+                }
+            } else if connecting {
+                ui.add_enabled_ui(false, |ui| {
+                    let _ = crate::design::button(
+                        ui,
+                        ICON_POWER_SETTINGS_NEW,
+                        "连接中",
+                        crate::design::ButtonKind::Ghost,
+                    );
+                });
+            } else if let Some(port) = selected.clone() {
+                if crate::design::button(
+                    ui,
+                    ICON_POWER_SETTINGS_NEW,
+                    "打开",
+                    crate::design::ButtonKind::Ghost,
+                )
+                .clicked()
+                {
+                    actions.push(SerialTopBarAction::Connect { port });
+                }
+            } else {
+                let _ = ui.add_enabled(
+                    false,
+                    egui::Button::new(crate::design::icon_text(ICON_POWER_SETTINGS_NEW, "打开")),
+                );
+            }
+
+            let mut close = ui.add_enabled(
+                selected_open,
+                egui::Button::new(crate::design::icon_text(ICON_LINK_OFF, "关闭")),
+            );
+            if !selected_open {
+                close = close.on_disabled_hover_text("端口未打开");
+            }
+            if close.clicked()
+                && let Some(port) = selected.clone()
+            {
+                actions.push(SerialTopBarAction::Disconnect { port });
+            }
+        } else if connected.is_some() {
+            ui.label(
+                egui::RichText::new(format!("· {}", serial_settings_label(settings)))
+                    .color(crate::theme::text_secondary()),
+            );
+        }
+
+        if view.show_request_port
+            && crate::design::button(ui, ICON_CABLE, "添加设备", crate::design::ButtonKind::Ghost)
+                .clicked()
+        {
+            actions.push(SerialTopBarAction::RequestPort);
+        }
+
+        actions
+    }
+
     pub fn ui(ui: &mut Ui, view: &mut SerialView<'_>) -> Vec<SerialAction> {
         ui.heading("串口");
         ui.separator();
@@ -96,57 +286,21 @@ impl SerialPanel {
     pub fn port_list_ui(ui: &mut Ui, view: &mut SerialView<'_>) -> Vec<SerialAction> {
         if view.show_ports && view.metadata.is_some() {
             let mut actions = Vec::new();
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add_enabled(
-                        view.capabilities.list_known_ports,
-                        egui::Button::new("刷新已授权设备"),
-                    )
-                    .clicked()
-                {
-                    actions.push(SerialAction::Refresh);
-                }
-                if ui
-                    .add_enabled(
-                        view.capabilities.request_port,
-                        egui::Button::new("添加设备"),
-                    )
-                    .clicked()
-                {
-                    actions.push(SerialAction::RequestPort);
-                }
-            });
-            ui.label(view.status);
+            if !view.status.is_empty() {
+                ui.label(view.status);
+            }
             actions.extend(Self::grouped_port_list_ui(ui, view));
             return actions;
         }
         let mut actions = Vec::new();
 
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(
-                    view.capabilities.list_known_ports,
-                    egui::Button::new("刷新已授权设备"),
-                )
-                .clicked()
-            {
-                actions.push(SerialAction::Refresh);
-            }
-            if ui
-                .add_enabled(
-                    view.capabilities.request_port,
-                    egui::Button::new("添加设备"),
-                )
-                .clicked()
-            {
-                actions.push(SerialAction::RequestPort);
-            }
-        });
-        ui.label(view.status);
+        if !view.status.is_empty() {
+            ui.label(view.status);
+        }
 
         if view.show_ports {
             for port in view.ports {
-                let connecting = view.connecting == Some(port.id.as_str());
+                let connecting = port.connecting;
                 ui.horizontal_wrapped(|ui| {
                     let label = if port.kind.is_empty() {
                         port.label.clone()
@@ -155,7 +309,7 @@ impl SerialPanel {
                     };
                     ui.label(label);
                     ui.monospace(&port.id);
-                    if view.connected == Some(port.id.as_str()) {
+                    if port.open {
                         if ui
                             .add_enabled(view.capabilities.disconnect, egui::Button::new("断开"))
                             .clicked()
@@ -183,8 +337,8 @@ impl SerialPanel {
         actions
     }
 
-    fn grouped_port_list_ui(ui: &mut Ui, view: &mut SerialView<'_>) -> Vec<SerialAction> {
-        let metadata = view
+    pub fn grouped_port_list_ui(ui: &mut Ui, view: &mut SerialView<'_>) -> Vec<SerialAction> {
+        let mut metadata = view
             .metadata
             .take()
             .expect("metadata was checked before rendering grouped ports");
@@ -211,10 +365,14 @@ impl SerialPanel {
                 .data_mut(|data| data.get_persisted::<bool>(group_id).unwrap_or(true));
             ui.horizontal_wrapped(|ui| {
                 if ui
+                    // Keep the release layout's plain arrows. Material icon
+                    // glyphs are not guaranteed to be present in a browser's
+                    // fallback font and were rendered as square boxes in Web.
                     .selectable_label(false, if open { "▾" } else { "▸" })
                     .clicked()
                 {
                     open = !open;
+                    actions.push(SerialAction::Refresh);
                 }
                 ui.label(
                     egui::RichText::new(&group_name).color(if group_name == "未分组" {
@@ -235,91 +393,71 @@ impl SerialPanel {
                 for port in ports {
                     let mut alias = metadata.aliases.get(&port.id).cloned().unwrap_or_default();
                     let mut selected_group = group_name.clone();
-                    let connected = view.connected == Some(port.id.as_str());
-                    let connecting = view.connecting == Some(port.id.as_str());
-                    ui.horizontal_wrapped(|ui| {
-                        let status_label = if connected {
-                            "●开"
-                        } else if connecting {
-                            "◌中"
-                        } else {
-                            "○关"
-                        };
-                        let status_color = if connected {
-                            crate::theme::green()
-                        } else if connecting {
-                            crate::theme::yellow()
-                        } else {
-                            crate::theme::red()
-                        };
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new(status_label).color(status_color),
-                                )
-                                .frame(false),
-                            )
-                            .clicked()
-                        {
-                            if connected {
-                                if view.capabilities.disconnect {
-                                    actions.push(SerialAction::Disconnect {
-                                        port: port.id.clone(),
-                                    });
-                                }
-                            } else if !connecting && view.capabilities.connect {
-                                actions.push(SerialAction::Connect {
-                                    port: port.id.clone(),
-                                    settings: *view.settings,
-                                });
-                            }
-                        }
-                        ui.monospace(if alias.trim().is_empty() {
-                            port.label.as_str()
-                        } else {
-                            alias.trim()
-                        })
-                        .on_hover_text(&port.id);
-                        ui.label(&port.kind);
-                        ui.label("别名");
-                        let alias_response = ui.add(
-                            egui::TextEdit::singleline(&mut alias)
-                                .desired_width((ui.available_width() - 210.0).clamp(110.0, 240.0))
-                                .hint_text("例如 主控板"),
-                        );
-                        if alias_response.changed() {
-                            if alias.trim().is_empty() {
-                                metadata.aliases.remove(&port.id);
-                            } else {
-                                metadata
-                                    .aliases
-                                    .insert(port.id.clone(), alias.trim().to_owned());
-                            }
-                        }
-                        egui::ComboBox::from_id_salt(("shared-port-group-select", &port.id))
-                            .selected_text(&selected_group)
-                            .width(125.0)
-                            .show_ui(ui, |ui| {
-                                if ui
-                                    .selectable_value(
-                                        &mut selected_group,
-                                        "未分组".to_owned(),
-                                        "未分组",
-                                    )
-                                    .changed()
-                                {
-                                    metadata.groups.remove(&port.id);
-                                }
-                                for group in &group_names {
-                                    if ui
-                                        .selectable_value(&mut selected_group, group.clone(), group)
-                                        .changed()
-                                    {
-                                        metadata.groups.insert(port.id.clone(), group.clone());
-                                    }
-                                }
+                    let connected = port.open;
+                    let connecting = port.connecting;
+                    let pending_reconnect = port.pending_reconnect;
+                    let inline = ui.available_width() >= PORT_INLINE_MIN_WIDTH;
+                    let capabilities = view.capabilities;
+                    let settings = *view.settings;
+                    if inline {
+                        // Keep this row non-wrapping. The width check above is
+                        // deliberately conservative so the editor never wraps
+                        // into the status controls.
+                        ui.horizontal(|ui| {
+                            Self::render_port_status(
+                                ui,
+                                port,
+                                connected,
+                                connecting,
+                                pending_reconnect,
+                                capabilities,
+                                settings,
+                                &mut actions,
+                            );
+                            Self::render_port_editor(
+                                ui,
+                                port,
+                                &mut alias,
+                                &mut selected_group,
+                                &group_name,
+                                &group_names,
+                                &mut metadata,
+                                true,
+                            );
+                        });
+                    } else {
+                        // Narrow docks get an explicit second line. Do not use
+                        // nested `horizontal_wrapped` here: egui cannot always
+                        // account for its wrapped child height correctly.
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                Self::render_port_status(
+                                    ui,
+                                    port,
+                                    connected,
+                                    connecting,
+                                    pending_reconnect,
+                                    capabilities,
+                                    settings,
+                                    &mut actions,
+                                );
                             });
-                    });
+                            ui.horizontal(|ui| {
+                                ui.add_space(16.0);
+                                Self::render_port_editor(
+                                    ui,
+                                    port,
+                                    &mut alias,
+                                    &mut selected_group,
+                                    &group_name,
+                                    &group_names,
+                                    &mut metadata,
+                                    false,
+                                );
+                            });
+                            ui.add_space(4.0);
+                        });
+                    }
                 }
             }
         }
@@ -415,6 +553,153 @@ impl SerialPanel {
 
         view.metadata = Some(metadata);
         actions
+    }
+
+    /// Render the stable, non-wrapping portion of one grouped port row.
+    #[allow(clippy::too_many_arguments)]
+    fn render_port_status(
+        ui: &mut Ui,
+        port: &SerialPortItem,
+        connected: bool,
+        connecting: bool,
+        pending_reconnect: bool,
+        capabilities: TransportCapabilities,
+        settings: SerialSettings,
+        actions: &mut Vec<SerialAction>,
+    ) {
+        let (status_label, tooltip) = if pending_reconnect {
+            ("⟳连", "重连中，点击取消")
+        } else if connected {
+            ("●开", "已打开，点击关闭")
+        } else if connecting {
+            ("◌中", "连接中")
+        } else {
+            ("○关", "未打开，点击打开")
+        };
+        let status_color = if pending_reconnect || connecting {
+            crate::theme::yellow()
+        } else if connected {
+            crate::theme::green()
+        } else if connecting {
+            crate::theme::yellow()
+        } else {
+            crate::theme::red()
+        };
+        if ui
+            .add(
+                egui::Button::new(
+                    egui::RichText::new(status_label)
+                        .color(status_color)
+                        .small(),
+                )
+                .frame(false)
+                .min_size(egui::vec2(36.0, 18.0)),
+            )
+            .on_hover_text(tooltip)
+            .clicked()
+        {
+            if pending_reconnect {
+                actions.push(SerialAction::CancelReconnect {
+                    port: port.id.clone(),
+                });
+            } else if connected {
+                if capabilities.disconnect {
+                    actions.push(SerialAction::Disconnect {
+                        port: port.id.clone(),
+                    });
+                }
+            } else if !connecting && capabilities.connect {
+                actions.push(SerialAction::Connect {
+                    port: port.id.clone(),
+                    settings,
+                });
+            }
+        }
+        ui.monospace(if port.label.trim().is_empty() {
+            port.id.as_str()
+        } else {
+            port.label.as_str()
+        })
+        .on_hover_text(&port.id);
+        if !port.kind.is_empty() {
+            ui.label(&port.kind);
+        }
+        if port.kind == "网络" && ui.small_button("×").on_hover_text("移除网络端口").clicked()
+        {
+            actions.push(SerialAction::RemoveNetwork {
+                port: port.id.clone(),
+            });
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_port_editor(
+        ui: &mut Ui,
+        port: &SerialPortItem,
+        alias: &mut String,
+        selected_group: &mut String,
+        current_group: &str,
+        group_names: &[String],
+        metadata: &mut SerialPortMetadata<'_>,
+        inline: bool,
+    ) {
+        ui.label("别名");
+        let alias_width = if inline {
+            (ui.available_width() - 150.0).clamp(120.0, 240.0)
+        } else {
+            (ui.available_width() - 150.0).clamp(100.0, 220.0)
+        };
+        let alias_response = ui.add(
+            egui::TextEdit::singleline(alias)
+                .desired_width(alias_width)
+                .hint_text("例如 主控板"),
+        );
+        if alias_response.changed() {
+            if alias.trim().is_empty() {
+                metadata.aliases.remove(&port.id);
+            } else {
+                metadata
+                    .aliases
+                    .insert(port.id.clone(), alias.trim().to_owned());
+            }
+        }
+
+        let group_width = if inline {
+            125.0
+        } else {
+            ui.available_width().clamp(80.0, 125.0)
+        };
+        egui::ComboBox::from_id_salt(("shared-port-group-select", &port.id))
+            .selected_text(selected_group.as_str())
+            .width(group_width)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_value(selected_group, "未分组".to_owned(), "未分组")
+                    .changed()
+                {
+                    metadata.groups.remove(&port.id);
+                }
+                for group in group_names {
+                    if ui
+                        .selectable_value(selected_group, group.clone(), group)
+                        .changed()
+                    {
+                        metadata.groups.insert(port.id.clone(), group.clone());
+                    }
+                }
+            });
+
+        // Keep the model consistent when a future caller changes the initial
+        // selection without going through the ComboBox callback.
+        if selected_group != current_group {
+            if selected_group == "未分组" {
+                metadata.groups.remove(&port.id);
+            } else {
+                metadata
+                    .groups
+                    .insert(port.id.clone(), selected_group.clone());
+            }
+        }
     }
 
     /// Render DTR/RTS controls for the currently connected port.
@@ -541,4 +826,31 @@ fn parity_label(parity: SerialParity) -> &'static str {
         SerialParity::Odd => "奇",
         SerialParity::Even => "偶",
     }
+}
+
+fn port_display_label(port: &SerialPortItem, aliases: &BTreeMap<String, String>) -> String {
+    if let Some(alias) = aliases
+        .get(&port.id)
+        .map(|alias| alias.trim())
+        .filter(|alias| !alias.is_empty())
+    {
+        return format!("{alias} ({})", port.id);
+    }
+    if port.label.trim().is_empty() || port.label == port.id {
+        port.id.clone()
+    } else {
+        format!("{} ({})", port.label, port.id)
+    }
+}
+
+fn serial_settings_label(settings: SerialSettings) -> String {
+    let parity = match settings.parity {
+        SerialParity::None => 'N',
+        SerialParity::Odd => 'O',
+        SerialParity::Even => 'E',
+    };
+    format!(
+        "{} {}{}{}",
+        settings.baud_rate, settings.data_bits, parity, settings.stop_bits
+    )
 }

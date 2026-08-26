@@ -1,6 +1,7 @@
 //! Native implementation of the platform transport capability.
 
 use std::thread;
+use std::time::Duration;
 
 use futures_channel::oneshot;
 use futures_executor::block_on;
@@ -118,8 +119,13 @@ impl TransportBackend for NativeTransportBackend {
     fn disconnect(&self, port: PortId) -> TransportFuture<()> {
         let manager = self.manager.clone();
         spawn_blocking(move || {
-            manager.close_port(port.as_str());
-            Ok(())
+            // `close_port` only signals the worker and returns. Reconnect can
+            // therefore race the still-running native handle and get
+            // WouldBlock. The async platform contract completes only after
+            // the worker has really exited.
+            manager
+                .close_port_blocking(port.as_str(), Duration::from_secs(3))
+                .map_err(|error| TransportError::Operation(error.to_string()))
         })
     }
 
@@ -136,7 +142,7 @@ impl TransportBackend for NativeTransportBackend {
         let manager = self.manager.clone();
         spawn_blocking(move || {
             manager
-                .set_dtr(port.as_str(), value)
+                .set_dtr_blocking(port.as_str(), value, Duration::from_secs(5))
                 .map_err(|error| TransportError::Operation(error.to_string()))
         })
     }
@@ -145,7 +151,7 @@ impl TransportBackend for NativeTransportBackend {
         let manager = self.manager.clone();
         spawn_blocking(move || {
             manager
-                .set_rts(port.as_str(), value)
+                .set_rts_blocking(port.as_str(), value, Duration::from_secs(5))
                 .map_err(|error| TransportError::Operation(error.to_string()))
         })
     }

@@ -76,6 +76,62 @@ struct TaskControl {
     cancelled: Arc<AtomicBool>,
 }
 
+type TaskWork = Box<dyn FnOnce(TaskContext) -> Result<TaskResult, String> + Send + 'static>;
+
+struct OrderedTask {
+    id: TaskId,
+    kind: String,
+    context: TaskContext,
+    work: TaskWork,
+    events: Sender<AppEvent>,
+}
+
+fn run_task(
+    id: TaskId,
+    kind: String,
+    context: TaskContext,
+    work: TaskWork,
+    events: Sender<AppEvent>,
+) {
+    let _ = events.send(AppEvent::TaskStateChanged {
+        snapshot: TaskSnapshot {
+            id,
+            kind,
+            state: TaskState::Running,
+            message: "后台任务运行中".to_owned(),
+        },
+    });
+
+    // A queued transport task can be cancelled before it reaches its per-port
+    // runner. Do not start the I/O in that case.
+    if context.is_cancelled() {
+        let _ = events.send(AppEvent::TaskCancelled { id });
+        return;
+    }
+
+    let outcome = catch_unwind(AssertUnwindSafe(|| work(context.clone())));
+    match outcome {
+        Ok(Ok(_result)) if context.is_cancelled() => {
+            let _ = events.send(AppEvent::TaskCancelled { id });
+        }
+        Ok(Ok(result)) => {
+            let _ = events.send(AppEvent::TaskCompleted { id, result });
+        }
+        Ok(Err(_error)) if context.is_cancelled() => {
+            let _ = events.send(AppEvent::TaskCancelled { id });
+        }
+        Ok(Err(error)) => {
+            let _ = events.send(AppEvent::TaskFailed { id, error });
+        }
+        Err(_) => {
+            let _ = events.send(AppEvent::TaskFailed {
+                id,
+                error: "后台任务线程异常退出".to_owned(),
+            });
+        }
+    }
+}
+
 /// Workbench 持有的任务调度器。它本身只在 UI 线程访问，worker 只持有 channel
 /// 和取消令牌，因此不会把 Workbench 或任何 egui 状态跨线程借出。
 pub struct TaskManager {
@@ -84,6 +140,7 @@ pub struct TaskManager {
     events_rx: Receiver<AppEvent>,
     snapshots: BTreeMap<TaskId, TaskSnapshot>,
     controls: BTreeMap<TaskId, TaskControl>,
+    ordered_queues: BTreeMap<String, Sender<OrderedTask>>,
 }
 
 impl Default for TaskManager {
@@ -101,6 +158,7 @@ impl TaskManager {
             events_rx,
             snapshots: BTreeMap::new(),
             controls: BTreeMap::new(),
+            ordered_queues: BTreeMap::new(),
         }
     }
 
@@ -127,42 +185,80 @@ impl TaskManager {
         self.controls.insert(id, TaskControl { cancelled });
 
         let events = self.events_tx.clone();
+        let work: TaskWork = Box::new(work);
         std::thread::Builder::new()
             .name(format!("app-task-{}", id.0))
             .spawn(move || {
-                let _ = events.send(AppEvent::TaskStateChanged {
-                    snapshot: TaskSnapshot {
-                        id,
-                        kind,
-                        state: TaskState::Running,
-                        message: "后台任务运行中".to_owned(),
-                    },
-                });
-
-                let outcome = catch_unwind(AssertUnwindSafe(|| work(context.clone())));
-                match outcome {
-                    Ok(Ok(_result)) if context.is_cancelled() => {
-                        let _ = events.send(AppEvent::TaskCancelled { id });
-                    }
-                    Ok(Ok(result)) => {
-                        let _ = events.send(AppEvent::TaskCompleted { id, result });
-                    }
-                    Ok(Err(_error)) if context.is_cancelled() => {
-                        let _ = events.send(AppEvent::TaskCancelled { id });
-                    }
-                    Ok(Err(error)) => {
-                        let _ = events.send(AppEvent::TaskFailed { id, error });
-                    }
-                    Err(_) => {
-                        let _ = events.send(AppEvent::TaskFailed {
-                            id,
-                            error: "后台任务线程异常退出".to_owned(),
-                        });
-                    }
-                }
+                run_task(id, kind, context, work, events);
             })
             .expect("spawn application task worker");
 
+        id
+    }
+
+    /// Submit a task to a FIFO runner identified by `key`.
+    ///
+    /// Transport commands use the port as the key. The task is submitted from
+    /// the UI dispatch thread in command order, while the runner performs the
+    /// blocking native operation off the UI thread. This closes the gap where
+    /// one OS thread per send could otherwise start A/C/B out of order.
+    pub fn spawn_ordered<F>(
+        &mut self,
+        key: impl Into<String>,
+        kind: impl Into<String>,
+        work: F,
+    ) -> TaskId
+    where
+        F: FnOnce(TaskContext) -> Result<TaskResult, String> + Send + 'static,
+    {
+        let id = TaskId(self.next_id.fetch_add(1, Ordering::Relaxed));
+        let key = key.into();
+        let kind = kind.into();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let context = TaskContext {
+            id,
+            cancelled: Arc::clone(&cancelled),
+        };
+        self.snapshots.insert(
+            id,
+            TaskSnapshot {
+                id,
+                kind: kind.clone(),
+                state: TaskState::Pending,
+                message: "等待后台任务启动".to_owned(),
+            },
+        );
+        self.controls.insert(id, TaskControl { cancelled });
+
+        let sender = if let Some(sender) = self.ordered_queues.get(&key) {
+            sender.clone()
+        } else {
+            let (sender, receiver) = unbounded::<OrderedTask>();
+            let thread_receiver = receiver;
+            std::thread::Builder::new()
+                .name(format!(
+                    "app-transport-{}",
+                    key.replace([':', '/', '\\'], "_")
+                ))
+                .spawn(move || {
+                    while let Ok(task) = thread_receiver.recv() {
+                        run_task(task.id, task.kind, task.context, task.work, task.events);
+                    }
+                })
+                .expect("spawn ordered application task worker");
+            self.ordered_queues.insert(key, sender.clone());
+            sender
+        };
+
+        sender
+            .send(OrderedTask {
+                id,
+                kind,
+                context,
+                work: Box::new(work),
+                events: self.events_tx.clone(),
+            })
+            .expect("ordered application task worker stopped");
         id
     }
 
@@ -285,5 +381,30 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         panic!("task was not cancelled");
+    }
+
+    #[test]
+    fn ordered_tasks_run_in_submission_order() {
+        let mut manager = TaskManager::new();
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let task_count = 32;
+        for index in 0..task_count {
+            let order = Arc::clone(&order);
+            manager.spawn_ordered("serial:COM1", "send_serial", move |_context| {
+                order.lock().unwrap().push(index);
+                Ok(TaskResult::FileExported {
+                    file: FileHandle::named(format!("{index}.txt")),
+                })
+            });
+        }
+
+        for _ in 0..200 {
+            manager.drain_events();
+            if order.lock().unwrap().len() == task_count {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(*order.lock().unwrap(), (0..task_count).collect::<Vec<_>>());
     }
 }

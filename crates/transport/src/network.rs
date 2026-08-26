@@ -6,7 +6,7 @@
 //! 显示策略：只转发 gcode 命令/响应（`notify_gcode_response`），
 //! 其余 notify（状态、进程统计、历史等）一律忽略，保持终端干净。
 
-use crate::{RepaintWaker, TransportResult, serial_rx_event, serial_tx_event};
+use crate::{RepaintWaker, SerialCommand, TransportResult, serial_rx_event, serial_tx_event};
 use crossbeam_channel::Receiver;
 use serde::{Deserialize, Serialize};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -64,7 +64,7 @@ fn parse_gcode_response(text: &str) -> Option<String> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_network_worker(
     config: NetworkSerialConfig,
-    write_rx: Receiver<Vec<u8>>,
+    command_rx: Receiver<SerialCommand>,
     stop: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
     connecting: Arc<AtomicBool>,
@@ -74,7 +74,7 @@ pub(crate) fn spawn_network_worker(
 ) -> TransportResult<JoinHandle<()>> {
     let join = thread::spawn(move || {
         network_worker_loop(
-            config, write_rx, stop, alive, connecting, bus, source, waker,
+            config, command_rx, stop, alive, connecting, bus, source, waker,
         );
     });
     Ok(join)
@@ -83,7 +83,7 @@ pub(crate) fn spawn_network_worker(
 #[allow(clippy::too_many_arguments)]
 fn network_worker_loop(
     config: NetworkSerialConfig,
-    write_rx: Receiver<Vec<u8>>,
+    command_rx: Receiver<SerialCommand>,
     stop: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
     connecting: Arc<AtomicBool>,
@@ -175,9 +175,23 @@ fn network_worker_loop(
     let mut next_id: u64 = 2;
     while !stop.load(Ordering::Acquire) {
         // 发送队列：文本 → printer.gcode.script
-        while let Ok(bytes) = write_rx.try_recv() {
+        while let Ok(command) = command_rx.try_recv() {
+            let SerialCommand::Write { bytes, completion } = command else {
+                let completion = match command {
+                    SerialCommand::SetDtr { completion, .. }
+                    | SerialCommand::SetRts { completion, .. } => completion,
+                    SerialCommand::Write { .. } => unreachable!(),
+                };
+                if let Some(completion) = completion {
+                    let _ = completion.send(Err("网络串口不支持 DTR/RTS".to_owned()));
+                }
+                continue;
+            };
             let script = String::from_utf8_lossy(&bytes).into_owned();
             if script.trim().is_empty() {
+                if let Some(completion) = completion {
+                    let _ = completion.send(Ok(()));
+                }
                 continue;
             }
             let request = serde_json::json!({
@@ -191,8 +205,14 @@ fn network_worker_loop(
                 Ok(()) => {
                     bus.publish(serial_tx_event(source.clone(), bytes));
                     wake();
+                    if let Some(completion) = completion {
+                        let _ = completion.send(Ok(()));
+                    }
                 }
                 Err(error) => {
+                    if let Some(completion) = completion {
+                        let _ = completion.send(Err(error.to_string()));
+                    }
                     bus.publish(Event::system_log(
                         LogLevel::Error,
                         "transport.network",

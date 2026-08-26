@@ -4,6 +4,30 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-27
+
+### 新增
+
+- 提供浏览器在线模式，复用桌面端的 egui、Dock、Terminal、Log、Chart、发送器和设置界面。
+- 接入 Web Serial：授权设备刷新、用户主动添加设备、串口连接、断开、TEXT/HEX 收发以及 DTR/RTS 控制。
+- 增加网络串口连接能力，并将 Native/Web 的串口、快捷键、插件设置和状态栏组件统一为共享 UI。
+- Web 端支持 Lua 插件、插件命令、动态面板、工具栏按钮、市场索引和文件选择等浏览器等价能力。
+- 增加 WebAssembly 时间源适配、性能诊断和发布构建检查，避免浏览器调用未实现的系统时间接口。
+
+### 调整
+
+- 收拢 Native/Web 的 Application 边界，串口异步任务统一使用 TaskId 和状态事件。
+- 恢复并统一桌面端与 Web 端的默认 Dock 布局，修复发送器窄宽度下按钮换行和操作按钮消失问题。
+- 串口列表进入页面和再次打开串口面板时自动刷新，过长端口名称使用省略显示并保留完整名称悬浮提示。
+- Web 端发布构建使用 release 优化，并支持 GitHub Pages 子路径部署。
+
+### 修复
+
+- 修复 `wasm32-unknown-unknown` 下 `SystemTime`/`Instant` 不可用导致的浏览器崩溃。
+- 修复 Native 手动关闭串口后被自动重连，以及重连时串口 worker 尚未退出导致的竞态。
+- 修复插件工具栏按钮在发送器中不可见或点击无效的问题。
+- 修复 Web 串口授权列表显示不完整、端口名称和分组状态显示异常的问题。
+
 ## [1.1.2] - 2026-08-25
 
 ### 新增
@@ -71,7 +95,8 @@
 - 支持左键拖选文本或跨行选择时继续使用滚轮滚动。
 - 修复设置导航、工具栏按钮和插件统计切换时的布局抖动。
 
-[Unreleased]: https://github.com/Tydwdh/serial_tool/compare/v1.1.2...HEAD
+[Unreleased]: https://github.com/Tydwdh/serial_tool/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/Tydwdh/serial_tool/compare/v1.1.2...v1.2.0
 [1.1.2]: https://github.com/Tydwdh/serial_tool/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/Tydwdh/serial_tool/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/Tydwdh/serial_tool/compare/v1.0.0...v1.1.0

@@ -6,7 +6,7 @@ use std::sync::{
     Arc, Weak,
     atomic::{AtomicU64, Ordering},
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tool_core::{Direction, Event, Payload};
 
 /// 默认历史记录限制
@@ -396,7 +396,7 @@ impl DataBus {
     }
 
     pub fn publish(&self, mut event: Event) -> Event {
-        let started = Instant::now();
+        let started = tool_core::monotonic_now_nanos();
         if event.id == 0 {
             event.id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         }
@@ -471,10 +471,10 @@ impl DataBus {
                 .tx_bytes
                 .fetch_add(payload_bytes, Ordering::Relaxed);
         }
-        self.inner
-            .perf
-            .publish_nanos
-            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        self.inner.perf.publish_nanos.fetch_add(
+            tool_core::monotonic_now_nanos().saturating_sub(started),
+            Ordering::Relaxed,
+        );
 
         event
     }

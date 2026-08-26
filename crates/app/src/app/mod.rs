@@ -239,6 +239,7 @@ impl WorkbenchApp {
                 last_port_refresh: 0.0,
                 auto_reconnect: config.as_ref().map(|c| c.auto_reconnect).unwrap_or(true),
                 pending_reconnect: None,
+                manual_disconnects: std::collections::HashSet::new(),
                 pending_open_notice: None,
                 port_aliases: config
                     .as_ref()
@@ -259,6 +260,7 @@ impl WorkbenchApp {
                     .unwrap_or_default(),
                 network_host: String::new(),
                 network_port: "7125".to_owned(),
+                network_api_key: String::new(),
             },
             recorder_path: config
                 .as_ref()

@@ -39,6 +39,10 @@ pub enum PluginPanelEvent {
     Disable(String),
     /// 用户请求刷新市场索引。
     RefreshMarket,
+    /// 用户请求从平台导入插件文件。
+    ImportPlugin,
+    /// 用户修改市场索引地址。
+    MarketplaceUrlChanged(String),
     /// 用户请求安装/重装某个市场插件。
     InstallPlugin(String),
     /// 用户请求卸载某个已安装插件。
@@ -72,6 +76,27 @@ pub struct PluginsPanel {
     market: MarketplaceState,
     market_search: String,
     market_category: Option<String>,
+}
+
+/// Optional platform controls rendered inside the shared plugin cards.
+///
+/// Native keeps the filesystem root controls. Web hides those controls and
+/// supplies an import action plus its browser registry URL, while the plugin
+/// list, tabs, cards, and market rows remain identical.
+pub struct PluginPanelOptions<'a> {
+    pub show_root: bool,
+    pub show_import: bool,
+    pub marketplace_url: Option<&'a mut String>,
+}
+
+impl<'a> Default for PluginPanelOptions<'a> {
+    fn default() -> Self {
+        Self {
+            show_root: true,
+            show_import: false,
+            marketplace_url: None,
+        }
+    }
 }
 
 impl PluginsPanel {
@@ -183,6 +208,18 @@ impl PluginsPanel {
         summaries: &[PluginSummaryView],
         diagnostics: &[PluginDiagnosticView],
     ) -> Vec<PluginPanelEvent> {
+        self.ui_with_view_options(ui, summaries, diagnostics, PluginPanelOptions::default())
+    }
+
+    /// DTO-driven rendering with platform capability controls embedded in the
+    /// same presentation tree.
+    pub fn ui_with_view_options(
+        &mut self,
+        ui: &mut egui::Ui,
+        summaries: &[PluginSummaryView],
+        diagnostics: &[PluginDiagnosticView],
+        mut options: PluginPanelOptions<'_>,
+    ) -> Vec<PluginPanelEvent> {
         let mut events = Vec::new();
 
         // ── tab 切换 ──
@@ -222,12 +259,12 @@ impl PluginsPanel {
 
         match self.tab {
             PluginTab::Installed => {
-                if let Some(ev) = self.installed_tab_inner(ui, summaries, diagnostics) {
+                if let Some(ev) = self.installed_tab_inner(ui, summaries, diagnostics, &options) {
                     events.push(ev);
                 }
             }
             PluginTab::Marketplace => {
-                events.extend(self.marketplace_tab(ui));
+                events.extend(self.marketplace_tab(ui, &mut options));
             }
         }
 
@@ -249,6 +286,7 @@ impl PluginsPanel {
         ui: &mut egui::Ui,
         summaries: &[PluginSummaryView],
         diagnostics: &[PluginDiagnosticView],
+        options: &PluginPanelOptions<'_>,
     ) -> Option<PluginPanelEvent> {
         // ── 管理 ──
         let toolbar_status = design::card()
@@ -257,19 +295,25 @@ impl PluginsPanel {
                 design::section_header(ui, ICON_MANAGE_ACCOUNTS, "插件管理");
                 ui.separator();
                 ui.horizontal_wrapped(|ui| -> Option<PluginPanelEvent> {
-                    ui.label("根目录");
-                    ui.add(TextEdit::singleline(&mut self.root).desired_width(240.0));
+                    if options.show_root {
+                        ui.label("根目录");
+                        ui.add(TextEdit::singleline(&mut self.root).desired_width(240.0));
+                    }
                     if design::button(ui, ICON_REFRESH, "刷新", ButtonKind::Primary).clicked() {
                         // 实际刷新由 Workbench 处理，Panel 只发状态提示
                         return Some(PluginPanelEvent::Status("刷新已请求".to_owned(), false));
                     }
-                    if design::button(ui, ICON_FOLDER_OPEN, "打开目录", ButtonKind::Secondary)
-                        .clicked()
+                    if options.show_root
+                        && design::button(ui, ICON_FOLDER_OPEN, "打开目录", ButtonKind::Secondary)
+                            .clicked()
                     {
                         #[cfg(not(target_arch = "wasm32"))]
                         let _ = open::that(&self.root);
                         #[cfg(target_arch = "wasm32")]
                         ui.label("浏览器没有本地插件目录");
+                    }
+                    if options.show_import && ui.button("导入 Lua 插件").clicked() {
+                        return Some(PluginPanelEvent::ImportPlugin);
                     }
                     None
                 })
@@ -409,7 +453,11 @@ impl PluginsPanel {
 
     // ── 市场 tab ──
 
-    fn marketplace_tab(&mut self, ui: &mut egui::Ui) -> Vec<PluginPanelEvent> {
+    fn marketplace_tab(
+        &mut self,
+        ui: &mut egui::Ui,
+        options: &mut PluginPanelOptions<'_>,
+    ) -> Vec<PluginPanelEvent> {
         let mut events = Vec::new();
 
         // 首次进入市场 tab：自动触发一次索引拉取（条件保证只触发一次）。
@@ -444,6 +492,23 @@ impl PluginsPanel {
                     ui.label(egui::RichText::new("正在拉取市场索引…").small());
                 }
             });
+
+            if let Some(url) = options.marketplace_url.as_deref_mut() {
+                let mut changed_url = false;
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("索引");
+                    changed_url = ui
+                        .add(
+                            TextEdit::singleline(url)
+                                .desired_width(420.0)
+                                .hint_text("https://…/registry.json"),
+                        )
+                        .changed();
+                });
+                if changed_url {
+                    events.push(PluginPanelEvent::MarketplaceUrlChanged(url.clone()));
+                }
+            }
 
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {

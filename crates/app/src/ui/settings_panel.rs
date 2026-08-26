@@ -4,16 +4,17 @@ use crate::config::{config_path, default_recorder_path};
 use crate::shared_settings::{SETTINGS_NAV_ITEMS, settings_nav_button};
 use crate::state::StatusLevel;
 use eframe::egui;
-use egui_extras::{Column, TableBuilder};
 use egui_material_icons::icons::{
     ICON_APPS, ICON_CONTENT_COPY, ICON_FOLDER, ICON_FOLDER_OPEN, ICON_INFO, ICON_KEYBOARD,
     ICON_NETWORK_CHECK, ICON_PALETTE, ICON_RESTART_ALT, ICON_TUNE,
 };
 use std::path::{Path, PathBuf};
+use tool_databus::EventPublisher;
 use tool_panels::{
-    DataSettingsView, DynamicField, copy_text_with_feedback, data_settings_ui,
+    DataSettingsView, KeymapAction, KeymapEntry, PluginSettingsView, copy_text_with_feedback,
+    data_settings_ui,
     design::{self, ButtonKind},
-    dynamic_form_ui, parse_fields, theme,
+    keymap_ui, plugin_settings_ui, theme,
 };
 
 const CONFIG_LOCATION_LABEL_WIDTH: f32 = 96.0;
@@ -412,82 +413,40 @@ impl WorkbenchApp {
         // 所有可配置的命令：内置 + 插件命令（统一 CommandRegistry）。
         // 命令元数据由 tick_plugin_lifecycle 随插件启停同步，此处直接读取。
         let all_commands: Vec<crate::command_registry::Command> = self.commands.all().to_vec();
-
-        TableBuilder::new(ui)
-            .striped(true)
-            .resizable(true)
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::remainder().at_least(150.0))
-            .column(Column::remainder().at_least(120.0))
-            .column(Column::auto().at_least(72.0))
-            .column(Column::auto().at_least(72.0))
-            .header(30.0, |mut header| {
-                for title in ["操作", "快捷键", "录制", "清除"] {
-                    header.col(|ui| {
-                        ui.label(
-                            egui::RichText::new(title)
-                                .strong()
-                                .color(theme::text_secondary()),
-                        );
-                    });
-                }
+        let entries = all_commands
+            .iter()
+            .map(|command| KeymapEntry {
+                id: command.id.clone(),
+                title: command.title.clone(),
+                bindings: self
+                    .keymap
+                    .get_bindings(&command.id)
+                    .iter()
+                    .map(|binding| binding.display())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                recording: self.key_recording.as_ref() == Some(&command.id),
             })
-            .body(|mut body| {
-                for command in &all_commands {
-                    let bindings = self.keymap.get_bindings(&command.id).to_vec();
-                    let is_recording = self.key_recording.as_ref() == Some(&command.id);
-                    body.row(32.0, |mut row| {
-                        row.col(|ui| {
-                            ui.label(&command.title);
-                        });
-                        row.col(|ui| {
-                            if bindings.is_empty() {
-                                ui.colored_label(theme::text_dimmed(), "未绑定");
-                            } else {
-                                let shortcuts: Vec<String> =
-                                    bindings.iter().map(|binding| binding.display()).collect();
-                                design::badge(ui, shortcuts.join(", "), theme::cyan());
-                            }
-                        });
-                        row.col(|ui| {
-                            if is_recording {
-                                design::status_pill(ui, theme::yellow(), "按下按键…");
-                            } else if design::button(ui, ICON_KEYBOARD, "录制", ButtonKind::Ghost)
-                                .clicked()
-                            {
-                                self.key_recording = Some(command.id.clone());
-                            }
-                        });
-                        row.col(|ui| {
-                            if !bindings.is_empty()
-                                && design::button(ui, ICON_RESTART_ALT, "清除", ButtonKind::Ghost)
-                                    .clicked()
-                            {
-                                self.keymap.set_bindings(&command.id, vec![]);
-                                if let Err(e) = self.save_config() {
-                                    log::warn!("save_config failed: {e}")
-                                };
-                            }
-                        });
-                    });
-                }
-            });
+            .collect::<Vec<_>>();
 
-        ui.add_space(4.0);
-        if design::button(
-            ui,
-            ICON_RESTART_ALT,
-            "恢复默认快捷键",
-            ButtonKind::Secondary,
-        )
-        .clicked()
-        {
-            self.keymap = Keymap::default();
-            self.key_recording = None;
-            if let Err(e) = self.save_config() {
-                log::warn!("save_config failed: {e}")
-            };
-            self.set_status_force(StatusLevel::Warn, "快捷键已恢复默认");
+        for action in keymap_ui(ui, &entries) {
+            match action {
+                KeymapAction::Record(command_id) => self.key_recording = Some(command_id),
+                KeymapAction::Clear(command_id) => {
+                    self.keymap.set_bindings(&command_id, vec![]);
+                    if let Err(e) = self.save_config() {
+                        log::warn!("save_config failed: {e}")
+                    }
+                }
+                KeymapAction::RestoreDefaults => {
+                    self.keymap = Keymap::default();
+                    self.key_recording = None;
+                    if let Err(e) = self.save_config() {
+                        log::warn!("save_config failed: {e}")
+                    };
+                    self.set_status_force(StatusLevel::Warn, "快捷键已恢复默认");
+                }
+            }
         }
     }
 
@@ -500,11 +459,16 @@ impl WorkbenchApp {
             });
             return;
         }
+        let ports = self
+            .serial
+            .ports
+            .iter()
+            .map(|port| port.port_name.clone())
+            .collect::<Vec<_>>();
         for (plugin_id, plugin_name, settings) in &plugin_settings {
-            // 通过 Application 读取设置；面板不直接持有平台配置存储。
-            let mut fields: Vec<DynamicField>;
-            let mut fields_json = Vec::with_capacity(settings.len());
-
+            // Application 提供当前值；共享面板只负责 manifest 表单展示。
+            let keys = self.workbench.plugin_setting_keys(plugin_id);
+            let mut values = std::collections::BTreeMap::new();
             for setting in settings {
                 let current_value = self.workbench.plugin_setting_value(
                     plugin_id,
@@ -512,77 +476,38 @@ impl WorkbenchApp {
                     setting.default.clone(),
                 );
                 // 首次写入默认值
-                if current_value == setting.default {
-                    let keys = self.workbench.plugin_setting_keys(plugin_id);
-                    if !keys.contains(&setting.id) {
-                        let _ = self.workbench.set_plugin_setting(
-                            plugin_id,
-                            &setting.id,
-                            setting.default.clone(),
-                        );
-                    }
-                }
-
-                let mut field_json = serde_json::json!({
-                    "id": setting.id,
-                    "label": setting.title,
-                    "kind": setting.kind,
-                    "value": current_value,
-                });
-                let obj = field_json.as_object_mut().unwrap();
-                if !setting.options.is_empty() {
-                    obj.insert(
-                        "options".to_owned(),
-                        serde_json::Value::Array(setting.options.clone()),
+                if !keys.contains(&setting.id) {
+                    let _ = self.workbench.set_plugin_setting(
+                        plugin_id,
+                        &setting.id,
+                        current_value.clone(),
                     );
                 }
-                if let Some(min) = setting.min {
-                    obj.insert("min".to_owned(), serde_json::json!(min));
-                }
-                if let Some(max) = setting.max {
-                    obj.insert("max".to_owned(), serde_json::json!(max));
-                }
-                if let Some(step) = setting.step {
-                    obj.insert("step".to_owned(), serde_json::json!(step));
-                }
-                if let Some(rows) = setting.rows {
-                    obj.insert("rows".to_owned(), serde_json::json!(rows));
-                }
-                fields_json.push(field_json);
+                values.insert(setting.id.clone(), current_value);
             }
+            let before = values.clone();
+            let mut view = PluginSettingsView {
+                plugin_id,
+                plugin_name,
+                settings,
+                ports: &ports,
+                values: &mut values,
+            };
+            plugin_settings_ui(ui, &mut view);
 
-            if let Ok(parsed) = parse_fields(Some(&serde_json::Value::Array(fields_json))) {
-                fields = parsed;
-            } else {
-                continue;
-            }
-
-            design::card().show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                design::section_header(ui, ICON_APPS, format!("{plugin_name} 设置"));
-                ui.separator();
-
-                let panel_id = format!("{plugin_id}.settings");
-
-                // 手动渲染表单
-                let ports: Vec<tool_panels::PortItem> = self
-                    .serial
-                    .ports
-                    .iter()
-                    .map(|d| tool_panels::PortItem {
-                        port_name: d.port_name.clone(),
-                    })
-                    .collect();
+            if values != before {
                 let event_sink = self.workbench.event_sink();
-                dynamic_form_ui(
-                    ui,
-                    &event_sink,
-                    &panel_id,
-                    &mut fields,
-                    true, // auto_apply
-                    &ports,
-                );
-            });
+                let payload = serde_json::json!({
+                    "panel_id": format!("{plugin_id}.settings"),
+                    "values": values,
+                });
+                event_sink.publish_event(tool_core::Event::new(
+                    tool_core::topics::UI_FORM_CHANGED,
+                    format!("ui.panel:{plugin_id}.settings"),
+                    tool_core::Direction::Internal,
+                    tool_core::Payload::Json(payload),
+                ));
+            }
         }
     }
 }

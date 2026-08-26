@@ -25,6 +25,7 @@ tool-transport = { path = "../transport" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 futures-channel = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

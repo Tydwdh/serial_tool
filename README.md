@@ -4,6 +4,12 @@
 
 项目仓库：https://github.com/Tydwdh/serial_tool
 
+在线模式：<https://tydwdh.github.io/serial_tool/>
+
+在线模式直接在浏览器中运行，无需安装。推荐使用最新版 Chrome 或 Edge；连接本机串口时，
+需要点击“添加设备”并在浏览器弹窗中主动授权。浏览器模式不需要维护第二套 UI，但受 Web
+Serial、HTTPS/localhost 和浏览器文件权限限制。
+
 ## 主要功能
 
 - **串口通信**：可自定义波特率（含 1M/2M/3M 高速档）、数据位、停止位、校验位、DTR/RTS 控制；自动重连（拔插后自动恢复，可一键取消）。
@@ -15,6 +21,7 @@
 - **录制回放**：JSONL 录制、快进/快退/步进、速度预设（0.5x/1x/2x/5x/10x）、回放阶段重新解析。
 - **命令面板**：Ctrl+K 搜索并执行内置命令或插件命令。
 - **工作区持久化**：窗口布局、串口配置、插件状态、快捷键、终端/日志参数自动保存。
+- **在线模式**：通过 GitHub Pages 使用与桌面端一致的工作台界面，支持 Web Serial 和网络串口。
 
 ## 快捷键
 
@@ -70,9 +77,25 @@ cargo build -p hardware-workbench-app
 
 打包结果在 `dist\hardware-workbench-app\` 与 `dist\hardware-workbench-app.zip`。
 
+本地运行 Web 在线模式：
+
+```powershell
+Set-Location web
+trunk serve --release
+```
+
+默认地址为 `http://127.0.0.1:8080/`。不要使用不带 `--release` 的 `trunk serve` 进行性能判断，
+那会生成 Debug WASM，交互性能会明显下降。
+
 ## 发布形态
 
-正式发布提供两种包：
+### 在线模式
+
+打开 <https://tydwdh.github.io/serial_tool/> 即可使用在线版。在线版适合无需安装的串口观察和
+调试场景；首次连接硬件时点击“添加设备”，由 Chrome/Edge 请求串口权限。浏览器刷新、已授权
+设备列表和网页设置会保留在浏览器存储中。
+
+桌面端正式发布提供以下包：
 
 - **Portable zip**：解压后直接运行，适合临时调试和免安装使用。
 - **Windows installer**：安装 Inno Setup 6 后执行 `installer\build-installer.ps1`；安装器使用同一 Rust 便携输出。
@@ -110,6 +133,7 @@ installer/       Windows 安装器配置
 ## 发布与变更
 
 - [变更记录](CHANGELOG.md)
+- [v1.2.0 发布说明](docs/releases/v1.2.0.md)
 - [v1.1.2 发布说明](docs/releases/v1.1.2.md)
 - [发布流程](docs/RELEASE.md)
 - [安装器说明](docs/INSTALLER.md)

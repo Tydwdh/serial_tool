@@ -19,7 +19,7 @@ use windows_sys::Win32::Devices::Communication::{
 };
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, GetLastError, HANDLE,
-    INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0,
+    INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_OVERLAPPED, FILE_GENERIC_READ, FILE_GENERIC_WRITE, OPEN_EXISTING,
@@ -27,11 +27,11 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, INFINITE, ResetEvent, SetEvent, WaitForMultipleObjects,
+    CreateEventW, INFINITE, ResetEvent, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
 };
 
 use crate::{
-    DataBits, DtrRtsCommand, Parity, SerialConfig, StopBits, TransportResult, serial_rx_event,
+    DataBits, Parity, SerialCommand, SerialConfig, StopBits, TransportResult, serial_rx_event,
     serial_tx_event,
 };
 
@@ -128,8 +128,7 @@ impl Drop for NativeSerialPort {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_native_serial_worker(
     config: &SerialConfig,
-    write_rx: Receiver<Vec<u8>>,
-    dtr_rts_rx: Receiver<DtrRtsCommand>,
+    command_rx: Receiver<SerialCommand>,
     stop: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
     bus: DataBus,
@@ -142,8 +141,7 @@ pub(crate) fn spawn_native_serial_worker(
     let join = thread::spawn(move || {
         NativeWorker {
             port,
-            write_rx,
-            dtr_rts_rx,
+            command_rx,
             wake: worker_wake,
             stop,
             alive,
@@ -158,8 +156,7 @@ pub(crate) fn spawn_native_serial_worker(
 
 struct NativeWorker {
     port: NativeSerialPort,
-    write_rx: Receiver<Vec<u8>>,
-    dtr_rts_rx: Receiver<DtrRtsCommand>,
+    command_rx: Receiver<SerialCommand>,
     wake: Arc<WakeEvent>,
     stop: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
@@ -222,8 +219,7 @@ impl NativeWorker {
 
             drain_commands(
                 &self.port,
-                &self.write_rx,
-                &self.dtr_rts_rx,
+                &self.command_rx,
                 &self.bus,
                 &self.source,
                 &self.repaint_waker,
@@ -311,24 +307,59 @@ impl NativeWorker {
 
 fn drain_commands(
     port: &NativeSerialPort,
-    write_rx: &Receiver<Vec<u8>>,
-    dtr_rts_rx: &Receiver<DtrRtsCommand>,
+    command_rx: &Receiver<SerialCommand>,
     bus: &DataBus,
     source: &str,
     repaint_waker: &Option<Arc<dyn RepaintWaker>>,
 ) -> io::Result<()> {
-    while let Ok(cmd) = dtr_rts_rx.try_recv() {
-        match cmd {
-            DtrRtsCommand::SetDtr(value) => port.set_dtr(value)?,
-            DtrRtsCommand::SetRts(value) => port.set_rts(value)?,
-        }
-    }
-
-    while let Ok(bytes) = write_rx.try_recv() {
-        port.write_all(&bytes)?;
-        bus.publish(serial_tx_event(source.to_owned(), bytes));
-        if let Some(w) = repaint_waker {
-            w.wake();
+    while let Ok(command) = command_rx.try_recv() {
+        match command {
+            SerialCommand::Write { bytes, completion } => {
+                let result = port.write_all(&bytes);
+                if let Some(completion) = completion {
+                    let _ =
+                        completion.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+                }
+                result?;
+                bus.publish(serial_tx_event(source.to_owned(), bytes));
+                if let Some(w) = repaint_waker {
+                    w.wake();
+                }
+            }
+            SerialCommand::SetDtr { value, completion } => {
+                let result = port.set_dtr(value);
+                if let Some(completion) = completion {
+                    let _ =
+                        completion.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+                }
+                if let Err(error) = result {
+                    bus.publish(Event::system_log(
+                        LogLevel::Error,
+                        "transport.serial",
+                        format!(
+                            "{} 设置 DTR 失败：{error}",
+                            source.trim_start_matches("serial:")
+                        ),
+                    ));
+                }
+            }
+            SerialCommand::SetRts { value, completion } => {
+                let result = port.set_rts(value);
+                if let Some(completion) = completion {
+                    let _ =
+                        completion.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+                }
+                if let Err(error) = result {
+                    bus.publish(Event::system_log(
+                        LogLevel::Error,
+                        "transport.serial",
+                        format!(
+                            "{} 设置 RTS 失败：{error}",
+                            source.trim_start_matches("serial:")
+                        ),
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -532,7 +563,12 @@ impl NativeSerialPort {
         if ok != 0 {
             return Ok(written as usize);
         }
-        wait_overlapped(self.handle, &overlapped, event.raw())
+        // A serial driver may leave an overlapped write pending indefinitely
+        // (for example after unplug or flow-control trouble). Never let that
+        // strand the per-port session and make every later command appear
+        // frozen. The cancellation is completed before the stack OVERLAPPED
+        // is released.
+        wait_overlapped_timeout(self.handle, &overlapped, event.raw(), 5_000)
     }
 
     fn bytes_to_read(&self) -> io::Result<usize> {
@@ -558,14 +594,50 @@ impl NativeSerialPort {
 }
 
 fn wait_overlapped(handle: HANDLE, overlapped: &OVERLAPPED, event: HANDLE) -> io::Result<usize> {
+    wait_overlapped_timeout(handle, overlapped, event, INFINITE)
+}
+
+fn wait_overlapped_timeout(
+    handle: HANDLE,
+    overlapped: &OVERLAPPED,
+    event: HANDLE,
+    timeout_ms: u32,
+) -> io::Result<usize> {
     let error = unsafe { GetLastError() };
     if error != ERROR_IO_PENDING {
         return Err(io::Error::from_raw_os_error(error as i32));
     }
-    let handles = [event];
-    let wait = unsafe { WaitForMultipleObjects(1, handles.as_ptr(), 0, INFINITE) };
+    let wait = if timeout_ms == INFINITE {
+        let handles = [event];
+        unsafe { WaitForMultipleObjects(1, handles.as_ptr(), 0, INFINITE) }
+    } else {
+        unsafe { WaitForSingleObject(event, timeout_ms) }
+    };
     if wait == WAIT_FAILED {
         return Err(last_error());
+    }
+    if wait == WAIT_TIMEOUT {
+        unsafe {
+            let _ = CancelIoEx(handle, overlapped);
+        }
+        let mut transferred = 0_u32;
+        let completed = unsafe {
+            // bWait=TRUE is intentional: CancelIoEx only requests
+            // cancellation; this call establishes that the kernel no longer
+            // owns the OVERLAPPED before this function returns.
+            GetOverlappedResult(handle, overlapped, &mut transferred, 1)
+        };
+        if completed != 0 {
+            return Ok(transferred as usize);
+        }
+        let cancel_error = last_error();
+        if cancel_error.raw_os_error() != Some(ERROR_OPERATION_ABORTED as i32) {
+            return Err(cancel_error);
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "serial write timed out",
+        ));
     }
     let mut transferred = 0_u32;
     cvt(unsafe { GetOverlappedResult(handle, overlapped, &mut transferred, 0) })?;

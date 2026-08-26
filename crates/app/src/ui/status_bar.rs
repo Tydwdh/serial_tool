@@ -1,13 +1,14 @@
 use crate::app::WorkbenchApp;
 use crate::state::StatusLevel;
 use eframe::egui;
-use egui::Color32;
 use egui_material_icons::icons::{
     ICON_CHECK_CIRCLE, ICON_CLOUD_DOWNLOAD, ICON_ERROR, ICON_NOTIFICATIONS, ICON_REFRESH,
     ICON_SYSTEM_UPDATE, ICON_WARNING,
 };
 use tool_application::query::TransportStatusView;
-use tool_panels::{design, theme};
+use tool_panels::{
+    StatusBarAction, StatusBarView, StatusSignalView, design, status_bar_contents_ui, theme,
+};
 
 impl WorkbenchApp {
     pub(super) fn status_bar(&mut self, ui: &mut egui::Ui) {
@@ -17,162 +18,74 @@ impl WorkbenchApp {
             .as_deref()
             .map(|p| self.workbench.transport_status(p))
             .unwrap_or_else(TransportStatusView::closed);
-        ui.horizontal(|ui| {
-            // 串口状态
-            let (dot_color, label) =
-                if let (Some(p), Some(b)) = (self.serial.selected_port.clone(), st.baud_rate) {
-                    let label = self.serial.port_label(&p);
-                    if st.connecting {
-                        (
-                            theme::yellow(),
-                            format!("{label} 连接中"),
-                        )
+        let selected_port = self.serial.selected_port.clone();
+        let (serial_color, serial_label) =
+            if let (Some(port), Some(baud_rate)) = (selected_port.clone(), st.baud_rate) {
+                let label = self.serial.port_label(&port);
+                if st.connecting {
+                    (theme::yellow(), format!("{label} 连接中"))
+                } else {
+                    let is_network = self
+                        .serial
+                        .network_ports
+                        .iter()
+                        .any(|network| network.display_name() == port);
+                    let suffix = if is_network {
+                        "网络".to_owned()
                     } else {
-                        // 网络模拟串口：波特率字段复用作服务器端口，不显示数字波特率。
-                        let is_network = self
-                            .serial
-                            .network_ports
-                            .iter()
-                            .any(|n| n.display_name() == p);
-                        let suffix = if is_network { "网络".to_owned() } else { format!("{b}") };
-                        (
-                            if st.open {
-                                theme::green()
-                            } else {
-                                theme::text_secondary()
-                            },
-                            format!("{label} @ {suffix}"),
-                        )
-                    }
-                } else {
-                    (theme::text_secondary(), "串口已关闭".into())
-                };
-            design::status_pill(ui, dot_color, label);
-
-            // 录制状态
-            let recording = self.workbench.query_recording();
-            let rec = recording.stats.running;
-            let recording_label = if rec {
-                let stats = &recording.stats;
-                if stats.paused {
-                    format!(
-                        "已暂停 {} 条 {:.1}MB",
-                        stats.events_written,
-                        stats.bytes_written as f64 / 1024.0 / 1024.0
-                    )
-                } else {
-                    format!(
-                        "录制中 {} 条 {:.1}MB",
-                        stats.events_written,
-                        stats.bytes_written as f64 / 1024.0 / 1024.0
+                        format!("{baud_rate}")
+                    };
+                    (
+                        if st.open {
+                            theme::green()
+                        } else {
+                            theme::text_secondary()
+                        },
+                        format!("{label} @ {suffix}"),
                     )
                 }
             } else {
-                "未录制".to_owned()
+                (theme::text_secondary(), "串口已关闭".to_owned())
             };
-            design::status_pill(
-                ui,
-                if rec {
-                    theme::red()
-                } else {
-                    theme::text_dimmed()
-                },
-                recording_label,
-            );
-            if rec && let Some(ref err) = recording.stats.last_error {
-                ui.colored_label(theme::red(), format!("错误: {err}"));
+        let recording = self.workbench.query_recording();
+        let recording_running = recording.stats.running;
+        let recording_label = if recording_running {
+            if recording.stats.paused {
+                format!(
+                    "已暂停 {} 条 {:.1}MB",
+                    recording.stats.events_written,
+                    recording.stats.bytes_written as f64 / 1024.0 / 1024.0
+                )
+            } else {
+                format!(
+                    "录制中 {} 条 {:.1}MB",
+                    recording.stats.events_written,
+                    recording.stats.bytes_written as f64 / 1024.0 / 1024.0
+                )
             }
-
-            // DTR/RTS 标签：可点击切换，复用发送面板的信号控制路径。
-            // 注意：dtr_high/rts_high 是 send.target_port 的状态；状态栏显示 selected_port，
-            // 通常两者一致（ensure_send_target_port 会回退到 selected_port）。
-            if st.open {
-                ui.separator();
-                let port = self.send.target_port.clone();
-                let target_open = self.send_target_port_open();
-                let tag = |ui: &mut egui::Ui, label: &str, high: bool, color: Color32, tooltip: &str| -> bool {
-                    let size = egui::vec2(46.0, 20.0); // 最小触控目标约 24px，此处为视觉标签适度增大
-                    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
-                    let bg = if high {
-                        color.linear_multiply(0.25)
-                    } else {
-                        theme::bg_input()
-                    };
-                    ui.painter().rect_filled(rect, 3.0, bg);
-                    if resp.hovered() {
-                        ui.painter().rect_stroke(
-                            rect,
-                            3.0,
-                            egui::Stroke::new(1.0, color),
-                            egui::StrokeKind::Inside,
-                        );
-                    }
-                    ui.painter().text(
-                        rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        label,
-                        egui::FontId::proportional(10.0),
-                        color,
-                    );
-                    resp.on_hover_text(tooltip).clicked()
-                };
-                // 仅当 target_port 打开时才允许点击切换；否则仅展示。
-                if target_open && port.is_some() {
-                    let port = port.clone().expect("checked Some above");
-                    if tag(
-                        ui,
-                        "DTR⬆",
-                        self.send.dtr_high,
-                        theme::green(),
-                        "数据终端就绪 (DTR)。点击切换会立即驱动该线路，部分设备会用它触发复位/进入 bootload，请谨慎。",
-                    ) {
-                        let new_dtr = !self.send.dtr_high;
-                        match self.workbench.dispatch(tool_application::AppCommand::SetDtr {
-                            port: tool_platform::PortId::new(port.clone()),
-                            value: new_dtr,
-                        }) {
-                            Ok(tool_application::CommandOutcome::Pending { .. })
-                            | Ok(tool_application::CommandOutcome::Done) => {
-                                self.send.dtr_high = new_dtr
-                            }
-                            Err(e) => self.set_status_force(StatusLevel::Error, e.to_string()),
-                        }
-                    }
-                    if tag(
-                        ui,
-                        "RTS⬆",
-                        self.send.rts_high,
-                        theme::blue(),
-                        "请求发送 (RTS)。点击切换会立即驱动该线路，部分设备会用它触发复位/进入 bootload，请谨慎。",
-                    ) {
-                        let new_rts = !self.send.rts_high;
-                        match self.workbench.dispatch(tool_application::AppCommand::SetRts {
-                            port: tool_platform::PortId::new(port.clone()),
-                            value: new_rts,
-                        }) {
-                            Ok(tool_application::CommandOutcome::Pending { .. })
-                            | Ok(tool_application::CommandOutcome::Done) => {
-                                self.send.rts_high = new_rts
-                            }
-                            Err(e) => self.set_status_force(StatusLevel::Error, e.to_string()),
-                        }
-                    }
-                } else {
-                    tag(
-                        ui,
-                        "DTR⬆",
-                        self.send.dtr_high,
-                        theme::green(),
-                        "数据终端就绪 (DTR)。打开串口后可切换电平。",
-                    );
-                    tag(
-                        ui,
-                        "RTS⬆",
-                        self.send.rts_high,
-                        theme::blue(),
-                        "请求发送 (RTS)。打开串口后可切换电平。",
-                    );
-                }
+        } else {
+            "未录制".to_owned()
+        };
+        let status_view = StatusBarView {
+            serial_color,
+            serial_label,
+            recording_color: if recording_running {
+                theme::red()
+            } else {
+                theme::text_dimmed()
+            },
+            recording_label,
+            signals: st.open.then_some(StatusSignalView {
+                dtr: self.send.dtr_high,
+                rts: self.send.rts_high,
+            }),
+        };
+        let signal_port = self.send.target_port.clone().or(selected_port);
+        let mut status_actions = Vec::new();
+        ui.horizontal(|ui| {
+            status_actions = status_bar_contents_ui(ui, &status_view);
+            if recording_running && let Some(ref err) = recording.stats.last_error {
+                ui.colored_label(theme::red(), format!("错误: {err}"));
             }
 
             // ── 插件贡献：status_bar.left ──
@@ -244,18 +157,16 @@ impl WorkbenchApp {
                         ICON_NOTIFICATIONS.codepoint,
                         total - max_show
                     ))
-                            .small()
-                            .color(theme::text_secondary());
-                    let overflow_resp =
-                        ui.selectable_label(false, overflow_text);
-                    let mut overflow_open = ui.ctx().memory_mut(|m| {
-                        m.data
-                            .get_persisted::<bool>(overflow_id)
-                            .unwrap_or(false)
-                    });
+                    .small()
+                    .color(theme::text_secondary());
+                    let overflow_resp = ui.selectable_label(false, overflow_text);
+                    let mut overflow_open = ui
+                        .ctx()
+                        .memory_mut(|m| m.data.get_persisted::<bool>(overflow_id).unwrap_or(false));
                     if overflow_resp.clicked() {
                         overflow_open = !overflow_open;
-                        ui.ctx().memory_mut(|m| m.data.insert_persisted(overflow_id, overflow_open));
+                        ui.ctx()
+                            .memory_mut(|m| m.data.insert_persisted(overflow_id, overflow_open));
                     }
                     if overflow_open {
                         egui::Window::new("通知列表")
@@ -281,18 +192,16 @@ impl WorkbenchApp {
                                             StatusLevel::Info => "",
                                         };
                                         ui.label(
-                                            egui::RichText::new(format!(
-                                                "{level_mark} {}",
-                                                n.text
-                                            ))
-                                            .color(color)
-                                            .small(),
+                                            egui::RichText::new(format!("{level_mark} {}", n.text))
+                                                .color(color)
+                                                .small(),
                                         );
                                     }
                                 });
                             });
                         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                            ui.ctx().memory_mut(|m| m.data.insert_persisted(overflow_id, false));
+                            ui.ctx()
+                                .memory_mut(|m| m.data.insert_persisted(overflow_id, false));
                         }
                     }
                 }
@@ -304,6 +213,39 @@ impl WorkbenchApp {
             // ── 更新图标（最右边） ──
             self.draw_update_status(ui);
         });
+        if let Some(port) = signal_port {
+            for action in status_actions {
+                let (command, is_dtr, value) = match action {
+                    StatusBarAction::SetDtr { value } => (
+                        tool_application::AppCommand::SetDtr {
+                            port: tool_platform::PortId::new(port.clone()),
+                            value,
+                        },
+                        true,
+                        value,
+                    ),
+                    StatusBarAction::SetRts { value } => (
+                        tool_application::AppCommand::SetRts {
+                            port: tool_platform::PortId::new(port.clone()),
+                            value,
+                        },
+                        false,
+                        value,
+                    ),
+                };
+                match self.workbench.dispatch(command) {
+                    Ok(tool_application::CommandOutcome::Pending { .. })
+                    | Ok(tool_application::CommandOutcome::Done) => {
+                        if is_dtr {
+                            self.send.dtr_high = value;
+                        } else {
+                            self.send.rts_high = value;
+                        }
+                    }
+                    Err(error) => self.set_status_force(StatusLevel::Error, error.to_string()),
+                }
+            }
+        }
     }
 
     /// 更新图标（靠右对齐）。

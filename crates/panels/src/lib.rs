@@ -5,8 +5,11 @@ mod data_table;
 pub mod design;
 mod dynamic;
 mod gauge;
+mod keymap;
 mod log;
 mod manager;
+mod network;
+mod plugin_settings;
 mod plugin_view;
 mod plugins;
 mod recording;
@@ -16,6 +19,7 @@ mod replay_view;
 mod search;
 pub mod sender;
 pub mod serial;
+mod status;
 mod table;
 mod terminal;
 pub mod theme;
@@ -37,23 +41,33 @@ pub use dynamic::{
     parse_fields,
 };
 pub use gauge::GaugePanel;
+pub use keymap::{KeymapAction, KeymapEntry, keymap_ui};
 pub use log::{LogExportCursor, LogExportJob, LogPanel};
 pub use manager::{
     DockArea, DockLayout, DockStack, PANEL_BUILTIN, PANEL_CHART, PANEL_DEVICES, PANEL_LOGS,
     PANEL_PLUGINS, PANEL_REPLAY, PANEL_SENDER, PANEL_SETTINGS, PANEL_TERMINAL, PanelId,
     PanelManager, TilesLayout,
 };
+pub use network::{NetworkSerialAction, NetworkSerialFormView, network_serial_form_ui};
+pub use plugin_settings::{PluginSettingsView, plugin_settings_ui};
 pub use plugin_view::{InstalledPluginRow, PluginUiCommand, PluginViewState};
-pub use plugins::{MarketplaceState, PluginPanelEvent, PluginTab, PluginsPanel};
+pub use plugins::{
+    MarketplaceState, PluginPanelEvent, PluginPanelOptions, PluginTab, PluginsPanel,
+};
 pub use recording::{RecordingAction, RecordingMode, RecordingView, recording_ui};
 pub use replay::ReplayPanel;
 pub use replay_policy::{ReplayPolicyOption, replay_policy_ui};
 pub use replay_view::{ReplayUiCommand, ReplayView};
 pub use search::SearchQuery;
 pub use sender::{
-    SendAction, SendLayout, SendLineEnding, SendPortItem, SendView, record_history, sender_ui,
+    SEND_LAYOUT_BREAKPOINT, SendAction, SendLayout, SendLineEnding, SendPortItem,
+    SendToolbarButton, SendView, record_history, send_layout_for_width, sender_ui,
 };
-pub use serial::{SerialAction, SerialPanel, SerialPortItem, SerialPortMetadata, SerialView};
+pub use serial::{
+    SerialAction, SerialPanel, SerialPortItem, SerialPortMetadata, SerialTopBarAction,
+    SerialTopBarView, SerialView,
+};
+pub use status::{StatusBarAction, StatusBarView, StatusSignalView, status_bar_contents_ui};
 pub use table::{RowSelection, copy_text_with_feedback, take_copy_feedback};
 pub use terminal::{TerminalExportCursor, TerminalExportFormat, TerminalExportJob, TerminalPanel};
 

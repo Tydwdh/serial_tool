@@ -1810,13 +1810,29 @@ fn render_rows_view(
 
                 if show_port {
                     if let Some(port) = row.port.as_deref() {
-                        label_painter.text(
-                            egui::pos2(x, label_y),
-                            egui::Align2::LEFT_CENTER,
-                            port_display_name(port, port_aliases),
-                            font_id.clone(),
+                        let port_text = port_display_name(port, port_aliases);
+                        let port_galley = egui::WidgetText::from(port_text.as_ref())
+                            .color(theme::yellow())
+                            .into_galley(
+                                ui,
+                                Some(egui::TextWrapMode::Truncate),
+                                port_col_width.max(0.0),
+                                font_id.clone(),
+                            );
+                        label_painter.galley(
+                            egui::pos2(x, label_y - port_galley.size().y / 2.0),
+                            port_galley,
                             theme::yellow(),
                         );
+                        ui.interact(
+                            egui::Rect::from_min_size(
+                                egui::pos2(x, current_y),
+                                egui::vec2(port_col_width.max(0.0), entry_height),
+                            ),
+                            ui.make_persistent_id(("terminal-port", row.id)),
+                            Sense::hover(),
+                        )
+                        .on_hover_text(port);
                     }
                     x += port_col_width + col_gap;
                 }

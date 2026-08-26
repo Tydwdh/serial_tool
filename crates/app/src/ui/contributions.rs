@@ -3,7 +3,7 @@ use eframe::egui;
 use serde_json::json;
 use std::path::PathBuf;
 use tool_application::query::{PluginStateView, PluginSummaryView};
-use tool_panels::theme;
+use tool_panels::{SendToolbarButton, theme};
 
 #[derive(Clone)]
 struct ResolvedUiContribution {
@@ -23,8 +23,63 @@ struct ResolvedUiContribution {
 }
 
 impl WorkbenchApp {
+    pub(super) fn send_toolbar_buttons(&mut self) -> Vec<SendToolbarButton> {
+        self.resolved_ui_contributions("send.toolbar")
+            .into_iter()
+            .filter(|item| {
+                matches!(
+                    item.kind.to_ascii_lowercase().as_str(),
+                    "button" | "small_button" | ""
+                )
+            })
+            .map(|item| SendToolbarButton {
+                plugin_id: item.plugin_id,
+                contribution_id: item.id,
+                title: item.title,
+                tooltip: item.tooltip,
+                order: item.order,
+                enabled: item.enabled,
+            })
+            .collect()
+    }
+
+    pub(super) fn activate_send_toolbar_button(&mut self, plugin_id: &str, contribution_id: &str) {
+        let item = self
+            .resolved_ui_contributions("send.toolbar")
+            .into_iter()
+            .find(|item| {
+                item.plugin_id == plugin_id
+                    && item.id == contribution_id
+                    && matches!(
+                        item.kind.to_ascii_lowercase().as_str(),
+                        "button" | "small_button" | ""
+                    )
+            });
+        if let Some(item) = item {
+            self.publish_ui_contribution_action(&item);
+        }
+    }
+
     pub(super) fn ui_contribution_slot(&mut self, ui: &mut egui::Ui, slot: &str) {
-        let items = self.resolved_ui_contributions(slot);
+        self.ui_contribution_slot_filtered(ui, slot, false);
+    }
+
+    pub(super) fn ui_contribution_non_button_slot(&mut self, ui: &mut egui::Ui, slot: &str) {
+        self.ui_contribution_slot_filtered(ui, slot, true);
+    }
+
+    fn ui_contribution_slot_filtered(&mut self, ui: &mut egui::Ui, slot: &str, skip_buttons: bool) {
+        let items = self
+            .resolved_ui_contributions(slot)
+            .into_iter()
+            .filter(|item| {
+                !skip_buttons
+                    || !matches!(
+                        item.kind.to_ascii_lowercase().as_str(),
+                        "button" | "small_button" | ""
+                    )
+            })
+            .collect::<Vec<_>>();
         if items.is_empty() {
             return;
         }

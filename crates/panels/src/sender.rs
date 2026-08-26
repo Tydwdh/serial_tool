@@ -44,10 +44,38 @@ pub enum SendLayout {
     Vertical,
 }
 
+/// Width at which the sender can keep its option/action rows on one line.
+/// Both composition roots use this same breakpoint so a Dock resize produces
+/// the same sender layout on Native and Web.
+pub const SEND_LAYOUT_BREAKPOINT: f32 = 420.0;
+
+pub const fn send_layout_for_width(width: f32) -> SendLayout {
+    if width < SEND_LAYOUT_BREAKPOINT {
+        SendLayout::Vertical
+    } else {
+        SendLayout::Horizontal
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendPortItem {
     pub id: String,
     pub label: String,
+}
+
+/// A plugin button contributed to the shared sender toolbar.
+///
+/// The panel only renders the button and returns its identity as an action;
+/// the Native/Web composition roots remain responsible for dispatching the
+/// plugin command and building the platform-specific context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendToolbarButton {
+    pub plugin_id: String,
+    pub contribution_id: String,
+    pub title: String,
+    pub tooltip: Option<String>,
+    pub order: i32,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +96,10 @@ pub enum SendAction {
     SetRts {
         port: String,
         value: bool,
+    },
+    ActivateToolbar {
+        plugin_id: String,
+        contribution_id: String,
     },
 }
 
@@ -90,6 +122,7 @@ pub struct SendView<'a> {
     pub periodic_send_count: &'a mut u64,
     pub dtr: &'a mut bool,
     pub rts: &'a mut bool,
+    pub toolbar_buttons: &'a [SendToolbarButton],
     pub max_history: usize,
     pub layout: SendLayout,
 }
@@ -276,7 +309,7 @@ fn render_actions(
     let can_send = target_open && !input.is_empty() && hex_error.is_none();
     let target = view.target_port.clone();
 
-    ui.horizontal_wrapped(|ui| {
+    let render_main_row = |ui: &mut Ui, view: &mut SendView<'_>, actions: &mut Vec<SendAction>| {
         if ui
             .add_enabled(can_send, egui::Button::new("发送"))
             .on_disabled_hover_text(
@@ -309,64 +342,99 @@ fn render_actions(
             *view.periodic_send_count = 0;
         }
         render_history(ui, view);
-    });
-
-    ui.horizontal_wrapped(|ui| {
-        let interval = view.periodic_interval_ms.trim().to_owned();
-        let valid = interval
-            .parse::<f64>()
-            .map(|value| value > 0.0)
-            .unwrap_or(false);
-        let can_toggle = valid || *view.periodic_enabled;
-        if ui
-            .add_enabled(
-                can_toggle,
-                egui::Checkbox::new(view.periodic_enabled, "周期发送"),
-            )
-            .on_disabled_hover_text("请输入大于 0 的发送间隔")
-            .changed()
-        {
-            *view.periodic_send_count = 0;
-        }
-        if ui
-            .add(egui::TextEdit::singleline(view.periodic_interval_ms).desired_width(72.0))
-            .changed()
-        {
-            *view.periodic_send_count = 0;
-        }
-        ui.label("ms");
-        if !valid && *view.periodic_enabled {
-            ui.colored_label(crate::theme::yellow(), "间隔必须 > 0ms");
-        }
-        if let Some(error) = hex_error {
-            ui.colored_label(crate::theme::red(), error);
-        }
-    });
-
-    ui.horizontal_wrapped(|ui| {
-        let enabled = target_open && target.is_some();
-        ui.add_enabled_ui(enabled, |ui| {
-            if ui.checkbox(view.dtr, "DTR").changed()
-                && let Some(port) = target.clone()
-            {
-                actions.push(SendAction::SetDtr {
-                    port,
-                    value: *view.dtr,
+        for button in view.toolbar_buttons {
+            let response = ui.add_enabled(button.enabled, egui::Button::new(&button.title));
+            let response = if let Some(tooltip) = button.tooltip.as_deref() {
+                response.on_hover_text(tooltip)
+            } else {
+                response
+            };
+            if response.clicked() {
+                actions.push(SendAction::ActivateToolbar {
+                    plugin_id: button.plugin_id.clone(),
+                    contribution_id: button.contribution_id.clone(),
                 });
             }
-            if ui.checkbox(view.rts, "RTS").changed()
-                && let Some(port) = target.clone()
-            {
-                actions.push(SendAction::SetRts {
-                    port,
-                    value: *view.rts,
-                });
-            }
-        });
-        if *view.hex_mode && !input.is_empty() {
-            ui.monospace(format!("HEX: {}", hex_preview(&input)));
         }
-    });
+    };
+
+    let render_secondary_row =
+        |ui: &mut Ui, view: &mut SendView<'_>, actions: &mut Vec<SendAction>| {
+            let interval = view.periodic_interval_ms.trim().to_owned();
+            let valid = interval
+                .parse::<f64>()
+                .map(|value| value > 0.0)
+                .unwrap_or(false);
+            let can_toggle = valid || *view.periodic_enabled;
+            if ui
+                .add_enabled(
+                    can_toggle,
+                    egui::Checkbox::new(view.periodic_enabled, "周期发送"),
+                )
+                .on_disabled_hover_text("请输入大于 0 的发送间隔")
+                .changed()
+            {
+                *view.periodic_send_count = 0;
+            }
+            if ui
+                .add(egui::TextEdit::singleline(view.periodic_interval_ms).desired_width(72.0))
+                .changed()
+            {
+                *view.periodic_send_count = 0;
+            }
+            ui.label("ms");
+            if !valid && *view.periodic_enabled {
+                ui.colored_label(crate::theme::yellow(), "间隔必须 > 0ms");
+            }
+            ui.separator();
+
+            let enabled = target_open && target.is_some();
+            ui.add_enabled_ui(enabled, |ui| {
+                if ui.checkbox(view.dtr, "DTR").changed()
+                    && let Some(port) = target.clone()
+                {
+                    actions.push(SendAction::SetDtr {
+                        port,
+                        value: *view.dtr,
+                    });
+                }
+                if ui.checkbox(view.rts, "RTS").changed()
+                    && let Some(port) = target.clone()
+                {
+                    actions.push(SendAction::SetRts {
+                        port,
+                        value: *view.rts,
+                    });
+                }
+            });
+
+            if *view.hex_mode && !input.is_empty() {
+                ui.monospace(format!("HEX: {}", hex_preview(&input)));
+            }
+            if let Some(error) = hex_error.as_deref() {
+                ui.colored_label(crate::theme::red(), error);
+            }
+        };
+
+    if matches!(view.layout, SendLayout::Horizontal) {
+        egui::ScrollArea::horizontal()
+            .id_salt("shared-send-actions-main-scroll")
+            .max_height(44.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| render_main_row(ui, view, actions));
+            });
+        egui::ScrollArea::horizontal()
+            .id_salt("shared-send-actions-secondary-scroll")
+            .max_height(44.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| render_secondary_row(ui, view, actions));
+            });
+    } else {
+        ui.horizontal_wrapped(|ui| render_main_row(ui, view, actions));
+        ui.horizontal_wrapped(|ui| render_secondary_row(ui, view, actions));
+    }
 }
 
 fn render_history(ui: &mut Ui, view: &mut SendView<'_>) {

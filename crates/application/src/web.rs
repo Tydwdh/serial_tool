@@ -66,6 +66,9 @@ pub enum WebAppEvent {
     },
     Disconnected {
         port: PortId,
+        /// True only for an explicit user disconnect/cancel command. The UI
+        /// must not start auto-reconnect for that lifecycle edge.
+        manual: bool,
     },
     Sent {
         id: TaskId,
@@ -583,13 +586,13 @@ impl WebApplication {
                 view.set_connected(Some(port.clone()));
                 view.status = format!("已连接 {port}");
             }
-            WebAppEvent::Disconnected { port } => {
+            WebAppEvent::Disconnected { port, .. } => {
                 self.reconnect_tasks.borrow_mut().remove(port);
                 view.set_connected(None);
                 view.status = "设备已断开".to_owned();
             }
             WebAppEvent::Sent { bytes, .. } => {
-                view.status = format!("发送成功（{bytes} 字节）");
+                view.status = format!("发送已提交（{bytes} 字节）");
             }
             WebAppEvent::SignalsChanged { signal, value, .. } => {
                 view.status = format!("{signal:?} {value}");
@@ -1772,7 +1775,10 @@ impl WebApplication {
                             let _ = network.disconnect(port).await;
                             Ok::<(), String>(())
                         },
-                        move |_, _| WebAppEvent::Disconnected { port: task_port },
+                        move |_, _| WebAppEvent::Disconnected {
+                            port: task_port,
+                            manual: true,
+                        },
                     );
                     return Ok(CommandOutcome::Pending {
                         task_id,
@@ -1786,7 +1792,10 @@ impl WebApplication {
                             let _ = transport.disconnect(port).await;
                             Ok::<(), String>(())
                         },
-                        move |_, _| WebAppEvent::Disconnected { port: task_port },
+                        move |_, _| WebAppEvent::Disconnected {
+                            port: task_port,
+                            manual: true,
+                        },
                     );
                     return Ok(CommandOutcome::Pending {
                         task_id,
@@ -1902,7 +1911,10 @@ impl WebApplication {
                             task_events
                                 .borrow_mut()
                                 .events
-                                .push(WebAppEvent::Disconnected { port });
+                                .push(WebAppEvent::Disconnected {
+                                    port,
+                                    manual: false,
+                                });
                             wake_handle(&disconnect_waker);
                         });
                         transport
@@ -1956,7 +1968,10 @@ impl WebApplication {
                             task_events
                                 .borrow_mut()
                                 .events
-                                .push(WebAppEvent::Disconnected { port });
+                                .push(WebAppEvent::Disconnected {
+                                    port,
+                                    manual: false,
+                                });
                             wake_handle(&disconnect_waker);
                         });
                         transport
@@ -1984,7 +1999,10 @@ impl WebApplication {
                     let task_id = self.spawn(
                         "disconnect_network",
                         async move { network.disconnect(port).await },
-                        move |_, _| WebAppEvent::Disconnected { port: task_port },
+                        move |_, _| WebAppEvent::Disconnected {
+                            port: task_port,
+                            manual: true,
+                        },
                     );
                     return Ok(CommandOutcome::Pending {
                         task_id,
@@ -1996,7 +2014,10 @@ impl WebApplication {
                 let task_id = self.spawn(
                     "disconnect_serial",
                     async move { transport.disconnect(port).await },
-                    move |_, _| WebAppEvent::Disconnected { port: task_port },
+                    move |_, _| WebAppEvent::Disconnected {
+                        port: task_port,
+                        manual: true,
+                    },
                 );
                 Ok(CommandOutcome::Pending {
                     task_id,
@@ -2131,6 +2152,7 @@ impl WebApplication {
                         .events
                         .push(WebAppEvent::Disconnected {
                             port: disconnect_port.clone(),
+                            manual: false,
                         });
                     wake_handle(&disconnect_waker);
                 });
@@ -2178,6 +2200,7 @@ impl WebApplication {
                         .events
                         .push(WebAppEvent::Disconnected {
                             port: disconnect_port.clone(),
+                            manual: false,
                         });
                     wake_handle(&disconnect_waker);
                 });

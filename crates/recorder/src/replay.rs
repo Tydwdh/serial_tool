@@ -5,7 +5,6 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::PathBuf;
-use std::time::Instant;
 use tool_core::{Event, LogLevel};
 use tool_databus::DataBus;
 
@@ -214,7 +213,7 @@ pub struct ReplayManager {
     cursor: usize,
     state: ReplayState,
     speed: f64,
-    replay_start: Option<Instant>,
+    replay_start: Option<u64>,
     position_at_start_ms: u64,
 
     // ── 新增 ──
@@ -586,7 +585,7 @@ impl ReplayManager {
             self.seek_ms(0);
         }
         self.position_at_start_ms = self.position_ms();
-        self.replay_start = Some(Instant::now());
+        self.replay_start = Some(tool_core::monotonic_now_nanos());
         self.state = ReplayState::Playing;
         self.bus.publish(Event::system_log(
             LogLevel::Info,
@@ -649,7 +648,7 @@ impl ReplayManager {
             .unwrap_or(self.events.len());
         self.position_at_start_ms = position_ms.min(self.duration_ms());
         self.replay_start = if self.state == ReplayState::Playing {
-            Some(Instant::now())
+            Some(tool_core::monotonic_now_nanos())
         } else {
             None
         };
@@ -882,7 +881,7 @@ impl ReplayManager {
             self.position_at_start_ms = position_ms;
 
             if self.state == ReplayState::Playing {
-                self.replay_start = Some(Instant::now());
+                self.replay_start = Some(tool_core::monotonic_now_nanos());
             } else {
                 self.replay_start = None;
             }
@@ -959,7 +958,7 @@ impl ReplayManager {
     pub fn set_speed(&mut self, speed: f64) {
         self.position_at_start_ms = self.position_ms();
         self.replay_start = if self.state == ReplayState::Playing {
-            Some(Instant::now())
+            Some(tool_core::monotonic_now_nanos())
         } else {
             None
         };
@@ -1056,7 +1055,9 @@ impl ReplayManager {
         if self.state == ReplayState::Playing
             && let Some(started) = self.replay_start
         {
-            let elapsed = started.elapsed().as_millis() as f64 * self.speed;
+            let elapsed = tool_core::monotonic_now_nanos().saturating_sub(started) as f64
+                / 1_000_000.0
+                * self.speed;
             return self
                 .position_at_start_ms
                 .saturating_add(elapsed.max(0.0) as u64)

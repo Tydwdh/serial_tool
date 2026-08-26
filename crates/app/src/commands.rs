@@ -347,7 +347,8 @@ impl WorkbenchApp {
                     self.serial.selected_port = None;
                     self.set_status_force(StatusLevel::Warn, format!("{selected} 已拔出或不可用"));
                 }
-                if self.serial.auto_reconnect {
+                if self.serial.auto_reconnect && !self.serial.manual_disconnects.contains(selected)
+                {
                     self.serial.pending_reconnect = Some(PendingReconnect {
                         port_name: selected.clone(),
                         attempts: 0,
@@ -441,6 +442,8 @@ impl WorkbenchApp {
 
         if self.workbench.transport_status(name).open {
             // 已打开：关闭
+            self.serial.manual_disconnects.insert(name.to_owned());
+            self.serial.pending_reconnect = None;
             self.cancel_pending_port_open_notice(name);
             match self
                 .workbench
@@ -469,6 +472,7 @@ impl WorkbenchApp {
         }
 
         // 未打开：切换 selected_port（恢复该端口的配置档案）后打开
+        self.serial.manual_disconnects.remove(name);
         let old = self.serial.selected_port.clone();
         if old.as_deref() != Some(name) {
             self.switch_port_selection(old.as_deref(), name);

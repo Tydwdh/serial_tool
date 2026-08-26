@@ -1,4 +1,4 @@
-use crossbeam_channel::{Sender, TrySendError, bounded};
+use crossbeam_channel::{Sender, bounded};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serialport as sp;
@@ -19,9 +19,26 @@ pub use network::NetworkSerialConfig;
 #[cfg(windows)]
 mod windows_native;
 
-pub(crate) enum DtrRtsCommand {
-    SetDtr(bool),
-    SetRts(bool),
+/// A command executed by exactly one port worker.
+///
+/// Keeping data and modem-control operations in the same FIFO is important:
+/// `Write(A); SetDtr(false); Write(B)` must reach the device in that order.
+/// The optional completion channel is used by the platform backend when its
+/// async operation must mean "the worker has completed the command", rather
+/// than merely "the command was accepted into a queue".
+pub(crate) enum SerialCommand {
+    Write {
+        bytes: Vec<u8>,
+        completion: Option<Sender<Result<(), String>>>,
+    },
+    SetDtr {
+        value: bool,
+        completion: Option<Sender<Result<(), String>>>,
+    },
+    SetRts {
+        value: bool,
+        completion: Option<Sender<Result<(), String>>>,
+    },
 }
 use tool_databus::DataBus;
 
@@ -294,8 +311,7 @@ struct PortHandle {
     /// 网络模拟串口连接中标记：worker 异步连接完成前为 true。
     /// 真实串口连接是同步的，恒为 false。
     connecting: Arc<AtomicBool>,
-    writer: Sender<Vec<u8>>,
-    dtr_rts_tx: Sender<DtrRtsCommand>,
+    writer: Sender<SerialCommand>,
     #[cfg(windows)]
     wake: Option<Arc<windows_native::WakeEvent>>,
     stop: Arc<AtomicBool>,
@@ -369,26 +385,29 @@ impl TransportManager {
             if closing[i].join.is_finished() {
                 let h = closing.swap_remove(i);
                 let _ = h.join.join();
-                self.bus.publish(Event::system_log(
-                    LogLevel::Info,
-                    "transport.serial",
-                    format!("已关闭 {} @ {}", h.port_name, h.baud_rate),
-                ));
-                // 发布结构化生命周期事件，供插件监听
-                self.bus.publish(Event::new(
-                    tool_core::topics::SERIAL_CLOSED,
-                    format!("serial:{}", h.port_name),
-                    Direction::Internal,
-                    Payload::Json(serde_json::json!({
-                        "port": h.port_name,
-                        "baud_rate": h.baud_rate,
-                    })),
-                ));
+                self.publish_closed(&h.port_name, h.baud_rate);
                 // swap_remove 把最后一个元素移到了 i，不递增 i
             } else {
                 i += 1;
             }
         }
+    }
+
+    fn publish_closed(&self, port_name: &str, baud_rate: u32) {
+        self.bus.publish(Event::system_log(
+            LogLevel::Info,
+            "transport.serial",
+            format!("已关闭 {} @ {}", port_name, baud_rate),
+        ));
+        self.bus.publish(Event::new(
+            tool_core::topics::SERIAL_CLOSED,
+            format!("serial:{port_name}"),
+            Direction::Internal,
+            Payload::Json(serde_json::json!({
+                "port": port_name,
+                "baud_rate": baud_rate,
+            })),
+        ));
     }
 
     pub fn list_serial_ports(&self) -> TransportResult<Vec<SerialPortDescriptor>> {
@@ -443,8 +462,7 @@ impl TransportManager {
         // 配置变化时：同步等待旧 worker 退出再打开
         self.close_port_blocking(&config.port_name, Duration::from_millis(100))?;
 
-        let (writer, write_rx) = bounded::<Vec<u8>>(1024);
-        let (dtr_rts_tx, dtr_rts_rx) = bounded::<DtrRtsCommand>(16);
+        let (writer, command_rx) = bounded::<SerialCommand>(1024);
         let stop = Arc::new(AtomicBool::new(false));
         let alive = Arc::new(AtomicBool::new(true));
         let thread_stop = Arc::clone(&stop);
@@ -459,8 +477,7 @@ impl TransportManager {
         let (join, wake) = {
             match windows_native::spawn_native_serial_worker(
                 &config,
-                write_rx,
-                dtr_rts_rx,
+                command_rx,
                 thread_stop,
                 thread_alive,
                 thread_bus,
@@ -505,8 +522,7 @@ impl TransportManager {
             let join = thread::spawn(move || {
                 serial_worker_loop(
                     port,
-                    write_rx,
-                    dtr_rts_rx,
+                    command_rx,
                     thread_stop,
                     thread_alive,
                     thread_bus,
@@ -523,7 +539,6 @@ impl TransportManager {
                 config: config.clone(),
                 connecting: Arc::new(AtomicBool::new(false)),
                 writer,
-                dtr_rts_tx,
                 #[cfg(windows)]
                 wake,
                 stop,
@@ -567,8 +582,7 @@ impl TransportManager {
             port_name: port_name.clone(),
             ..SerialConfig::default()
         };
-        let (writer, write_rx) = bounded::<Vec<u8>>(1024);
-        let (dtr_rts_tx, dtr_rts_rx) = bounded::<DtrRtsCommand>(16);
+        let (writer, command_rx) = bounded::<SerialCommand>(1024);
         let stop = Arc::new(AtomicBool::new(false));
         let alive = Arc::new(AtomicBool::new(true));
         let thread_stop = Arc::clone(&stop);
@@ -578,10 +592,9 @@ impl TransportManager {
         let thread_source = source.clone();
         let join = thread::spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
-                while dtr_rts_rx.try_recv().is_ok() {}
-                match write_rx.recv_timeout(Duration::from_millis(5)) {
-                    Ok(bytes) => {
-                        thread_bus.publish(serial_tx_event(thread_source.clone(), bytes));
+                match command_rx.recv_timeout(Duration::from_millis(5)) {
+                    Ok(command) => {
+                        execute_virtual_command(&thread_bus, &thread_source, command);
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
@@ -596,7 +609,6 @@ impl TransportManager {
                 config: config.clone(),
                 connecting: Arc::new(AtomicBool::new(false)),
                 writer,
-                dtr_rts_tx,
                 #[cfg(windows)]
                 wake: None,
                 stop,
@@ -645,8 +657,7 @@ impl TransportManager {
         // 配置变化时：同步等待旧 worker 退出再打开
         self.close_port_blocking(&port_name, Duration::from_millis(100))?;
 
-        let (writer, write_rx) = bounded::<Vec<u8>>(1024);
-        let (dtr_rts_tx, _dtr_rts_rx) = bounded::<DtrRtsCommand>(16);
+        let (writer, command_rx) = bounded::<SerialCommand>(1024);
         let stop = Arc::new(AtomicBool::new(false));
         let alive = Arc::new(AtomicBool::new(true));
         let connecting = Arc::new(AtomicBool::new(true));
@@ -661,7 +672,7 @@ impl TransportManager {
 
         let join = network::spawn_network_worker(
             config.clone(),
-            write_rx,
+            command_rx,
             thread_stop,
             thread_alive,
             thread_connecting,
@@ -681,7 +692,6 @@ impl TransportManager {
                 },
                 connecting,
                 writer,
-                dtr_rts_tx,
                 #[cfg(windows)]
                 wake: None,
                 stop,
@@ -725,21 +735,7 @@ impl TransportManager {
         };
         for h in handles {
             let _ = h.join.join();
-            self.bus.publish(Event::system_log(
-                LogLevel::Info,
-                "transport.serial",
-                format!("已关闭 {} @ {}", h.port_name, h.baud_rate),
-            ));
-            // 发布结构化生命周期事件，供插件监听
-            self.bus.publish(Event::new(
-                tool_core::topics::SERIAL_CLOSED,
-                format!("serial:{}", h.port_name),
-                Direction::Internal,
-                Payload::Json(serde_json::json!({
-                    "port": h.port_name,
-                    "baud_rate": h.baud_rate,
-                })),
-            ));
+            self.publish_closed(&h.port_name, h.baud_rate);
         }
     }
 
@@ -815,27 +811,75 @@ impl TransportManager {
             std::thread::sleep(Duration::from_millis(10));
         }
         let _ = join.join();
+        self.publish_closed(&old_name, old_baud);
         Ok(())
     }
 
     // ── 发送到指定端口 ──
     pub fn send_to(&self, port_name: &str, bytes: Vec<u8>) -> TransportResult<()> {
+        self.enqueue_command(
+            port_name,
+            SerialCommand::Write {
+                bytes,
+                completion: None,
+            },
+        )
+    }
+
+    /// Enqueue a write and wait until the single port worker has completed it.
+    /// This is the semantic used by the asynchronous platform backend.
+    pub fn send_to_blocking(
+        &self,
+        port_name: &str,
+        bytes: Vec<u8>,
+        timeout: Duration,
+    ) -> TransportResult<()> {
+        let (completion, result) = bounded(1);
+        self.enqueue_command(
+            port_name,
+            SerialCommand::Write {
+                bytes,
+                completion: Some(completion),
+            },
+        )?;
+        result
+            .recv_timeout(timeout)
+            .map_err(|error| match error {
+                crossbeam_channel::RecvTimeoutError::Timeout => TransportError::Io(
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "串口写入超时"),
+                ),
+                crossbeam_channel::RecvTimeoutError::Disconnected => TransportError::WorkerClosed,
+            })?
+            .map_err(|error| TransportError::Io(std::io::Error::other(error)))
+    }
+
+    fn enqueue_command(&self, port_name: &str, command: SerialCommand) -> TransportResult<()> {
         self.reap_closing();
-        let guard = self.ports.lock();
-        let resolved = Self::resolve_open_port_name_locked(&guard, port_name)
-            .ok_or_else(|| TransportError::PortNotOpen(port_name.to_owned()))?;
-        let worker = guard
-            .get(&resolved)
-            .ok_or_else(|| TransportError::PortNotOpen(port_name.to_owned()))?;
-        if !worker.alive.load(Ordering::Acquire) {
-            return Err(TransportError::WorkerClosed);
-        }
-        worker.writer.try_send(bytes).map_err(|e| match e {
+        let writer = {
+            let guard = self.ports.lock();
+            let resolved = Self::resolve_open_port_name_locked(&guard, port_name)
+                .ok_or_else(|| TransportError::PortNotOpen(port_name.to_owned()))?;
+            let worker = guard
+                .get(&resolved)
+                .ok_or_else(|| TransportError::PortNotOpen(port_name.to_owned()))?;
+            if !worker.alive.load(Ordering::Acquire) {
+                return Err(TransportError::WorkerClosed);
+            }
+            worker.writer.clone()
+        };
+        #[cfg(windows)]
+        let wake = {
+            let guard = self.ports.lock();
+            let resolved = Self::resolve_open_port_name_locked(&guard, port_name)
+                .ok_or_else(|| TransportError::PortNotOpen(port_name.to_owned()))?;
+            guard.get(&resolved).and_then(|worker| worker.wake.clone())
+        };
+        writer.try_send(command).map_err(|e| match e {
             crossbeam_channel::TrySendError::Full(_) => TransportError::QueueFull,
             crossbeam_channel::TrySendError::Disconnected(_) => TransportError::WorkerClosed,
         })?;
         #[cfg(windows)]
-        if let Some(wake) = &worker.wake {
+        if let Some(wake) = wake {
             wake.set();
         }
         Ok(())
@@ -911,34 +955,85 @@ impl TransportManager {
     }
 
     pub fn set_dtr(&self, port_name: &str, value: bool) -> TransportResult<()> {
-        self.send_dtr_rts_command(port_name, DtrRtsCommand::SetDtr(value))
+        self.enqueue_command(
+            port_name,
+            SerialCommand::SetDtr {
+                value,
+                completion: None,
+            },
+        )
     }
 
     pub fn set_rts(&self, port_name: &str, value: bool) -> TransportResult<()> {
-        self.send_dtr_rts_command(port_name, DtrRtsCommand::SetRts(value))
+        self.enqueue_command(
+            port_name,
+            SerialCommand::SetRts {
+                value,
+                completion: None,
+            },
+        )
     }
 
-    /// 向指定端口的 worker 发送 DTR/RTS 控制命令
-    fn send_dtr_rts_command(&self, port_name: &str, cmd: DtrRtsCommand) -> TransportResult<()> {
-        self.reap_closing();
-        let guard = self.ports.lock();
-        let resolved = Self::resolve_open_port_name_locked(&guard, port_name)
-            .ok_or_else(|| TransportError::PortNotOpen(port_name.to_owned()))?;
-        let worker = guard
-            .get(&resolved)
-            .ok_or_else(|| TransportError::PortNotOpen(port_name.to_owned()))?;
-        if !worker.alive.load(Ordering::Acquire) {
-            return Err(TransportError::WorkerClosed);
-        }
-        worker.dtr_rts_tx.try_send(cmd).map_err(|e| match e {
-            TrySendError::Full(_) => TransportError::QueueFull,
-            TrySendError::Disconnected(_) => TransportError::WorkerClosed,
-        })?;
-        #[cfg(windows)]
-        if let Some(wake) = &worker.wake {
-            wake.set();
-        }
-        Ok(())
+    pub fn set_dtr_blocking(
+        &self,
+        port_name: &str,
+        value: bool,
+        timeout: Duration,
+    ) -> TransportResult<()> {
+        self.send_control_blocking(
+            port_name,
+            SerialCommand::SetDtr {
+                value,
+                completion: None,
+            },
+            timeout,
+        )
+    }
+
+    pub fn set_rts_blocking(
+        &self,
+        port_name: &str,
+        value: bool,
+        timeout: Duration,
+    ) -> TransportResult<()> {
+        self.send_control_blocking(
+            port_name,
+            SerialCommand::SetRts {
+                value,
+                completion: None,
+            },
+            timeout,
+        )
+    }
+
+    fn send_control_blocking(
+        &self,
+        port_name: &str,
+        command: SerialCommand,
+        timeout: Duration,
+    ) -> TransportResult<()> {
+        let (completion, result) = bounded(1);
+        let command = match command {
+            SerialCommand::SetDtr { value, .. } => SerialCommand::SetDtr {
+                value,
+                completion: Some(completion),
+            },
+            SerialCommand::SetRts { value, .. } => SerialCommand::SetRts {
+                value,
+                completion: Some(completion),
+            },
+            SerialCommand::Write { .. } => unreachable!("control command expected"),
+        };
+        self.enqueue_command(port_name, command)?;
+        result
+            .recv_timeout(timeout)
+            .map_err(|error| match error {
+                crossbeam_channel::RecvTimeoutError::Timeout => TransportError::Io(
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "串口控制信号超时"),
+                ),
+                crossbeam_channel::RecvTimeoutError::Disconnected => TransportError::WorkerClosed,
+            })?
+            .map_err(|error| TransportError::Io(std::io::Error::other(error)))
     }
 
     /// 清理已退出 worker 的 stale port handle（alive == false）。
@@ -1028,23 +1123,21 @@ impl SerialIo for Box<dyn sp::SerialPort> {
 #[cfg(not(windows))]
 fn serial_worker_loop(
     port: Box<dyn sp::SerialPort>,
-    write_rx: crossbeam_channel::Receiver<Vec<u8>>,
-    dtr_rts_rx: crossbeam_channel::Receiver<DtrRtsCommand>,
+    command_rx: crossbeam_channel::Receiver<SerialCommand>,
     stop: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
     bus: DataBus,
     source: String,
     waker: Option<Arc<dyn RepaintWaker>>,
 ) {
-    serial_worker_loop_impl(port, write_rx, dtr_rts_rx, stop, alive, bus, source, waker)
+    serial_worker_loop_impl(port, command_rx, stop, alive, bus, source, waker)
 }
 
 #[cfg(any(not(windows), test))]
 #[allow(clippy::too_many_arguments)]
 fn serial_worker_loop_impl(
     mut port: impl SerialIo,
-    write_rx: crossbeam_channel::Receiver<Vec<u8>>,
-    dtr_rts_rx: crossbeam_channel::Receiver<DtrRtsCommand>,
+    command_rx: crossbeam_channel::Receiver<SerialCommand>,
     stop: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
     bus: DataBus,
@@ -1061,45 +1154,11 @@ fn serial_worker_loop_impl(
     };
 
     while !stop.load(Ordering::Acquire) {
-        // 处理 DTR/RTS 命令
-        while let Ok(cmd) = dtr_rts_rx.try_recv() {
-            match cmd {
-                DtrRtsCommand::SetDtr(value) => {
-                    if let Err(e) = port.write_data_terminal_ready(value) {
-                        bus.publish(Event::system_log(
-                            LogLevel::Error,
-                            "transport.serial",
-                            format!("{port_name} 设置 DTR 失败：{e}"),
-                        ));
-                    }
-                }
-                DtrRtsCommand::SetRts(value) => {
-                    if let Err(e) = port.write_request_to_send(value) {
-                        bus.publish(Event::system_log(
-                            LogLevel::Error,
-                            "transport.serial",
-                            format!("{port_name} 设置 RTS 失败：{e}"),
-                        ));
-                    }
-                }
-            }
-        }
-
-        while let Ok(bytes) = write_rx.try_recv() {
-            match port.write_all(&bytes) {
-                Ok(()) => {
-                    bus.publish(serial_tx_event(source.clone(), bytes));
-                    wake();
-                }
-                Err(error) => {
-                    bus.publish(Event::system_log(
-                        LogLevel::Error,
-                        "transport.serial",
-                        format!("{port_name} 写入失败：{error}"),
-                    ));
-                    alive.store(false, Ordering::Release);
-                    return;
-                }
+        while let Ok(command) = command_rx.try_recv() {
+            if execute_serial_command(&mut port, command, &bus, &source, &port_name, &wake).is_err()
+            {
+                alive.store(false, Ordering::Release);
+                return;
             }
         }
 
@@ -1143,6 +1202,85 @@ fn serial_worker_loop_impl(
         }
     }
     alive.store(false, Ordering::Release);
+}
+
+#[cfg(any(not(windows), test))]
+fn complete_command(completion: Option<Sender<Result<(), String>>>, result: &std::io::Result<()>) {
+    if let Some(completion) = completion {
+        let _ = completion.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+    }
+}
+
+#[cfg(any(not(windows), test))]
+fn execute_serial_command(
+    port: &mut impl SerialIo,
+    command: SerialCommand,
+    bus: &DataBus,
+    source: &str,
+    port_name: &str,
+    wake: &impl Fn(),
+) -> std::io::Result<()> {
+    match command {
+        SerialCommand::Write { bytes, completion } => {
+            let result = port.write_all(&bytes);
+            complete_command(completion, &result);
+            match result {
+                Ok(()) => {
+                    bus.publish(serial_tx_event(source.to_owned(), bytes));
+                    wake();
+                    Ok(())
+                }
+                Err(error) => {
+                    bus.publish(Event::system_log(
+                        LogLevel::Error,
+                        "transport.serial",
+                        format!("{port_name} 写入失败：{error}"),
+                    ));
+                    Err(error)
+                }
+            }
+        }
+        SerialCommand::SetDtr { value, completion } => {
+            let result = port.write_data_terminal_ready(value);
+            complete_command(completion, &result);
+            if let Err(error) = &result {
+                bus.publish(Event::system_log(
+                    LogLevel::Error,
+                    "transport.serial",
+                    format!("{port_name} 设置 DTR 失败：{error}"),
+                ));
+            }
+            Ok(())
+        }
+        SerialCommand::SetRts { value, completion } => {
+            let result = port.write_request_to_send(value);
+            complete_command(completion, &result);
+            if let Err(error) = &result {
+                bus.publish(Event::system_log(
+                    LogLevel::Error,
+                    "transport.serial",
+                    format!("{port_name} 设置 RTS 失败：{error}"),
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn execute_virtual_command(bus: &DataBus, source: &str, command: SerialCommand) {
+    match command {
+        SerialCommand::Write { bytes, completion } => {
+            bus.publish(serial_tx_event(source.to_owned(), bytes));
+            if let Some(completion) = completion {
+                let _ = completion.send(Ok(()));
+            }
+        }
+        SerialCommand::SetDtr { completion, .. } | SerialCommand::SetRts { completion, .. } => {
+            if let Some(completion) = completion {
+                let _ = completion.send(Ok(()));
+            }
+        }
+    }
 }
 
 // ── parse_hex 等辅助函数不变 ──
@@ -1550,6 +1688,7 @@ mod tests {
         written: StdMutex<Vec<u8>>,
         dtr: StdMutex<bool>,
         rts: StdMutex<bool>,
+        operations: Arc<StdMutex<Vec<String>>>,
     }
 
     impl MockSerialPort {
@@ -1559,6 +1698,7 @@ mod tests {
                 written: StdMutex::new(Vec::new()),
                 dtr: StdMutex::new(false),
                 rts: StdMutex::new(false),
+                operations: Arc::new(StdMutex::new(Vec::new())),
             }
         }
 
@@ -1582,16 +1722,22 @@ mod tests {
 
         fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
             self.written.lock().unwrap().extend_from_slice(buf);
+            self.operations
+                .lock()
+                .unwrap()
+                .push(format!("write:{}", String::from_utf8_lossy(buf)));
             Ok(())
         }
 
         fn write_data_terminal_ready(&mut self, value: bool) -> std::io::Result<()> {
             *self.dtr.lock().unwrap() = value;
+            self.operations.lock().unwrap().push(format!("dtr:{value}"));
             Ok(())
         }
 
         fn write_request_to_send(&mut self, value: bool) -> std::io::Result<()> {
             *self.rts.lock().unwrap() = value;
+            self.operations.lock().unwrap().push(format!("rts:{value}"));
             Ok(())
         }
     }
@@ -1605,8 +1751,7 @@ mod tests {
         let mock = MockSerialPort::new();
         mock.push_read(b"hello".to_vec());
 
-        let (write_tx, write_rx) = bounded::<Vec<u8>>(16);
-        let (_dtr_tx, dtr_rx) = bounded::<DtrRtsCommand>(4);
+        let (command_tx, command_rx) = bounded::<SerialCommand>(16);
         let stop = Arc::new(AtomicBool::new(false));
         let alive = Arc::new(AtomicBool::new(true));
 
@@ -1617,8 +1762,7 @@ mod tests {
         let handle = std::thread::spawn(move || {
             serial_worker_loop_impl(
                 mock,
-                write_rx,
-                dtr_rx,
+                command_rx,
                 thread_stop,
                 thread_alive,
                 thread_bus,
@@ -1633,7 +1777,12 @@ mod tests {
         assert_eq!(rx_event.payload.text_lossy(), "hello");
 
         // 发送数据
-        write_tx.send(b"world".to_vec()).unwrap();
+        command_tx
+            .send(SerialCommand::Write {
+                bytes: b"world".to_vec(),
+                completion: None,
+            })
+            .unwrap();
         let tx_event = tx_sub.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(tx_event.topic, tool_core::topics::SERIAL_TX);
         assert_eq!(tx_event.payload.text_lossy(), "world");
@@ -1648,14 +1797,23 @@ mod tests {
         let bus = DataBus::new();
         let mock = MockSerialPort::new();
 
-        let (_write_tx, write_rx) = bounded::<Vec<u8>>(16);
-        let (dtr_tx, dtr_rx) = bounded::<DtrRtsCommand>(4);
+        let (command_tx, command_rx) = bounded::<SerialCommand>(16);
         let stop = Arc::new(AtomicBool::new(false));
         let alive = Arc::new(AtomicBool::new(true));
 
         // 发送 DTR 命令
-        dtr_tx.send(DtrRtsCommand::SetDtr(true)).unwrap();
-        dtr_tx.send(DtrRtsCommand::SetRts(true)).unwrap();
+        command_tx
+            .send(SerialCommand::SetDtr {
+                value: true,
+                completion: None,
+            })
+            .unwrap();
+        command_tx
+            .send(SerialCommand::SetRts {
+                value: true,
+                completion: None,
+            })
+            .unwrap();
 
         let thread_stop = stop.clone();
         let thread_alive = alive.clone();
@@ -1663,8 +1821,7 @@ mod tests {
         let handle = std::thread::spawn(move || {
             serial_worker_loop_impl(
                 mock,
-                write_rx,
-                dtr_rx,
+                command_rx,
                 thread_stop,
                 thread_alive,
                 thread_bus,
@@ -1681,11 +1838,68 @@ mod tests {
         // 注意：mock 在 worker loop 中被 move 了，无法直接检查
         // 此测试主要验证 DTR/RTS 命令不会导致 panic
     }
+
+    #[test]
+    fn worker_loop_preserves_write_and_signal_fifo() {
+        let bus = DataBus::new();
+        let mock = MockSerialPort::new();
+        let operations = Arc::clone(&mock.operations);
+        let (command_tx, command_rx) = bounded::<SerialCommand>(8);
+        let (a_tx, a_rx) = bounded(1);
+        let (dtr_tx, dtr_rx) = bounded(1);
+        let (b_tx, b_rx) = bounded(1);
+        command_tx
+            .send(SerialCommand::Write {
+                bytes: b"A".to_vec(),
+                completion: Some(a_tx),
+            })
+            .unwrap();
+        command_tx
+            .send(SerialCommand::SetDtr {
+                value: false,
+                completion: Some(dtr_tx),
+            })
+            .unwrap();
+        command_tx
+            .send(SerialCommand::Write {
+                bytes: b"B".to_vec(),
+                completion: Some(b_tx),
+            })
+            .unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let alive = Arc::new(AtomicBool::new(true));
+        let thread_stop = Arc::clone(&stop);
+        let thread_alive = Arc::clone(&alive);
+        let handle = std::thread::spawn(move || {
+            serial_worker_loop_impl(
+                mock,
+                command_rx,
+                thread_stop,
+                thread_alive,
+                bus,
+                "serial:COM1".to_owned(),
+                None,
+            );
+        });
+
+        assert_eq!(a_rx.recv_timeout(Duration::from_secs(1)).unwrap(), Ok(()));
+        assert_eq!(dtr_rx.recv_timeout(Duration::from_secs(1)).unwrap(), Ok(()));
+        assert_eq!(b_rx.recv_timeout(Duration::from_secs(1)).unwrap(), Ok(()));
+        stop.store(true, Ordering::Release);
+        handle.join().unwrap();
+
+        assert_eq!(
+            *operations.lock().unwrap(),
+            vec!["write:A", "dtr:false", "write:B"]
+        );
+    }
 }
 
 #[cfg(test)]
 mod transport_tests {
     use super::*;
+    use tool_databus::TopicFilter;
 
     #[test]
     fn resolve_open_port_name_exact_match() {
@@ -1695,8 +1909,7 @@ mod transport_tests {
             PortHandle {
                 config: SerialConfig::default(),
                 connecting: Arc::new(AtomicBool::new(false)),
-                writer: bounded(1).0,
-                dtr_rts_tx: bounded(1).0,
+                writer: bounded::<SerialCommand>(1).0,
                 #[cfg(windows)]
                 wake: None,
                 stop: Arc::new(AtomicBool::new(false)),
@@ -1718,8 +1931,7 @@ mod transport_tests {
             PortHandle {
                 config: SerialConfig::default(),
                 connecting: Arc::new(AtomicBool::new(false)),
-                writer: bounded(1).0,
-                dtr_rts_tx: bounded(1).0,
+                writer: bounded::<SerialCommand>(1).0,
                 #[cfg(windows)]
                 wake: None,
                 stop: Arc::new(AtomicBool::new(false)),
@@ -1773,8 +1985,7 @@ mod transport_tests {
         PortHandle {
             config: SerialConfig::default(),
             connecting: Arc::new(AtomicBool::new(false)),
-            writer: bounded::<Vec<u8>>(1).0,
-            dtr_rts_tx: bounded::<DtrRtsCommand>(1).0,
+            writer: bounded::<SerialCommand>(1).0,
             #[cfg(windows)]
             wake: None,
             stop: Arc::new(AtomicBool::new(false)),
@@ -1810,7 +2021,7 @@ mod transport_tests {
         let tm = TransportManager::new(bus);
         // 用 capacity=1 的 writer，塞入一条后下一条应 QueueFull。
         let mut handle = make_test_handle(true);
-        let (writer, _rx) = bounded::<Vec<u8>>(1);
+        let (writer, _rx) = bounded::<SerialCommand>(1);
         handle.writer = writer;
         tm.ports.lock().insert("COM3".to_owned(), handle);
         // 先发一条填满 channel（capacity=1）。
@@ -1818,6 +2029,40 @@ mod transport_tests {
         // 第二条应 QueueFull。
         let err = tm.send_to("COM3", vec![0x02]).unwrap_err();
         assert!(matches!(err, TransportError::QueueFull), "got {err:?}");
+    }
+
+    #[test]
+    fn virtual_send_blocking_completes_after_tx_event() {
+        let bus = DataBus::new();
+        let tx = bus.subscribe_lossless(TopicFilter::exact(serial_topics::SERIAL_TX));
+        let tm = TransportManager::new(bus);
+        let virtual_port = tm.open_virtual_serial("VIRTUAL1").unwrap();
+
+        tm.send_to_blocking(
+            virtual_port.port_name(),
+            b"hello".to_vec(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let event = tx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(event.payload.text_lossy(), "hello");
+        tm.close_port_blocking(virtual_port.port_name(), Duration::from_secs(1))
+            .unwrap();
+    }
+
+    #[test]
+    fn virtual_close_then_immediate_reopen_waits_for_worker_exit() {
+        let tm = TransportManager::new(DataBus::new());
+        let first = tm.open_virtual_serial("VIRTUAL2").unwrap();
+        tm.close_port(first.port_name());
+
+        // Reopen is allowed to proceed immediately because close_port_blocking
+        // waits for the old worker instead of merely setting its stop flag.
+        let second = tm.open_virtual_serial("VIRTUAL2").unwrap();
+        assert_eq!(second.port_name(), "VIRTUAL2");
+        tm.close_port_blocking(second.port_name(), Duration::from_secs(1))
+            .unwrap();
     }
 
     #[test]
