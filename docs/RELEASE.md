@@ -2,7 +2,11 @@
 
 ## 项目概览
 
-**硬件调试工作台** (Hardware Workbench) 是一个跨平台的串口调试工具，使用 Rust + egui 构建，支持 Lua 插件系统、录制回放、多串口管理、自定义面板。
+**硬件调试工作台** (Hardware Workbench) 是一个串口调试工具，使用 Rust + egui 构建，支持 Lua 插件系统、录制回放、多串口管理、自定义面板。
+
+支持平台为 **Windows 与 Linux**（另提供浏览器在线模式）。macOS 当前不提供支持：仓库没有
+macOS 专用代码、CI 任务和发布包，`transport` 在该平台只会落到未经验证的通用
+`serialport` 路径上。
 
 - 仓库: `Tydwdh/serial_tool`
 - 开发版本号: `Cargo.toml` workspace `version` 字段；发布成功后 CI 更新 `update.json`
@@ -13,19 +17,25 @@
 
 ```
 crates/
+  application/  — UI 无关的应用核心 (Workbench, AppCommand/Query, 更新器与市场编排)
+  app/          — 应用壳 (eframe::App, 布局, 快捷键, 运行时; Native 与 Web 两个组合根)
   core/         — 基础类型 (Event, Payload, LogLevel, topics)
   databus/      — 发布/订阅事件总线 (DataBus)
+  platform/     — 平台能力层 (PortId/PortDescriptor, Native 与浏览器实现)
   transport/    — 串口抽象层 (serialport, Windows native worker)
   extension/    — 插件管理器 (发现、启用、权限、生命周期)
-  lua_host/     — Lua 5.4 运行时 (mlua, 沙箱, ctx.* API)
+  lua_host/     — 桌面 Lua 5.4 运行时 (mlua, 沙箱, ctx.* API)
+  plugin_api/   — Native/Web 共用的插件协议类型
+  plugin_runtime/ — 浏览器 Lua 引擎适配 (纯 Rust VM)
   panels/       — 所有 egui 面板 UI (terminal, log, chart, dock 等)
   recorder/     — JSONL 录制 + 回放引擎
   updater/      — 自更新系统 (HTTPS 下载 + SHA256 + zip 提取)
   marketplace/  — 插件市场客户端
   testing/      — 测试报告存储
-  app/          — 应用壳 (eframe::App, 布局, 快捷键, 运行时)
+web/            — 浏览器在线模式的 Trunk 工程
 plugins/        — 内置插件 (模板 + demo)
-installer/      — Inno Setup 安装脚本
+plugin-marketplace/ — 插件市场索引与发布脚本
+installer/      — Inno Setup 与 Ubuntu .deb 安装脚本
 docs/           — 用户文档
 assets/         — 字体、图标
 ```
@@ -228,6 +238,13 @@ cargo test --workspace --lib --exclude tool-updater
 ### 构建失败: 找不到 `windows-sys`
 
 确保在 Windows 上构建。transport crate 的 `windows_native.rs` 仅在 `cfg(windows)` 下编译。
+
+### macOS 上能构建吗
+
+不能作为受支持的场景对待。全仓库没有 `target_os = "macos"` 的代码分支，CI 也不构建
+macOS，`transport` 会走通用的非 Windows `serialport` 路径，该路径从未在 macOS 上验证过，
+也没有对应的发布包或安装器。需要 macOS 支持时应先补代码、CI 任务和发布形态，不要把
+README 的构建说明当作兼容性承诺。
 
 ### 插件同步失败
 

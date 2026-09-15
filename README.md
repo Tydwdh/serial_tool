@@ -60,8 +60,10 @@ Ubuntu `.deb` 安装中，插件、主题和录制文件写入当前用户的
 环境要求：
 
 - Rust 1.92+
-- Windows / macOS / Linux
+- Windows / Linux
 - Windows 安装器需要 Inno Setup 6
+
+暂不支持 macOS：仓库没有 macOS 专用代码、CI 任务和发布包。
 
 ```powershell
 git clone https://github.com/Tydwdh/serial_tool.git
