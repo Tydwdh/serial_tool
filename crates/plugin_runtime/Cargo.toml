@@ -17,6 +17,6 @@ tool-plugin-api = { path = "../plugin_api" }
 tool-platform = { path = "../platform" }
 serde_json.workspace = true
 regex = "1"
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
+# 纯 Rust Lua VM：既用于浏览器，也在桌面测试里跑同一份实现，
+# 因此不做 wasm 限定，让 `cargo test` 能在宿主平台上覆盖它。
 omnilua.workspace = true

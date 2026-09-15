@@ -2151,11 +2151,16 @@ fn create_storage_api(lua: &Lua, host: Rc<dyn PluginHostApi>) -> omnilua::Result
     api.set(
         "get",
         lua.create_function(move |lua, (key, default): (String, Option<Value>)| {
-            let value = get_host.storage_get(&key).unwrap_or_else(|_| {
-                default
-                    .and_then(|value| value_from_lua(value).ok())
-                    .unwrap_or(PluginValue::Null)
-            });
+            let fallback = match default {
+                Some(value) => value_from_lua(value).unwrap_or(PluginValue::Null),
+                None => PluginValue::Null,
+            };
+            // 宿主对「未写入」既可能返回 Null 也可能报错，两种都算缺省，
+            // 否则 `ctx.session.get(key, default)` 的第二参数永远不会生效。
+            let value = match get_host.storage_get(&key) {
+                Ok(PluginValue::Null) | Err(_) => fallback,
+                Ok(value) => value,
+            };
             value_to_lua(lua, &value)
         })?,
     )?;
