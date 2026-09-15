@@ -41,6 +41,14 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-targets
 
+      # 压力门禁：断言是结构性的（行索引保持完整、无损订阅不丢事件），
+      # 不是计时，所以 debug 下即可作为回归门禁。计时测量仍按
+      # docs/performance.md 手工用 --release --nocapture 采集。
+      # 只选这两个 crate，避免把 crates/app 里依赖安静调度、故意 ignore 的
+      # 计时测试拉进 CI。
+      - name: Pressure gates
+        run: cargo test -p tool-panels -p tool-databus -- --ignored
+
       - name: Verify release metadata
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
