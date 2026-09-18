@@ -120,7 +120,15 @@ jobs:
         run: cargo check --workspace
 
       - name: Linux clippy
-        run: cargo clippy --workspace --all-targets
+        # 整包 `-D warnings` 现在会把作业变红：`crates/app` 的自动更新链路在 Linux 下
+        # 被 cfg 关掉，留下 9 处 dead_code / clippy 诊断（逐条清单与复现方法见
+        # docs/ARCHITECTURE.md 的「Linux clippy 的 -D warnings 缺口」）。
+        # 因此先把 `-D warnings` 加在**除 app 之外**的全部 crate 上：Linux 专属
+        # （`cfg(not(windows))` / `cfg(target_os = "linux")`）的 clippy 回归就此无处藏身。
+        # 补齐 app 的 Linux cfg 覆盖后删掉 `--exclude`，本步即与 Windows 作业完全对齐。
+        run: |
+          cargo clippy --workspace --all-targets --exclude hardware-workbench-app -- -D warnings
+          cargo clippy --workspace --all-targets
 
       - name: Linux tests
         run: cargo test --workspace --all-targets

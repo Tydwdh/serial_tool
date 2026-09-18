@@ -122,6 +122,58 @@ cargo tree -p tool-application | grep -i egui    # 0 行
   注意 CI 的 `wasm` 作业 clippy（`:195`）**同样带 `-D warnings`**，且必须用
   `--target wasm32-unknown-unknown` 才会 lint 到 wasm-only 代码 —— 只跑宿主侧门抓不到上面第二个红门。
 
+### Linux clippy 的 `-D warnings` 缺口
+
+Windows 作业的 clippy 带 `-D warnings`，Linux 作业过去不带 —— clippy 回归能在 Linux 侧静默通过。
+本轮把 `crates/transport` 里**只有非 Windows 构建才会出现**的两个警告修掉了：
+
+- `unused variable: wake`（`open_serial` 的 `#[cfg(not(windows))]` 分支）：那个元组槽只为对齐
+  Windows 分支而存在，`PortHandle::wake` 本身是 `#[cfg(windows)]` 字段。现在该分支只绑 `join`，
+  块尾直接返回 `thread::spawn(..)`（不留中间 `let`，否则触发 `clippy::let_and_return`）。
+- `unreachable_expression`（`serial_permission_message`）：`#[cfg(target_os = "linux")]` 块以
+  `return format!(..)` 结尾，后面还跟着无条件尾表达式，Linux 上那段是死代码。改为互斥 cfg 块对，
+  两条消息文本逐字不变。
+
+**但整包 `-D warnings` 仍会把 Linux 作业当场变红**：`crates/app` 的自动更新链路在 Linux 下被
+`cfg(not(target_os = "linux"))` 关掉后，剩下 9 处死代码诊断（实测 12 条，分布在 bin 与 bin-test 两次构建）：
+
+| 位置 | 诊断 |
+| --- | --- |
+| `crates/app/src/runtime/update.rs:157` | `start_update_check` / `start_update_download` / `force_check_update` never used |
+| `crates/app/src/state.rs:407` | `UpdateState` 多字段 never read |
+| `crates/app/src/state.rs:443` | `CheckResult` 的 `version`/`download_url`/`sha256`/`cached` never read |
+| `crates/app/src/state.rs:447` | `CheckResult::changelog` never read |
+| `crates/app/src/state.rs:462` | `UpdateState::pinned_update_sha256` never used |
+| `crates/app/src/state.rs:478` | `cached_check_result` never used |
+| `crates/app/src/ui/status_bar.rs:256` | `clippy::needless_return`（Linux 早返回块） |
+| `crates/app/src/ui/status_bar.rs:266` | `draw_update_icon` never used |
+| `crates/app/src/workbench_app.rs:78` | `WorkbenchApp::update_state` never read |
+
+> 这不是「本地跑不了所以不知道」—— 上面这张表是用 **cfg 形状复刻**在 Windows 宿主上实测得到的：
+> 把源码里的 `#[cfg(windows)]`/`#[cfg(target_os = "windows")]` 换成 `#[cfg(target_arch = "wasm32")]`
+> （本机为假），`#[cfg(not(windows))]`/`#[cfg(target_os = "linux")]` 换成
+> `#[cfg(not(target_arch = "wasm32"))]`（本机为真），宿主构建编译的就是 Linux 原生构建的那一半代码，
+> 依赖无需交叉编译。39 个站点全部映射、无残留后跑
+> `cargo clippy --workspace --all-targets -- -D warnings`，报错**只**落在 `hardware-workbench-app`
+> 一个包上 —— 即 `tool-transport` / `tool-updater` 与其余 12 个 crate 的 Linux 形状是干净的。
+> 复刻完 `git checkout -- crates/` 还原。
+
+**因此 `.github/workflows/ci.yml` 的 Linux clippy 步骤改为**：
+`cargo clippy --workspace --all-targets --exclude hardware-workbench-app -- -D warnings`
++ 原有的整包 `cargo clippy --workspace --all-targets`（app 的警告继续打印，但不红作业）。
+补齐 app 的 Linux cfg 覆盖（给更新链路加 cfg，或让 Linux 真正启用更新器）后删掉 `--exclude` 即完全对齐。
+
+本轮实际跑过的非 Windows 验证（`libudev-sys` 的 build script 需要 Linux sysroot，
+`--target x86_64-unknown-linux-gnu` 在本机不可用）：
+
+```bash
+# 不含 C 依赖的 6 个 crate，用 android 三重作为 not(windows) 代理 —— exit 0
+cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-databus \
+        -p tool-recorder -p tool-testing --target x86_64-linux-android --all-targets -- -D warnings
+# 整包 Linux cfg 形状（复刻配方见上）：只有 hardware-workbench-app 报错
+# 全仓 grep：平台相关 cfg 站点只出现在 app / transport / updater，且没有任何 cfg(unix) 代码
+```
+
 ## 剩余工作（原「朝 todo.txt §69 全量达标」）
 
 > **依据核对提示**：本条原引用 `todo.txt §39/§69` 作为验收依据，但 `todo.txt`
@@ -192,6 +244,9 @@ cargo tree -p tool-application | grep -i egui    # 0 行
    > `path.display().to_string().contains("crates/app")` 时，Windows 分隔符是 `\`，
    > 该判定**恒假**，两个 UI crate 会混进检查集让守卫当场恒红；故改为按 `[package] name` 跳过。
    > 同理根 `Cargo.toml` 的 `members` 已补上 `crates/recorder`（此前只靠 path-dep 隐式纳入）。
+   > **口径边界（不要过度解读）**：判定读的是每个成员**自己那份清单**，所以锁的是**直接依赖边**。
+   > 「`tool-application` 的传递闭包里没有 UI」这条更强的断言仍归 `cargo tree -p tool-application
+   > | grep -i egui`（见上「验证」段）——测试里不许调 `cargo`，故闭包检查无法做成常驻门。
 
 ### 仍未做（本轮明确不做，缺口如实标注）
 
@@ -286,9 +341,15 @@ cargo tree -p tool-application | grep -i egui    # 0 行
    > 不在任何任务的 inScope。
    > **下一轮立项必须把 `Cargo.lock` 纳入 inScope**，否则任何"删死依赖"都无法落地。
 
+11. **`crates/app` 的自动更新链路在 Linux 下留 9 处死代码诊断（实测，本轮只记录了缺口）**：
+   Linux 用 `cfg(not(target_os = "linux"))` 关掉更新 UI 后，`UpdateState`/`CheckResult`
+   及其读取方全部变成 never-used / never-read。逐条位置与复现方法见上方
+   「Linux clippy 的 `-D warnings` 缺口」。在此之前，CI 的 Linux clippy 用
+   `--exclude hardware-workbench-app` 上 `-D warnings`，app 仍跑不带该旗标的整包 lint。
+
 ### 本轮裁掉项
 
-11. `crates/app/Cargo.toml` 删除 `crossbeam-channel`（本 crate 0 引用，工作区其它 crate 仍在用）；
+12. `crates/app/Cargo.toml` 删除 `crossbeam-channel`（本 crate 0 引用，工作区其它 crate 仍在用）；
     `crates/panels/Cargo.toml` 删除 `tool-marketplace`。两者都会改写 `Cargo.lock` 的依赖边
     （无版本变更、无新增行）。
 
