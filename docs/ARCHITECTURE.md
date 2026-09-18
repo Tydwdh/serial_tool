@@ -118,7 +118,12 @@ cargo tree -p tool-application | grep -i egui    # 0 行
   **当前状态（修复后）**：`cargo +1.92.0 fmt --all --check`、
   `cargo +1.92.0 clippy --workspace --all-targets -- -D warnings`、
   `cargo +1.92.0 test --workspace --all-targets` 三条均 **exit 0**，
-  test 为 **557 passed / 0 failed / 7 ignored**（22 targets）。
+  test 为 **573 passed / 0 failed / 7 ignored**（22 targets）。
+  > **计数口径（引用数字前先看这条）**：`cargo test` 打的是**测试槽位**，不是唯一断言数。
+  > `crates/app/tests/manifest_deps.rs` 既是独立 test target，又被两份守卫各用 `#[path]`
+  > 引一次，所以它的 13 条元测试在 **3 个 target 各跑一遍**（13 条 → 39 槽）。
+  > 架构守卫这轮改动的净增量因此是 **15 条唯一用例 / 41 个槽位**（532 → 573），
+  > **不是**「多了 41 条测试」。把槽位数当覆盖数会高估 3 倍。
   注意 CI 的 `wasm` 作业 clippy（`:195`）**同样带 `-D warnings`**，且必须用
   `--target wasm32-unknown-unknown` 才会 lint 到 wasm-only 代码 —— 只跑宿主侧门抓不到上面第二个红门。
 
@@ -204,31 +209,56 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
    ```
 4. **CI 的 Windows 作业不再被 `default-members` 收窄** —— `.github/workflows/ci.yml` 的
    clippy 与 test 均带 `--workspace`，与 Linux 作业一致。核对：见下方「验证」段。
-5. **架构守卫改为「解析后的真实依赖名」（本轮）** —— 两份守卫（`crates/app/tests/architecture.rs`、
+5. **架构守卫改为「解析后的真实依赖名」** —— 两份守卫（`crates/app/tests/architecture.rs`、
    `crates/application/tests/architecture.rs`）过去都拿 `Cargo.toml` 做**文本**判定，
    评审在仓库外副本实证了两个合法清单即可绕过：
    ```toml
    my-transport = { package = "tool-transport", path = "../transport" }   # 声明名 ≠ 真实包名
    "tool-transport" = { path = "../transport" }                            # 加引号的键
    ```
+   评审后补上**第三个同类向量**（提权声明在另一份文件里，只看成员清单同样漏检）：
+   ```toml
+   # 根 Cargo.toml
+   [workspace.dependencies]
+   sneaky-transport = { package = "tool-transport", path = "crates/transport" }
+   # 成员 crates/panels/Cargo.toml
+   sneaky-transport.workspace = true      # 成员侧完全不出现 tool-transport 字样
+   ```
+   > 本仓 `+1.92.0` 实测（不只是临时工作区）：该写法合法，`cargo tree -p tool-panels --locked`
+   > 顶格出现 `tool-transport v1.2.0`，`Cargo.lock` 的 `tool-panels` 依赖表多出 `"tool-transport",`，
+   > 而修复前两份守卫**都还是绿的**（`cargo test -p hardware-workbench-app --test architecture`
+   > 与 `-p tool-application --test architecture` 均 exit 0）。
+   > 注意 `[workspace.dependencies]` 里的 `path` 以**工作区根**为基准解析，
+   > 所以这里必须写 `crates/transport`；照抄成员侧的 `../transport` 会让 cargo 直接报错。
+   > 根表也**没有** `dev-dependencies` 这类别名表可藏：1.92.0 实测 `[workspace.dev-dependencies]`
+   > 不参与继承（`workspace.dependencies was not defined`），继承只读 `[workspace.dependencies]`。
    现在判定统一到 `crates/app/tests/manifest_deps.rs`（后者用
    `#[path = "../../app/tests/manifest_deps.rs"]` 引同一份实现，不复制第二份）：
-   * `dependency_names()` 用 `toml` 解析清单，返回**解析后的真实 crate 名**，
+   * `dependency_names(manifest, workspace_renames)` 用 `toml` 解析清单，返回**解析后的真实 crate 名**，
      覆盖 `[dependencies]/[dev-dependencies]/[build-dependencies]` 与任意
-     `[target.<cfg>.*dependencies]`，重命名以 `package` 字段为准；
-     `[workspace.dependencies]`（版本声明）与 `[package] name` 都不算依赖边。
+     `[target.<cfg>.*dependencies]`，重命名以 `package` 字段为准；第二个参数是**根清单**
+     `[workspace.dependencies]` 的「别名 -> 真实包名」表（`workspace_dependency_renames_from_root()`，
+     根路径由 `env!("CARGO_MANIFEST_DIR")` 推两级，两个守卫 crate 各自都推得对），
+     于是 `sneaky-transport.workspace = true` 也会解析成 `tool-transport`。
+     被判定清单自己的 `[workspace.dependencies]` 与 `[package] name` 依旧不算依赖边。
    * `violations()` 做**精确集合比较**，因此 `egui` 不会吃掉 `egui_kittest`、
      `tool-application` 不会吃掉 `tool-application-extra`（子串匹配给的是恒真/恒假假证据）。
-   * 判定器自身带 8 条元测试（含上述两个绕过向量、近亲反例，以及两条 `#[should_panic]`
-     防空转夹具：无 `[package] name` 与零依赖清单都必须炸），先红后绿；
-     它同时是独立 test target，故守卫编不过时元测试仍可单独跑。
+   * 判定器自身带 13 条元测试（含上述三个绕过向量、近亲反例、根别名表口径、
+     根清单定位可达性，以及两条 `#[should_panic]` 防空转夹具：无 `[package] name`
+     与零依赖清单都必须炸），先红后绿；它同时是独立 test target，故守卫编不过时元测试仍可单独跑
+     （代价见上「计数口径」：这 13 条要占 39 个槽位）。
    * UI 禁令覆盖面从「`tool-application` 的 4 个可达内部 crate（实际 11 个）」改为
      **推导**的 `crates/*/Cargo.toml` 全集，按 `[package] name` 跳过两个 presentation crate；
      `tool-platform`（`application` 与 `panels` 的无条件共同基座）另有单条锁定断言，
      禁用语也补上了 `rfd` 与 `egui_kittest`。非 presentation crate 同时被禁止反向依赖
      `tool-panels` / `hardware-workbench-app`。
+   * **根清单守卫**（`root_workspace_dependencies_do_not_rename_to_banned_crates`）：
+     `[workspace.dependencies]` 不是依赖边、所有按清单扫描的守卫都看不见它，
+     因而它是「改一行就能给 13 份清单投毒」的唯一位置；现在禁止其中任何
+     `package = ` 指向 UI / 领域 / presentation crate。
    * **防空转**：扫描目录读不到 → panic；扫到的清单份数 < 15、检查份数 < 13、
-     根 `workspace.members` < 16 → 当场红；单份清单解析出零依赖 → 红；
+     根 `workspace.members` < 16、根 `[workspace.dependencies]` 条目 < 15 → 当场红；
+     单份清单解析出零依赖 → 红；根清单推导出错（读到的文件没有 `[workspace.dependencies]`）→ 红；
      被跳过的集合必须**恰好**等于 presentation crate 集合（多跳=静默放行，也会红）。
      `every_workspace_member_is_covered_by_the_scan` 进一步要求 `crates/` 之外的成员显式登记。
    核对（反向自检，必须真能红）：
@@ -237,16 +267,31 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
    cargo +1.92.0 test -p hardware-workbench-app --test architecture    # 红，点名 tool-transport
    # ② 往 crates/platform/Cargo.toml 加 egui = "0.35"
    cargo +1.92.0 test -p tool-application --test architecture           # 红，点名 tool-platform
-   # ③ 还原后
+   # ③ 根 [workspace.dependencies] 加 sneaky-transport = { package = "tool-transport", path = "crates/transport" }
+   #    且 crates/panels/Cargo.toml 加 sneaky-transport.workspace = true
+   cargo +1.92.0 test -p hardware-workbench-app --test architecture     # 红，点名 tool-transport
+   cargo +1.92.0 test -p tool-application --test architecture           # 红，点名根清单投毒
+   # ④ 只投毒根清单、没有任何成员继承
+   cargo +1.92.0 test -p tool-application --test architecture           # 只有根守卫红（成员扫描仍绿：确实没有边）
+   # ⑤ 还原本节所有 Cargo.toml 改动（Cargo.lock 会随 ③/④ 变动，必须一并还原）
    cargo +1.92.0 test --workspace --all-targets                          # 绿
    ```
    > 踩过的坑（已修）：按目录名跳过 presentation 写成
    > `path.display().to_string().contains("crates/app")` 时，Windows 分隔符是 `\`，
    > 该判定**恒假**，两个 UI crate 会混进检查集让守卫当场恒红；故改为按 `[package] name` 跳过。
    > 同理根 `Cargo.toml` 的 `members` 已补上 `crates/recorder`（此前只靠 path-dep 隐式纳入）。
-   > **口径边界（不要过度解读）**：判定读的是每个成员**自己那份清单**，所以锁的是**直接依赖边**。
-   > 「`tool-application` 的传递闭包里没有 UI」这条更强的断言仍归 `cargo tree -p tool-application
-   > | grep -i egui`（见上「验证」段）——测试里不许调 `cargo`，故闭包检查无法做成常驻门。
+   > **口径边界（不要过度解读）**：判定读的是每个成员**自己那份清单 + 根清单的别名表**，
+   > 所以锁的是**直接依赖边**。三条边界要分清楚：
+   > ① 传递闭包不在范围内 —— 「`tool-application` 的闭包里没有 UI」这条更强的断言仍归
+   >    `cargo tree -p tool-application | grep -i egui`（见上「验证」段），测试里不许调 `cargo`，
+   >    故闭包检查无法做成常驻门；`[patch.crates-io]` 换掉某个 crate 的**来源**同样看不见
+   >    （它不改名字，只改内容），那是闭包问题而不是清单解析问题。
+   > ② 重命名可以写在另一份文件里：`alias.workspace = true` + 根表 `alias = { package = "real" }`
+   >    以前会少报，现在由别名表解析，且根表自身另有守卫（上一轮文档曾把这条写成
+   >    「路径依赖不写 `package =` 就藏不住重命名」——那句只对③成立，对这条是沉默的）。
+   > ③ 不写 `package =` 的路径依赖确实藏不住：1.92.0 实测根表写
+   >    `sneaky-transport = { path = "crates/transport" }` 会 `no matching package named
+   >    sneaky-transport` 直接构建失败，这个口子是 cargo 自己关的。
 
 ### 仍未做（本轮明确不做，缺口如实标注）
 

@@ -5,9 +5,11 @@
 //! 主门（`cargo test --all-targets`）会立刻变红，而不是在若干轮之后才发现耦合回潮。
 //!
 //! 判定基于**解析后的真实依赖名**：`{ package = "tool-transport" }` 重命名、
-//! `"tool-transport" = {...}` 加引号的键、`[target.<cfg>.*dependencies]` 段里的声明
-//! 都必须被抓到。按声明键做文本/行匹配会漏检前两种合法写法，使本守卫静默保持绿色 ——
-//! 这是评审实证过的两个绕过向量，`manifest_deps.rs` 的元测试逐条钉住它们。
+//! `"tool-transport" = {...}` 加引号的键、`[target.<cfg>.*dependencies]` 段里的声明、
+//! 以及写在**根清单** `[workspace.dependencies]` 里再由 `alias.workspace = true` 继承的重命名，
+//! 都必须被抓到。按声明键做文本/行匹配会漏检前两种合法写法，只读成员清单会漏检最后一种，
+//! 两种情况下本守卫都会静默保持绿色 —— 这些都是实证过的绕过向量，
+//! `manifest_deps.rs` 的元测试逐条钉住它们。
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -15,7 +17,9 @@ use std::path::{Path, PathBuf};
 #[path = "manifest_deps.rs"]
 mod manifest_deps;
 
-use manifest_deps::{DOMAIN_CRATES, manifest_dependencies, violations};
+use manifest_deps::{
+    DOMAIN_CRATES, manifest_dependencies, violations, workspace_dependency_renames_from_root,
+};
 
 fn crate_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
@@ -25,11 +29,17 @@ fn crate_dir() -> PathBuf {
 ///
 /// 读不到就 panic（不是 `unwrap_or_default()`，那会把路径写错变成零断言）；
 /// 包名缺失与零依赖这两道防空转由共用判定 `manifest_dependencies` 负责，两份守卫同一份实现。
+/// 根清单的别名表由共用判定之外的 `workspace_dependency_renames_from_root()` 提供，
+/// 它内部用 `env!("CARGO_MANIFEST_DIR")` 定位根，故两份守卫拿到的是同一张表。
 fn read_manifest_dependencies(relative: &str) -> (String, BTreeSet<String>) {
     let path = crate_dir().join(relative);
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("读取 {} 失败：{error}", path.display()));
-    manifest_dependencies(&text, &path.display().to_string())
+    manifest_dependencies(
+        &text,
+        &path.display().to_string(),
+        &workspace_dependency_renames_from_root(),
+    )
 }
 
 /// presentation 层只允许经 `tool-application` 的 DTO 访问领域能力。

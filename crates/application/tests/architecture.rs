@@ -1,8 +1,9 @@
 //! Architecture contract：非 presentation crate 不得引入 UI/窗口依赖，
 //! 也不得反向依赖 presentation 层。
 //!
-//! 判定基于解析后的真实依赖名（含 `package = ` 重命名、加引号的键与 `[target.*]` 段），
-//! 不是清单文本包含 —— 后者可被两种合法写法绕过，见 `manifest_deps.rs` 的元测试。
+//! 判定基于解析后的真实依赖名（含 `package = ` 重命名、加引号的键、`[target.*]` 段，
+//! 以及**根清单** `[workspace.dependencies]` 里由 `alias.workspace = true` 继承来的重命名），
+//! 不是清单文本包含 —— 后者可被三种合法写法绕过，见 `manifest_deps.rs` 的元测试。
 //!
 //! 检查对象是**推导**出来的：扫描 `crates/*/Cargo.toml`，按 `[package] name` 跳过两个
 //! presentation crate。此前这里硬编码了 `tool-application` 的 4 个可达内部 crate（实际 11 个），
@@ -12,7 +13,7 @@
 //! 与 `crates/app/tests/architecture.rs` 共用同一份判定实现（`#[path]` 引同一文件），
 //! 避免「修了一处、另一处仍可绕过」。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -20,15 +21,18 @@ use std::path::{Path, PathBuf};
 mod manifest_deps;
 
 use manifest_deps::{
-    PRESENTATION_CRATES, UI_BANS, manifest_dependencies, violations, workspace_members,
+    DOMAIN_CRATES, PRESENTATION_CRATES, UI_BANS, manifest_dependencies, violations,
+    workspace_dependency_names_from_root, workspace_dependency_renames_from_root,
+    workspace_members, workspace_renames_to_banned,
 };
 
-/// 三道防空转下限：任何一道掉下来都说明扫描面在缩水，而不是边界变干净了。
-/// 数值按当前工作区（15 个 crate 目录 / 2 个 presentation / 16 个成员）取「不大于实际」的口径，
-/// 只在覆盖变少时变红。
+/// 四道防空转下限：任何一道掉下来都说明扫描面在缩水，而不是边界变干净了。
+/// 数值按当前工作区（15 个 crate 目录 / 2 个 presentation / 16 个成员 / 18 条 workspace deps）
+/// 取「不大于实际」的口径，只在覆盖变少时变红。
 const WORKSPACE_MEMBER_FLOOR: usize = 16;
 const CRATE_MANIFEST_FLOOR: usize = 15;
 const CHECKED_MANIFEST_FLOOR: usize = 13;
+const WORKSPACE_DEPENDENCY_FLOOR: usize = 15;
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -59,19 +63,25 @@ fn crate_manifests() -> Vec<PathBuf> {
 
 /// 读清单并交出 `(包名, 真实依赖名)`；读不到直接 panic（不是 `unwrap_or_default()`，
 /// 那会把路径写错退化成零断言）。「包名缺失」与「零依赖」两道防空转由共用判定负责。
-fn read_package_manifest(path: &Path) -> (String, BTreeSet<String>) {
+/// `workspace_renames` 是根 `[workspace.dependencies]` 的别名表，由调用方读一次传进来
+/// （全量扫描要判 13 份清单，逐份重读根清单只是噪音）。
+fn read_package_manifest(
+    path: &Path,
+    workspace_renames: &BTreeMap<String, String>,
+) -> (String, BTreeSet<String>) {
     let text = fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("读取 {} 失败：{error}", path.display()));
-    manifest_dependencies(&text, &path.display().to_string())
+    manifest_dependencies(&text, &path.display().to_string(), workspace_renames)
 }
 
 #[test]
 fn no_non_presentation_crate_depends_on_ui() {
     let mut checked = 0usize;
     let mut skipped: Vec<String> = Vec::new();
+    let workspace_renames = workspace_dependency_renames_from_root();
 
     for path in crate_manifests() {
-        let (name, names) = read_package_manifest(&path);
+        let (name, names) = read_package_manifest(&path, &workspace_renames);
         // 按 [package] name 跳过，不按目录名：`path.display().to_string().contains("crates/app")`
         // 在 Windows 上恒为 false（分隔符是 `\`），会把两个 presentation crate 混进检查集。
         if PRESENTATION_CRATES.contains(&name.as_str()) {
@@ -115,7 +125,7 @@ fn tool_platform_is_ui_free_so_the_boundary_rests_on_it() {
     // tool-platform 是 application 与 panels 的共同基座：它一旦被污染，
     // 两条边的传递闭包同时失守，而任何单清单检查都看不见。
     let path = workspace_root().join("crates/platform/Cargo.toml");
-    let (name, names) = read_package_manifest(&path);
+    let (name, names) = read_package_manifest(&path, &workspace_dependency_renames_from_root());
     assert_eq!(
         name, "tool-platform",
         "读错了清单，判定对象不是 tool-platform"
@@ -134,7 +144,7 @@ fn tool_platform_is_ui_free_so_the_boundary_rests_on_it() {
 #[test]
 fn application_manifest_has_no_ui_or_presentation_dependencies() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-    let (name, names) = read_package_manifest(&path);
+    let (name, names) = read_package_manifest(&path, &workspace_dependency_renames_from_root());
     assert_eq!(
         name, "tool-application",
         "读错了清单，判定对象不是 tool-application"
@@ -150,6 +160,43 @@ fn application_manifest_has_no_ui_or_presentation_dependencies() {
             "tool-application Cargo.toml 不得依赖 {banned}（实际依赖：{names:?}）"
         );
     }
+}
+
+/// 根清单 `[workspace.dependencies]` 不得把别名指向 UI/领域/presentation crate。
+///
+/// 为什么单独钉这一条：那张表**不是**依赖边，所以所有按清单扫描的守卫都刻意看不见它 ——
+/// 于是它成了「改一行就能给 13 份清单同时投毒」的唯一位置。解析层修好后（成员侧
+/// `alias.workspace = true` 会解析到真实名）投毒要成立仍需再改一份成员清单，
+/// 但那一步本来就会被成员守卫抓住；这条断言的价值是让**根**这次编辑当场变红并点名，
+/// 而不是只靠「根清单的改动在评审里看得见」这种口头约束。
+///
+/// 反向自检（必须真能红；当前根表没有 `package` 条目，所以夹具才是它唯一的可失败证据，
+/// 见 `manifest_deps.rs::workspace_renames_to_banned_reports_poisoned_root_entries`）：
+/// 往根 `[workspace.dependencies]` 加
+/// `sneaky-transport = { package = "tool-transport", path = "crates/transport" }`，
+/// `cargo +1.92.0 test -p tool-application --test architecture` 必须红并点名 tool-transport。
+#[test]
+fn root_workspace_dependencies_do_not_rename_to_banned_crates() {
+    let declared = workspace_dependency_names_from_root();
+    assert!(
+        declared.len() >= WORKSPACE_DEPENDENCY_FLOOR,
+        "根 [workspace.dependencies] 只有 {} 项（下限 {WORKSPACE_DEPENDENCY_FLOOR}）：\
+         读错文件或表被删空会让本用例退化成零断言",
+        declared.len()
+    );
+    let banned: Vec<&'static str> = UI_BANS
+        .iter()
+        .chain(DOMAIN_CRATES.iter())
+        .chain(PRESENTATION_CRATES.iter())
+        .copied()
+        .collect();
+    let hits = workspace_renames_to_banned(&workspace_dependency_renames_from_root(), &banned);
+    assert!(
+        hits.is_empty(),
+        "根清单 [workspace.dependencies] 不得用 `package = ` 把别名指向禁令 crate：{hits:?}\
+         （成员写 `别名.workspace = true` 就能拿到它的 API，而这张表本身不是依赖边，\
+         按清单扫描的守卫全都看不见）"
+    );
 }
 
 /// 扫描面必须覆盖全部工作区成员：落在 `crates/` 下的会被自动扫到，
