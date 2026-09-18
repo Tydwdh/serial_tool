@@ -1,5 +1,5 @@
 use crate::{
-    MAX_INGEST_PER_FRAME, MESSAGE_EVENT_BUFFER_CAPACITY, TerminalExportFormat, fmt_ts,
+    MAX_INGEST_PER_FRAME, MESSAGE_EVENT_BUFFER_CAPACITY, TerminalExportFormat, design, fmt_ts,
     table::{
         AutoScrollState, MessageSearch, RowHighlight, RowSelection, TextSelectionRows,
         bulk_copy_button, claim_copy_focus, copy_text_with_feedback, edge_scroll_delta,
@@ -25,6 +25,8 @@ const COL_GAP: f32 = 6.0;
 const LABEL_TO_MSG_GAP: f32 = 3.0;
 const LOG_SCROLL_ID: &str = "log-scroll-v2";
 const COPY_OWNER: &str = "log";
+/// 清空按钮两步确认的状态 id。
+const LOG_CLEAR_CONFIRM_ID: &str = "log-clear-confirm";
 /// 日志面板最大保留条数（与终端面板一致）。
 const MAX_LOG_ENTRIES: usize = 50_000;
 /// 跳转目标行高亮总时长（秒）。
@@ -560,26 +562,25 @@ impl LogPanel {
             });
 
             // 清空：两步确认（与终端面板一致），避免误触丢失系统日志。
-            let clear_id = ui.id().with("log_clear_armed_ts");
-            let now = ui.input(|i| i.time);
-            let armed_ts: Option<f64> = ui.ctx().memory(|m| m.data.get_temp(clear_id));
-            let armed = armed_ts.is_some_and(|t| now - t < 3.0);
-            let clear_label = if armed { "确认清空?" } else { "清空" };
-            let clear_btn = egui::Button::new(egui::RichText::new(clear_label).color(if armed {
-                crate::theme::red()
-            } else {
-                crate::theme::text_primary()
-            }));
-            if ui.add(clear_btn).clicked() {
-                if armed {
-                    self.clear();
-                    ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(clear_id));
-                } else {
-                    ui.ctx().memory_mut(|m| m.data.insert_temp(clear_id, now));
-                }
+            // 确认态只换等宽标签，不插入「取消」按钮，窄面板下工具栏不会重新换行；
+            // 取消交给 3 秒超时 / Esc / 点击别处。
+            let clear_armed = design::confirm_armed(ui, LOG_CLEAR_CONFIRM_ID);
+            let clear_btn = egui::Button::new(
+                egui::RichText::new(if clear_armed { "确认" } else { "清空" }).color(
+                    if clear_armed {
+                        crate::theme::red()
+                    } else {
+                        crate::theme::text_primary()
+                    },
+                ),
+            );
+            let clear_response = ui.add(clear_btn);
+            let clear_clicked = clear_response.clicked();
+            if clear_armed {
+                clear_response.on_hover_text("再次点击清空，3 秒内有效（Esc 或点击别处取消）");
             }
-            if armed && ui.small_button("取消").clicked() {
-                ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(clear_id));
+            if design::confirm_click(ui, LOG_CLEAR_CONFIRM_ID, clear_clicked) {
+                self.clear();
             }
         });
 
@@ -589,15 +590,18 @@ impl LogPanel {
             self.search.toolbar(ui, 120.0, "关键词", "区分大小写");
 
             ui.label("来源");
-            egui::ComboBox::from_id_salt("log-source-filter")
-                .width(100.0)
-                .selected_text(self.source_filter.as_deref().unwrap_or("全部"))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.source_filter, None, "全部");
-                    for name in self.source_names() {
-                        ui.selectable_value(&mut self.source_filter, Some(name.clone()), &name);
-                    }
-                });
+            // 该行会换行：ComboBox 必须按已知宽度占位（见 design::combo_slot）。
+            design::combo_slot(ui, 100.0, |ui| {
+                egui::ComboBox::from_id_salt("log-source-filter")
+                    .width(100.0)
+                    .selected_text(self.source_filter.as_deref().unwrap_or("全部"))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.source_filter, None, "全部");
+                        for name in self.source_names() {
+                            ui.selectable_value(&mut self.source_filter, Some(name.clone()), &name);
+                        }
+                    });
+            });
 
             if (self.search.is_active() || self.source_filter.is_some())
                 && ui.small_button("清除筛选").clicked()

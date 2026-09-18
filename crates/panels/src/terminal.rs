@@ -13,7 +13,7 @@ use crate::{
 use egui::text_selection::LabelSelectionState;
 use egui::{Color32, RichText, ScrollArea, Sense, Stroke};
 use egui_material_icons::icons::{
-    ICON_CANCEL, ICON_DELETE_SWEEP, ICON_DOWNLOAD, ICON_FILTER_ALT_OFF, ICON_SEARCH,
+    ICON_DELETE_SWEEP, ICON_DOWNLOAD, ICON_FILTER_ALT_OFF, ICON_SEARCH,
 };
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
@@ -32,6 +32,8 @@ const ROW_LEFT_PADDING: f32 = 4.0;
 const COL_GAP: f32 = 3.0;
 const PREVIEW_COL_MIN_WIDTH: f32 = 80.0;
 const COPY_OWNER: &str = "terminal";
+/// 清空按钮两步确认的状态 id。
+const CLEAR_CONFIRM_ID: &str = "terminal-clear-confirm";
 
 /// 终端端口列的短显示名：IPv4 地址 + 端口（如 `192.168.1.100:7125`）
 /// 只显示 IP 后两段（`1.100`），避免长端口名占据接收区视野；
@@ -816,31 +818,26 @@ impl TerminalPanel {
             });
 
             // 清空：两步确认，避免误触丢失刚出现的故障数据。
-            // 「清空」首次点击 → 变红「确认清空?」→ 再次点击才真正清空；
-            // 3 秒内未点则自动解除武装。
-            let clear_id = ui.id().with("clear_armed_ts");
-            let now = ui.input(|i| i.time);
-            let armed_ts: Option<f64> = ui.ctx().memory(|m| m.data.get_temp(clear_id));
-            let armed = armed_ts.is_some_and(|t| now - t < 3.0);
-            let clear_label = if armed { "确认清空?" } else { "清空" };
-            let clear_kind = if armed {
-                ButtonKind::Danger
-            } else {
-                ButtonKind::Ghost
-            };
-            if design::button(ui, ICON_DELETE_SWEEP, clear_label, clear_kind).clicked() {
-                if armed {
-                    self.clear();
-                    ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(clear_id));
+            // 确认态只把标签从「清空」换成等宽的「确认」，不再插入额外的「取消」
+            // 按钮——否则工具栏会变宽，窄面板下整组确认控件会被折到下一行。
+            // 取消交给 3 秒超时 / Esc / 点击别处（见 design::confirm_click）。
+            let clear_armed = design::confirm_armed(ui, CLEAR_CONFIRM_ID);
+            let clear_response = design::button(
+                ui,
+                ICON_DELETE_SWEEP,
+                if clear_armed { "确认" } else { "清空" },
+                if clear_armed {
+                    ButtonKind::Danger
                 } else {
-                    ui.ctx().memory_mut(|m| m.data.insert_temp(clear_id, now));
-                }
+                    ButtonKind::Ghost
+                },
+            );
+            let clear_clicked = clear_response.clicked();
+            if clear_armed {
+                clear_response.on_hover_text("再次点击清空，3 秒内有效（Esc 或点击别处取消）");
             }
-            if armed {
-                // 解除武装的可点击提示（点此取消）
-                if design::button(ui, ICON_CANCEL, "取消", ButtonKind::Ghost).clicked() {
-                    ui.ctx().memory_mut(|m| m.data.remove_temp::<f64>(clear_id));
-                }
+            if design::confirm_click(ui, CLEAR_CONFIRM_ID, clear_clicked) {
+                self.clear();
             }
         });
 
@@ -860,15 +857,19 @@ impl TerminalPanel {
             );
 
             ui.label("端口");
-            egui::ComboBox::from_id_salt("terminal-port-filter")
-                .width(100.0)
-                .selected_text(self.port_filter.as_deref().unwrap_or("全部"))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.port_filter, None, "全部");
-                    for port in self.store.port_names() {
-                        ui.selectable_value(&mut self.port_filter, Some(port.clone()), port);
-                    }
-                });
+            // 该行会换行：ComboBox 必须按已知宽度占位，否则窄面板下它直接溢出，
+            // 并把这行所属 Ui 的换行边界撑大（见 design::combo_slot）。
+            design::combo_slot(ui, 100.0, |ui| {
+                egui::ComboBox::from_id_salt("terminal-port-filter")
+                    .width(100.0)
+                    .selected_text(self.port_filter.as_deref().unwrap_or("全部"))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.port_filter, None, "全部");
+                        for port in self.store.port_names() {
+                            ui.selectable_value(&mut self.port_filter, Some(port.clone()), port);
+                        }
+                    });
+            });
 
             if design::button(ui, ICON_FILTER_ALT_OFF, "清除筛选", ButtonKind::Ghost).clicked()
             {
@@ -2253,6 +2254,98 @@ mod tests {
 
     fn item_text(item: &TerminalItem) -> String {
         String::from_utf8_lossy(item.bytes()).into_owned()
+    }
+
+    /// 在 harness 中渲染终端面板。
+    ///
+    /// kittest 在构建 harness 时就会先跑一帧，而 `icon_only` 用到的具名字体族
+    /// "material-icons" 必须在那一帧之前注册。因此第一帧只注册字体、不渲染面板。
+    fn terminal_harness<'a>(
+        panel: &'a std::cell::RefCell<TerminalPanel>,
+        size: egui::Vec2,
+    ) -> egui_kittest::Harness<'a> {
+        let registered = std::cell::Cell::new(false);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(size)
+            .build_ui(move |ui| {
+                if !registered.replace(true) {
+                    egui_material_icons::initialize(ui.ctx());
+                    return;
+                }
+                panel.borrow_mut().ui(ui);
+            });
+        harness.run();
+        harness
+    }
+
+    #[test]
+    fn narrow_toolbar_keeps_the_clear_confirmation_on_one_row() {
+        use egui_kittest::kittest::Queryable as _;
+
+        let bus = DataBus::new();
+        let panel = std::cell::RefCell::new(TerminalPanel::new(&bus));
+        let mut harness = terminal_harness(&panel, egui::vec2(1200.0, 240.0));
+
+        // 把面板收窄到「刚好放下一行工具栏」，这就是用户报的窄面板场景。
+        let idle = harness.get_by_label_contains("清空").rect();
+        let row_y = idle.min.y;
+        harness.set_size(egui::vec2(idle.max.x + 32.0, 240.0));
+        harness.run();
+        assert_eq!(
+            harness.get_by_label_contains("清空").rect().min.y,
+            row_y,
+            "前提：常态下工具栏正好放得下一行"
+        );
+
+        harness.get_by_label_contains("清空").click();
+        harness.run();
+
+        let armed = harness
+            .query_by_label_contains("确认")
+            .expect("首次点击进入确认态");
+        assert_eq!(armed.rect().min.y, row_y, "确认态不得把工具栏折到下一行");
+        assert!(
+            harness.query_by_label_contains("取消").is_none(),
+            "确认态不得插入额外控件"
+        );
+        assert!(armed.rect().width() <= idle.width() + 4.0);
+    }
+
+    #[test]
+    fn clicking_clear_twice_empties_the_terminal() {
+        use egui_kittest::kittest::Queryable as _;
+
+        let bus = DataBus::new();
+        let panel = std::cell::RefCell::new(TerminalPanel::new(&bus));
+        bus.publish(
+            Event::new(
+                serial_topics::SERIAL_RX,
+                "serial:COM1",
+                Direction::Rx,
+                Payload::Bytes(b"payload\n".to_vec()),
+            )
+            .with_metadata(serde_json::json!({ "port": "COM1" })),
+        );
+        panel.borrow_mut().ingest_all_pending();
+
+        let mut harness = terminal_harness(&panel, egui::vec2(1200.0, 240.0));
+
+        // 第一次点击只进入确认态，不能丢数据。
+        harness.get_by_label_contains("清空").click();
+        harness.run();
+        assert_eq!(
+            panel.borrow().store.iter().count(),
+            1,
+            "首次点击不得清空终端"
+        );
+
+        harness.get_by_label_contains("确认").click();
+        harness.run();
+        assert_eq!(
+            panel.borrow().store.iter().count(),
+            0,
+            "第二次点击才真正清空"
+        );
     }
 
     #[test]

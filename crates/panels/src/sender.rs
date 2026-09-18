@@ -7,6 +7,8 @@
 use egui::widgets::text_edit::TextEditState;
 use egui::{Id, Ui};
 
+use crate::design::combo_slot;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SendLineEnding {
     #[default]
@@ -133,18 +135,29 @@ pub fn sender_ui(ui: &mut Ui, view: &mut SendView<'_>) -> Vec<SendAction> {
     render_options(ui, view);
 
     let available = ui.available_size();
+    // 操作行一律换行（见 render_actions），插件按钮多时会多占一行。预留高度取
+    // 「上一帧量到的操作区高度」与常数中的较大值，这样宽度变小、按钮换行后不会
+    // 把最后一行挤出面板；首帧用常数，最多差一帧。
+    let measured = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<f32>(actions_height_id(view.layout)));
     let reserved = match view.layout {
-        SendLayout::Horizontal => 92.0,
-        SendLayout::Vertical => 150.0,
-    };
+        SendLayout::Horizontal => 92.0_f32,
+        SendLayout::Vertical => 150.0_f32,
+    }
+    .max(measured.unwrap_or(0.0));
     let min_input = 40.0_f32.min(available.y.max(0.0));
     let input_height = (available.y - reserved).max(min_input);
     let response = render_input(ui, view, input_height);
 
+    let actions_top = ui.cursor().min.y;
     render_actions(ui, view, &mut actions);
     if let Some(error) = view.error.as_deref() {
         ui.colored_label(crate::theme::red(), error);
     }
+    let actions_height = (ui.cursor().min.y - actions_top).max(0.0);
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(actions_height_id(view.layout), actions_height));
     ui.take_available_space();
 
     if response.changed() {
@@ -152,6 +165,14 @@ pub fn sender_ui(ui: &mut Ui, view: &mut SendView<'_>) -> Vec<SendAction> {
         *view.error = None;
     }
     actions
+}
+
+/// 记忆操作区实测高度的键（两种布局各自独立，避免拖拽 Dock 时互相污染）。
+fn actions_height_id(layout: SendLayout) -> Id {
+    Id::new(match layout {
+        SendLayout::Horizontal => "shared-send-actions-height-horizontal",
+        SendLayout::Vertical => "shared-send-actions-height-vertical",
+    })
 }
 
 fn render_options(ui: &mut Ui, view: &mut SendView<'_>) {
@@ -163,18 +184,24 @@ fn render_options(ui: &mut Ui, view: &mut SendView<'_>) {
             .and_then(|id| view.ports.iter().find(|port| port.id == id))
             .map(|port| port.label.clone())
             .unwrap_or_else(|| "请选择串口".to_owned());
-        egui::ComboBox::from_id_salt("shared-send-target-port")
-            .width(130.0)
-            .selected_text(selected)
-            .show_ui(ui, |ui| {
-                if view.ports.is_empty() {
-                    ui.add_enabled(false, egui::Label::new("无已打开串口"));
-                } else {
-                    for port in view.ports {
-                        ui.selectable_value(view.target_port, Some(port.id.clone()), &port.label);
+        combo_slot(ui, 130.0, |ui| {
+            egui::ComboBox::from_id_salt("shared-send-target-port")
+                .width(130.0)
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    if view.ports.is_empty() {
+                        ui.add_enabled(false, egui::Label::new("无已打开串口"));
+                    } else {
+                        for port in view.ports {
+                            ui.selectable_value(
+                                view.target_port,
+                                Some(port.id.clone()),
+                                &port.label,
+                            );
+                        }
                     }
-                }
-            });
+                });
+        });
         ui.separator();
         ui.selectable_value(view.hex_mode, false, "文本");
         ui.selectable_value(view.hex_mode, true, "HEX");
@@ -182,27 +209,22 @@ fn render_options(ui: &mut Ui, view: &mut SendView<'_>) {
             ui.checkbox(view.hex_strict, "严格")
                 .on_hover_text("严格模式：每个 HEX token 必须是完整的两位字节");
         }
-        ui.add_enabled_ui(!*view.hex_mode, |ui| {
-            egui::ComboBox::from_id_salt("shared-send-line-ending")
-                .width(72.0)
-                .selected_text(view.line_ending.label())
-                .show_ui(ui, |ui| {
-                    for ending in SendLineEnding::ALL {
-                        ui.selectable_value(view.line_ending, ending, ending.label());
-                    }
-                });
+        combo_slot(ui, 72.0, |ui| {
+            ui.add_enabled_ui(!*view.hex_mode, |ui| {
+                egui::ComboBox::from_id_salt("shared-send-line-ending")
+                    .width(72.0)
+                    .selected_text(view.line_ending.label())
+                    .show_ui(ui, |ui| {
+                        for ending in SendLineEnding::ALL {
+                            ui.selectable_value(view.line_ending, ending, ending.label());
+                        }
+                    });
+            });
         });
     };
 
-    if matches!(view.layout, SendLayout::Horizontal) {
-        egui::ScrollArea::horizontal()
-            .id_salt("shared-send-options-scroll")
-            .max_height(34.0)
-            .auto_shrink([false, true])
-            .show(ui, |ui| ui.horizontal(|ui| row(ui, view)));
-    } else {
-        ui.horizontal_wrapped(|ui| row(ui, view));
-    }
+    // 选项行一律换行：宽面板下插件按钮也不会被横向裁出视野，也不会多出滚动条。
+    ui.horizontal_wrapped(|ui| row(ui, view));
 }
 
 /// 读取文本框当前光标所在的字符下标；该文本框尚未布局过时返回 `None`。
@@ -415,25 +437,11 @@ fn render_actions(ui: &mut Ui, view: &mut SendView<'_>, actions: &mut Vec<SendAc
             }
         };
 
-    if matches!(view.layout, SendLayout::Horizontal) {
-        egui::ScrollArea::horizontal()
-            .id_salt("shared-send-actions-main-scroll")
-            .max_height(44.0)
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                ui.horizontal(|ui| render_main_row(ui, view, actions));
-            });
-        egui::ScrollArea::horizontal()
-            .id_salt("shared-send-actions-secondary-scroll")
-            .max_height(44.0)
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                ui.horizontal(|ui| render_secondary_row(ui, view, actions));
-            });
-    } else {
-        ui.horizontal_wrapped(|ui| render_main_row(ui, view, actions));
-        ui.horizontal_wrapped(|ui| render_secondary_row(ui, view, actions));
-    }
+    // 主操作行与次操作行一律换行：插件贡献的按钮（G文件/G单条/暂停恢复/取消等）
+    // 会把行撑过可用宽度，用横向 ScrollArea 会把它们裁到视野外，只能靠拖动滚动条
+    // 才能点到；换行则始终可见。
+    ui.horizontal_wrapped(|ui| render_main_row(ui, view, actions));
+    ui.horizontal_wrapped(|ui| render_secondary_row(ui, view, actions));
 }
 
 fn render_history(ui: &mut Ui, view: &mut SendView<'_>) {
@@ -564,7 +572,6 @@ pub fn record_history(history: &mut Vec<String>, text: impl Into<String>, max_hi
 
 #[cfg(test)]
 mod tests {
-    use super::hex_error;
 
     // ── 活的 HEX 门禁真值表 ───────────────────────────────────────────────
     //
@@ -706,6 +713,265 @@ mod tests {
             tool_core::parse_hex_strict("0xAB").as_deref(),
             Ok([0xAB].as_slice()),
             "对照格：`tool_core` 对单层前缀同样放行",
+        );
+    }
+    use super::*;
+    use egui_kittest::{Harness, kittest::Queryable as _};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// 发送器的全部可变状态，测试里持有它并在每帧构造 [`SendView`]。
+    struct SenderFixture {
+        ports: Vec<SendPortItem>,
+        target_port: Option<String>,
+        input: String,
+        hex_mode: bool,
+        hex_strict: bool,
+        line_ending: SendLineEnding,
+        error: Option<String>,
+        history: Vec<String>,
+        history_search: String,
+        history_index: Option<usize>,
+        saved_input: String,
+        periodic_enabled: bool,
+        periodic_interval_ms: String,
+        periodic_send_count: u64,
+        dtr: bool,
+        rts: bool,
+        toolbar_buttons: Vec<SendToolbarButton>,
+        layout: SendLayout,
+    }
+
+    impl SenderFixture {
+        fn new(layout: SendLayout) -> Self {
+            Self {
+                ports: vec![SendPortItem {
+                    id: "COM1".to_owned(),
+                    label: "COM1".to_owned(),
+                }],
+                target_port: Some("COM1".to_owned()),
+                input: "payload".to_owned(),
+                hex_mode: false,
+                hex_strict: false,
+                line_ending: SendLineEnding::Lf,
+                error: None,
+                history: vec!["上一帧发送的内容".to_owned()],
+                history_search: String::new(),
+                history_index: None,
+                saved_input: String::new(),
+                periodic_enabled: false,
+                periodic_interval_ms: "1000".to_owned(),
+                periodic_send_count: 0,
+                dtr: false,
+                rts: false,
+                toolbar_buttons: Vec::new(),
+                layout,
+            }
+        }
+
+        /// gcode-sender 这类插件会在操作行里追加按钮。
+        fn with_plugin_buttons(mut self, titles: &[&str]) -> Self {
+            self.toolbar_buttons = titles
+                .iter()
+                .map(|title| SendToolbarButton {
+                    plugin_id: "test.plugin".to_owned(),
+                    contribution_id: title.to_string(),
+                    title: (*title).to_owned(),
+                    tooltip: None,
+                    order: 0,
+                    enabled: true,
+                })
+                .collect();
+            self
+        }
+
+        fn view(&mut self) -> SendView<'_> {
+            SendView {
+                ports: &self.ports,
+                target_port: &mut self.target_port,
+                target_open: true,
+                input: &mut self.input,
+                hex_mode: &mut self.hex_mode,
+                hex_strict: &mut self.hex_strict,
+                line_ending: &mut self.line_ending,
+                error: &mut self.error,
+                history: &mut self.history,
+                history_search: &mut self.history_search,
+                history_index: &mut self.history_index,
+                saved_input: &mut self.saved_input,
+                periodic_enabled: &mut self.periodic_enabled,
+                periodic_interval_ms: &mut self.periodic_interval_ms,
+                periodic_send_count: &mut self.periodic_send_count,
+                dtr: &mut self.dtr,
+                rts: &mut self.rts,
+                toolbar_buttons: &self.toolbar_buttons,
+                max_history: 200,
+                layout: self.layout,
+            }
+        }
+    }
+
+    /// 渲染发送器，并返回 (harness, 面板矩形)。
+    fn sender_harness<'a>(
+        fixture: &'a Rc<RefCell<SenderFixture>>,
+        panel_rect: &'a Rc<RefCell<Option<egui::Rect>>>,
+        size: egui::Vec2,
+    ) -> Harness<'a> {
+        let mut harness = Harness::builder().with_size(size).build_ui(move |ui| {
+            *panel_rect.borrow_mut() = Some(ui.max_rect());
+            let mut fixture = fixture.borrow_mut();
+            let _ = sender_ui(ui, &mut fixture.view());
+        });
+        harness.run();
+        harness
+    }
+
+    fn assert_buttons_inside_panel(harness: &Harness<'_>, panel: egui::Rect, labels: &[&str]) {
+        for label in labels {
+            let rect = harness.get_by_label(label).rect();
+            assert!(
+                panel.contains_rect(rect),
+                "「{label}」被裁出面板：按钮 {rect:?} 不在 {panel:?} 内"
+            );
+        }
+    }
+
+    #[test]
+    fn wrapped_action_row_keeps_every_plugin_button_visible() {
+        let fixture = Rc::new(RefCell::new(
+            SenderFixture::new(SendLayout::Horizontal).with_plugin_buttons(&[
+                "G文件",
+                "G单条",
+                "暂停/恢复",
+                "取消",
+                "回零",
+                "预热",
+                "校准",
+                "导出 G",
+            ]),
+        ));
+        let panel_rect = Rc::new(RefCell::new(None));
+        // 430px 宽（仍在 ≥420px 的 Horizontal 区间）：内置按钮 + 8 个插件按钮
+        // 一行放不下，必须换行而不是横向裁切。
+        let harness = sender_harness(&fixture, &panel_rect, egui::vec2(430.0, 360.0));
+        let panel = panel_rect.borrow().expect("panel rect");
+
+        assert_buttons_inside_panel(
+            &harness,
+            panel,
+            &[
+                "发送",
+                "清空",
+                "历史",
+                "G文件",
+                "G单条",
+                "暂停/恢复",
+                "取消",
+                "回零",
+                "预热",
+                "校准",
+                "导出 G",
+            ],
+        );
+    }
+
+    /// 窄面板（Vertical 布局）同样不能裁掉任何按钮。
+    #[test]
+    fn narrow_panel_keeps_every_plugin_button_visible() {
+        let fixture = Rc::new(RefCell::new(
+            SenderFixture::new(SendLayout::Vertical).with_plugin_buttons(&[
+                "G文件",
+                "G单条",
+                "暂停/恢复",
+                "取消",
+            ]),
+        ));
+        let panel_rect = Rc::new(RefCell::new(None));
+        let harness = sender_harness(&fixture, &panel_rect, egui::vec2(300.0, 360.0));
+        let panel = panel_rect.borrow().expect("panel rect");
+
+        assert_buttons_inside_panel(
+            &harness,
+            panel,
+            &[
+                "发送",
+                "清空",
+                "历史",
+                "G文件",
+                "G单条",
+                "暂停/恢复",
+                "取消",
+            ],
+        );
+    }
+
+    /// 操作行换行后可能多占一行；预留高度必须跟着实测高度走，否则最后一行会被
+    /// 输入区挤出面板底部。
+    #[test]
+    fn wrapped_action_rows_stay_above_the_panel_bottom() {
+        let fixture = Rc::new(RefCell::new(
+            SenderFixture::new(SendLayout::Horizontal).with_plugin_buttons(&[
+                "G文件",
+                "G单条",
+                "暂停/恢复",
+                "取消",
+            ]),
+        ));
+        let panel_rect = Rc::new(RefCell::new(None));
+        // 高度收紧到刚好够：换行前 92px 的旧预留会不够用。
+        let harness = sender_harness(&fixture, &panel_rect, egui::vec2(470.0, 250.0));
+        let panel = panel_rect.borrow().expect("panel rect");
+
+        assert_buttons_inside_panel(
+            &harness,
+            panel,
+            &[
+                "发送",
+                "G文件",
+                "暂停/恢复",
+                "取消",
+                "周期发送",
+                "DTR",
+                "RTS",
+            ],
+        );
+    }
+
+    /// 操作行不再使用横向滚动：同一行在宽面板下也不会出现滚动条容器。
+    #[test]
+    fn action_row_has_no_horizontal_scroll_container() {
+        let fixture = Rc::new(RefCell::new(SenderFixture::new(SendLayout::Horizontal)));
+        let panel_rect = Rc::new(RefCell::new(None));
+        let harness = sender_harness(&fixture, &panel_rect, egui::vec2(640.0, 320.0));
+
+        // 发送按钮left边与面板左边对齐：若外层是横向 ScrollArea，会有内容内边距。
+        let panel = panel_rect.borrow().expect("panel rect");
+        let send = harness.get_by_label("发送").rect();
+        assert!(
+            (send.min.x - panel.min.x).abs() < 12.0,
+            "操作行左边缘 {} 与面板左边缘 {} 偏差过大，可能仍在滚动容器内",
+            send.min.x,
+            panel.min.x
+        );
+    }
+
+    /// 第二次点击不能把输入区顶到操作行之上（原 `send_layout_input_does_not_overlap_actions`
+    /// 的语义，改为针对真实实现断言）。
+    #[test]
+    fn send_input_stays_above_the_action_row() {
+        let fixture = Rc::new(RefCell::new(SenderFixture::new(SendLayout::Horizontal)));
+        let panel_rect = Rc::new(RefCell::new(None));
+        let harness = sender_harness(&fixture, &panel_rect, egui::vec2(640.0, 360.0));
+
+        let send = harness.get_by_label("发送").rect();
+        let input = harness
+            .query_by_role(egui::accesskit::Role::MultilineTextInput)
+            .expect("发送输入框应当存在");
+        assert!(
+            input.rect().max.y <= send.min.y + 0.5,
+            "输入区底部 {} 超过操作行顶部 {}，发生重叠",
+            input.rect().max.y,
+            send.min.y
         );
     }
 }

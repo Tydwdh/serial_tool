@@ -29,6 +29,23 @@ pub fn icon_only(icon: MaterialIcon, color: Color32, size: f32) -> RichText {
     icon.rich_text().color(color).size(size)
 }
 
+/// 在换行行（`horizontal_wrapped`）里按已知宽度放置一个下拉框。
+///
+/// `egui::ComboBox` 自身不参与换行：剩余宽度不足时它直接向右溢出。更糟的是
+/// `Region::expand_to_include_rect` 会同时放大 `min_rect` 与 `max_rect`，于是
+/// **同一块 Ui 里后面所有行**都改用被撑坏的边界排版——表现就是按钮被裁到面板外、
+/// 而且不再换行。先用 `allocate_ui_with_layout` 按已知宽度占位，换行判断就落在
+/// 占位块上，ComboBox 在块内正常绘制。
+pub fn combo_slot<R>(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let height = ui.spacing().interact_size.y;
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, height),
+        egui::Layout::left_to_right(egui::Align::Center),
+        add,
+    )
+    .inner
+}
+
 pub fn button(
     ui: &mut egui::Ui,
     icon: MaterialIcon,
@@ -86,6 +103,110 @@ pub fn card() -> Frame {
         .stroke(Stroke::new(1.0, theme::border()))
         .corner_radius(CARD_RADIUS)
         .inner_margin(egui::Margin::symmetric(14, 12))
+}
+
+/// 两步确认的机械状态：首次点击武装，再次点击才算确认。
+///
+/// 与 egui 无关，便于单独测试。默认 3 秒内未确认即自动解除。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TwoStepConfirm {
+    armed_at_ms: Option<u64>,
+}
+
+impl TwoStepConfirm {
+    /// 确认态自动解除的时长（毫秒）。用户看得到、也来得及点第二下。
+    pub const TIMEOUT_MS: u64 = 3_000;
+
+    pub fn is_armed(&self, now_ms: u64) -> bool {
+        self.armed_at_ms
+            .is_some_and(|armed| now_ms.saturating_sub(armed) < Self::TIMEOUT_MS)
+    }
+
+    pub fn arm(&mut self, now_ms: u64) {
+        self.armed_at_ms = Some(now_ms);
+    }
+
+    pub fn disarm(&mut self) {
+        self.armed_at_ms = None;
+    }
+
+    /// 处理一次点击。返回 `true` 表示这次点击应当真正执行动作。
+    pub fn click(&mut self, now_ms: u64) -> bool {
+        if self.is_armed(now_ms) {
+            self.armed_at_ms = None;
+            true
+        } else {
+            self.arm(now_ms);
+            false
+        }
+    }
+}
+
+/// 读取两步确认按钮当前是否处于确认态，供调用方选择标签与配色。
+///
+/// 标签必须与 [`confirm_click`] 中渲染的按钮使用同一个 `id_salt`。
+pub fn confirm_armed(ui: &egui::Ui, id_salt: &str) -> bool {
+    let state = read_confirm_state(ui, id_salt);
+    state.is_armed(now_ms(ui))
+}
+
+/// 提交两步确认按钮本帧的交互，返回是否应当执行动作。
+///
+/// 两个步骤都没有额外占位：确认态只换标签，不要另外插入「取消」按钮——那样会
+/// 加宽工具栏，窄面板下 `horizontal_wrapped` 会把整组确认控件折到下一行。
+/// 取消由超时、Esc 和「点击别处」负责。
+///
+/// 调用方必须保证确认态标签与常态标签等宽（通常同为两个或四个全角字符）。
+pub fn confirm_click(ui: &egui::Ui, id_salt: &str, clicked: bool) -> bool {
+    let now = now_ms(ui);
+    let mut state = read_confirm_state(ui, id_salt);
+    if clicked {
+        let confirmed = state.click(now);
+        write_confirm_state(ui, id_salt, state);
+        return confirmed;
+    }
+
+    // 只有已经武装时才需要处理「放弃」：Esc 或任意其它点击都算取消。
+    //
+    // 这里只看 `any_click()`（按下并抬起）而不是 `any_pressed()`：确认态的第二次
+    // 点击在按下帧还没有产生 `clicked()`，若把按下也算作「点击别处」，就会在
+    // 用户确认的瞬间先解除、再被抬起帧重新武装。
+    if state.is_armed(now) {
+        let dismissed =
+            ui.input(|input| input.pointer.any_click() || input.key_pressed(egui::Key::Escape));
+        if dismissed {
+            state.disarm();
+            write_confirm_state(ui, id_salt, state);
+        }
+    }
+    false
+}
+
+fn now_ms(ui: &egui::Ui) -> u64 {
+    (ui.input(|input| input.time) * 1_000.0).max(0.0) as u64
+}
+
+fn confirm_id(ui: &egui::Ui, id_salt: &str) -> egui::Id {
+    ui.id().with(id_salt)
+}
+
+fn read_confirm_state(ui: &egui::Ui, id_salt: &str) -> TwoStepConfirm {
+    ui.ctx()
+        .memory(|memory| memory.data.get_temp(confirm_id(ui, id_salt)))
+        .unwrap_or_default()
+}
+
+fn write_confirm_state(ui: &egui::Ui, id_salt: &str, state: TwoStepConfirm) {
+    let id = confirm_id(ui, id_salt);
+    // 时间必须在取内存锁之前算好：在 memory_mut 闭包里读 input 会形成锁嵌套。
+    let now = now_ms(ui);
+    ui.ctx().memory_mut(|memory| {
+        if state.is_armed(now) {
+            memory.data.insert_temp(id, state);
+        } else {
+            memory.data.remove_temp::<TwoStepConfirm>(id);
+        }
+    });
 }
 
 pub fn elevated_card() -> Frame {
@@ -231,7 +352,7 @@ pub fn segmented_toggle(
 mod tests {
     use super::*;
     use egui_kittest::{Harness, kittest::Queryable as _};
-    use egui_material_icons::icons::ICON_CHECK;
+    use egui_material_icons::icons::{ICON_CHECK, ICON_DELETE_SWEEP};
     use std::{cell::Cell, rc::Rc};
 
     #[test]
@@ -263,6 +384,123 @@ mod tests {
                 "compact toolbar lost action {label}"
             );
         }
+    }
+
+    #[test]
+    fn two_step_confirm_needs_a_second_click_inside_the_timeout() {
+        let mut state = TwoStepConfirm::default();
+        assert!(!state.click(1_000), "首次点击只进入确认态");
+        assert!(state.is_armed(1_000));
+
+        assert!(state.click(2_000), "超时内的第二次点击才算确认");
+        assert!(!state.is_armed(2_000), "确认后必须解除确认态");
+    }
+
+    #[test]
+    fn two_step_confirm_expires_without_a_second_click() {
+        let mut state = TwoStepConfirm::default();
+        state.click(0);
+
+        assert!(
+            !state.is_armed(TwoStepConfirm::TIMEOUT_MS),
+            "超过超时窗口后确认态必须失效"
+        );
+        assert!(
+            !state.click(TwoStepConfirm::TIMEOUT_MS),
+            "失效后的点击重新进入确认态，而不是直接执行"
+        );
+    }
+
+    #[test]
+    fn confirm_button_keeps_a_stable_width_and_offers_no_cancel_widget() {
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(320.0, 120.0))
+            .build_ui(|ui| {
+                egui_material_icons::initialize(ui.ctx());
+                ui.horizontal_wrapped(|ui| {
+                    let armed = confirm_armed(ui, "demo-confirm");
+                    let response = button(
+                        ui,
+                        ICON_DELETE_SWEEP,
+                        if armed { "确认" } else { "清空" },
+                        if armed {
+                            ButtonKind::Danger
+                        } else {
+                            ButtonKind::Ghost
+                        },
+                    );
+                    let clicked = response.clicked();
+                    confirm_click(ui, "demo-confirm", clicked);
+                });
+            });
+        harness.run();
+
+        let idle = harness.get_by_label_contains("清空").rect();
+        harness.get_by_label_contains("清空").click();
+        harness.run();
+
+        let armed = harness
+            .query_by_label_contains("确认")
+            .expect("首次点击后进入确认态");
+        // 关键是「不变宽」：变宽才会把窄工具栏挤到下一行。测试环境没有中日韩
+        // 字体，两个全角字走回退字形时会有几像素差异，因此允许极小抖动。
+        assert!(
+            armed.rect().width() <= idle.width() + 4.0,
+            "确认态不得让按钮变宽：idle={} armed={}",
+            idle.width(),
+            armed.rect().width()
+        );
+        assert!(
+            harness.query_by_label_contains("取消").is_none(),
+            "确认态不能再插入「取消」按钮，否则窄面板下工具栏会重新换行"
+        );
+    }
+
+    #[test]
+    fn confirm_button_is_dismissed_by_escape_and_by_other_clicks() {
+        let mut harness = Harness::builder()
+            .with_size(egui::vec2(320.0, 120.0))
+            .build_ui(|ui| {
+                egui_material_icons::initialize(ui.ctx());
+                ui.horizontal_wrapped(|ui| {
+                    let armed = confirm_armed(ui, "demo-confirm");
+                    let response = button(
+                        ui,
+                        ICON_DELETE_SWEEP,
+                        if armed { "确认" } else { "清空" },
+                        ButtonKind::Ghost,
+                    );
+                    let clicked = response.clicked();
+                    confirm_click(ui, "demo-confirm", clicked);
+                    button(ui, ICON_CHECK, "别处", ButtonKind::Ghost);
+                });
+            });
+        harness.run();
+
+        harness.get_by_label_contains("清空").click();
+        harness.run();
+        assert!(
+            harness.query_by_label_contains("确认").is_some(),
+            "首次点击进入确认态"
+        );
+
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+        assert!(
+            harness.query_by_label_contains("清空").is_some(),
+            "Esc 应解除确认态"
+        );
+
+        harness.get_by_label_contains("清空").click();
+        harness.run();
+        assert!(harness.query_by_label_contains("确认").is_some());
+
+        harness.get_by_label_contains("别处").click();
+        harness.run();
+        assert!(
+            harness.query_by_label_contains("清空").is_some(),
+            "点击别处应解除确认态"
+        );
     }
 
     #[test]

@@ -245,8 +245,6 @@ pub(crate) enum LineEnding {
 }
 
 impl LineEnding {
-    pub(crate) const ALL: [Self; 4] = [Self::None, Self::Lf, Self::Cr, Self::Crlf];
-
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::None => "无",
