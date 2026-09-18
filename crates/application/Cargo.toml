@@ -35,3 +35,4 @@ wasm-bindgen-futures = "0.4"
 
 [dev-dependencies]
 tool-testing = { path = "../testing" }
+toml.workspace = true

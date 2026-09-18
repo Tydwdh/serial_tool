@@ -118,7 +118,7 @@ cargo tree -p tool-application | grep -i egui    # 0 行
   **当前状态（修复后）**：`cargo +1.92.0 fmt --all --check`、
   `cargo +1.92.0 clippy --workspace --all-targets -- -D warnings`、
   `cargo +1.92.0 test --workspace --all-targets` 三条均 **exit 0**，
-  test 为 **506 passed / 0 failed / 7 ignored**（21 targets）。
+  test 为 **557 passed / 0 failed / 7 ignored**（22 targets）。
   注意 CI 的 `wasm` 作业 clippy（`:195`）**同样带 `-D warnings`**，且必须用
   `--target wasm32-unknown-unknown` 才会 lint 到 wasm-only 代码 —— 只跑宿主侧门抓不到上面第二个红门。
 
@@ -152,13 +152,46 @@ cargo tree -p tool-application | grep -i egui    # 0 行
    ```
 4. **CI 的 Windows 作业不再被 `default-members` 收窄** —— `.github/workflows/ci.yml` 的
    clippy 与 test 均带 `--workspace`，与 Linux 作业一致。核对：见下方「验证」段。
-5. **新增 app 侧架构守卫（本轮）** —— `crates/app/tests/architecture.rs` 的 4 条断言把
-   "`crates/panels` 不得直连领域 crate（transport/recorder/extension/marketplace/lua-host/updater）"
-   与"app 不得重新引入已删依赖"变成**可失败的契约**（而非仅靠文档约定）。
-   它由 `cargo test --all-targets` 执行（app 的 integration test target）。核对：
-   ```bash
-   cargo test --all-targets        # 应见 tests\architecture.rs -> 4 passed
+5. **架构守卫改为「解析后的真实依赖名」（本轮）** —— 两份守卫（`crates/app/tests/architecture.rs`、
+   `crates/application/tests/architecture.rs`）过去都拿 `Cargo.toml` 做**文本**判定，
+   评审在仓库外副本实证了两个合法清单即可绕过：
+   ```toml
+   my-transport = { package = "tool-transport", path = "../transport" }   # 声明名 ≠ 真实包名
+   "tool-transport" = { path = "../transport" }                            # 加引号的键
    ```
+   现在判定统一到 `crates/app/tests/manifest_deps.rs`（后者用
+   `#[path = "../../app/tests/manifest_deps.rs"]` 引同一份实现，不复制第二份）：
+   * `dependency_names()` 用 `toml` 解析清单，返回**解析后的真实 crate 名**，
+     覆盖 `[dependencies]/[dev-dependencies]/[build-dependencies]` 与任意
+     `[target.<cfg>.*dependencies]`，重命名以 `package` 字段为准；
+     `[workspace.dependencies]`（版本声明）与 `[package] name` 都不算依赖边。
+   * `violations()` 做**精确集合比较**，因此 `egui` 不会吃掉 `egui_kittest`、
+     `tool-application` 不会吃掉 `tool-application-extra`（子串匹配给的是恒真/恒假假证据）。
+   * 判定器自身带 8 条元测试（含上述两个绕过向量、近亲反例，以及两条 `#[should_panic]`
+     防空转夹具：无 `[package] name` 与零依赖清单都必须炸），先红后绿；
+     它同时是独立 test target，故守卫编不过时元测试仍可单独跑。
+   * UI 禁令覆盖面从「`tool-application` 的 4 个可达内部 crate（实际 11 个）」改为
+     **推导**的 `crates/*/Cargo.toml` 全集，按 `[package] name` 跳过两个 presentation crate；
+     `tool-platform`（`application` 与 `panels` 的无条件共同基座）另有单条锁定断言，
+     禁用语也补上了 `rfd` 与 `egui_kittest`。非 presentation crate 同时被禁止反向依赖
+     `tool-panels` / `hardware-workbench-app`。
+   * **防空转**：扫描目录读不到 → panic；扫到的清单份数 < 15、检查份数 < 13、
+     根 `workspace.members` < 16 → 当场红；单份清单解析出零依赖 → 红；
+     被跳过的集合必须**恰好**等于 presentation crate 集合（多跳=静默放行，也会红）。
+     `every_workspace_member_is_covered_by_the_scan` 进一步要求 `crates/` 之外的成员显式登记。
+   核对（反向自检，必须真能红）：
+   ```bash
+   # ① 往 crates/panels/Cargo.toml 加 my-transport = { package = "tool-transport", path = "../transport" }
+   cargo +1.92.0 test -p hardware-workbench-app --test architecture    # 红，点名 tool-transport
+   # ② 往 crates/platform/Cargo.toml 加 egui = "0.35"
+   cargo +1.92.0 test -p tool-application --test architecture           # 红，点名 tool-platform
+   # ③ 还原后
+   cargo +1.92.0 test --workspace --all-targets                          # 绿
+   ```
+   > 踩过的坑（已修）：按目录名跳过 presentation 写成
+   > `path.display().to_string().contains("crates/app")` 时，Windows 分隔符是 `\`，
+   > 该判定**恒假**，两个 UI crate 会混进检查集让守卫当场恒红；故改为按 `[package] name` 跳过。
+   > 同理根 `Cargo.toml` 的 `members` 已补上 `crates/recorder`（此前只靠 path-dep 隐式纳入）。
 
 ### 仍未做（本轮明确不做，缺口如实标注）
 
@@ -223,7 +256,7 @@ cargo tree -p tool-application | grep -i egui    # 0 行
 10. **`egui_extras` 是可证明的死依赖（实测，本轮裁决不做）**：
    只在 `Cargo.toml:35`（workspace 声明）与 `crates/app/Cargo.toml:16` 出现；
    **`crates/app` 内 0 引用**，全 `crates/` 的 `.rs` 中 0 处代码引用
-   （唯一命中是 `crates/application/tests/architecture.rs:13` 的禁用语清单字符串字面量）。
+   （唯一命中是 `crates/app/tests/manifest_deps.rs` 的禁用语清单字符串字面量）。
    **影响面（实测）**：移除后 `Cargo.lock` 减少 **35 行**（**0 增 35 删**，6374 → 6339 行），
    消失的包恰为 **3 个**：`egui_extras` / `enum-map` / `enum-map-derive`，均无其它引用者。
    > **数字出处与测量差异（重要）**：
