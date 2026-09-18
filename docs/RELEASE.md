@@ -200,9 +200,15 @@ apply 前再拿磁盘文件比对一次。`sha256` 为**必填**字段，缺失�
 ### 沙箱
 
 Lua 插件运行在受限沙箱中:
-- 禁止 `BASE`/`IO`/`OS`/`DEBUG`/`FFI` 标准库
-- `package.preload` 只读
-- `dofile`/`loadfile` 不可用
+- 标准库只显式装载 `TABLE`/`STRING`/`MATH`/`UTF8`/`PACKAGE`/`COROUTINE`，
+  不启用 `IO`/`OS`/`DEBUG`/`FFI`；`base` 例外——mlua 建 state 时无条件打开它，
+  `StdLib` 位掩码删不掉
+- 所以 `dofile`/`loadfile`/`load` 由 `harden_globals()`
+  （`crates/lua_host/src/lib.rs`）逐个显式置 `nil`：插件不能按文件名、也不能从字符串
+  造 chunk 来加载宿主上的 `.lua`
+- `require` 同样收紧：`package.searchers` 只保留 preload 一项，文件型 searcher 已摘除
+  （`package.path` 对插件可写，留着它等于给 `loadfile` 换个门），`package.preload` 只读，
+  C 模块 searcher 由 mlua 的 safe 构造器换成报错桩
 - 指令计数钩子防止无限循环
 
 ## 常见问题

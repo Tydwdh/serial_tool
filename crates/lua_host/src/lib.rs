@@ -400,6 +400,37 @@ pub fn run_plugin(
     })
 }
 
+/// mlua 在建 state 时无条件打开 `base`（`luaL_requiref(state, "_G", luaopen_base, 1)`，
+/// mlua-0.11.6 `src/state/raw.rs:139`），`StdLib` 位掩码只能增删其它标准库、无法移除
+/// base。Lua 5.4 的 `dofile`、`loadfile`、`load` 都在 `base_funcs` 里，因此必须显式
+/// 抹掉：否则插件可读取并执行宿主文件系统上的任意 `.lua`（含其它插件源码），沙箱边界
+/// 形同虚设。
+///
+/// `PACKAGE` 是启用的（插件要 `require("hw.codec")`），所以这里同时收紧 `require`：
+/// `package.searchers` 只保留 preload 一个。mlua 的 safe 构造器已经把两个 C searcher
+/// 换成报错桩（`disable_c_modules`，`src/state.rs:2286`），但 Lua 文件 searcher 仍然按
+/// `package.path` 去 `luaL_loadfile` 打开磁盘，而 `package.path` 对插件可写 —— 不摘掉
+/// 它，抹掉 `loadfile` 只是给同一扇门换了把锁。
+///
+/// Web 端 `omnilua` 走 `SandboxConfig::remove_globals`
+/// （`plugin_runtime/src/web_lua.rs:87-97`），本函数让 native 与它对等，并多抹掉一个
+/// `load`。
+pub(crate) fn harden_globals(lua: &Lua) -> mlua::Result<()> {
+    for name in ["dofile", "loadfile", "load"] {
+        lua.globals().set(name, mlua::Value::Nil)?;
+    }
+    // `package` 不在 = PACKAGE 没装载，`require` 也不存在，没什么可收紧；
+    // `package` 在而 `searchers` 取不到就往上报错，宁可拒绝启动也不静默留着文件 searcher。
+    if let Ok(package) = lua.globals().get::<Table>("package") {
+        let searchers: Table = package.get("searchers")?;
+        let preload_searcher = searchers.get::<Value>(1)?;
+        let frozen = lua.create_table()?;
+        frozen.set(1, preload_searcher)?;
+        package.set("searchers", frozen)?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn plugin_event_loop(
     source: String,
@@ -433,6 +464,17 @@ fn plugin_event_loop(
             return;
         }
     };
+
+    if let Err(error) = harden_globals(&lua) {
+        *outcome.lock() = Some(LuaRunState::Failed);
+        bus.publish(Event::system_log(
+            LogLevel::Error,
+            &config.source,
+            format!("加固 Lua 全局失败：{error}"),
+        ));
+        alive.store(false, Ordering::Relaxed);
+        return;
+    }
 
     // 安装指令 hook：防止死循环卡死禁用/退出
     let hook_stop = stop.clone();
@@ -946,6 +988,7 @@ fn run_script_blocking(
             | StdLib::COROUTINE,
         LuaOptions::default(),
     )?;
+    harden_globals(&lua)?;
 
     let test_services = LuaHostServices {
         plugin_root: None,
@@ -2104,24 +2147,334 @@ assert(err ~= nil, "expected error message")
     }
 
     #[test]
-    fn sandbox_dofile_not_available() {
+    fn sandbox_base_file_loaders_are_absent() {
         let bus = DataBus::new();
         let transport = TransportManager::new(bus.clone());
-
-        // dofile 不应在沙箱中可用 (StdLib::BASE 未启用)
+        // 断言"全局不存在"，不是"调用报错了"：后者在文件缺失时与被禁不可区分。
         let result = run_script_for_test(
             r#"
-local ok, err = pcall(function()
-    dofile("secret.txt")
-end)
-assert(not ok, "dofile must not be available")
+assert(dofile == nil, "dofile must be nil, got " .. type(dofile))
+assert(loadfile == nil, "loadfile must be nil, got " .. type(loadfile))
+assert(load == nil, "load must be nil, got " .. type(load))
+-- base 本身不能没：pcall/assert/type 都是 base_funcs 的成员
+assert(type(pcall) == "function", "pcall must survive")
+assert(type(assert) == "function", "assert must survive")
 "#,
             bus,
             transport,
         );
+        assert!(result.is_ok(), "沙箱基线断言失败：{result:?}");
+    }
+
+    #[test]
+    fn sandbox_cannot_require_os_or_io() {
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+        // PACKAGE 在 plugin_event_loop 与 run_script_blocking 两处都是启用的，
+        // 所以 require 是真实逃逸面。
+        let result = run_script_for_test(
+            r#"
+for _, name in ipairs({"os", "io", "debug", "ffi"}) do
+    local ok, mod = pcall(require, name)
+    assert(not ok or mod == nil,
+        string.format("require(%q) must not yield a live module", name))
+end
+assert(pcall(require, "hw.codec") == true or true)
+-- package.path 对插件可写；只要 Lua 文件 searcher 还在，require 就会按被改写的
+-- 模板去 open 宿主磁盘上的 .lua（searcher_Lua -> luaL_loadfile）。探针目录不必
+-- 真的存在：searchpath 会把逐个试过的文件名写进错误串，据此判定碰没碰文件系统。
+package.path = "/hwbench-t2-sandbox-probe/?.lua"
+local probe_ok, probe_err = pcall(require, "hwbench_t2_sandbox_probe")
+assert(probe_ok == false, "require must not resolve modules from the filesystem")
+assert(not tostring(probe_err):find("hwbench-t2-sandbox-probe", 1, true),
+    "require still probes host paths: " .. tostring(probe_err))
+-- 收紧 searcher 不能顺手弄坏宿主自己注册进 preload 的模块。
+assert(pcall(require, "hw.codec") == true,
+    "require('hw.codec') must still resolve from the preload searcher")
+"#,
+            bus,
+            transport,
+        );
+        assert!(result.is_ok(), "require 逃逸用例失败：{result:?}");
+    }
+
+    #[test]
+    fn sandbox_cannot_rebind_globals_to_escape_harden() {
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+        // load(string) 被抹掉后，插件不得还有办法从字符串造 chunk。
+        let result = run_script_for_test(
+            r#"
+assert(load == nil and loadfile == nil and dofile == nil)
+assert(pcall(function() return loadstring("return 1") end) == false)
+assert(package.loadlib == nil or pcall(package.loadlib, "x.so", "y") == false)
+"#,
+            bus,
+            transport,
+        );
+        assert!(result.is_ok(), "字符串→chunk 逃逸未被挡住：{result:?}");
+    }
+
+    /// 逐行扫描 Rust 源码，产出「生产代码」的 `(行号, 去掉注释与字面量后的文本)`。
+    ///
+    /// 静态守卫全靠它，所以扫描本身必须可信，两类误判都得挡住：
+    /// - 行注释、跨行块注释、字符串与字符字面量里出现的 `Lua::new()` 不算违规；
+    /// - `mod tests { ... }` 整块跳过 —— 这是唯一的豁免，且只豁免测试模块本身：
+    ///   `bundled_gcode_sender_lua_tests` 需要一个不加沙箱的 VM，因为
+    ///   `plugins/gcode-sender/tests/main_test.lua` 用 `dofile` 定位插件 main.lua，
+    ///   `convert.rs` 的纯转换用例同理；它们是测试夹具，不是插件能碰到的运行时。
+    ///   跨行的 `/* */` 与 `r#"..."#` 状态会带到下一行，判定不会因换行而丢。
+    fn production_code_lines(text: &str) -> Vec<(usize, String)> {
+        fn raw_string_ends_at(chars: &[char], index: usize, hashes: usize) -> bool {
+            chars.get(index) == Some(&'"')
+                && (1..=hashes).all(|offset| chars.get(index + offset) == Some(&'#'))
+        }
+
+        let mut lines = Vec::new();
+        let mut depth = 0i32;
+        let mut block_comment = 0usize;
+        let mut raw_hashes: Option<usize> = None;
+        let mut in_string = false;
+        let mut in_test_module = false;
+
+        for (number, raw_line) in text.lines().enumerate() {
+            let chars: Vec<char> = raw_line.chars().collect();
+            let mut code = String::new();
+            let mut after_mod = false;
+            let mut index = 0usize;
+
+            while index < chars.len() {
+                let ch = chars[index];
+
+                if block_comment > 0 {
+                    let next = chars.get(index + 1).copied();
+                    if ch == '*' && next == Some('/') {
+                        block_comment -= 1;
+                        index += 2;
+                    } else if ch == '/' && next == Some('*') {
+                        block_comment += 1;
+                        index += 2;
+                    } else {
+                        index += 1;
+                    }
+                    code.push(' ');
+                    continue;
+                }
+                if let Some(hashes) = raw_hashes {
+                    if raw_string_ends_at(&chars, index, hashes) {
+                        raw_hashes = None;
+                        index += 1 + hashes;
+                    } else {
+                        index += 1;
+                    }
+                    code.push(' ');
+                    continue;
+                }
+                if in_string {
+                    if ch == '\\' {
+                        index += 2;
+                    } else {
+                        if ch == '"' {
+                            in_string = false;
+                        }
+                        index += 1;
+                    }
+                    code.push(' ');
+                    continue;
+                }
+
+                let next = chars.get(index + 1).copied();
+                if ch == '/' && next == Some('/') {
+                    break; // 行注释：本行剩余部分不是代码
+                }
+                if ch == '/' && next == Some('*') {
+                    block_comment = 1;
+                    index += 2;
+                    code.push(' ');
+                    continue;
+                }
+                if ch == '"' {
+                    in_string = true;
+                    index += 1;
+                    code.push(' ');
+                    continue;
+                }
+                if ch == '\'' {
+                    // 字符字面量 vs 生命周期：只有形如 'x' / '\x' 才按字面量吃掉。
+                    let closed_at = if next == Some('\\') {
+                        chars
+                            .get(index + 3..)
+                            .and_then(|rest| rest.iter().position(|c| *c == '\''))
+                            .map(|offset| index + 4 + offset)
+                    } else if chars.get(index + 2) == Some(&'\'') {
+                        Some(index + 3)
+                    } else {
+                        None
+                    };
+                    if let Some(end) = closed_at {
+                        index = end;
+                        code.push(' ');
+                    } else {
+                        code.push('\'');
+                        index += 1;
+                    }
+                    continue;
+                }
+                if ch.is_ascii_alphabetic() || ch == '_' {
+                    let start = index;
+                    while index < chars.len()
+                        && (chars[index].is_ascii_alphanumeric() || chars[index] == '_')
+                    {
+                        index += 1;
+                    }
+                    let token: String = chars[start..index].iter().collect();
+                    // r"..."、r#"..."#、b"..."、br#"..."# —— 前缀必须紧贴引号。
+                    let is_raw = matches!(token.as_str(), "r" | "br" | "rb");
+                    let is_byte_string = token == "b";
+                    if is_raw || is_byte_string {
+                        let mut probe = index;
+                        let mut hashes = 0usize;
+                        while chars.get(probe) == Some(&'#') {
+                            hashes += 1;
+                            probe += 1;
+                        }
+                        if chars.get(probe) == Some(&'"') {
+                            if is_byte_string && hashes == 0 {
+                                in_string = true;
+                            } else {
+                                raw_hashes = Some(hashes);
+                            }
+                            index = probe + 1;
+                            code.push(' ');
+                            continue;
+                        }
+                    }
+                    if token == "mod" {
+                        after_mod = true;
+                    } else {
+                        if after_mod && token == "tests" {
+                            in_test_module = true;
+                        }
+                        after_mod = false;
+                    }
+                    code.push_str(&token);
+                    continue;
+                }
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth <= 0 && in_test_module {
+                            in_test_module = false;
+                            depth = depth.max(0);
+                        }
+                    }
+                    _ => {}
+                }
+                code.push(ch);
+                index += 1;
+            }
+
+            if !in_test_module && !code.trim().is_empty() {
+                lines.push((number + 1, code));
+            }
+        }
+        lines
+    }
+
+    #[test]
+    fn production_code_never_opens_all_stdlibs() {
+        use std::path::Path;
+
+        fn flagged(text: &str) -> Vec<usize> {
+            production_code_lines(text)
+                .into_iter()
+                .filter(|(_, code)| code.contains("Lua::new()"))
+                .map(|(number, _)| number)
+                .collect()
+        }
+
+        // 扫描器不可信 = 守卫零断言，所以先拿夹具自证：命中生产代码、忽略噪声、
+        // 并且跳过测试模块后能恢复正常。
+        assert_eq!(
+            flagged(
+                r#"
+fn setup() {
+    let lua = Lua::new();
+}
+"#
+            ),
+            vec![3],
+            "扫描器漏掉了生产代码里的 Lua::new()"
+        );
+        assert_eq!(
+            flagged(
+                r#"
+// 注释里提到 Lua::new() 不算违规
+/* 块注释里的 Lua::new()
+   跨行也一样 */
+let hint = "字符串里的 Lua::new()";
+mod tests {
+    fn helper() { let _ = Lua::new(); }
+}
+"#
+            ),
+            Vec::<usize>::new(),
+            "扫描器把注释/字符串/测试模块里的 Lua::new() 也算成了违规"
+        );
+        assert_eq!(
+            flagged(
+                r#"
+mod tests {
+    fn helper() { let _ = Lua::new(); }
+}
+let quote = '"';
+let _ = Lua::new();
+"#
+            ),
+            vec![6],
+            "扫描器跳过 mod tests 后没恢复，或被 '\"' 字面量弄乱了状态"
+        );
+
+        // Lua::new() == ALL_SAFE（含 IO/OS）。沙箱只允许 new_with(子集) + harden_globals。
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        let mut checked = 0usize;
+        let mut saw_sandbox_constructor = false;
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("读取 src 目录失败") {
+                let path = entry.expect("目录项").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                checked += 1;
+                let text = std::fs::read_to_string(&path).expect("读取源文件失败");
+                for (number, code) in production_code_lines(&text) {
+                    if code.contains("Lua::new_with(") {
+                        saw_sandbox_constructor = true;
+                    }
+                    if code.contains("Lua::new()") {
+                        offenders.push(format!("{}:{}", path.display(), number));
+                    }
+                }
+            }
+        }
         assert!(
-            result.is_ok(),
-            "dofile sandbox test should pass: {result:?}"
+            checked >= 20,
+            "扫描到的 .rs 文件过少（{checked}），守卫可能失效"
+        );
+        assert!(
+            saw_sandbox_constructor,
+            "生产代码里一个 Lua::new_with 都没扫到，扫描器可能在空转"
+        );
+        assert!(
+            offenders.is_empty(),
+            "生产代码不得用 Lua::new() 打开全部标准库：{offenders:?}"
         );
     }
 }
