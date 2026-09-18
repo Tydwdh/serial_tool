@@ -661,3 +661,56 @@ fn cvt(ok: i32) -> io::Result<()> {
 fn last_error() -> io::Error {
     io::Error::from_raw_os_error(unsafe { GetLastError() } as i32)
 }
+
+/// Windows 生产入口的 **guard 站点**测试。
+///
+/// 本文件整体由 `lib.rs` 的 `#[cfg(windows)] mod windows_native;` 门控，故这里的
+/// `windows` 只是把意图写在明面上：非 Windows 的 cfg 路径不编译、也就不需要这条测试。
+///
+/// 它补上的是 `AliveGuard` 那条共享单测覆盖不到的另一半事实：**那句 guard 确实挂在
+/// `NativeWorker::run` 上**。原先"构造不出 NativeSerialPort 所以测不了"的说法不成立
+/// —— 该类型只是 `{ handle: HANDLE }`，`WakeEvent::new()` 不需要端口，而 `run_impl`
+/// 的第一条语句在 `stop` 已置位时直接 `return Ok(())`：`read_pending == false` 意味着
+/// 没有 CancelIoEx / GetOverlappedResult，也没有 WaitForMultipleObjects，全程不碰句柄、
+/// 不阻塞、不依赖硬件。
+///
+/// 仍然测不到的另一半：`run_impl` **内部** panic 展开时 guard 生效 —— 那里没有任何可
+/// 注入 panic 的钩子（要真句柄），由共享的 `AliveGuard` 单测（`lib.rs`）代偿。
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_worker_run_clears_alive_flag_when_it_returns() {
+        let alive = Arc::new(AtomicBool::new(true));
+        let (_writer, command_rx) = crossbeam_channel::bounded::<SerialCommand>(1);
+        let worker = NativeWorker {
+            // 哨兵句柄：本用例不会有任何 I/O 落到它上面；`Drop` 里的
+            // `CloseHandle(INVALID_HANDLE_VALUE)` 只会失败、不会关掉别的真句柄。
+            port: NativeSerialPort {
+                handle: INVALID_HANDLE_VALUE,
+            },
+            command_rx,
+            wake: WakeEvent::new().expect("创建唤醒事件不需要串口"),
+            // 预先置位 ⇒ `run_impl` 第一条语句即返回 Ok(())。
+            stop: Arc::new(AtomicBool::new(true)),
+            alive: Arc::clone(&alive),
+            bus: DataBus::new(),
+            source: "serial:GUARD_TEST".to_owned(),
+            repaint_waker: None,
+        };
+        assert!(
+            alive.load(Ordering::Acquire),
+            "装配前提：worker 还没退出，alive 必须是 true"
+        );
+
+        // 直接在当前线程调用：guard 的生效点是 `run` 返回时的栈析构，与它跑在哪个线程
+        // 无关 —— 于是这条断言里没有任何等待、超时或调度假设。
+        worker.run();
+
+        assert!(
+            !alive.load(Ordering::Acquire),
+            "`NativeWorker::run`（Windows 上唯一的生产 worker）返回后 alive 必须为 false"
+        );
+    }
+}

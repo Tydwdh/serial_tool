@@ -423,6 +423,19 @@ impl JsonlRecorder {
         if self.worker_panicked() {
             let reason = "录制线程异常退出（panic），本次录制不完整".to_owned();
             self.stop_with_reason(true, Some(reason.clone()));
+            // `running` / `stopping` 的正常清零点是 worker 闭包的尾部，而 panic 展开
+            // 永远走不到那里；`stop_with_reason` 又只置 `stopping`、从不清 `running`。
+            // 两条合起来的结果就是本分支必须就地兜住：否则状态栏会一直挂着一个冻住的
+            // 红色"录制中"徽标（`status_bar.rs` / `top_bar.rs` / `device_panel.rs` /
+            // `web.rs` 渲染读的都是 `stats.running`，不是 `is_running()`），Stop 按钮
+            // 也退化成 no-op（`self.worker` 已被 take）。
+            // **只能写在这条分支里**：放进 `stop_with_reason` 就会连带抹掉正常 Stop
+            // 的 Stop→Stopping 中间态（那侧的线程随后会自己走到尾部清零）。
+            {
+                let mut stats = self.stats.lock();
+                stats.running = false;
+                stats.stopping = false;
+            }
             self.bus
                 .publish(Event::system_log(LogLevel::Error, "recorder", reason));
             return;
@@ -907,14 +920,28 @@ mod tests {
     /// 手工装配一个 worker 字段齐全、但线程已经终止的 recorder。
     /// `orderly = true` 模拟正常收尾（含写失败的 `handle_fatal` 路径：线程照样走到
     /// 尾部并置 `finished`）；`orderly = false` 模拟 panic 展开，尾部那行到不了。
+    ///
+    /// `stats.running` 一并置为 true，复刻 `start()` 里的 `RecorderStats { running:
+    /// true, .. }` —— UI 渲染读的是这个字段（不是 `is_running()`），fixture 不置起来
+    /// 就测不到"冻住的录制中徽标"。orderly 一侧再复刻 worker 尾部的清零，panic 一侧
+    /// 刻意不清：两条用例的差别正是被测的那条展开路径。
     fn attach_exited_worker(rec: &mut JsonlRecorder, orderly: bool) {
         let finished = Arc::new(AtomicBool::new(false));
         let stats = Arc::clone(&rec.stats);
+        {
+            // 与 `start()` 的 `RecorderStats { running: true, ..Default::default() }` 一致。
+            let mut s = stats.lock();
+            s.running = true;
+        }
         let finished_for_thread = Arc::clone(&finished);
+        let stats_for_thread = Arc::clone(&stats);
         let join: JoinHandle<()> = thread::spawn(move || {
             if orderly {
                 // 与生产闭包尾部的 `finished_thread.store(true, SeqCst)` 同一件事。
                 finished_for_thread.store(true, Ordering::SeqCst);
+                let mut s = stats_for_thread.lock();
+                s.running = false;
+                s.stopping = false;
             } else {
                 panic!("模拟录制 worker panic 展开");
             }
@@ -994,6 +1021,10 @@ mod tests {
         rec.backlog = None;
         attach_exited_worker(&mut rec, false);
         assert!(rec.is_running(), "装配前提：worker 仍在（用户没点过停止）");
+        assert!(
+            rec.stats().running,
+            "装配前提：UI 渲染用的 `stats.running` 此时必须是 true（复刻 start() 之后）"
+        );
 
         rec.tick_backpressure();
 
@@ -1002,6 +1033,19 @@ mod tests {
             "worker 已异常退出的 recorder 必须停止自称\"正在录制\""
         );
         let stats = rec.stats();
+        // 关键断言：`is_running()` 不是 UI 读的字段。状态栏/顶栏/录制面板/web 渲染的
+        // 都是 `stats.running`，它只有 worker 闭包尾部一处清零点，而展开路径到不了 ——
+        // 不在这里清，用户看到的就是一个永久冻住的红色"录制中"徽标。
+        assert!(
+            !stats.running,
+            "UI 渲染的 `stats.running` 必须被 panic 分支清零，否则状态栏永远显示\"录制中\""
+        );
+        // 同一个新调用点会经 `stop_with_reason` 置 `stopping = true`，而线程不会再走到
+        // 尾部去清它 —— 不在这里清，就把"冻住的录制中"换成了"冻住的停止中"。
+        assert!(
+            !stats.stopping,
+            "`stats.stopping` 同样不得留在 true：worker 已死，没有线程会去清它"
+        );
         assert!(stats.incomplete, "本次录制必须标记为不完整");
         assert!(
             stats

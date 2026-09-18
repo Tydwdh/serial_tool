@@ -897,6 +897,15 @@ impl TransportManager {
             let worker = guard
                 .get(&resolved)
                 .ok_or_else(|| TransportError::PortNotOpen(port_name.to_owned()))?;
+            // 死亡判定提前于取 writer：这是一处**防御性早退**，不是"UI 一路显示已发"
+            // 那个症状的修复。worker 按值持有 `Receiver`（本 crate 内没有 clone，也没有
+            // catch_unwind/forget），线程一结束 receiver 就被 drop，旧代码走到底同样在
+            // `try_send` 上拿到 `Disconnected` → `WorkerClosed`。换判定真正买到的是：省掉
+            // 下面那次为 `wake` 的第二次 `ports.lock()`，以及判死不再依赖单个信号 ——
+            // `join` 已被 `take()` 走的句柄由 `alive` 兜住，忘了置位的线程由
+            // `is_finished()` 兜住。
+            // 仍然漏掉的是**卡住却没退出**的 worker（`alive` 为 true、`is_finished()` 为
+            // false，`bounded(1024)` 照旧无声填满）：那需要心跳/超时，不在本改动范围内。
             if port_is_dead(worker) {
                 return Err(TransportError::WorkerClosed);
             }
@@ -1796,10 +1805,11 @@ mod tests {
 
     /// `AliveGuard` 本身：**不需要任何端口**。
     ///
-    /// 这条是 Windows CI 上真正跑得到的证据 —— Windows 生产的 worker 入口是
-    /// `NativeWorker::run`（`windows_native.rs`），它无法在单测里构造真实的
-    /// `NativeSerialPort`，但它使用的是同一个 `AliveGuard` 类型、同一种
-    /// "函数第一行持有 guard" 的结构。
+    /// 这条测的是 guard 这个类型的语义 —— 线程 panic 展开时 `Drop` 仍然执行。
+    /// 至于"Windows 生产入口 `NativeWorker::run` 身上到底挂没挂这个 guard"，那是
+    /// 另一条事实，由 `windows_native.rs` 里的 `native_worker_run_...` 测试覆盖
+    /// （无需端口、无需硬件：`stop` 预先置位即可让 `run_impl` 第一句返回）。
+    /// 两者合起来才是 Windows 侧的完整证据：类型对 + 站点对。
     #[test]
     fn alive_guard_clears_flag_when_thread_panics() {
         let alive = Arc::new(AtomicBool::new(true));
@@ -1838,9 +1848,9 @@ mod tests {
     /// `alive.store(false)` 都被展开跳过，端口既不被回收也不能重开。
     ///
     /// 注意适用范围：`serial_worker_loop_impl` 是 `#[cfg(any(not(windows), test))]`
-    /// 的共享实现，Windows 生产路径走 `NativeWorker::run`；本测试证明的是
-    /// "共享实现 + guard" 协同生效，Windows 侧由上面的 `alive_guard_*` 加
-    /// 结构上同一处应用覆盖。
+    /// 的共享实现，Windows 生产路径走 `NativeWorker::run`；本测试证明的是"共享实现 +
+    /// guard"协同生效。Windows 侧另有两条证据：`alive_guard_*`（guard 类型本身）与
+    /// `windows_native.rs` 里直接调用 `NativeWorker::run` 的那条（站点本身）。
     #[test]
     fn panicked_worker_clears_alive_flag() {
         let alive = Arc::new(AtomicBool::new(true));
@@ -2171,10 +2181,20 @@ mod transport_tests {
 
     #[test]
     fn enqueue_command_rejects_handle_whose_worker_thread_finished() {
+        // **谓词级**单测：锁定 `port_is_dead` 挂在 `enqueue_command` 这道门上，即判死
+        // 只看句柄自身的两个信号、与 channel 状态无关。
+        //
+        // 这里"receiver 还握在测试手里"的通道状态在**生产里不可达**：worker 按值持有
+        // Receiver（本 crate 无 clone / catch_unwind / forget），线程一结束 receiver 就
+        // 被 drop，旧代码在 `try_send` 上同样得到 `Disconnected` → `WorkerClosed`。所以
+        // 本测试不是"UI 一路显示已发"那个症状的复现，它也不声称修好了那个症状（那个洞是
+        // 卡住未退出的 worker，见 `enqueue_command` 处的注释）。
+        //
+        // 留着它的价值有两条：(1) 它是"哪天有人从 worker 里 clone 出一个 Receiver、于是
+        // 通道健康而线程已死"这一回归的绊线；(2) 它顺带覆盖了 `join: Some(finished)` 但
+        // `alive` 仍为 true 的形状，正是 guard 缺席时的样子。
         let bus = DataBus::new();
         let tm = TransportManager::new(bus);
-        // 命令通道本身是健康的（receiver 还握在测试手里）：旧的 `!alive` 判定会
-        // 放行，于是命令进队列后永远无人取走，UI 一路显示"已发送"直到队列满。
         let (writer, reader) = bounded::<SerialCommand>(4);
         let mut handle = make_test_handle(true);
         handle.writer = writer;
