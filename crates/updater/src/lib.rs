@@ -31,7 +31,8 @@ const UPDATE_HELPER_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const UPDATE_HELPER_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const UPDATE_HELPER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(2);
 const UPDATE_HELPER_LAUNCH_RETRY_INTERVAL: Duration = Duration::from_millis(100);
-/// 网络设置。`proxy_url` 为空时使用 reqwest 的系统与环境代理探测；非空时强制使用该代理。
+/// 网络设置。`proxy_url` 非空时强制使用该代理；为空时使用环境与系统代理探测，
+/// 但回环/字面 IP 目标一律直连（见 `NetworkSettings::route_for_url`）。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NetworkSettings {
     pub proxy_url: Option<String>,
@@ -46,19 +47,75 @@ impl NetworkSettings {
         }
     }
 
-    fn effective_proxy_url(&self) -> Option<String> {
-        self.proxy_url.clone().or_else(explicit_proxy_url)
+    /// 该 URL 实际走哪条网络路径。
+    fn route_for_url(&self, url: &str) -> ProxyRoute {
+        self.route_for_url_with_env_proxy(url, explicit_proxy_url())
     }
 
-    fn route_label(&self) -> &'static str {
+    /// [`NetworkSettings::route_for_url`] 的纯函数部分：环境代理的探测结果由参数注入。
+    ///
+    /// 拆开是为了能单测 —— edition 2024 下 `std::env::set_var` 是 `unsafe`，
+    /// 而测试默认并行跑，用例无法可靠地把 `HTTP_PROXY` 摆成想要的样子。
+    fn route_for_url_with_env_proxy(&self, url: &str, env_proxy: Option<String>) -> ProxyRoute {
+        // 用户在设置里手填的代理是显式决定，任何目标都照走。
+        if let Some(proxy_url) = &self.proxy_url {
+            return ProxyRoute {
+                proxy_url: Some(proxy_url.clone()),
+                force_direct: false,
+            };
+        }
+        // 回环 / 字面 IP 目标交给环境代理基本只会失败：代理进程不一定转发 loopback，
+        // 而这里一旦显式装上 `Proxy::all`，reqwest 连 `NO_PROXY` 都不再看，
+        // 设了例外也救不回来。所以这类目标必须真直连（见 `update_http_client`）。
+        if is_direct_route_url(url) {
+            return ProxyRoute {
+                proxy_url: None,
+                force_direct: true,
+            };
+        }
+        ProxyRoute {
+            proxy_url: env_proxy,
+            force_direct: false,
+        }
+    }
+
+    fn route_label(&self, route: &ProxyRoute) -> &'static str {
         if self.proxy_url.is_some() {
             "自定义代理"
-        } else if explicit_proxy_url().is_some() {
+        } else if route.force_direct {
+            "直连"
+        } else if route.proxy_url.is_some() {
             "环境代理"
         } else {
             "系统代理或直连"
         }
     }
+}
+
+/// 一次请求的代理决策：用哪个代理，以及是否必须直连。
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ProxyRoute {
+    proxy_url: Option<String>,
+    /// `true` 表示目标是回环/字面 IP：连 reqwest 自己的环境/系统代理探测一起关掉。
+    force_direct: bool,
+}
+
+/// 目标是不是「该直连」的地址：`localhost`、回环地址或字面 IP。
+///
+/// 这两类都不属于"要翻墙/要出网"的范畴，环境代理（`HTTP_PROXY` 等）是为公网域名
+/// 设的，套到它们身上只会把请求送到一个不认识目标的代理进程里。
+/// URL 解析失败时返回 `false`：判定不吞掉任何真实请求的代理行为，
+/// 报错的活儿留给各调用点（`validate_download_url` 等）。
+fn is_direct_route_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    // IPv6 在 URL 里带方括号，`parse::<IpAddr>()` 只认裸地址。
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok()
 }
 
 /// 一次成功请求使用的网络路径，用于 UI 状态与日志诊断。
@@ -103,6 +160,8 @@ impl TlsBackend {
 struct ClientKey {
     proxy_url: Option<String>,
     tls: TlsBackend,
+    /// 目标为回环/字面 IP：必须直连，见 `NetworkSettings::route_for_url`。
+    force_direct: bool,
 }
 
 static HTTP_CLIENTS: OnceLock<Mutex<std::collections::HashMap<ClientKey, reqwest::Client>>> =
@@ -133,7 +192,12 @@ fn update_http_client(key: &ClientKey) -> Result<reqwest::Client, String> {
         TlsBackend::Rustls => builder.use_rustls_tls(),
     };
 
-    if let Some(proxy_url) = &key.proxy_url {
+    if key.force_direct {
+        // 光是"不传代理"还不够：`proxy_url = None` 时 reqwest 会自己再挂一个
+        // 环境/系统代理探测器，而它只认 `NO_PROXY`。`no_proxy()` 同时清空代理列表
+        // 并关掉那个自动探测，是保证真的直连本地端口的唯一写法。
+        builder = builder.no_proxy();
+    } else if let Some(proxy_url) = &key.proxy_url {
         log::info!("updater: 使用代理 {}", redact_proxy_url(proxy_url));
         let proxy = reqwest::Proxy::all(proxy_url)
             .map_err(|e| format!("解析代理地址失败：{}", describe_reqwest_error(&e)))?;
@@ -171,20 +235,23 @@ pub async fn send_update_get(url: &str) -> Result<reqwest::Response, String> {
     )
 }
 
-/// 用系统/自定义代理、native TLS 与 Rustls TLS 依次尝试请求。
+/// 按 `settings` 与目标 URL 决定的代理路径，用 native TLS 与 Rustls TLS 依次尝试请求。
 ///
+/// 代理是**逐 URL** 决定的：回环/字面 IP 目标直连，不吃环境代理
+/// （`NetworkSettings::route_for_url`）。
 /// 不强制 IPv4，保留系统 DNS 的正常地址选择与回退能力。
 pub async fn send_update_get_with_network_settings(
     url: &str,
     settings: &NetworkSettings,
 ) -> Result<NetworkResponse, String> {
-    let proxy_url = settings.effective_proxy_url();
+    let route = settings.route_for_url(url);
     let mut failures = Vec::new();
 
     for tls in [TlsBackend::Native, TlsBackend::Rustls] {
         let client = shared_http_client(ClientKey {
-            proxy_url: proxy_url.clone(),
+            proxy_url: route.proxy_url.clone(),
             tls,
+            force_direct: route.force_direct,
         })?;
         for attempt in 1..=NETWORK_RETRY_COUNT {
             match client.get(url).send().await {
@@ -197,7 +264,7 @@ pub async fn send_update_get_with_network_settings(
                     return Ok(NetworkResponse {
                         response,
                         diagnostics: NetworkDiagnostics {
-                            route: settings.route_label(),
+                            route: settings.route_label(&route),
                             tls: tls.label(),
                             http,
                             attempts: attempt,
@@ -224,7 +291,7 @@ pub async fn send_update_get_with_network_settings(
 
     Err(format!(
         "网络请求失败（{}）：{}",
-        settings.route_label(),
+        settings.route_label(&route),
         failures.join("；")
     ))
 }
@@ -1263,8 +1330,11 @@ mod tests {
     //
     // 走 127.0.0.1 明文端口不削弱被测点：https/域名白名单是
     // `download_update_with_network_settings` 的前置门，本用例测的是它下面的收尾。
-    // 若跑测试的机器设了 HTTP(S)_PROXY，`NetworkSettings::default()` 会把请求交给
-    // 代理，用例在"错误须点名不匹配"那条断言上响亮地失败 —— 不会静默放行。
+    // 本用例对环境变量不敏感：回环目标一律直连，`HTTP_PROXY` / `ALL_PROXY` 之类
+    // 不会把这条请求交给代理（`NetworkSettings::route_for_url`，由
+    // `env_proxy_never_applies_to_loopback_or_literal_ip_targets` 钉住）。
+    // 注意 `NO_PROXY` 从来不是可行的补救手段 —— 一旦显式装上 `Proxy::all`，
+    // reqwest 就不再看它。
 
     /// 被测载荷，以及**独立**算出的 SHA256（`printf '%s' <载荷> | sha256sum`）。
     /// 摘要刻意写死而不在测试里现算：自算自比正是这次修掉的自我循环。
@@ -1298,12 +1368,30 @@ mod tests {
                 {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
-                            // 读写超时保证即使对端不发完整请求，线程也不会卡在 read 上。
+                            // 监听套接字是非阻塞的，而 Linux 上 accept 出来的套接字会
+                            // 继承 O_NONBLOCK：那时 read 只会立刻返回 WouldBlock（请求还没
+                            // 缓冲齐），write 也可能只吐出半截响应。先改回阻塞模式，
+                            // 再用读写超时兜底，线程就不会卡死。
+                            let _ = stream.set_nonblocking(false);
                             let half_second = Some(Duration::from_millis(500));
                             let _ = stream.set_read_timeout(half_second);
                             let _ = stream.set_write_timeout(half_second);
+                            // 把请求头读完整（到 \r\n\r\n）再回响应：只 read 一次会将对端
+                            // 已发出的字节留在接收队列里，收尾 close 时内核可能直接 RST。
                             let mut request = [0u8; 1024];
-                            let _ = stream.read(&mut request);
+                            let mut filled = 0usize;
+                            while filled < request.len() && Instant::now() < deadline {
+                                match stream.read(&mut request[filled..]) {
+                                    Ok(0) => break,
+                                    Ok(read) => {
+                                        filled += read;
+                                        if request[..filled].windows(4).any(|w| w == b"\r\n\r\n") {
+                                            break;
+                                        }
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
                             let header = format!(
                                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                                 UPDATE_PAYLOAD.len()
@@ -1312,7 +1400,8 @@ mod tests {
                             let _ = stream.write_all(UPDATE_PAYLOAD);
                             let _ = stream.flush();
                             // 显式 shutdown 发 FIN：直接 drop 在 Windows 上可能 RST 掉响应体。
-                            let _ = stream.shutdown(std::net::Shutdown::Both);
+                            // 只关**写**半边 —— 保留读半边，别把对端的请求字节变成 RST 理由。
+                            let _ = stream.shutdown(std::net::Shutdown::Write);
                         }
                         Err(error)
                             if matches!(
@@ -1448,6 +1537,99 @@ mod tests {
                 .as_deref(),
             Some("http://172.18.88.90:3128")
         );
+    }
+
+    // ── 代理的逐 URL 判定 ──
+    //
+    // 反向自检（必须能失败，改完请还原）：把 `route_for_url_with_env_proxy` 里
+    // `if is_direct_route_url(url) { ... }` 那一段删掉（= 回环目标重新吃环境代理）
+    // → `env_proxy_never_applies_to_loopback_or_literal_ip_targets` 变红。
+    //
+    // 环境代理的探测结果一律用参数注入：edition 2024 下 `std::env::set_var` 是
+    // unsafe，测试又并行跑，改进程环境既不安全也不可靠。
+
+    #[test]
+    fn env_proxy_never_applies_to_loopback_or_literal_ip_targets() {
+        let env_proxy = "http://proxy.invalid:7890".to_owned();
+        let direct = NetworkSettings::default();
+
+        for url in [
+            "http://127.0.0.1:4567/payload.zip",
+            "http://localhost:4567/payload.zip",
+            "http://LOCALHOST:4567/payload.zip",
+            "http://[::1]:4567/payload.zip",
+            "https://192.168.1.10/api",
+            "http://172.18.88.90:3128/probe",
+        ] {
+            let route = direct.route_for_url_with_env_proxy(url, Some(env_proxy.clone()));
+            assert!(
+                route.force_direct,
+                "{url} 是回环/字面 IP 目标，必须走强制直连"
+            );
+            assert_eq!(
+                route.proxy_url, None,
+                "{url} 不该吃到环境代理 {env_proxy}（那会让本地请求被代理吞掉）"
+            );
+        }
+
+        // 真实域名：保持原有语义，环境代理照旧生效。
+        for url in [
+            "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/update.json",
+            "https://github.com/Tydwdh/serial_tool/releases/download/v1.3.0/a.zip",
+        ] {
+            let route = direct.route_for_url_with_env_proxy(url, Some(env_proxy.clone()));
+            assert!(!route.force_direct, "{url} 是公网域名，不该被改成强制直连");
+            assert_eq!(
+                route.proxy_url.as_deref(),
+                Some(env_proxy.as_str()),
+                "{url} 应继续走环境代理"
+            );
+        }
+
+        // 没有环境代理时，回环目标依然是强制直连（reqwest 自己的探测器也要被关掉）。
+        let route = direct.route_for_url_with_env_proxy("http://127.0.0.1:9/x", None);
+        assert!(route.force_direct);
+        assert_eq!(route.proxy_url, None);
+
+        // 诊断标签不得对着直连请求谎报"环境代理"。
+        assert_eq!(direct.route_label(&route), "直连");
+        let public = direct
+            .route_for_url_with_env_proxy("https://github.com/x/y.zip", Some(env_proxy.clone()));
+        assert_eq!(direct.route_label(&public), "环境代理");
+        assert_eq!(
+            direct.route_label(
+                &direct.route_for_url_with_env_proxy("https://github.com/x/y.zip", None)
+            ),
+            "系统代理或直连"
+        );
+        let custom = NetworkSettings::with_proxy(Some("10.0.0.1:3128".to_owned()));
+        assert_eq!(
+            custom.route_label(&custom.route_for_url_with_env_proxy("http://127.0.0.1:9/x", None)),
+            "自定义代理"
+        );
+    }
+
+    #[test]
+    fn explicit_proxy_setting_still_applies_to_loopback_targets() {
+        // 用户在设置里手填的代理是显式决定，新判定不吞掉它（哪怕目标是本机端口）。
+        let settings = NetworkSettings::with_proxy(Some("172.18.88.90:3128".to_owned()));
+        let route = settings.route_for_url_with_env_proxy("http://127.0.0.1:9/x", None);
+        assert_eq!(route.proxy_url.as_deref(), Some("http://172.18.88.90:3128"));
+        assert!(!route.force_direct);
+    }
+
+    #[test]
+    fn unparsable_url_keeps_the_env_proxy_route() {
+        // 判定失败时保持原行为：不去改这条请求的代理路径，报错交给各调用点。
+        let route = NetworkSettings::default()
+            .route_for_url_with_env_proxy("not a url", Some("http://p:1".to_owned()));
+        assert!(!route.force_direct);
+        assert_eq!(route.proxy_url.as_deref(), Some("http://p:1"));
+        assert!(!is_direct_route_url(""));
+        assert!(!is_direct_route_url(
+            "https://raw.githubusercontent.com/a/b"
+        ));
+        assert!(is_direct_route_url("http://127.0.0.1:1/"));
     }
 
     #[test]
