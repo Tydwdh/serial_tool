@@ -441,7 +441,8 @@ pub(crate) fn harden_globals(lua: &Lua) -> mlua::Result<()> {
 /// 有四处插件可达的 VM（插件事件循环、阻塞式运行、`MluaEngine`、replay analyzer），各自
 /// 抄一遍 stdlib 子集；其中 `replay.rs` 那一处连加固都没抄，`dofile` 至今活着。新增任何
 /// 能跑插件源码的 VM，一律调用本函数，不要自己 `new_with`；`mod tests` 里的静态守卫按
-/// 本函数的名字与全 crate 的出现次数把关。
+/// 本函数的名字与全 crate 的出现次数把关，并把 `Lua::new()`、`Lua::default()`、
+/// `unsafe_new*`、`new_with_options` 这些"绕过本函数"的拼法一并列为违规。
 ///
 /// 返回 `mlua::Result` 而非 `LuaHostResult`：构造与加固的失败都意味着这个 VM 不可信，
 /// 调用方必须一并当作启动失败处理（`plugin_event_loop` 就是这么做到的）。
@@ -2174,11 +2175,22 @@ assert(type(assert) == "function", "assert must survive")
         // 所以 require 是真实逃逸面。
         let result = run_script_for_test(
             r#"
+-- 真风险不在"require 报不报错"上：require 只有在标准库被装进 package.loaded 之后才可能拿到
+-- 活模块，那是 stdlib 位集的**后果**，不是沙箱边界本身。原来的写法把后果当判据：抹掉
+-- dofile/loadfile/load、放松 searcher 收紧、留不留 package.searchpath —— 它一种都看不见。
+-- 判据直接查边界本身：这些库既不许是活的 global，也不许留在 package.loaded 里 —— 只抹
+-- global 却留着 package.loaded 的话，require("os") 照样返回活表。
+local widened = {}
 for _, name in ipairs({"os", "io", "debug", "ffi"}) do
-    local ok, mod = pcall(require, name)
-    assert(not ok or mod == nil,
-        string.format("require(%q) must not yield a live module", name))
+    local live_global = rawget(_G, name)
+    local live_loaded = package.loaded and package.loaded[name]
+    if live_global ~= nil or live_loaded ~= nil then
+        widened[#widened + 1] = string.format(
+            "%s: global=%s package.loaded=%s", name, type(live_global), type(live_loaded))
+    end
 end
+assert(#widened == 0,
+    "stdlib modules must be absent from the sandbox, got: " .. table.concat(widened, ", "))
 -- package.path 对插件可写；只要 Lua 文件 searcher 还在，require 就会按被改写的
 -- 模板去 open 宿主磁盘上的 .lua（searcher_Lua -> luaL_loadfile）。探针目录不必
 -- 真的存在：searcher 会把逐个试过的文件名写进错误串，据此判定碰没碰文件系统。
@@ -2208,8 +2220,12 @@ assert(pcall(require, "hw.codec") == true,
         // load(string) 被抹掉后，插件不得还有办法从字符串造 chunk。
         let result = run_script_for_test(
             r#"
-assert(load == nil and loadfile == nil and dofile == nil)
-assert(pcall(function() return loadstring("return 1") end) == false)
+assert(load == nil, "load must be nil, got " .. type(load))
+assert(loadfile == nil, "loadfile must be nil, got " .. type(loadfile))
+assert(dofile == nil, "dofile must be nil, got " .. type(dofile))
+-- 原来这里是一句 pcall(loadstring("return 1")) == false：loadstring 在 Lua 5.4 已被删除，
+-- 调用一个 nil 全局必然报错，它挡不住任何东西（零断言）。字符串→chunk 的真判据就是上面的
+-- load 那一行 —— 5.4 里从字符串造 chunk 的入口只剩 load，没有别的拼法可查。
 assert(package.loadlib == nil or pcall(package.loadlib, "x.so", "y") == false)
 "#,
             bus,
@@ -2269,6 +2285,90 @@ function on_replay_end() end
             output.logs.is_empty(),
             "replay 沙箱用例不应产生回调错误：{:?}",
             output.logs
+        );
+    }
+
+    /// 四处插件可达 VM 里的最后一处 —— `plugin_event_loop`（`run_plugin` 起的常驻线程，真实
+    /// 插件全都走这条）此前只靠"它和别人共用 `sandbox_lua`"这条传递论证活着，自己没有任何
+    /// 行为背垫：字符串守卫一旦被同义拼法绕过（`Lua::default()` 就是第一种），红起来的只会
+    /// 是别的站点的测试。这里让它自己红。
+    ///
+    /// 判据是线程自己写的结局（`outcome`），不是时序：顶层断言失败会走 fail-closed 分支，结局
+    /// 变成 `Failed`；沙箱正常则脚本跑完、以 `Finished` 收尾。失败时再去 `log.system` 取
+    /// `脚本错误：…`，把 Lua 的断言原文带进 panic 信息（线程先写结局、后发日志，所以取日志
+    /// 需要一点宽限；它只影响报错文案，不影响判定）。
+    #[test]
+    fn plugin_event_loop_runs_lua_in_the_hardened_sandbox() {
+        let bus = DataBus::new();
+        let system_logs = bus.subscribe(TopicFilter::exact(topics::LOG_SYSTEM));
+        let transport = TransportManager::new(bus.clone());
+        let host_services = LuaHostServices {
+            plugin_root: None,
+            plugin_id: "sandbox-probe".to_owned(),
+            dialog_sender: None,
+            file_broker: None,
+            stop_flag: None,
+            line_buffers: None,
+            config_store: None,
+            declared_panel_ids: Default::default(),
+        };
+
+        let runtime = run_plugin(
+            r#"
+assert(dofile == nil, "event loop: dofile must be nil, got " .. type(dofile))
+assert(loadfile == nil, "event loop: loadfile must be nil, got " .. type(loadfile))
+assert(load == nil, "event loop: load must be nil, got " .. type(load))
+assert(package.searchpath == nil,
+    "event loop: package.searchpath must be nil, got " .. type(package.searchpath))
+-- base 不能整个没掉：pcall/assert 还在，说明是逐抹而非断粮
+assert(type(pcall) == "function", "event loop: pcall must survive")
+"#
+            .to_owned(),
+            LuaRunConfig {
+                script_name: "harden_probe.lua".to_owned(),
+                timeout_ms: 5_000,
+                source: "plugin:sandbox-probe".to_owned(),
+                context: json!({"id": "sandbox-probe"}),
+                permissions: vec![],
+            },
+            bus.clone(),
+            transport,
+            host_services,
+        )
+        .expect("插件运行时应能启动");
+
+        let mut script_errors: Vec<String> = Vec::new();
+        let collect_errors = |errors: &mut Vec<String>| {
+            for event in system_logs.drain() {
+                let text = event.payload.text_lossy();
+                if text.contains("脚本错误") {
+                    errors.push(text);
+                }
+            }
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let outcome = loop {
+            collect_errors(&mut script_errors);
+            if let Some(outcome) = runtime.outcome() {
+                break outcome;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "插件事件循环未在 5 秒内给出结局；已收到的系统日志：{script_errors:?}"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        if outcome == LuaRunState::Failed {
+            let grace = Instant::now() + Duration::from_millis(500);
+            while script_errors.is_empty() && Instant::now() < grace {
+                collect_errors(&mut script_errors);
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert_eq!(
+            outcome,
+            LuaRunState::Finished,
+            "插件事件循环沙箱断言失败，脚本错误日志：{script_errors:?}"
         );
     }
 
@@ -2468,10 +2568,40 @@ function on_replay_end() end
             None
         }
 
+        /// 裸构造器的每一种拼法 —— 每一种都等价于"建了一台没人加固的 VM"。
+        /// - `Lua::new()`：`StdLib::ALL_SAFE`，含 IO/OS（`os.execute` 可用）。
+        /// - `Lua::default()`：mlua-0.11.6 `src/state.rs:170-174` 的 `impl Default for Lua`
+        ///   就是 `fn default() -> Self { Lua::new() }`，所以它是上面那个 bug 的**字面同义词**；
+        ///   而文本里既不含 `Lua::new()` 也不含 `Lua::new_with(`，只会撞在这一条上。
+        /// - `unsafe_new`：裸词，同时兜住 `Lua::unsafe_new()` 与
+        ///   `Lua::unsafe_new_with(StdLib::ALL, ..)` —— 比 ALL_SAFE 还宽，连 C 模块都放进来。
+        /// - `new_with_options`：mlua 0.11.6 里还没有这个入口，它是别的版本里的第四种构造
+        ///   拼法；将来升依赖时不能靠人记得补守卫。
+        ///
+        /// 受制裁的 `Lua::new_with(` 不在这里：它由规则 2 数次数、规则 3 查加固。
+        ///
+        /// 文本守卫的极限要说清楚：`let lua: Lua = Default::default();` 这种靠类型推断的写法
+        /// 没有任何拼法可匹配。所以每一处插件可达的 VM 都另外配了一条行为背垫
+        /// （`sandbox_*` 走 `run_script_blocking`、`plugin_event_loop_runs_lua_*`、
+        /// `load_plugin_runs_lua_*`、`replay_sandbox_*`），拼法清单只是第一道网。
+        const FORBIDDEN_CONSTRUCTORS: [&str; 4] = [
+            "Lua::new()",
+            "Lua::default(",
+            "unsafe_new",
+            "new_with_options",
+        ];
+
+        fn forbidden_constructor(code: &str) -> Option<&'static str> {
+            FORBIDDEN_CONSTRUCTORS
+                .iter()
+                .find(|pattern| code.contains(**pattern))
+                .copied()
+        }
+
         fn flagged(text: &str) -> Vec<usize> {
             production_code_lines(text)
                 .into_iter()
-                .filter(|(_, code)| code.contains("Lua::new()"))
+                .filter(|(_, code)| forbidden_constructor(code).is_some())
                 .map(|(number, _)| number)
                 .collect()
         }
@@ -2517,6 +2647,23 @@ let _ = Lua::new();
             vec![6],
             "扫描器跳过 mod tests 后没恢复，或被 '\"' 字面量弄乱了状态"
         );
+        // 同义词夹具：FORBIDDEN_CONSTRUCTORS 里每一种拼法都要真的能命中（漏一种 = 守卫对该
+        // 写法形同虚设），同时受制裁的 `Lua::new_with(` 和满屏合法的 `LuaOptions::default()`
+        // 不许被 `Lua::default(` 误伤。
+        assert_eq!(
+            flagged(
+                r#"
+fn plain() { let _ = Lua::new(); }
+fn synonym() { let _ = Lua::default(); }
+fn unsafe_plain() { let _ = unsafe { Lua::unsafe_new() }; }
+fn unsafe_with() { let _ = unsafe { Lua::unsafe_new_with(StdLib::ALL, LuaOptions::default()) }; }
+fn renamed_api() { let _ = Lua::new_with_options(StdLib::ALL_SAFE, LuaOptions::default()); }
+fn sanctioned() { let _ = Lua::new_with(StdLib::TABLE, LuaOptions::default()); }
+"#
+            ),
+            vec![2, 3, 4, 5, 6],
+            "裸构造器的同义词拼法必须逐个点名；Lua::new_with( 与 LuaOptions::default() 不该被误伤"
+        );
 
         // fn_span 是规则 2/3 的支点，先自证：区间恰好框住函数体，既不缩水也不外溢。
         let span_fixture = production_code_lines(
@@ -2556,12 +2703,13 @@ fn other() {
         );
 
         // 三条规则共用同一份「生产代码」行集：
-        // 1. 不许 `Lua::new()` == ALL_SAFE（含 IO/OS）；
+        // 1. 不许任何裸构造器：`Lua::new()` / `Lua::default()`（mlua 里它就是 `Lua::new()`）/
+        //    `unsafe_new*` / `new_with_options` —— 全都等价于"开了一台没人加固的 VM"；
         // 2. 全 crate 只许一处 `Lua::new_with(`，且必须在 `sandbox_lua` 体内；
         // 3. `sandbox_lua` 自己必须调 `harden_globals`。
         // 规则 2 就是当初漏掉 replay.rs 的那道缝：那是一处 new_with(含 PACKAGE) 却没跟着
-        // harden_globals 的 VM，只扫 `Lua::new()` 永远看不见它。把构造收敛到一处、把加固
-        // 焊进那一处，"再开一个没加固的 VM" 才从"记得不记得"变成"过不过守卫"。
+        // harden_globals 的 VM —— 拼法再怎么补也都看不见它，因为它没用裸构造器。把构造收敛到
+        // 一处、把加固焊进那一处，"再开一个没加固的 VM" 才从"记得不记得"变成"过不过守卫"。
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut production: Vec<(String, usize, String)> = Vec::new();
         let mut checked = 0usize;
@@ -2591,14 +2739,17 @@ fn other() {
 
         let mut offenders: Vec<String> = production
             .iter()
-            .filter(|(_, _, code)| code.contains("Lua::new()"))
-            .map(|(file, number, _)| format!("{file}:{number}"))
+            .filter_map(|(file, number, code)| {
+                forbidden_constructor(code)
+                    .map(|spelling| format!("{file}:{number} 用了 {spelling}"))
+            })
             .collect();
         // read_dir 顺序由 OS 决定，报错信息按路径排序后才可复现。
         offenders.sort();
         assert!(
             offenders.is_empty(),
-            "生产代码不得用 Lua::new() 打开全部标准库：{offenders:?}"
+            "生产代码不得用裸构造器打开未经加固的 Lua VM（拼法清单 {:?}）：{offenders:?}",
+            FORBIDDEN_CONSTRUCTORS
         );
 
         let constructors: Vec<(String, usize)> = production

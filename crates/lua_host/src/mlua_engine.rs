@@ -581,4 +581,51 @@ mod tests {
         );
         engine.stop(instance).expect("plugin should stop");
     }
+
+    /// `load_plugin` 是 `pub use` 导出的（`lib.rs:46`），`docs/plugin-api-v2.md` 把 native
+    /// `mlua` 运行时写成 `LuaEngine` 适配的一侧入口，但它此前只有一个断言"能加载能派发"的
+    /// 用例：沙箱在这里没人看管，全靠 `lib.rs` 的字符串守卫 —— 而守卫当时恰好漏掉
+    /// `Lua::default()` 这个同义写法（mlua 里 `Lua::default() == Lua::new()` ==
+    /// `StdLib::ALL_SAFE`，把 io/os/dofile/loadfile/load 全数还给插件也照样过）。
+    /// 这里补一条走 `load_plugin` 的行为背垫：断言写在插件源码顶层，`exec()` 一失败
+    /// `load_plugin` 就返回 `Err`，Lua 的原文进报错。
+    #[test]
+    fn load_plugin_runs_lua_in_the_hardened_sandbox() {
+        let host = Rc::new(RecordingHost::default());
+        let mut engine = MluaEngine::default();
+        let source = r#"
+assert(dofile == nil, "load_plugin: dofile must be nil, got " .. type(dofile))
+assert(loadfile == nil, "load_plugin: loadfile must be nil, got " .. type(loadfile))
+assert(load == nil, "load_plugin: load must be nil, got " .. type(load))
+assert(os == nil, "load_plugin: os must be nil, got " .. type(os))
+assert(io == nil, "load_plugin: io must be nil, got " .. type(io))
+assert(package.searchpath == nil,
+    "load_plugin: package.searchpath must be nil, got " .. type(package.searchpath))
+-- base 不能整个没掉：pcall/assert 还在，说明是逐抹而非断粮
+assert(type(pcall) == "function", "load_plugin: pcall must survive")
+-- searcher 只剩 preload：改 package.path 也不许去碰宿主文件系统。探针目录不必存在，
+-- 文件 searcher 会把试过的路径写进错误串，据此判定碰没碰磁盘。
+package.path = "/hwbench-t2-mlua-engine-probe/?.lua"
+local probe_ok, probe_err = pcall(require, "hwbench_t2_mlua_engine_probe")
+assert(probe_ok == false, "load_plugin: require must not resolve modules from the filesystem")
+assert(not tostring(probe_err):find("no file", 1, true),
+    "load_plugin: require still probes host paths: " .. tostring(probe_err))
+"#;
+        if let Err(error) = engine.load_plugin(
+            source,
+            PluginLoadConfig {
+                plugin_id: "sandbox.probe".to_owned(),
+                plugin_name: "Sandbox Probe".to_owned(),
+                plugin_version: "1.0.0".to_owned(),
+                script_name: "harden_probe.lua".to_owned(),
+                context: PluginValue::Null,
+                permissions: tool_plugin_api::PluginPermissions::new([
+                    tool_plugin_api::PluginCapability::Log,
+                ]),
+            },
+            host,
+        ) {
+            panic!("load_plugin 沙箱断言失败：{error}");
+        }
+    }
 }
