@@ -1,6 +1,8 @@
+use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crossbeam_channel::{Receiver, RecvTimeoutError};
 use tool_application::plugin::PluginStateView;
 use tool_application::query::{ReplayBlockReasonView, ReplayPolicyView, ReplayStateView};
 use tool_application::{AppCommand, AppError, CommandOutcome, TaskId, TaskState, Workbench};
@@ -8,6 +10,7 @@ use tool_core::{Direction, Event, LogLevel, Payload, topics};
 use tool_databus::{DataBus, TopicFilter};
 use tool_platform::storage::FileHandle;
 use tool_platform::{NetworkSerialConfig, PortId, SerialSettings};
+use tungstenite::Message;
 
 #[test]
 fn headless_workbench_can_dispatch_and_query() {
@@ -874,4 +877,391 @@ fn event_emission_reaches_bus_subscribers_from_all_publishers() {
         .filter(|event| event.payload.text_lossy().contains("后台任务失败"))
         .count();
     assert_eq!(failure_logs, 1, "任务失败必须发布 1 条系统日志事件");
+}
+
+// ── 发送链路字节级契约 ─────────────────────────────────────────────────────
+//
+// `send_routing_dispatches_by_port_kind_and_rejects_invalid_hex` 只断言「任务种类对了、
+// 最后因为端口从未打开而 Failed」。把 `Workbench::send_transport_bytes` 的入参换成
+// `let bytes: Vec<u8> = Vec::new();`（每一次发送都真的投递 0 字节）后，全工作区仍会
+// 全绿 —— 用户按下发送键什么都不发，CI 看不见。下面的用例把契约钉在**对端收到的字节**上。
+
+/// 收满期望帧数之后，回路服务器继续观察的静默窗口：让「多投递一帧」也能被看见。
+const QUIET_WINDOW: Duration = Duration::from_millis(300);
+
+/// 回路服务器观测到的一条事件。
+enum Observed {
+    /// 收到一条 WebSocket 文本帧（原文，未解析）。
+    Frame(String),
+    /// 观测线程停止，附带原因：让「没收到」变成断言消息，而不是挂死。
+    Stopped(String),
+}
+
+/// 在 127.0.0.1 上起一个真实的 WebSocket 服务器（Nexus Prime / Moonraker 替身，
+/// 端口 0 由内核分配），把客户端发来的每条文本帧原样转发给调用方。
+///
+/// 形状照抄 `crates/transport/src/network.rs` 的 `e2e_send_gcode_and_receive_response`：
+/// 裸 `TcpListener` + `tungstenite::accept`，不经过 `reqwest`，因此与 `HTTP_PROXY`
+/// 之类环境无关；也不猜空闲端口，不存在端口竞争。
+///
+/// 观测结果走 channel 而非 `join()`：调用方只按 deadline 等待，绝不阻塞在一个可能
+/// 卡在 `accept()` 上的线程上。线程内部每次读都设了 socket 读超时，并用绝对 deadline
+/// 收口，所以它自己一定会退出。
+fn spawn_loopback_ws_server(expected_frames: usize) -> (SocketAddr, Receiver<Observed>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("绑定 loopback 监听端口");
+    let addr = listener.local_addr().expect("读取内核分配的监听地址");
+    let (tx, rx) = crossbeam_channel::unbounded();
+    std::thread::spawn(move || {
+        let stop = |reason: String| {
+            let _ = tx.send(Observed::Stopped(reason));
+        };
+        // 握手阶段给足余量（客户端 TCP 连上后才发 GET Upgrade），随后收紧成轮询间隔，
+        // 让 read() 能周期性返回以检查 deadline。
+        let (stream, _) = match listener.accept() {
+            Ok(peer) => peer,
+            Err(error) => {
+                stop(format!("accept 失败：{error}"));
+                return;
+            }
+        };
+        if let Err(error) = stream.set_read_timeout(Some(Duration::from_secs(5))) {
+            stop(format!("设置握手读超时失败：{error}"));
+            return;
+        }
+        let mut ws = match tungstenite::accept(stream) {
+            Ok(ws) => ws,
+            Err(error) => {
+                stop(format!("WebSocket 握手失败：{error}"));
+                return;
+            }
+        };
+        if let Err(error) = ws
+            .get_mut()
+            .set_read_timeout(Some(Duration::from_millis(50)))
+        {
+            stop(format!("设置读帧超时失败：{error}"));
+            return;
+        }
+        let hard_deadline = Instant::now() + Duration::from_secs(15);
+        let mut quiet_deadline: Option<Instant> = None;
+        let mut forwarded = 0_usize;
+        loop {
+            // 收满期望条数后再静默观察一会儿：只读到「期望的那几条」会让多投递一帧的
+            // 缺陷隐形（重复派发正是 Task 6 统一路由时最容易引入的那一类）。
+            if let Some(quiet) = quiet_deadline
+                && Instant::now() >= quiet
+            {
+                break; // 观测完成，正常退出（丢弃 tx → 调用方看到 Disconnected）
+            }
+            if Instant::now() >= hard_deadline {
+                if forwarded < expected_frames {
+                    stop(format!(
+                        "服务器 15s 内只等到 {forwarded} 帧（期望 {expected_frames}）"
+                    ));
+                }
+                break;
+            }
+            match ws.read() {
+                Ok(Message::Text(text)) => {
+                    if tx.send(Observed::Frame(text.as_str().to_owned())).is_err() {
+                        return; // 调用方已退出
+                    }
+                    forwarded += 1;
+                    if forwarded >= expected_frames && quiet_deadline.is_none() {
+                        quiet_deadline = Some(Instant::now() + QUIET_WINDOW);
+                    }
+                }
+                Ok(Message::Close(_)) => {
+                    stop("对端发送 Close 帧后连接结束".to_owned());
+                    return;
+                }
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(error))
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    ) => {}
+                Err(error) => {
+                    stop(format!("读帧失败：{error}"));
+                    return;
+                }
+            }
+        }
+    });
+    (addr, rx)
+}
+
+/// 在 `budget` 内把观测线程报告的帧全部收完，返回 `(帧原文, 提前停止的原因)`。
+///
+/// 结束方式只有三种，且每一种都有绝对截止：观测线程正常收口（`Disconnected`，
+/// 返回 `None`）、观测线程给出原因、或 `budget` 到期。每轮 `recv_timeout` 都只用
+/// 剩余预算，所以「没收到字节」一定是断言失败，不可能挂死。
+fn drain_frames(rx: &Receiver<Observed>, budget: Duration) -> (Vec<String>, Option<String>) {
+    let mut frames = Vec::new();
+    let deadline = Instant::now() + budget;
+    let stopped = loop {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            break Some(format!(
+                "{}s 内观测未结束，只收到 {} 帧",
+                budget.as_secs(),
+                frames.len()
+            ));
+        };
+        match rx.recv_timeout(remaining) {
+            Ok(Observed::Frame(text)) => frames.push(text),
+            Ok(Observed::Stopped(reason)) => {
+                break Some(format!("{reason}（已收到 {} 帧）", frames.len()));
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                break Some(format!(
+                    "{}s 内没有新的帧（已收到 {} 帧）",
+                    budget.as_secs(),
+                    frames.len()
+                ));
+            }
+            Err(RecvTimeoutError::Disconnected) => break None,
+        }
+    };
+    (frames, stopped)
+}
+
+/// 解析一条 JSON-RPC 文本帧为 `(method, id, params.script)`。
+///
+/// 帧不是 JSON、`jsonrpc` 不是 `"2.0"`、或缺少 `method` 都当场 panic：下面的断言读的是
+/// `method`/`id`/`params.script` 三个字段，只有先确认「这确实是一条 JSON-RPC 2.0 请求」，
+/// 取不到字段时补默认值才不会把缺陷读成合法值。`params.script` 缺失同样落成空串：
+/// gcode 请求缺它会被下面的按序字节断言判红，identify 请求本就无 script，由显式的
+/// method/id/params 断言单独钉住。
+fn json_rpc_frame(frame: &str) -> (String, u64, String) {
+    let value: serde_json::Value = serde_json::from_str(frame)
+        .unwrap_or_else(|error| panic!("对端帧不是合法 JSON：{error}，原文：{frame}"));
+    assert_eq!(
+        value
+            .get("jsonrpc")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default(),
+        "2.0",
+        "对端帧必须是 JSON-RPC 2.0，原文：{frame}"
+    );
+    let method = value
+        .get("method")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("对端帧必须有 method 字段，原文：{frame}"))
+        .to_owned();
+    let id = value
+        .get("id")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default();
+    let script = value
+        .pointer("/params/script")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    (method, id, script)
+}
+
+#[test]
+fn send_bytes_reach_a_connected_network_port() {
+    // 派发命令数 = identify(1) + 之后的 gcode 请求数。
+    const SENT_COMMANDS: usize = 5;
+
+    let (addr, observed) = spawn_loopback_ws_server(1 + SENT_COMMANDS);
+
+    let bus = DataBus::new();
+    let mut wb = Workbench::new(bus);
+    let config = NetworkSerialConfig {
+        host: "127.0.0.1".to_owned(),
+        port: addr.port(),
+        api_key: None,
+    };
+    let name = config.display_name();
+    expect_done(&mut wb, AppCommand::RegisterNetworkPort { config });
+
+    // 1) 端口必须先**真的打开**：连的是活着的 loopback 服务器，不是死端口 9。
+    let connect_task = expect_pending(
+        &mut wb,
+        AppCommand::Connect {
+            port: PortId::new(name.clone()),
+            settings: SerialSettings::default(),
+        },
+    );
+    assert_eq!(
+        task_kind(&wb, connect_task).as_deref(),
+        Some("connect_network"),
+        "已注册网络端口的连接不得落到 connect_serial"
+    );
+    let connect_ended = tick_until(&mut wb, Duration::from_secs(10), |wb| {
+        matches!(
+            task_state(wb, connect_task),
+            Some(TaskState::Completed | TaskState::Failed)
+        )
+    });
+    assert!(
+        connect_ended,
+        "connect_network 任务必须在 10s 内结束，实际: {:?}",
+        task_state(&wb, connect_task)
+    );
+    assert_eq!(
+        task_state(&wb, connect_task),
+        Some(TaskState::Completed),
+        "连上真实 loopback WebSocket 服务器必须成功，而不是静默降级成「端口没开」"
+    );
+    let handshaked = tick_until(&mut wb, Duration::from_secs(10), |wb| {
+        wb.query_transport().statuses.iter().any(|status| {
+            status.port_name.as_deref() == Some(name.as_str()) && status.open && !status.connecting
+        })
+    });
+    assert!(
+        handshaked,
+        "WebSocket 握手必须完成（transport 状态应为 open 且不在 connecting）：{:?}",
+        wb.query_transport().statuses
+    );
+
+    // 2) 按序派发 5 条命令。per-port 有序队列（`spawn_ordered`）保证到帧顺序 == 派发顺序。
+    let text_task = expect_pending(
+        &mut wb,
+        AppCommand::SendText {
+            port: PortId::new(name.clone()),
+            text: "G28\n".to_owned(),
+        },
+    );
+    let raw_task = expect_pending(
+        &mut wb,
+        AppCommand::SendRaw {
+            port: PortId::new(name.clone()),
+            bytes: b"M105".to_vec(),
+        },
+    );
+    // 解码后全是可打印 ASCII 的 HEX：script 字段与投递的字节逐字节相同，最直白的字节级证据。
+    let ascii_hex_task = expect_pending(
+        &mut wb,
+        AppCommand::SendHex {
+            port: PortId::new(name.clone()),
+            hex: "48 69".to_owned(),
+            strict: true,
+        },
+    );
+    // HEX 解码契约的两条主角：严格 "AB CD" 必须投递解码后的 0xAB 0xCD；
+    // 宽松 "AB C" 必须按生产解析器的单 nibble 规则投递 0xAB 0x0C。
+    let strict_hex_task = expect_pending(
+        &mut wb,
+        AppCommand::SendHex {
+            port: PortId::new(name.clone()),
+            hex: "AB CD".to_owned(),
+            strict: true,
+        },
+    );
+    let lenient_hex_task = expect_pending(
+        &mut wb,
+        AppCommand::SendHex {
+            port: PortId::new(name.clone()),
+            hex: "AB C".to_owned(),
+            strict: false,
+        },
+    );
+    let sends = [
+        text_task,
+        raw_task,
+        ascii_hex_task,
+        strict_hex_task,
+        lenient_hex_task,
+    ];
+    for task in sends {
+        assert_eq!(
+            task_kind(&wb, task).as_deref(),
+            Some("send_network"),
+            "已注册网络端口 {name} 的发送（task {task:?}）不得落到 send_serial"
+        );
+    }
+
+    // 3) 先收对端的字节。`send_to` 是 fire-and-forget（写进端口命令队列就算成功），
+    //    所以「任务 Completed」绝不等于「字节到了线上」—— 这个先后顺序本身就是用例的要点。
+    //    同时，观测一定在 Workbench 仍被持有、端口仍打开时跑完：万一 loopback 连接受环境
+    //    影响而失败，变红的只会是本用例的字节断言，不会牵连本进程里其他串口路径用例。
+    let (frames, stopped) = drain_frames(&observed, Duration::from_secs(20));
+
+    // 4) 任务侧也必须 Completed：端口开着还静默失败，就是路由/后端的缺陷。
+    let sends_ended = tick_until(&mut wb, Duration::from_secs(10), |wb| {
+        sends.iter().all(|task| {
+            matches!(
+                task_state(wb, *task),
+                Some(TaskState::Completed | TaskState::Failed)
+            )
+        })
+    });
+    assert!(
+        sends_ended,
+        "发送任务必须在 10s 内结束，实际: {:?}",
+        sends.map(|task| task_state(&wb, task))
+    );
+    let states: Vec<Option<TaskState>> = sends.iter().map(|task| task_state(&wb, *task)).collect();
+    assert_eq!(
+        states,
+        vec![Some(TaskState::Completed); sends.len()],
+        "端口已打开时每一次发送都必须让任务 Completed，而不是静默失败"
+    );
+
+    // 5) 契约本体：对端**收到了什么**。收到几条就断言几条，多一条也算失败。
+    assert_eq!(
+        stopped, None,
+        "回路服务器观测中断：{stopped:?}；已收到 {frames:?}"
+    );
+    assert_eq!(
+        frames.len(),
+        1 + SENT_COMMANDS,
+        "对端应恰好收到 identify + {SENT_COMMANDS} 条 gcode 请求，实际 {} 帧: {frames:?}",
+        frames.len()
+    );
+    let parsed: Vec<(String, u64, String)> =
+        frames.iter().map(|frame| json_rpc_frame(frame)).collect();
+
+    // identify 必须先于任何 gcode 请求，且占用 id 1（gcode 请求从 2 开始编号）。
+    assert_eq!(
+        parsed[0].0, "server.connection.identify",
+        "第一条帧必须是客户端自我标识，实际: {:?}",
+        parsed[0]
+    );
+    assert_eq!(parsed[0].1, 1, "identify 请求必须是 id 1");
+    let identify_params: serde_json::Value =
+        serde_json::from_str(&frames[0]).expect("json_rpc_frame 已确认是 JSON");
+    assert!(
+        identify_params.get("params").is_some(),
+        "identify 请求必须带 params（客户端标识），原文：{}",
+        frames[0]
+    );
+    let methods: Vec<&str> = parsed[1..]
+        .iter()
+        .map(|(method, _, _)| method.as_str())
+        .collect();
+    assert_eq!(
+        methods,
+        vec!["printer.gcode.script"; SENT_COMMANDS],
+        "每条发送命令都必须以 printer.gcode.script 投递到对端"
+    );
+    let ids: Vec<u64> = parsed[1..].iter().map(|(_, id, _)| *id).collect();
+    assert_eq!(
+        ids,
+        vec![2, 3, 4, 5, 6],
+        "gcode 请求必须按派发顺序取得连续 id（identify 用掉 1）"
+    );
+    let scripts: Vec<&str> = parsed[1..]
+        .iter()
+        .map(|(_, _, script)| script.as_str())
+        .collect();
+    // transport 用 `String::from_utf8_lossy` 把原始字节渲染成 gcode 文本，非法 UTF-8
+    // 字节逐个替换成 U+FFFD，所以「恰好两个 U+FFFD」就是 0xAB 0xCD 两字节在对端的投影。
+    assert_eq!(
+        scripts,
+        vec![
+            "G28\n",            // SendText：原文投递
+            "M105",             // SendRaw：字节投递
+            "Hi",               // 严格 HEX "48 69" → 0x48 0x69
+            "\u{FFFD}\u{FFFD}", // 严格 HEX "AB CD" → 0xAB 0xCD（两字节，非 ASCII 原文）
+            "\u{FFFD}\u{0C}",   // 宽松 HEX "AB C" → 0xAB 0x0C（单 nibble 左补 0）
+        ],
+        "对端按序收到的 script 必须与派发的 5 条命令逐字节对应：HEX 变成 \"48 69\"/\"AB CD\"/\"AB C\" \
+         这类 ASCII 原文就说明没有解码；帧数变少或整条消失就说明投递了 0 字节；\
+         第 5 条若不再是「U+FFFD + U+000C」就说明宽松模式的单 nibble 左补 0 规则被改掉\
+         （右补 0 会得到 0xC0，即第二个 U+FFFD）"
+    );
 }
