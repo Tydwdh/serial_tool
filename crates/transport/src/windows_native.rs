@@ -167,6 +167,10 @@ struct NativeWorker {
 
 impl NativeWorker {
     fn run(self) {
+        // 线程退出（正常返回 **或 run_impl() panic 展开**）时清 alive。原先这里是
+        // 函数尾的显式 store：非 panic 路径都能走到，展开路径整体跳过 —— 同一个
+        // 僵尸端口缺陷，只是站点不同。Release 与调用方的 Acquire load 配对。
+        let _alive_guard = crate::AliveGuard(Arc::clone(&self.alive));
         match self.run_impl() {
             Ok(()) => {}
             Err(error)
@@ -184,9 +188,6 @@ impl NativeWorker {
             }
             Err(_) => {}
         }
-        // Release 与调用方（send_to/open_serial/reap_dead_ports）的 Acquire load 配对，
-        // 确保弱内存模型（ARM/AArch64）上 worker 已死状态对其他线程可见。
-        self.alive.store(false, Ordering::Release);
     }
 
     fn run_impl(&self) -> io::Result<()> {

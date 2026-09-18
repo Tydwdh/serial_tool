@@ -91,6 +91,9 @@ fn network_worker_loop(
     source: String,
     waker: Option<Arc<dyn RepaintWaker>>,
 ) {
+    // 覆盖全部退出路径（含 panic 展开）：原本五处显式 `alive.store(false)` 只写在
+    // return/尾部，worker 一旦 panic 就整体跳过，网络端口变成不可重开的僵尸。
+    let _alive_guard = crate::AliveGuard(Arc::clone(&alive));
     let port_name = crate::extract_port(&source);
     let wake = || {
         if let Some(w) = &waker {
@@ -109,7 +112,6 @@ fn network_worker_loop(
             format!("{port_name} 连接失败：{reason}"),
         ));
         connecting.store(false, Ordering::Release);
-        alive.store(false, Ordering::Release);
     };
     let addr = match (config.host.as_str(), config.port).to_socket_addrs() {
         Ok(mut addrs) => match addrs.next() {
@@ -133,7 +135,6 @@ fn network_worker_loop(
     };
     // 连接期间用户点击取消：直接退出
     if stop.load(Ordering::Acquire) {
-        alive.store(false, Ordering::Release);
         return;
     }
 
@@ -218,7 +219,6 @@ fn network_worker_loop(
                         "transport.network",
                         format!("{port_name} 发送失败：{error}"),
                     ));
-                    alive.store(false, Ordering::Release);
                     return;
                 }
             }
@@ -249,14 +249,12 @@ fn network_worker_loop(
                     "transport.network",
                     format!("{port_name} 连接断开：{error}"),
                 ));
-                alive.store(false, Ordering::Release);
                 return;
             }
         }
     }
     // 正常关闭：发送 Close 帧后释放连接
     let _ = ws.close(None);
-    alive.store(false, Ordering::Release);
 }
 
 #[cfg(test)]

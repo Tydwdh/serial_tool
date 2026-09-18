@@ -396,11 +396,37 @@ impl JsonlRecorder {
         }
     }
 
+    /// worker 线程已经退出、却没有走到自己的收尾（`finished` 标志未置位）
+    /// ⇒ 只剩一种可能：被 panic 展开掀掉了。
+    ///
+    /// `is_running()` 回答的是"用户点过停止没有"，不是"线程还活着"；只看它的
+    /// 话，崩掉的 recorder 会一直报告"正在录制"，而磁盘上一个字节都不会再增加
+    /// —— 用户失去的正是他此行的目的（本次会话的抓取）。
+    ///
+    /// 正常收尾（含 `handle_fatal` 的写失败路径）会把 `finished` 置 true，那种
+    /// 情况归 `reap_error()` 报告，这里必须不误报。
+    fn worker_panicked(&self) -> bool {
+        self.worker.as_ref().is_some_and(|worker| {
+            worker.join.as_ref().is_some_and(|join| join.is_finished())
+                && !worker.finished.load(Ordering::SeqCst)
+        })
+    }
+
     /// 在 UI tick 中调用，监控 lossless 录制队列。
     ///
     /// 软阈值只产生一次告警；硬阈值会停止 worker、丢弃尚未写入的尾部并把摘要
     /// 标记为 incomplete。这样不会静默丢数据，也不会让无界队列把进程拖到 OOM。
     pub fn tick_backpressure(&mut self) {
+        // worker 存活检查放在 backlog 早退**之前**：`backlog` 为 None 的录制路径
+        // （未启用积压监控）同样必须被盯着，否则这条修复只在开了阈值时才生效。
+        // 本函数由 `Workbench::tick` 每帧调用，故检测延迟为一帧。
+        if self.worker_panicked() {
+            let reason = "录制线程异常退出（panic），本次录制不完整".to_owned();
+            self.stop_with_reason(true, Some(reason.clone()));
+            self.bus
+                .publish(Event::system_log(LogLevel::Error, "recorder", reason));
+            return;
+        }
         let Some(backlog) = self.backlog.clone() else {
             return;
         };
@@ -864,5 +890,142 @@ mod tests {
         assert!(!rec.is_running());
 
         let _ = fs::remove_file(&invalid_path);
+    }
+
+    // ── worker 线程存活：panic 不得让 recorder 继续自称"正在录制" ──
+
+    /// 自旋等待线程终止。断言对象是"线程已终止"这一事实本身，时限只是防止测试
+    /// 永久卡死的兜底，**不是**通过条件（被测线程除了 panic 什么都不做）。
+    fn wait_thread_finished(join: &JoinHandle<()>) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !join.is_finished() {
+            assert!(Instant::now() < deadline, "worker 线程应在合理时间内终止");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// 手工装配一个 worker 字段齐全、但线程已经终止的 recorder。
+    /// `orderly = true` 模拟正常收尾（含写失败的 `handle_fatal` 路径：线程照样走到
+    /// 尾部并置 `finished`）；`orderly = false` 模拟 panic 展开，尾部那行到不了。
+    fn attach_exited_worker(rec: &mut JsonlRecorder, orderly: bool) {
+        let finished = Arc::new(AtomicBool::new(false));
+        let stats = Arc::clone(&rec.stats);
+        let finished_for_thread = Arc::clone(&finished);
+        let join: JoinHandle<()> = thread::spawn(move || {
+            if orderly {
+                // 与生产闭包尾部的 `finished_thread.store(true, SeqCst)` 同一件事。
+                finished_for_thread.store(true, Ordering::SeqCst);
+            } else {
+                panic!("模拟录制 worker panic 展开");
+            }
+        });
+        wait_thread_finished(&join);
+        rec.worker = Some(RecorderWorker {
+            stop: Arc::new(AtomicBool::new(false)),
+            discard_pending: Arc::new(AtomicBool::new(false)),
+            pause: Arc::new(AtomicBool::new(false)),
+            finished,
+            last_error: Arc::new(Mutex::new(None)),
+            join: Some(join),
+            stats,
+        });
+    }
+
+    #[test]
+    fn worker_panicked_is_false_when_not_started_and_while_recording() {
+        let bus = DataBus::new();
+        let mut rec = JsonlRecorder::new(bus);
+        assert!(
+            !rec.worker_panicked(),
+            "未启动时不得报告 panic，否则每帧都会自杀"
+        );
+
+        let path = temp_file(&format!(
+            "test-worker-panic-{}.jsonl",
+            tool_core::now_timestamp_ms()
+        ));
+        rec.start(&path).unwrap();
+        assert!(!rec.worker_panicked(), "正常录制中不得误报 worker panic");
+        assert!(rec.is_running());
+
+        rec.stop();
+        while rec.reap_stopping().is_none() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !rec.worker_panicked(),
+            "停止后 worker 已移出，不得报告 panic"
+        );
+
+        let _ = fs::remove_file(&path);
+        let summary = path.with_extension("summary.json");
+        if summary.exists() {
+            let _ = fs::remove_file(&summary);
+        }
+    }
+
+    #[test]
+    fn worker_panicked_is_true_only_for_thread_exiting_without_finished_flag() {
+        // true 分支：线程已终止 + `finished` 未置位 = 只可能是 panic 展开。
+        let mut panicked_rec = JsonlRecorder::new(DataBus::new());
+        attach_exited_worker(&mut panicked_rec, false);
+        assert!(
+            panicked_rec.worker_panicked(),
+            "worker 线程已终止且没走到尾部，必须判定为异常退出"
+        );
+
+        // 反向（防误报）：`handle_fatal` 写失败等正常收尾会置 finished=true，
+        // 那种情况归 reap_error() 报告，这里不得冒充 panic。
+        let mut clean_rec = JsonlRecorder::new(DataBus::new());
+        attach_exited_worker(&mut clean_rec, true);
+        assert!(
+            !clean_rec.worker_panicked(),
+            "worker 已置 finished 的正常退出不得判为 panic"
+        );
+    }
+
+    #[test]
+    fn tick_backpressure_stops_exited_worker_even_without_backlog_monitoring() {
+        let bus = DataBus::new();
+        let logs = bus.subscribe_lossless(TopicFilter::exact(tool_core::topics::LOG_SYSTEM));
+        let mut rec = JsonlRecorder::new(bus.clone());
+        // 关键前提：未启用积压监控。存活检查若排在 `backlog` 早退之后，这条路径
+        // 上崩掉的 recorder 依旧会一直自称"正在录制"。
+        rec.backlog = None;
+        attach_exited_worker(&mut rec, false);
+        assert!(rec.is_running(), "装配前提：worker 仍在（用户没点过停止）");
+
+        rec.tick_backpressure();
+
+        assert!(
+            !rec.is_running(),
+            "worker 已异常退出的 recorder 必须停止自称\"正在录制\""
+        );
+        let stats = rec.stats();
+        assert!(stats.incomplete, "本次录制必须标记为不完整");
+        assert!(
+            stats
+                .stop_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("异常退出")),
+            "停止原因需说明线程异常退出，got {:?}",
+            stats.stop_reason
+        );
+        let error_logs: Vec<String> = logs
+            .drain()
+            .into_iter()
+            .filter(|event| {
+                event
+                    .metadata
+                    .get("level")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("error")
+            })
+            .map(|event| event.payload.text_lossy())
+            .collect();
+        assert!(
+            error_logs.iter().any(|text| text.contains("异常退出")),
+            "必须发布 Error 级日志告知用户录制线程异常退出，got {error_logs:?}"
+        );
     }
 }

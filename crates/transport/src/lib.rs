@@ -325,6 +325,37 @@ struct ClosingHandle {
     join: JoinHandle<()>,
 }
 
+/// worker 线程退出（正常返回 **或 panic 展开**）时把 `alive` 置 false。
+///
+/// 显式 `alive.store(false)` 只写在 `return` 路径上，panic 展开会全部跳过，
+/// 于是 `reap_dead_ports` 匹配不到、同名重开复用死句柄 —— 端口成为不可恢复
+/// 的僵尸。改由 `Drop` 承担后展开路径同样生效。
+///
+/// Release 与各调用方（`open_serial` / `enqueue_command` / `reap_dead_ports`）的
+/// Acquire load 配对，确保弱内存模型（ARM/AArch64）上"worker 已死"可见。
+///
+/// 本类型服务于两条 cfg 路径（非 Windows 的 `serial_worker_loop_impl`、Windows
+/// 的 `NativeWorker::run`），因此**不得**置于任何 `cfg` 之下。
+struct AliveGuard(Arc<AtomicBool>);
+
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// 端口句柄是否已死亡。两个互相独立的信号，任一成立即判定死亡：
+///
+/// - `alive`：worker 主动置位，或由 [`AliveGuard`] 在退出/展开时置位；
+/// - `join.is_finished()`：线程已结束 —— 含 panic 展开，完全不依赖 worker
+///   自己有没有记得写标志位。
+///
+/// 只信前者时，任何一个遗漏的置位点都会留下用户连"关掉重开"都做不到的僵尸端口。
+fn port_is_dead(handle: &PortHandle) -> bool {
+    !handle.alive.load(Ordering::Acquire)
+        || handle.join.as_ref().is_some_and(|join| join.is_finished())
+}
+
 impl TransportManager {
     pub fn new(bus: DataBus) -> Self {
         Self {
@@ -437,11 +468,13 @@ impl TransportManager {
         // 先收割已完成关闭的旧 worker
         self.reap_closing();
 
-        // 同配置重复打开：直接成功
+        // 同配置重复打开：直接成功。必须是**活着**的同配置句柄才算成功——
+        // 只看 alive 时，worker 忘记置位（或 guard 之前的一切版本）会把死句柄
+        // 复用成 Ok，用户连"关掉重开"都做不到。
         {
             let guard = self.ports.lock();
             if let Some(existing) = guard.get(&config.port_name)
-                && existing.alive.load(Ordering::Acquire)
+                && !port_is_dead(existing)
                 && existing.config == config
             {
                 return Ok(());
@@ -591,6 +624,9 @@ impl TransportManager {
         let source = format!("serial:{port_name}");
         let thread_source = source.clone();
         let join = thread::spawn(move || {
+            // `execute_virtual_command` 若 panic，展开会跳过函数尾的显式 store，
+            // 虚拟端口同样会变成不可重开的僵尸；统一交给 AliveGuard 收尾。
+            let _alive_guard = AliveGuard(thread_alive);
             while !thread_stop.load(Ordering::Acquire) {
                 match command_rx.recv_timeout(Duration::from_millis(5)) {
                     Ok(command) => {
@@ -600,7 +636,6 @@ impl TransportManager {
                     Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 }
             }
-            thread_alive.store(false, Ordering::Release);
         });
 
         self.ports.lock().insert(
@@ -644,11 +679,11 @@ impl TransportManager {
         self.reap_closing();
         let port_name = config.display_name();
 
-        // 同名已在打开：直接成功
+        // 同名已在打开：直接成功（同样要求句柄真的还活着，见 open_serial 的说明）
         {
             let guard = self.ports.lock();
             if let Some(existing) = guard.get(&port_name)
-                && existing.alive.load(Ordering::Acquire)
+                && !port_is_dead(existing)
             {
                 return Ok(port_name);
             }
@@ -862,7 +897,7 @@ impl TransportManager {
             let worker = guard
                 .get(&resolved)
                 .ok_or_else(|| TransportError::PortNotOpen(port_name.to_owned()))?;
-            if !worker.alive.load(Ordering::Acquire) {
+            if port_is_dead(worker) {
                 return Err(TransportError::WorkerClosed);
             }
             worker.writer.clone()
@@ -913,7 +948,7 @@ impl TransportManager {
         let key = Self::resolve_open_port_name_locked(&guard, port_name)
             .unwrap_or_else(|| port_name.to_owned());
         match guard.get(&key) {
-            Some(w) if w.alive.load(Ordering::Relaxed) => {
+            Some(w) if !port_is_dead(w) => {
                 let connecting = w.connecting.load(Ordering::Relaxed);
                 TransportStatus {
                     open: !connecting,
@@ -933,7 +968,9 @@ impl TransportManager {
             .lock()
             .values()
             .map(|w| {
-                if w.alive.load(Ordering::Relaxed) {
+                if port_is_dead(w) {
+                    TransportStatus::closed()
+                } else {
                     let connecting = w.connecting.load(Ordering::Relaxed);
                     TransportStatus {
                         open: !connecting,
@@ -941,8 +978,6 @@ impl TransportManager {
                         baud_rate: Some(w.config.baud_rate),
                         connecting,
                     }
-                } else {
-                    TransportStatus::closed()
                 }
             })
             .collect()
@@ -1036,7 +1071,7 @@ impl TransportManager {
             .map_err(|error| TransportError::Io(std::io::Error::other(error)))
     }
 
-    /// 清理已退出 worker 的 stale port handle（alive == false）。
+    /// 清理已退出 worker 的 stale port handle（[`port_is_dead`] 的两个信号任一成立）。
     /// 可在 status 查询、list/open/close 或定时刷新时调用。
     ///
     /// 在 ports 锁内完成 dead handle 的 remove + stop + 取 join，仅把 push(closing)
@@ -1048,7 +1083,7 @@ impl TransportManager {
             let mut guard = self.ports.lock();
             let dead_names: Vec<String> = guard
                 .iter()
-                .filter(|(_, h)| !h.alive.load(Ordering::Acquire))
+                .filter(|(_, h)| port_is_dead(h))
                 .map(|(name, _)| name.clone())
                 .collect();
             dead_names
@@ -1144,6 +1179,8 @@ fn serial_worker_loop_impl(
     source: String,
     waker: Option<Arc<dyn RepaintWaker>>,
 ) {
+    // 线程退出（含 panic 展开）时清 alive；函数内不再有任何显式 store。
+    let _alive_guard = AliveGuard(Arc::clone(&alive));
     let mut buffer = [0_u8; 4096];
     // 日志用干净端口名（去掉 "serial:" 前缀）。
     let port_name = extract_port(&source);
@@ -1157,7 +1194,6 @@ fn serial_worker_loop_impl(
         while let Ok(command) = command_rx.try_recv() {
             if execute_serial_command(&mut port, command, &bus, &source, &port_name, &wake).is_err()
             {
-                alive.store(false, Ordering::Release);
                 return;
             }
         }
@@ -1196,12 +1232,10 @@ fn serial_worker_loop_impl(
                     "transport.serial",
                     format!("{port_name} 读取失败：{error}"),
                 ));
-                alive.store(false, Ordering::Release);
                 return;
             }
         }
     }
-    alive.store(false, Ordering::Release);
 }
 
 #[cfg(any(not(windows), test))]
@@ -1742,6 +1776,99 @@ mod tests {
         }
     }
 
+    /// `MockSerialPort` 的 panic 版本：`read` 一被调用就把 worker 掀掉。
+    struct PanickingPort;
+
+    impl SerialIo for PanickingPort {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            panic!("模拟串口读路径 panic（预期：跳过所有显式 alive.store）");
+        }
+        fn write_all(&mut self, _buf: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn write_data_terminal_ready(&mut self, _value: bool) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn write_request_to_send(&mut self, _value: bool) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// `AliveGuard` 本身：**不需要任何端口**。
+    ///
+    /// 这条是 Windows CI 上真正跑得到的证据 —— Windows 生产的 worker 入口是
+    /// `NativeWorker::run`（`windows_native.rs`），它无法在单测里构造真实的
+    /// `NativeSerialPort`，但它使用的是同一个 `AliveGuard` 类型、同一种
+    /// "函数第一行持有 guard" 的结构。
+    #[test]
+    fn alive_guard_clears_flag_when_thread_panics() {
+        let alive = Arc::new(AtomicBool::new(true));
+        let guard_alive = Arc::clone(&alive);
+        let join = std::thread::spawn(move || {
+            let _guard = AliveGuard(guard_alive);
+            panic!("模拟 worker 线程 panic 展开");
+        });
+        assert!(
+            join.join().is_err(),
+            "mock 线程必须 panic，否则本测试什么都没测到"
+        );
+        // join() 返回即意味着展开已完成 ⇒ guard 已经 drop，无需任何等待/超时。
+        assert!(
+            !alive.load(Ordering::Acquire),
+            "worker panic 后 alive 必须为 false，否则端口成为不可恢复的僵尸"
+        );
+    }
+
+    #[test]
+    fn alive_guard_clears_flag_on_normal_exit() {
+        // panic 之外的一侧：guard 取代显式 store 后，正常返回同样要清零。
+        let alive = Arc::new(AtomicBool::new(true));
+        let guard_alive = Arc::clone(&alive);
+        let join = std::thread::spawn(move || {
+            let _guard = AliveGuard(guard_alive);
+        });
+        join.join().unwrap();
+        assert!(
+            !alive.load(Ordering::Acquire),
+            "worker 正常退出后 alive 必须为 false"
+        );
+    }
+
+    /// 现场复现 C4：worker panic 时 `serial_worker_loop_impl` 内所有显式
+    /// `alive.store(false)` 都被展开跳过，端口既不被回收也不能重开。
+    ///
+    /// 注意适用范围：`serial_worker_loop_impl` 是 `#[cfg(any(not(windows), test))]`
+    /// 的共享实现，Windows 生产路径走 `NativeWorker::run`；本测试证明的是
+    /// "共享实现 + guard" 协同生效，Windows 侧由上面的 `alive_guard_*` 加
+    /// 结构上同一处应用覆盖。
+    #[test]
+    fn panicked_worker_clears_alive_flag() {
+        let alive = Arc::new(AtomicBool::new(true));
+        let thread_alive = Arc::clone(&alive);
+        let (writer, command_rx) = bounded::<SerialCommand>(4);
+        let stop = Arc::new(AtomicBool::new(false));
+        let join = std::thread::spawn(move || {
+            serial_worker_loop_impl(
+                PanickingPort,
+                command_rx,
+                stop,
+                thread_alive,
+                DataBus::new(),
+                "serial:PANIC_TEST".to_owned(),
+                None,
+            )
+        });
+        assert!(
+            join.join().is_err(),
+            "mock 端口必须让 worker panic，否则本测试什么都没测到"
+        );
+        assert!(
+            !alive.load(Ordering::Acquire),
+            "worker panic 后 alive 必须为 false，否则端口成为不可恢复的僵尸"
+        );
+        drop(writer);
+    }
+
     #[test]
     fn worker_loop_publishes_rx_and_tx() {
         let bus = DataBus::new();
@@ -1992,6 +2119,75 @@ mod transport_tests {
             alive: Arc::new(AtomicBool::new(alive)),
             join: None,
         }
+    }
+
+    /// 自旋等待线程终止。断言对象是"线程已终止"这一事实本身，时限只是防止
+    /// 测试永久卡死的兜底，**不是**通过条件（被测线程除了 panic 什么都不做）。
+    fn wait_thread_finished(join: &JoinHandle<()>) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !join.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker 线程应在合理时间内终止"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn port_is_dead_accepts_finished_join_without_alive_flag() {
+        // 线程已终止 = 端口已死亡，与 worker 有没有记得置位无关。
+        let mut handle = make_test_handle(true);
+        handle.join = Some(thread::spawn(move || {
+            panic!("模拟 worker panic 展开：一个 alive.store 都不会执行");
+        }));
+        wait_thread_finished(handle.join.as_ref().unwrap());
+        assert!(
+            handle.alive.load(Ordering::Acquire),
+            "用例前提：没有任何代码把 alive 置为 false"
+        );
+        assert!(
+            port_is_dead(&handle),
+            "线程已退出即视为端口死亡，与 alive 标志无关"
+        );
+    }
+
+    #[test]
+    fn port_is_dead_keeps_healthy_handle_open() {
+        // 反向：线程还在跑且 alive=true 时不得判死，否则双信号会把正常端口关掉。
+        let (keep_alive_tx, keep_alive_rx) = bounded::<()>(1);
+        let mut handle = make_test_handle(true);
+        handle.join = Some(thread::spawn(move || {
+            let _ = keep_alive_rx.recv();
+        }));
+        assert!(
+            !port_is_dead(&handle),
+            "worker 线程仍在运行时不得判定为死亡"
+        );
+        drop(keep_alive_tx);
+        wait_thread_finished(handle.join.as_ref().unwrap());
+        assert!(port_is_dead(&handle), "同一句柄在线程终止后必须立刻判死");
+    }
+
+    #[test]
+    fn enqueue_command_rejects_handle_whose_worker_thread_finished() {
+        let bus = DataBus::new();
+        let tm = TransportManager::new(bus);
+        // 命令通道本身是健康的（receiver 还握在测试手里）：旧的 `!alive` 判定会
+        // 放行，于是命令进队列后永远无人取走，UI 一路显示"已发送"直到队列满。
+        let (writer, reader) = bounded::<SerialCommand>(4);
+        let mut handle = make_test_handle(true);
+        handle.writer = writer;
+        handle.join = Some(thread::spawn(|| {}));
+        wait_thread_finished(handle.join.as_ref().unwrap());
+        tm.ports.lock().insert("COM3".to_owned(), handle);
+
+        let err = tm.send_to("COM3", vec![0x01]).unwrap_err();
+        assert!(matches!(err, TransportError::WorkerClosed), "got {err:?}");
+        assert!(
+            reader.try_recv().is_err(),
+            "死亡句柄的命令通道不得收到任何字节"
+        );
     }
 
     #[test]
