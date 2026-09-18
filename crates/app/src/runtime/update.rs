@@ -1,5 +1,5 @@
 use crate::app::WorkbenchApp;
-use crate::state::CheckResult;
+use crate::state::{CheckResult, cached_check_result};
 use std::sync::Arc;
 
 impl WorkbenchApp {
@@ -21,12 +21,13 @@ impl WorkbenchApp {
         if self.update_state.want_restart {
             // manifest 写 update.json 带来的 pinned 摘要，而非下载自算值：
             // 后者只会把校验退化成"下载内容跟下载内容比"。
+            // 可用性判定与下载侧共用同一个 gate（`UpdateState::pinned_update_sha256`）。
             let Some((version, sha256)) = self
                 .update_state
                 .latest_version
                 .as_ref()
-                .zip(self.update_state.expected_sha256.as_ref())
-                .map(|(v, s)| (v.clone(), s.clone()))
+                .zip(self.update_state.pinned_update_sha256())
+                .map(|(version, pin)| (version.clone(), pin.to_owned()))
             else {
                 self.update_state.want_restart = false;
                 self.update_state.error = Some("更新信息不完整，请重新下载更新".into());
@@ -163,20 +164,10 @@ impl WorkbenchApp {
         );
 
         self.update_state.check_handle = Some(std::thread::spawn(move || {
-            // 先检查 24h 缓存（非强制时）。缓存里的 sha256 必须是上次真实从
-            // update.json 拿到的固定值；空/被篡改的记录一律当作未命中重新拉取。
-            if !force
-                && let Some(cache) = tool_updater::read_check_cache()
-                && tool_updater::is_cache_valid(&cache)
-                && tool_updater::update_info::is_pinned_sha256(&cache.sha256)
-            {
-                return Ok(CheckResult {
-                    version: cache.latest_version.clone(),
-                    download_url: String::new(),
-                    sha256: cache.sha256.clone(),
-                    changelog: Vec::new(),
-                    cached: true,
-                });
+            // 先检查 24h 缓存（非强制时）。命中条件（未过期 + 缓存的 sha256 是真实
+            // pinned 值）抽在 `state::cached_check_result` 里，那里有单测直接覆盖。
+            if let Some(cached) = cached_check_result(tool_updater::read_check_cache, force) {
+                return Ok(cached);
             }
 
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -233,12 +224,9 @@ impl WorkbenchApp {
         };
 
         // 下载前必须已拿到 update.json 的 pinned 摘要；缺失或非法一律拒绝，
-        // 绝不回退到"下完再自算"——那等于没有校验。
-        let Some(expected_sha256) = self
-            .update_state
-            .expected_sha256
-            .clone()
-            .filter(|pin| tool_updater::update_info::is_pinned_sha256(pin))
+        // 绝不回退到"下完再自算"——那等于没有校验。判定本身在
+        // `UpdateState::pinned_update_sha256`，那里有单测直接覆盖。
+        let Some(expected_sha256) = self.update_state.pinned_update_sha256().map(str::to_owned)
         else {
             self.update_state.error = Some("更新清单未提供合法的包摘要，已拒绝下载".into());
             return;

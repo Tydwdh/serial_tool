@@ -119,6 +119,123 @@ mod tests {
         assert!(notifications[0].id > first_id);
         assert_eq!(notifications[0].text, "second");
     }
+
+    /// 与 `tool_updater::is_cache_valid` 同一时间基准（Unix 毫秒）。
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    // ── 自动更新的两道 gate ──
+    //
+    // 反向自检（必须能失败，改完请还原）：
+    //   1. 删掉 `cached_check_result` 里的 `is_pinned_sha256(&cache.sha256)` 条件
+    //      → `cached_check_hit_requires_pinned_sha256` 变红。
+    //   2. 删掉 `pinned_update_sha256` 的 `.filter(...)`
+    //      → `download_pin_gate_requires_pinned_sha256` 变红。
+
+    #[test]
+    fn cached_check_hit_requires_pinned_sha256() {
+        let pin = "a".repeat(64);
+        let cache = |sha256: &str| tool_updater::CheckCache {
+            last_check_time: now_ms(),
+            latest_version: "1.3.0".to_owned(),
+            had_update: true,
+            sha256: sha256.to_owned(),
+        };
+
+        // 24h 内 + pinned 摘要合法：命中，且带出去的就是那个固定值。
+        let hit = cached_check_result(|| Some(cache(&pin)), false).expect("合法缓存应命中");
+        assert_eq!(
+            hit.sha256, pin,
+            "缓存命中必须把 pinned 摘要带进 CheckResult"
+        );
+        assert_eq!(hit.version, "1.3.0");
+        assert!(hit.cached);
+        assert!(
+            hit.download_url.is_empty(),
+            "缓存命中不该凭空造出一个下载 URL"
+        );
+
+        // 空 / 短 / 非十六进制：一律未命中。缓存是本机可改的文件，
+        // 放行这些值就等于让"有版本号但没有固定摘要"的结果去驱动下载。
+        for bad in ["", "deadbeef", &"a".repeat(63), &"g".repeat(64)] {
+            assert!(
+                cached_check_result(|| Some(cache(bad)), false).is_none(),
+                "缓存里的 {bad:?} 不是合法 pinned 摘要，必须重新拉取 update.json"
+            );
+        }
+
+        // 过期缓存与"没有缓存记录"同样不命中。
+        let expired = tool_updater::CheckCache {
+            last_check_time: 0,
+            ..cache(&pin)
+        };
+        assert!(
+            cached_check_result(|| Some(expired), false).is_none(),
+            "超过 24h 的缓存必须重取"
+        );
+        assert!(
+            cached_check_result(|| None, false).is_none(),
+            "没有缓存记录时不得凭空命中"
+        );
+
+        // 用户手动检查（force）不命中，而且连缓存文件都不读（抽取前的行为）。
+        let read = std::cell::Cell::new(false);
+        assert!(
+            cached_check_result(
+                || {
+                    read.set(true);
+                    Some(cache(&pin))
+                },
+                true,
+            )
+            .is_none(),
+            "手动检查更新不得复用 24h 缓存"
+        );
+        assert!(!read.get(), "手动检查更新连缓存都不该读");
+    }
+
+    #[test]
+    fn download_pin_gate_requires_pinned_sha256() {
+        let pin = "0123456789abcdef".repeat(4);
+        let state = |expected_sha256: Option<String>| UpdateState {
+            expected_sha256,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            state(Some(pin.clone())).pinned_update_sha256(),
+            Some(pin.as_str()),
+            "合法的 pinned 摘要应原样交给下载侧比对"
+        );
+
+        // 合法但大写/来源不同的值：gate 只判形状，不改值、也不额外收紧成"必须小写"，
+        // 否则一份大写十六进制的 update.json 会被静默拒掉。
+        let upper = pin.to_uppercase();
+        assert_eq!(
+            state(Some(upper.clone())).pinned_update_sha256(),
+            Some(upper.as_str()),
+            "gate 不得改动 pinned 值本身"
+        );
+
+        // 缺失、被清空、被截断、非十六进制都不能当通行证。
+        for bad in [
+            None,
+            Some(String::new()),
+            Some("deadbeef".to_owned()),
+            Some("a".repeat(63)),
+            Some("g".repeat(64)),
+        ] {
+            assert_eq!(
+                state(bad.clone()).pinned_update_sha256(),
+                None,
+                "{bad:?} 不能作为下载校验的期望值"
+            );
+        }
+    }
 }
 
 pub(crate) const MAX_SEND_HISTORY: usize = 200;
@@ -330,6 +447,52 @@ pub(crate) struct CheckResult {
     pub(crate) changelog: Vec<String>,
     /// 是否已缓存跳过（无需更新 UI）
     pub(crate) cached: bool,
+}
+
+impl UpdateState {
+    /// gate 2/2（下载与写 manifest 侧）：本次更新唯一可用的校验期望值。
+    ///
+    /// 只有真正来自 `update.json` 且形状合法的 pinned 摘要才算数：缺失（`None`）、
+    /// 被清空（`""`）、被截断或含非十六进制字符一律返回 `None`，调用方据此拒绝下载
+    /// 并报错。绝不回退到"下完再自算"——那等于没有校验。
+    ///
+    /// 刻意留在 `UpdateState` 上而不是写在 `WorkbenchApp` 里：这条判定只读字段，
+    /// 抽出来才能在本文件的 `mod tests` 里被直接测到（`WorkbenchApp` 的构造需要
+    /// `&eframe::CreationContext`，headless 下跑不了）。
+    pub(crate) fn pinned_update_sha256(&self) -> Option<&str> {
+        self.expected_sha256
+            .as_deref()
+            .filter(|pin| tool_updater::update_info::is_pinned_sha256(pin))
+    }
+}
+
+/// gate 1/2（检查侧）：24h 检查缓存能否直接复用。
+///
+/// 命中会跳过 `update.json` 的拉取，所以缓存里的 `sha256` 必须是上次真实从清单
+/// 拿到的固定值。老缓存（该字段 `#[serde(default)]` ⇒ `""`）与被改空/改短/改成非
+/// 十六进制的记录都当作未命中（返回 `None`，调用方重新联网拉取），不给它们放行
+/// 一条"有版本号但没有 pinned 摘要"的结果。
+///
+/// `force`（用户手动检查更新）无视缓存，且连缓存文件都不去读 —— 故缓存用
+/// 惰性读取传入，而不是先读好再传进来。
+pub(crate) fn cached_check_result(
+    read_cache: impl FnOnce() -> Option<tool_updater::CheckCache>,
+    force: bool,
+) -> Option<CheckResult> {
+    if force {
+        return None;
+    }
+    let cache = read_cache().filter(|cache| {
+        tool_updater::is_cache_valid(cache)
+            && tool_updater::update_info::is_pinned_sha256(&cache.sha256)
+    })?;
+    Some(CheckResult {
+        version: cache.latest_version,
+        download_url: String::new(),
+        sha256: cache.sha256,
+        changelog: Vec::new(),
+        cached: true,
+    })
 }
 
 impl Default for UpdateState {
