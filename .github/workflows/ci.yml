@@ -233,6 +233,14 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
 
+      # 上一步 checkout 会清掉工作区里未跟踪的产物，这里重新取回待发布 zip，
+      # 只为算摘要——不入库。
+      - name: Download release assets for checksum
+        uses: actions/download-artifact@v4
+        with:
+          name: hardware-workbench-windows
+          path: release-assets
+
       - name: Generate and commit update.json
         run: |
           git config user.name "github-actions[bot]"
@@ -243,6 +251,13 @@ jobs:
           $chinaTime = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId((Get-Date), "China Standard Time")
           $date = $chinaTime.ToString("yyyy-MM-dd")
           $downloadUrl = "https://github.com/Tydwdh/serial_tool/releases/download/$tag/hardware-workbench-app.zip"
+          $zipPath = "release-assets/hardware-workbench-app.zip"
+          if (-not (Test-Path -LiteralPath $zipPath)) {
+            throw "release 产物缺失：$zipPath"
+          }
+          $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
+          if ($sha256.Length -ne 64) { throw "SHA256 计算异常：$sha256" }
+          Write-Host "update.json pinned sha256: $sha256"
           $changelog = [System.Collections.Generic.List[string]]::new()
           $inVersion = $false
           $heading = '^## \[' + [regex]::Escape($version) + '\](?: - .*)?$'
@@ -265,6 +280,7 @@ jobs:
             version = $version
             date = $date
             download_url = $downloadUrl
+            sha256 = $sha256
             changelog = @($changelog)
           } | ConvertTo-Json
           $json | Out-File -FilePath "update.json" -Encoding utf8NoBOM

@@ -139,7 +139,8 @@ git push origin v1.1.2
 5. **Ubuntu .deb** — 在 Ubuntu 22.04 上构建 amd64 `.deb`，检查包元数据并生成 Linux 校验文件
 6. **Checksums** — 生成 `SHA256SUMS.txt` 和 `SHA256SUMS-linux.txt`
 7. **Release** — 上传便携包、安装器、`.deb` 和校验文件，以 `docs/releases/<tag>.md` 为正文并附加提交记录
-8. **update.json** — 从 CHANGELOG 提取本版条目，生成 Windows 便携包更新清单并推回 `main` 分支；Ubuntu 用户通过 `.deb` 升级
+8. **update.json** — 从 CHANGELOG 提取本版条目，用 `hardware-workbench-app.zip` 的 SHA256 作为 `sha256`
+   字段，生成 Windows 便携包更新清单并推回 `main` 分支；Ubuntu 用户通过 `.deb` 升级
 
 ### 7. 发布插件（如有插件变更）
 
@@ -160,11 +161,18 @@ git push origin v1.1.2
   "version": "1.1.2",
   "date": "2026-08-25",
   "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v1.1.2/hardware-workbench-app.zip",
+  "sha256": "0f2c1a7b9d3e4c5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7",
   "changelog": ["G-code Sender 支持可配置的暂停、取消和运行中状态处理。"]
 }
 ```
 
-应用启动时检查 `https://raw.githubusercontent.com/Tydwdh/serial_tool/main/update.json`，发现新版本后通过内置 updater 自动下载、SHA256 校验、替换 exe。
+应用启动时检查 `https://raw.githubusercontent.com/Tydwdh/serial_tool/main/update.json`，发现新版本后通过内置
+updater 下载并替换 exe。更新包摘要以 `update.json` 的 `sha256` 字段为准（发布作业由
+`hardware-workbench-app.zip` 计算后写入）：下载流哈希在与外置固定值一致之前不会落最终名，
+apply 前再拿磁盘文件比对一次。`sha256` 为**必填**字段，缺失或不是 64 位十六进制的清单会直接
+解析失败、UI 报「检查更新失败」而不是静默接受 —— 当前线上那份还没有该字段的 `update.json`
+即属此情况，下一个 `v*` 标签重新生成后自然恢复。当前**没有代码签名**，信任根是 GitHub 仓库写
+权限 + TLS。
 该更新流程用于 Windows 便携版；Ubuntu `.deb` 用户请下载新版本 `.deb` 后用系统包管理器升级。
 
 ## 配置文件

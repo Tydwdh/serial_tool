@@ -13,9 +13,17 @@ pub struct UpdateInfo {
     pub date: String,
     /// 下载 URL（指向 GitHub Release 的 zip）
     pub download_url: String,
+    /// 发布产物的 SHA256。**必填**：更新包字节必须与这个外置固定值一致，
+    /// 否则校验退化成"拿下载内容跟下载内容比"，只约束发布仓库写权限之外的人。
+    pub sha256: String,
     /// 更新日志
     #[serde(default)]
     pub changelog: Vec<String>,
+}
+
+/// 是否为可信的 SHA256 固定值：恰好 64 个十六进制字符。
+pub fn is_pinned_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// 从远端获取 update.json。
@@ -38,9 +46,19 @@ pub async fn fetch_update_info_with_network_settings(
         return Err(format!("获取更新信息返回 {status}：{body}"));
     }
 
-    resp.json::<UpdateInfo>()
+    let info = resp
+        .json::<UpdateInfo>()
         .await
-        .map_err(|e| format!("解析更新信息失败：{}", crate::describe_reqwest_error(&e)))
+        .map_err(|e| format!("解析更新信息失败：{}", crate::describe_reqwest_error(&e)))?;
+
+    if !is_pinned_sha256(&info.sha256) {
+        return Err(format!(
+            "update.json 的 sha256 不是合法的 64 位十六进制摘要（得到 {:?}），拒绝更新",
+            info.sha256
+        ));
+    }
+
+    Ok(info)
 }
 
 /// 比较两个语义版本号。返回 `true` 表示 `remote` 比 `local` 新。
@@ -97,12 +115,18 @@ mod tests {
             "version": "0.3.0",
             "date": "2026-06-25",
             "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v0.3.0/hardware-workbench-app.zip",
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             "changelog": ["修复若干问题", "新增自动更新功能"]
         }"#;
         let info: UpdateInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.version, "0.3.0");
         assert_eq!(info.date, "2026-06-25");
         assert!(info.download_url.contains("v0.3.0"));
+        assert_eq!(
+            info.sha256,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+        assert!(is_pinned_sha256(&info.sha256));
         assert_eq!(info.changelog.len(), 2);
     }
 
@@ -111,9 +135,37 @@ mod tests {
         let json = r#"{
             "version": "0.3.0",
             "date": "2026-06-25",
-            "download_url": "https://example.com/app.zip"
+            "download_url": "https://example.com/app.zip",
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         }"#;
         let info: UpdateInfo = serde_json::from_str(json).unwrap();
         assert!(info.changelog.is_empty());
+    }
+
+    #[test]
+    fn update_info_requires_sha256_field() {
+        // 缺 sha256 必须硬失败：静默接受 = 自我循环校验的旧行为回来了。
+        let missing = r#"{"version":"1.3.0","date":"2026-09-19","download_url":"https://github.com/Tydwdh/serial_tool/releases/download/v1.3.0/hardware-workbench-app.zip","changelog":[]}"#;
+        let error = serde_json::from_str::<UpdateInfo>(missing)
+            .expect_err("缺少 sha256 字段的 update.json 必须解析失败");
+        assert!(
+            error.to_string().contains("sha256"),
+            "错误信息应点名缺失字段，实际：{error}"
+        );
+    }
+
+    #[test]
+    fn update_info_rejects_malformed_sha256() {
+        for bad in ["", "deadbeef", &"a".repeat(63), &"g".repeat(64)] {
+            assert!(
+                !is_pinned_sha256(bad),
+                "{bad:?} 不是合法的 64 位十六进制摘要"
+            );
+        }
+        assert!(is_pinned_sha256(&"a".repeat(64)));
+        assert!(
+            is_pinned_sha256(&("0123456789ABCDEF".to_owned() + &"f".repeat(48))),
+            "大写十六进制同样应视为合法固定值"
+        );
     }
 }

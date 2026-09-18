@@ -308,8 +308,11 @@ pub(crate) struct UpdateState {
     pub(crate) download_handle: Option<std::thread::JoinHandle<Result<String, String>>>,
     /// 下载 URL（从 update.json 获取）
     pub(crate) download_url: Option<String>,
-    /// 下载完成后的 SHA256
+    /// 下载流自算的 SHA256，仅用于日志/诊断：它**不能**作为校验凭据，
+    /// 校验一律用 `expected_sha256`。
     pub(crate) downloaded_sha256: Option<String>,
+    /// 本次待装包的 pinned 摘要（来自 update.json），**不是**下载自算值。
+    pub(crate) expected_sha256: Option<String>,
     /// 用户点击"更新并重启"后，标记需要退出
     pub(crate) want_restart: bool,
     /// 用户手动触发检查（跳过 24h 缓存）
@@ -322,6 +325,8 @@ pub(crate) struct UpdateState {
 pub(crate) struct CheckResult {
     pub(crate) version: String,
     pub(crate) download_url: String,
+    /// 来自 update.json 的外置固定摘要：下载与写 manifest 都以它为准。
+    pub(crate) sha256: String,
     pub(crate) changelog: Vec<String>,
     /// 是否已缓存跳过（无需更新 UI）
     pub(crate) cached: bool,
@@ -342,6 +347,7 @@ impl Default for UpdateState {
             download_handle: None,
             download_url: None,
             downloaded_sha256: None,
+            expected_sha256: None,
             want_restart: false,
             force_check: false,
             download_progress_arc: None,

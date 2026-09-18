@@ -19,11 +19,13 @@ impl WorkbenchApp {
 
         // 1. 用户点击"更新并重启"
         if self.update_state.want_restart {
+            // manifest 写 update.json 带来的 pinned 摘要，而非下载自算值：
+            // 后者只会把校验退化成"下载内容跟下载内容比"。
             let Some((version, sha256)) = self
                 .update_state
                 .latest_version
                 .as_ref()
-                .zip(self.update_state.downloaded_sha256.as_ref())
+                .zip(self.update_state.expected_sha256.as_ref())
                 .map(|(v, s)| (v.clone(), s.clone()))
             else {
                 self.update_state.want_restart = false;
@@ -76,6 +78,7 @@ impl WorkbenchApp {
                             self.update_state.latest_version = Some(result.version.clone());
                             self.update_state.changelog = result.changelog;
                             self.update_state.update_available = true;
+                            self.update_state.expected_sha256 = Some(result.sha256.clone());
                             self.update_state.download_url = Some(result.download_url);
                             self.update_state.error = None;
                             log::info!("updater: 发现新版本 v{}", result.version);
@@ -160,14 +163,17 @@ impl WorkbenchApp {
         );
 
         self.update_state.check_handle = Some(std::thread::spawn(move || {
-            // 先检查 24h 缓存（非强制时）
+            // 先检查 24h 缓存（非强制时）。缓存里的 sha256 必须是上次真实从
+            // update.json 拿到的固定值；空/被篡改的记录一律当作未命中重新拉取。
             if !force
                 && let Some(cache) = tool_updater::read_check_cache()
                 && tool_updater::is_cache_valid(&cache)
+                && tool_updater::update_info::is_pinned_sha256(&cache.sha256)
             {
                 return Ok(CheckResult {
                     version: cache.latest_version.clone(),
                     download_url: String::new(),
+                    sha256: cache.sha256.clone(),
                     changelog: Vec::new(),
                     cached: true,
                 });
@@ -188,8 +194,10 @@ impl WorkbenchApp {
                 let had_update =
                     tool_updater::update_info::is_newer_version(&info.version, &current_version);
 
-                // 写入缓存
-                if let Err(e) = tool_updater::write_check_cache(&info.version, had_update) {
+                // 写入缓存（含 pinned 摘要，缓存命中时同样要求合法固定值）
+                if let Err(e) =
+                    tool_updater::write_check_cache(&info.version, had_update, &info.sha256)
+                {
                     log::warn!("write_check_cache failed: {e}");
                 }
 
@@ -197,6 +205,7 @@ impl WorkbenchApp {
                     return Ok(CheckResult {
                         version: info.version.clone(),
                         download_url: String::new(),
+                        sha256: info.sha256.clone(),
                         changelog: Vec::new(),
                         cached: false,
                     });
@@ -205,6 +214,7 @@ impl WorkbenchApp {
                 Ok(CheckResult {
                     version: info.version.clone(),
                     download_url: info.download_url.clone(),
+                    sha256: info.sha256.clone(),
                     changelog: info.changelog.clone(),
                     cached: false,
                 })
@@ -220,6 +230,18 @@ impl WorkbenchApp {
                 self.update_state.error = Some("无下载 URL".into());
                 return;
             }
+        };
+
+        // 下载前必须已拿到 update.json 的 pinned 摘要；缺失或非法一律拒绝，
+        // 绝不回退到"下完再自算"——那等于没有校验。
+        let Some(expected_sha256) = self
+            .update_state
+            .expected_sha256
+            .clone()
+            .filter(|pin| tool_updater::update_info::is_pinned_sha256(pin))
+        else {
+            self.update_state.error = Some("更新清单未提供合法的包摘要，已拒绝下载".into());
+            return;
         };
 
         self.update_state.downloading = true;
@@ -250,6 +272,7 @@ impl WorkbenchApp {
                         };
                         progress_clone.store(pct, std::sync::atomic::Ordering::Relaxed);
                     },
+                    &expected_sha256,
                 )
                 .await
             })

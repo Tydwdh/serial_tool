@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use update_info::is_pinned_sha256;
 
 /// 远端 update.json 的 URL。
 pub const UPDATE_JSON_URL: &str =
@@ -298,6 +299,12 @@ pub struct CheckCache {
     pub latest_version: String,
     /// 上次检查时是否有更新
     pub had_update: bool,
+    /// 上次检查时 `update.json` 携带的 pinned 摘要。
+    ///
+    /// 缓存是本机可丢弃数据、不是信任根，故允许 `default`：老缓存或被人改空的
+    /// 记录会拿到 `""`，调用方据此当作未命中并重新拉取 `update.json`。
+    #[serde(default)]
+    pub sha256: String,
 }
 
 /// 缓存有效期：24 小时（毫秒）。
@@ -324,8 +331,12 @@ pub fn is_cache_valid(cache: &CheckCache) -> bool {
     now.saturating_sub(cache.last_check_time) < CACHE_TTL_MS
 }
 
-/// 写入缓存。
-pub fn write_check_cache(latest_version: &str, had_update: bool) -> Result<(), String> {
+/// 写入缓存。`sha256` 为本次 `update.json` 的 pinned 摘要，供缓存命中时复用。
+pub fn write_check_cache(
+    latest_version: &str,
+    had_update: bool,
+    sha256: &str,
+) -> Result<(), String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -334,6 +345,7 @@ pub fn write_check_cache(latest_version: &str, had_update: bool) -> Result<(), S
         last_check_time: now,
         latest_version: latest_version.to_owned(),
         had_update,
+        sha256: sha256.to_owned(),
     };
     let dir = update_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建更新目录失败：{e}"))?;
@@ -971,14 +983,29 @@ pub fn validate_download_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn download_update(url: &str, on_progress: impl Fn(u64, u64)) -> Result<String, String> {
-    download_update_with_network_settings(url, &NetworkSettings::default(), on_progress).await
+pub async fn download_update(
+    url: &str,
+    on_progress: impl Fn(u64, u64),
+    expected_sha256: &str,
+) -> Result<String, String> {
+    download_update_with_network_settings(
+        url,
+        &NetworkSettings::default(),
+        on_progress,
+        expected_sha256,
+    )
+    .await
 }
 
+/// 下载更新包，并与 `update.json` 里的外置 pinned 摘要比对。
+///
+/// `expected_sha256` 必须来自更新清单，**不能**来自本次下载：拿下载内容跟下载
+/// 内容比只能发现磁盘损坏，不能约束下载到了什么。
 pub async fn download_update_with_network_settings(
     url: &str,
     network: &NetworkSettings,
     on_progress: impl Fn(u64, u64),
+    expected_sha256: &str,
 ) -> Result<String, String> {
     // 安全：强制 https 且 host 在白名单，防止被篡改的 update.json 把下载指向任意域。
     validate_download_url(url)?;
@@ -993,9 +1020,11 @@ pub async fn download_update_with_network_settings(
     let _ = std::fs::remove_file(&zip_path);
     let _ = std::fs::remove_file(zip_path.with_extension("zip.part"));
 
-    let hash = download_to_file_with_network_settings(url, &zip_path, network, on_progress).await?;
+    let hash =
+        download_to_file_verified(url, &zip_path, network, on_progress, Some(expected_sha256))
+            .await?;
 
-    // download_to_file 内部已通过 .part 原子 rename 到 zip_path。
+    // download_to_file_verified 已在校验通过后才做 .part → zip_path 原子 rename。
     Ok(hash)
 }
 
@@ -1020,6 +1049,20 @@ pub async fn download_to_file_with_network_settings(
     dest_path: &Path,
     network: &NetworkSettings,
     on_progress: impl Fn(u64, u64),
+) -> Result<String, String> {
+    download_to_file_verified(url, dest_path, network, on_progress, None).await
+}
+
+/// [`download_to_file_with_network_settings`] 的实现体。
+///
+/// `expected_sha256 = Some(pin)` 时，流式哈希必须在 `.part → dest_path` 的 rename
+/// **之前**与该外置固定值一致：不匹配就删掉半截文件并报错，绝不留下未通过校验的产物。
+async fn download_to_file_verified(
+    url: &str,
+    dest_path: &Path,
+    network: &NetworkSettings,
+    on_progress: impl Fn(u64, u64),
+    expected_sha256: Option<&str>,
 ) -> Result<String, String> {
     if let Some(parent) = dest_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("创建下载目录失败：{e}"))?;
@@ -1075,13 +1118,21 @@ pub async fn download_to_file_with_network_settings(
 
     drop(part_file);
 
+    let hash = format!("{:x}", hasher.finalize());
+    if let Some(expected) = expected_sha256 {
+        // 先比对 rename：不匹配就不留下任何可被 apply 读到的文件。
+        if let Err(e) = verify_stream_sha256(&hash, expected) {
+            cleanup_partial_download(&part_path);
+            return Err(e);
+        }
+    }
+
     // 重命名 .part → 最终文件名
     if let Err(e) = std::fs::rename(&part_path, dest_path) {
         cleanup_partial_download(&part_path);
         return Err(format!("重命名下载文件失败：{e}"));
     }
 
-    let hash = format!("{:x}", hasher.finalize());
     Ok(hash)
 }
 
@@ -1110,6 +1161,22 @@ pub fn write_update_manifest(version: &str, sha256: &str) -> Result<(), String> 
 }
 
 // ── 工具函数 ──
+
+/// 下载流哈希与外置 pinned 值的唯一比对点。
+/// 独立成函数是为了让"不匹配必须拒绝"这一条可被单测直接命中。
+pub fn verify_stream_sha256(actual: &str, expected: &str) -> Result<(), String> {
+    if !is_pinned_sha256(expected) {
+        return Err(format!(
+            "拒绝校验：更新清单的 sha256 不合法（{expected:?}）"
+        ));
+    }
+    if !actual.eq_ignore_ascii_case(expected) {
+        return Err(format!(
+            "更新包校验失败：SHA256 不匹配（清单声明 {expected}，实际下载 {actual}）"
+        ));
+    }
+    Ok(())
+}
 
 /// 计算文件的 SHA256 哈希值。
 pub fn sha256_file(path: &Path) -> Result<String, io::Error> {
@@ -1148,6 +1215,20 @@ mod tests {
             hash,
             "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
         );
+    }
+
+    #[test]
+    fn verify_stream_sha256_rejects_mismatch_and_malformed_pin() {
+        let pin = "a".repeat(64);
+        assert!(verify_stream_sha256(&pin, &pin).is_ok());
+        assert!(verify_stream_sha256(&"b".repeat(64), &pin).is_err());
+        assert!(
+            verify_stream_sha256(&pin, &pin.to_uppercase()).is_ok(),
+            "比对须大小写无关"
+        );
+        // 关键：pinned 值本身不合法时不得放行 —— 空串/短串都不能当通行证。
+        assert!(verify_stream_sha256(&pin, "").is_err());
+        assert!(verify_stream_sha256(&pin, "deadbeef").is_err());
     }
 
     #[test]
@@ -1215,12 +1296,23 @@ mod tests {
             last_check_time: 1719300000000,
             latest_version: "0.3.0".into(),
             had_update: true,
+            sha256: "0123456789abcdef".repeat(4),
         };
         let json = serde_json::to_string_pretty(&cache).unwrap();
         let parsed: CheckCache = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.last_check_time, 1719300000000);
         assert_eq!(parsed.latest_version, "0.3.0");
         assert!(parsed.had_update);
+        assert!(is_pinned_sha256(&parsed.sha256));
+
+        // 旧缓存文件没有 sha256 字段：必须仍能解析，且空值不被当作 pinned 值，
+        // 调用方据此重新拉取 update.json（缓存命中不得放行未固定的下载）。
+        let legacy: CheckCache = serde_json::from_str(
+            r#"{"last_check_time":1719300000000,"latest_version":"0.3.0","had_update":true}"#,
+        )
+        .unwrap();
+        assert!(legacy.sha256.is_empty());
+        assert!(!is_pinned_sha256(&legacy.sha256));
     }
 
     #[test]
@@ -1233,6 +1325,7 @@ mod tests {
             last_check_time: now - 1000, // 1 秒前
             latest_version: "0.3.0".into(),
             had_update: false,
+            sha256: String::new(),
         };
         assert!(is_cache_valid(&cache));
     }
@@ -1247,6 +1340,7 @@ mod tests {
             last_check_time: now - CACHE_TTL_MS - 1, // 过期 1ms
             latest_version: "0.3.0".into(),
             had_update: false,
+            sha256: String::new(),
         };
         assert!(!is_cache_valid(&cache));
     }
