@@ -533,7 +533,7 @@ impl TransportManager {
         };
 
         #[cfg(not(windows))]
-        let (join, wake) = {
+        let join = {
             let builder = sp::new(&config.port_name, config.baud_rate)
                 .data_bits(config.data_bits.into())
                 .stop_bits(config.stop_bits.into())
@@ -552,7 +552,7 @@ impl TransportManager {
                 TransportError::from(error)
             })?;
 
-            let join = thread::spawn(move || {
+            thread::spawn(move || {
                 serial_worker_loop(
                     port,
                     command_rx,
@@ -562,8 +562,7 @@ impl TransportManager {
                     thread_source,
                     thread_waker.clone(),
                 );
-            });
-            (join, None::<()>)
+            })
         };
 
         self.ports.lock().insert(
@@ -1599,12 +1598,15 @@ fn is_permission_denied(message: &str) -> bool {
 fn serial_permission_message(detail: &str) -> String {
     #[cfg(target_os = "linux")]
     {
-        return format!(
+        format!(
             "当前用户没有串口访问权限：{detail}\n\nUbuntu 用户通常需要加入 dialout 用户组：\n\nsudo usermod -aG dialout $USER\n\n完成后请注销并重新登录。不要使用 sudo 启动 Hardware Workbench。"
-        );
+        )
     }
 
-    format!("串口被占用或无权限访问：{detail}，请检查是否已被其他程序打开")
+    #[cfg(not(target_os = "linux"))]
+    {
+        format!("串口被占用或无权限访问：{detail}，请检查是否已被其他程序打开")
+    }
 }
 
 #[cfg(test)]
