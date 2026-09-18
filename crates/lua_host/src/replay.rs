@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value};
+use mlua::{Function, Lua, Table, Value};
 use parking_lot::Mutex;
 
 use tool_core::{Direction, Event, mark_derived_event, now_timestamp_ms, topic_matches};
@@ -33,15 +33,10 @@ pub fn run_replay_analyzer_with_cancel(
     input_events: &[Event],
     cancel: Arc<AtomicBool>,
 ) -> LuaHostResult<LuaReplayOutput> {
-    let lua = Lua::new_with(
-        StdLib::TABLE
-            | StdLib::STRING
-            | StdLib::MATH
-            | StdLib::UTF8
-            | StdLib::PACKAGE
-            | StdLib::COROUTINE,
-        LuaOptions::default(),
-    )?;
+    // 沙箱构造：与 plugin_event_loop / run_script_blocking 完全同一套加固
+    // （`dofile`/`loadfile`/`load` 置 nil、searcher 收紧、`package.searchpath` 置 nil）。
+    // 这里跑的是第三方 replay.lua，历史上是第三处裸 `new_with`，加固全部缺席。
+    let lua = crate::sandbox_lua()?;
 
     // 安装 budget hook：防止 analyzer 死循环或卡死；取消信号共用
     install_budget_hook(&lua, 30_000, Arc::clone(&cancel))?;
@@ -147,7 +142,8 @@ fn install_replay_ctx(
         lua.create_function(|_lua, ()| Ok(now_timestamp_ms()))?,
     )?;
 
-    // 本地 require：只能加载插件根目录和 lib 子目录
+    // 注：searcher 已被 sandbox_lua 收紧到 preload，下面两行 package.path 只是遗留配置，
+    // 不再有任何 searcher 读取它（与 install_ctx 的同名块一样，保留待后续任务清理）。
     if let Some(ref root) = config.plugin_root {
         let root_str = root.display().to_string().replace('\\', "/");
         let new_path = format!("{root_str}/lib/?.lua;{root_str}/?.lua");

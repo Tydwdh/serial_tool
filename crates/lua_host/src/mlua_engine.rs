@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value, Variadic};
+use mlua::{Function, Lua, Table, Value, Variadic};
 use tool_plugin_api::{
     LuaEngine, PluginCallResult, PluginError, PluginFunctionId, PluginHostApi, PluginHostRequest,
     PluginInstanceId, PluginLoadConfig, PluginResult, PluginUiCommand, PluginValue,
@@ -50,19 +50,10 @@ impl LuaEngine for MluaEngine {
         config: PluginLoadConfig,
         host: Rc<dyn PluginHostApi>,
     ) -> PluginResult<PluginInstanceId> {
-        // 与 plugin_event_loop / run_script_blocking 同一 stdlib 子集：无参构造器开的是
-        // ALL_SAFE（含 IO/OS），marketplace 插件一旦接上就是 os.execute。
-        let lua = Lua::new_with(
-            StdLib::TABLE
-                | StdLib::STRING
-                | StdLib::MATH
-                | StdLib::UTF8
-                | StdLib::PACKAGE
-                | StdLib::COROUTINE,
-            LuaOptions::default(),
-        )
-        .map_err(lua_error)?;
-        crate::harden_globals(&lua).map_err(lua_error)?;
+        // 与 plugin_event_loop / run_script_blocking / replay 同一个受制裁构造点：
+        // 无参构造器开的是 ALL_SAFE（含 IO/OS），marketplace 插件一旦接上就是 os.execute，
+        // 而 new_with(子集) 单独写也挡不住 base 的文件加载全局 —— 加固必须和构造绑死。
+        let lua = crate::sandbox_lua().map_err(lua_error)?;
         install_ctx(&lua, &config, host.clone()).map_err(lua_error)?;
         lua.load(source)
             .set_name(&config.script_name)

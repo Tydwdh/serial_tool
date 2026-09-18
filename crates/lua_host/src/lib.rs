@@ -412,9 +412,13 @@ pub fn run_plugin(
 /// `package.path` 去 `luaL_loadfile` 打开磁盘，而 `package.path` 对插件可写 —— 不摘掉
 /// 它，抹掉 `loadfile` 只是给同一扇门换了把锁。
 ///
+/// `package.searchpath` 是同一个 searcher 用的解析原语（loadlib.c `searchpath`），摘掉
+/// searcher 后它依然可被插件直接调用，用任意模板探测宿主文件是否存在。它是这一类漏洞的
+/// 兄弟，所以一并置 nil —— 探测元数据也是信息泄露，而这里没有任何插件需要它。
+///
 /// Web 端 `omnilua` 走 `SandboxConfig::remove_globals`
-/// （`plugin_runtime/src/web_lua.rs:87-97`），本函数让 native 与它对等，并多抹掉一个
-/// `load`。
+/// （`plugin_runtime/src/web_lua.rs:87-97`），本函数让 native 与它对等，并多抹掉
+/// `load` 与 `package.searchpath`。
 pub(crate) fn harden_globals(lua: &Lua) -> mlua::Result<()> {
     for name in ["dofile", "loadfile", "load"] {
         lua.globals().set(name, mlua::Value::Nil)?;
@@ -427,8 +431,32 @@ pub(crate) fn harden_globals(lua: &Lua) -> mlua::Result<()> {
         let frozen = lua.create_table()?;
         frozen.set(1, preload_searcher)?;
         package.set("searchers", frozen)?;
+        package.set("searchpath", Value::Nil)?;
     }
     Ok(())
+}
+
+/// 生产代码里**唯一**合法的 Lua VM 构造点：把 `Lua::new_with(子集)` 和 `harden_globals`
+/// 焊在同一个函数里，"建了 VM 却忘了加固" 就没法再顺手写出来。计划里数了两处构造点，实际
+/// 有四处插件可达的 VM（插件事件循环、阻塞式运行、`MluaEngine`、replay analyzer），各自
+/// 抄一遍 stdlib 子集；其中 `replay.rs` 那一处连加固都没抄，`dofile` 至今活着。新增任何
+/// 能跑插件源码的 VM，一律调用本函数，不要自己 `new_with`；`mod tests` 里的静态守卫按
+/// 本函数的名字与全 crate 的出现次数把关。
+///
+/// 返回 `mlua::Result` 而非 `LuaHostResult`：构造与加固的失败都意味着这个 VM 不可信，
+/// 调用方必须一并当作启动失败处理（`plugin_event_loop` 就是这么做到的）。
+pub(crate) fn sandbox_lua() -> mlua::Result<Lua> {
+    let lua = Lua::new_with(
+        StdLib::TABLE
+            | StdLib::STRING
+            | StdLib::MATH
+            | StdLib::UTF8
+            | StdLib::PACKAGE
+            | StdLib::COROUTINE,
+        LuaOptions::default(),
+    )?;
+    harden_globals(&lua)?;
+    Ok(lua)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -443,38 +471,19 @@ fn plugin_event_loop(
     host_services: LuaHostServices,
     outcome: Arc<ParkingMutex<Option<LuaRunState>>>,
 ) {
-    let lua = match Lua::new_with(
-        StdLib::TABLE
-            | StdLib::STRING
-            | StdLib::MATH
-            | StdLib::UTF8
-            | StdLib::PACKAGE
-            | StdLib::COROUTINE,
-        LuaOptions::default(),
-    ) {
+    let lua = match sandbox_lua() {
         Ok(lua) => lua,
         Err(error) => {
             *outcome.lock() = Some(LuaRunState::Failed);
             bus.publish(Event::system_log(
                 LogLevel::Error,
                 &config.source,
-                format!("创建 Lua 状态失败：{error}"),
+                format!("创建/加固 Lua 沙箱失败：{error}"),
             ));
             alive.store(false, Ordering::Relaxed);
             return;
         }
     };
-
-    if let Err(error) = harden_globals(&lua) {
-        *outcome.lock() = Some(LuaRunState::Failed);
-        bus.publish(Event::system_log(
-            LogLevel::Error,
-            &config.source,
-            format!("加固 Lua 全局失败：{error}"),
-        ));
-        alive.store(false, Ordering::Relaxed);
-        return;
-    }
 
     // 安装指令 hook：防止死循环卡死禁用/退出
     let hook_stop = stop.clone();
@@ -979,16 +988,7 @@ fn run_script_blocking(
     transport: TransportManager,
     stop: Arc<AtomicBool>,
 ) -> LuaHostResult<()> {
-    let lua = Lua::new_with(
-        StdLib::TABLE
-            | StdLib::STRING
-            | StdLib::MATH
-            | StdLib::UTF8
-            | StdLib::PACKAGE
-            | StdLib::COROUTINE,
-        LuaOptions::default(),
-    )?;
-    harden_globals(&lua)?;
+    let lua = sandbox_lua()?;
 
     let test_services = LuaHostServices {
         plugin_root: None,
@@ -2170,7 +2170,7 @@ assert(type(assert) == "function", "assert must survive")
     fn sandbox_cannot_require_os_or_io() {
         let bus = DataBus::new();
         let transport = TransportManager::new(bus.clone());
-        // PACKAGE 在 plugin_event_loop 与 run_script_blocking 两处都是启用的，
+        // PACKAGE 在沙箱构造点（sandbox_lua）上是启用的（插件要 require("hw.codec")），
         // 所以 require 是真实逃逸面。
         let result = run_script_for_test(
             r#"
@@ -2179,15 +2179,18 @@ for _, name in ipairs({"os", "io", "debug", "ffi"}) do
     assert(not ok or mod == nil,
         string.format("require(%q) must not yield a live module", name))
 end
-assert(pcall(require, "hw.codec") == true or true)
 -- package.path 对插件可写；只要 Lua 文件 searcher 还在，require 就会按被改写的
 -- 模板去 open 宿主磁盘上的 .lua（searcher_Lua -> luaL_loadfile）。探针目录不必
--- 真的存在：searchpath 会把逐个试过的文件名写进错误串，据此判定碰没碰文件系统。
+-- 真的存在：searcher 会把逐个试过的文件名写进错误串，据此判定碰没碰文件系统。
 package.path = "/hwbench-t2-sandbox-probe/?.lua"
 local probe_ok, probe_err = pcall(require, "hwbench_t2_sandbox_probe")
 assert(probe_ok == false, "require must not resolve modules from the filesystem")
 assert(not tostring(probe_err):find("hwbench-t2-sandbox-probe", 1, true),
     "require still probes host paths: " .. tostring(probe_err))
+-- package.searchpath 是那个 searcher 底层的解析原语，摘掉 searcher 并不拿走它：
+-- 插件仍可直接调用它拿"宿主某路径下有没有这个文件"的答案。断言不存在，不报错。
+assert(package.searchpath == nil,
+    "package.searchpath must be nil, got " .. type(package.searchpath))
 -- 收紧 searcher 不能顺手弄坏宿主自己注册进 preload 的模块。
 assert(pcall(require, "hw.codec") == true,
     "require('hw.codec') must still resolve from the preload searcher")
@@ -2213,6 +2216,60 @@ assert(package.loadlib == nil or pcall(package.loadlib, "x.so", "y") == false)
             transport,
         );
         assert!(result.is_ok(), "字符串→chunk 逃逸未被挡住：{result:?}");
+    }
+
+    /// 第三处插件可达 VM（`replay.rs` 的 replay analyzer，跑第三方 `replay.lua`）必须与
+    /// 主沙箱同加固。它此前是裸 `Lua::new_with`：`dofile`/`loadfile`/`load` 全都活着，
+    /// 而且 `plugin_root` 为 `None` 时 `package.path` 停在 Lua 的默认值上 —— 那个默认值是
+    /// `setpath` 从进程环境里的 `LUA_PATH_5_4`/`LUA_PATH` 播种出来的（loadlib.c:288-311），
+    /// 等于"这台机器恰好设过 LUA_PATH"会改变沙箱边界。收紧 searcher 把环境相关性一并抹平，
+    /// 所以下面的判据只看 require 的报错里有没有文件探测的痕迹（`no file`），不引用任何
+    /// 具体路径，也不碰磁盘。
+    #[test]
+    fn replay_sandbox_has_no_file_loaders() {
+        let source = r#"
+assert(dofile == nil, "replay: dofile must be nil, got " .. type(dofile))
+assert(loadfile == nil, "replay: loadfile must be nil, got " .. type(loadfile))
+assert(load == nil, "replay: load must be nil, got " .. type(load))
+assert(package.searchpath == nil,
+    "replay: package.searchpath must be nil, got " .. type(package.searchpath))
+-- base 不能整个没掉：pcall/assert 还在，说明是逐抹而非断粮
+assert(type(pcall) == "function", "replay: pcall must survive")
+package.path = "/hwbench-t2-replay-probe/?.lua"
+local probe_ok, probe_err = pcall(require, "hwbench_t2_replay_probe")
+assert(probe_ok == false, "replay: require must not resolve modules from the filesystem")
+assert(not tostring(probe_err):find("no file", 1, true),
+    "replay: require still probes host paths: " .. tostring(probe_err))
+assert(pcall(require, "hw.codec") == true,
+    "replay: require('hw.codec') must still resolve from the preload searcher")
+function on_replay_begin(session) end
+function on_replay_event(event) end
+function on_replay_end() end
+"#;
+        let config = LuaReplayConfig {
+            script_name: "harden_probe.lua".to_owned(),
+            plugin_id: "test.harden".to_owned(),
+            plugin_version: "1.0.0".to_owned(),
+            subscriptions: vec!["transport.serial.default.rx".to_owned()],
+            outputs: vec![],
+            context: json!({"id": "test.harden", "name": "Harden"}),
+            plugin_root: None,
+        };
+        let output = crate::replay::run_replay_analyzer(source.to_owned(), config, &[]);
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => panic!("replay 沙箱断言失败：{error}"),
+        };
+        assert!(
+            output.events.is_empty(),
+            "replay 沙箱用例不该产出事件：{:?}",
+            output.events
+        );
+        assert!(
+            output.logs.is_empty(),
+            "replay 沙箱用例不应产生回调错误：{:?}",
+            output.logs
+        );
     }
 
     /// 逐行扫描 Rust 源码，产出「生产代码」的 `(行号, 去掉注释与字面量后的文本)`。
@@ -2386,6 +2443,31 @@ assert(package.loadlib == nil or pcall(package.loadlib, "x.so", "y") == false)
     fn production_code_never_opens_all_stdlibs() {
         use std::path::Path;
 
+        /// `fn <name> { … }` 在生产代码行序列里的闭区间（含首尾），靠花括号配对算出来。
+        /// 规则 2/3 全靠它定位「唯一受制裁的 VM 构造点」，所以它自己也得上夹具。
+        fn fn_span(lines: &[(usize, String)], name: &str) -> Option<(usize, usize)> {
+            let header = format!("fn {name}");
+            let start = lines.iter().find(|(_, code)| code.contains(&header))?.0;
+            let mut depth = 0i32;
+            let mut opened = false;
+            for (number, code) in lines.iter().filter(|(number, _)| *number >= start) {
+                for ch in code.chars() {
+                    match ch {
+                        '{' => {
+                            depth += 1;
+                            opened = true;
+                        }
+                        '}' => depth -= 1,
+                        _ => {}
+                    }
+                }
+                if opened && depth <= 0 {
+                    return Some((start, *number));
+                }
+            }
+            None
+        }
+
         fn flagged(text: &str) -> Vec<usize> {
             production_code_lines(text)
                 .into_iter()
@@ -2436,11 +2518,53 @@ let _ = Lua::new();
             "扫描器跳过 mod tests 后没恢复，或被 '\"' 字面量弄乱了状态"
         );
 
-        // Lua::new() == ALL_SAFE（含 IO/OS）。沙箱只允许 new_with(子集) + harden_globals。
+        // fn_span 是规则 2/3 的支点，先自证：区间恰好框住函数体，既不缩水也不外溢。
+        let span_fixture = production_code_lines(
+            r#"
+fn helper() {
+    let lua = Lua::new_with();
+}
+fn sandbox_lua() {
+    let lua = Lua::new_with();
+    harden_globals(&lua);
+}
+fn other() {
+    let lua = Lua::new_with();
+}
+"#,
+        );
+        let span = fn_span(&span_fixture, "sandbox_lua").expect("夹具里就该找得到 sandbox_lua");
+        assert_eq!(
+            span,
+            (5, 8),
+            "fn_span 的花括号配对没框住 sandbox_lua 函数体"
+        );
+        let (inside_span, outside_span): (Vec<usize>, Vec<usize>) = span_fixture
+            .iter()
+            .filter(|(_, code)| code.contains("Lua::new_with("))
+            .map(|(number, _)| *number)
+            .partition(|number| *number >= span.0 && *number <= span.1);
+        assert_eq!(
+            inside_span,
+            vec![6],
+            "fn_span 把函数体内的构造点算到了区间外"
+        );
+        assert_eq!(
+            outside_span,
+            vec![3, 10],
+            "fn_span 区间外溢到了相邻函数，会替漏网的 VM 打掩护"
+        );
+
+        // 三条规则共用同一份「生产代码」行集：
+        // 1. 不许 `Lua::new()` == ALL_SAFE（含 IO/OS）；
+        // 2. 全 crate 只许一处 `Lua::new_with(`，且必须在 `sandbox_lua` 体内；
+        // 3. `sandbox_lua` 自己必须调 `harden_globals`。
+        // 规则 2 就是当初漏掉 replay.rs 的那道缝：那是一处 new_with(含 PACKAGE) 却没跟着
+        // harden_globals 的 VM，只扫 `Lua::new()` 永远看不见它。把构造收敛到一处、把加固
+        // 焊进那一处，"再开一个没加固的 VM" 才从"记得不记得"变成"过不过守卫"。
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut offenders = Vec::new();
+        let mut production: Vec<(String, usize, String)> = Vec::new();
         let mut checked = 0usize;
-        let mut saw_sandbox_constructor = false;
         let mut stack = vec![root];
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir).expect("读取 src 目录失败") {
@@ -2454,13 +2578,9 @@ let _ = Lua::new();
                 }
                 checked += 1;
                 let text = std::fs::read_to_string(&path).expect("读取源文件失败");
+                let file = path.display().to_string();
                 for (number, code) in production_code_lines(&text) {
-                    if code.contains("Lua::new_with(") {
-                        saw_sandbox_constructor = true;
-                    }
-                    if code.contains("Lua::new()") {
-                        offenders.push(format!("{}:{}", path.display(), number));
-                    }
+                    production.push((file.clone(), number, code));
                 }
             }
         }
@@ -2468,13 +2588,64 @@ let _ = Lua::new();
             checked >= 20,
             "扫描到的 .rs 文件过少（{checked}），守卫可能失效"
         );
-        assert!(
-            saw_sandbox_constructor,
-            "生产代码里一个 Lua::new_with 都没扫到，扫描器可能在空转"
-        );
+
+        let mut offenders: Vec<String> = production
+            .iter()
+            .filter(|(_, _, code)| code.contains("Lua::new()"))
+            .map(|(file, number, _)| format!("{file}:{number}"))
+            .collect();
+        // read_dir 顺序由 OS 决定，报错信息按路径排序后才可复现。
+        offenders.sort();
         assert!(
             offenders.is_empty(),
             "生产代码不得用 Lua::new() 打开全部标准库：{offenders:?}"
+        );
+
+        let constructors: Vec<(String, usize)> = production
+            .iter()
+            .filter(|(_, _, code)| code.contains("Lua::new_with("))
+            .map(|(file, number, _)| (file.clone(), *number))
+            .collect();
+        assert!(
+            !constructors.is_empty(),
+            "生产代码里一个 Lua::new_with 都没扫到，扫描器可能在空转"
+        );
+        assert_eq!(
+            constructors.len(),
+            1,
+            "Lua VM 构造点必须收敛到 sandbox_lua 一处；多出来的每一处都没人保证加固过：{:?}",
+            {
+                let mut listed: Vec<String> = constructors
+                    .iter()
+                    .map(|(file, number)| format!("{file}:{number}"))
+                    .collect();
+                listed.sort();
+                listed
+            }
+        );
+        let (ctor_file, ctor_line) = constructors[0].clone();
+        let ctor_lines: Vec<(usize, String)> = production
+            .iter()
+            .filter(|(file, _, _)| *file == ctor_file)
+            .map(|(_, number, code)| (*number, code.clone()))
+            .collect();
+        let sanctioned = fn_span(&ctor_lines, "sandbox_lua").unwrap_or_else(|| {
+            panic!(
+                "唯一的 Lua::new_with 在 {ctor_file}:{ctor_line}，却找不到 fn sandbox_lua \
+                 —— 构造点没有受制裁的落点"
+            )
+        });
+        assert!(
+            sanctioned.0 <= ctor_line && ctor_line <= sanctioned.1,
+            "Lua::new_with 出现在受制裁构造点之外（{ctor_file}:{ctor_line}，sandbox_lua 覆盖 \
+             {sanctioned:?}）：改成调用 sandbox_lua()，否则这个 VM 没人保证加固过"
+        );
+        assert!(
+            ctor_lines.iter().any(|(number, code)| {
+                (sanctioned.0..=sanctioned.1).contains(number) && code.contains("harden_globals(")
+            }),
+            "sandbox_lua 没调用 harden_globals(...)：沙箱构造点和裸 new_with 等价，全部插件 \
+             VM 会同时失去加固"
         );
     }
 }

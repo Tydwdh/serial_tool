@@ -207,8 +207,12 @@ Lua 插件运行在受限沙箱中:
   （`crates/lua_host/src/lib.rs`）逐个显式置 `nil`：插件不能按文件名、也不能从字符串
   造 chunk 来加载宿主上的 `.lua`
 - `require` 同样收紧：`package.searchers` 只保留 preload 一项，文件型 searcher 已摘除
-  （`package.path` 对插件可写，留着它等于给 `loadfile` 换个门），`package.preload` 只读，
-  C 模块 searcher 由 mlua 的 safe 构造器换成报错桩
+  （`package.path` 对插件可写，留着它等于给 `loadfile` 换个门），`package.searchpath`
+  也置 `nil`（它是那个 searcher 的解析原语，留着仍可探测宿主文件是否存在），
+  `package.preload` 只读，C 模块 searcher 由 mlua 的 safe 构造器换成报错桩
+- 上述加固不是逐个调用点手写上去的：所有能跑插件源码的 native VM（插件事件循环、
+  阻塞式运行、`MluaEngine` 适配器、replay analyzer）统一由 `sandbox_lua()` 构造，
+  构造与加固焊在一处，新增 VM 无从跳过
 - 指令计数钩子防止无限循环
 
 ## 常见问题
