@@ -32,7 +32,14 @@ fn core_and_databus_do_not_depend_on_ui() {
         ("recorder", "../recorder/Cargo.toml"),
     ] {
         let path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), rel);
-        let text = fs::read_to_string(&path).unwrap_or_default();
+        // 必须真实失败：此前这里用 `unwrap_or_default()`，路径写错时读到空串，
+        // 下面的断言等于零断言、测试静默通过（verifier 报告的真实缺陷）。
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("{label} Cargo.toml 读取失败（{path}）: {error}"));
+        assert!(
+            text.contains("[package]") || text.contains("[workspace]"),
+            "{label} Cargo.toml 内容异常，未读到 [package]/[workspace]：{path}"
+        );
         for banned in ["egui", "eframe", "egui_tiles"] {
             assert!(
                 !text.contains(banned),

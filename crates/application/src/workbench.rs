@@ -1155,7 +1155,7 @@ impl Workbench {
                 api_key: config.api_key,
             });
         let backend = self.transport_backend.clone();
-        let serial_settings = (!network.is_some()).then(|| self.platform_serial_settings());
+        let serial_settings = network.is_none().then(|| self.platform_serial_settings());
         let task_port = port_name.clone();
         let task_id = self.tasks.spawn_ordered(
             format!("serial:{port_name}"),

@@ -3,25 +3,21 @@ use crate::bootstrap::user_plugins_dir;
 use crate::state::StatusLevel;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tool_application::marketplace::MarketplaceView;
 use tool_core::LogLevel;
-use tool_marketplace::{RegistryFetch, RegistryPlugin};
+use tool_marketplace::{Registry, RegistryFetch, RegistryPlugin};
 
 /// 市场索引 + 安装任务的运行时状态。
+///
+/// `registry` 是原生 marketplace 域对象的持有者（安装需要 `download_url`/`sha256`，
+/// 这些字段不在 `MarketplaceView` DTO 中）：presentation 只拿到归一化视图，
+/// 安装时由这里按 id 查回原始条目。
+#[derive(Default)]
 pub(crate) struct MarketplaceState {
     pub(crate) url: Option<String>,
     pub(crate) refresh_job: Option<std::thread::JoinHandle<Result<RegistryFetch, String>>>,
     pub(crate) install_job: Option<MarketplaceInstallJob>,
-}
-
-#[allow(clippy::derivable_impls)]
-impl Default for MarketplaceState {
-    fn default() -> Self {
-        Self {
-            url: None,
-            refresh_job: None,
-            install_job: None,
-        }
-    }
+    pub(crate) registry: Option<Registry>,
 }
 
 /// 市场插件安装后台任务句柄。
@@ -62,8 +58,10 @@ impl WorkbenchApp {
                 match handle.join() {
                     Ok(Ok(fetched)) => {
                         let diagnostics = fetched.network_diagnostics.summary();
+                        let view = MarketplaceView::from(fetched.registry.clone());
                         self.plugins_panel
-                            .set_market_registry(fetched.registry, diagnostics.clone());
+                            .set_market_registry_view(view, diagnostics.clone());
+                        self.marketplace.registry = Some(fetched.registry);
                         self.set_status(
                             StatusLevel::Info,
                             format!("市场索引已刷新（{diagnostics}）"),
@@ -144,6 +142,18 @@ impl WorkbenchApp {
                 .map_err(|e| format!("创建 tokio runtime 失败：{e}"))?;
             rt.block_on(async { tool_marketplace::fetch_registry(&url, &network).await })
         }));
+    }
+
+    /// 按 id 查回最近一次成功刷新的市场条目（clone 返回），供安装流程使用。
+    ///
+    /// registry 的持有权在 app 运行时：`MarketplacePluginView` 缺少安装所需的
+    /// `download_url`/`sha256`，presentation 只消费展示用 DTO。
+    pub(crate) fn market_entry(&self, id: &str) -> Option<RegistryPlugin> {
+        self.marketplace
+            .registry
+            .as_ref()
+            .and_then(|registry| registry.plugins.iter().find(|plugin| plugin.id == id))
+            .cloned()
     }
 
     /// 启动后台安装一个市场插件。

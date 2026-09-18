@@ -154,7 +154,9 @@ impl WorkbenchApp {
                 ),
                 PluginPanelEvent::MarketplaceUrlChanged(_) => {}
                 PluginPanelEvent::InstallPlugin(id) => {
-                    match self.plugins_panel.find_market_plugin(&id) {
+                    // registry 的持有权在 app 运行时，面板只提供条目 id。
+                    let entry = self.market_entry(&id);
+                    match entry {
                         Some(entry) => self.start_marketplace_install(entry),
                         None => self.set_status(
                             StatusLevel::Warn,

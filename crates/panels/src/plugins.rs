@@ -14,8 +14,6 @@ use tool_application::marketplace::{MarketplacePluginView, MarketplaceView};
 use tool_application::plugin::{
     PluginDiagnosticSeverityView, PluginDiagnosticView, PluginStateView, PluginSummaryView,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use tool_marketplace::{Registry, RegistryPlugin};
 
 const TWO_COLUMN_PLUGIN_WIDTH: f32 = 980.0;
 const TWO_COLUMN_CARD_GAP: f32 = 10.0;
@@ -49,13 +47,14 @@ pub enum PluginPanelEvent {
     UninstallPlugin(String),
 }
 
-/// 市场 UI 状态：registry 缓存、刷新/安装进度、错误信息、已安装 id 集合。
+/// 市场 UI 状态：registry 视图缓存、刷新/安装进度、错误信息、已安装 id 集合。
+///
+/// `MarketplaceView` 是 `tool-application` 归一化后的只读 DTO；原生 registry（含安装所需的
+/// `download_url`/`sha256`）由 app 运行时持有，panels 不再直连 marketplace crate。
 /// 由 app 在后台任务完成后通过 setter 回填，panels 自身只负责渲染。
 #[derive(Default)]
 pub struct MarketplaceState {
     pub registry: Option<MarketplaceView>,
-    #[cfg(not(target_arch = "wasm32"))]
-    native_registry: Option<Registry>,
     pub refreshing: bool,
     pub error: Option<String>,
     /// 最近一次成功刷新实际使用的网络路径。
@@ -106,11 +105,7 @@ impl PluginsPanel {
             pending_restart: Vec::new(),
             pending_uninstall: None,
             tab: PluginTab::Installed,
-            market: MarketplaceState {
-                #[cfg(not(target_arch = "wasm32"))]
-                native_registry: None,
-                ..MarketplaceState::default()
-            },
+            market: MarketplaceState::default(),
             market_search: String::new(),
             market_category: None,
         }
@@ -118,17 +113,9 @@ impl PluginsPanel {
 
     // ── 市场 UI 状态 setter（供 app 回填） ──
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn set_market_registry(&mut self, reg: Registry, network_diagnostics: String) {
-        self.market.registry = Some(reg.clone().into());
-        self.market.native_registry = Some(reg);
-        self.market.refreshing = false;
-        self.market.error = None;
-        self.market.network_diagnostics = Some(network_diagnostics);
-    }
-
-    /// Browser runtimes provide the already-normalized registry view because
-    /// they cannot construct the native filesystem/download model.
+    /// 原生与浏览器运行时都提供已归一化的 registry 视图：原生端的 registry 由 app
+    /// 运行时持有（安装需要 DTO 未暴露的 `download_url`/`sha256`），浏览器端无法构造
+    /// 本地文件和下载模型，两者呈现的 marketplace 界面完全一致。
     pub fn set_market_registry_view(
         &mut self,
         registry: MarketplaceView,
@@ -176,15 +163,6 @@ impl PluginsPanel {
     /// 由 app 每帧调用，传入当前已发现的插件 id 集合。
     pub fn set_installed_ids(&mut self, ids: BTreeSet<String>) {
         self.market.installed_ids = ids;
-    }
-
-    /// 查找市场 registry 中某 id 的插件条目（clone 返回），供 app 安装时使用。
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn find_market_plugin(&self, id: &str) -> Option<RegistryPlugin> {
-        self.market
-            .native_registry
-            .as_ref()
-            .and_then(|r| r.plugins.iter().find(|p| p.id == id).cloned())
     }
 
     /// 是否需要首次拉取市场索引（无缓存、无错误、未在刷新中）。

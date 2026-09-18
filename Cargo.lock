@@ -1816,7 +1816,6 @@ dependencies = [
 name = "hardware-workbench-app"
 version = "1.2.0"
 dependencies = [
- "crossbeam-channel",
  "dirs-next",
  "eframe",
  "egui",
@@ -4752,7 +4751,6 @@ dependencies = [
  "tool-application",
  "tool-core",
  "tool-databus",
- "tool-marketplace",
  "tool-platform",
 ]
 
