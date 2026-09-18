@@ -1021,11 +1021,28 @@ pub async fn download_update_with_network_settings(
     let _ = std::fs::remove_file(zip_path.with_extension("zip.part"));
 
     let hash =
-        download_to_file_verified(url, &zip_path, network, on_progress, Some(expected_sha256))
+        download_verified_update_package(url, &zip_path, network, on_progress, expected_sha256)
             .await?;
 
-    // download_to_file_verified 已在校验通过后才做 .part → zip_path 原子 rename。
+    // download_verified_update_package 已在校验通过后才做 .part → zip_path 原子 rename。
     Ok(hash)
+}
+
+/// 更新包专用入口：把清单的 pinned 摘要交给共用的下载实现。
+///
+/// 参数刻意是**非 Option** 的 `&str`：[`download_to_file_verified`] 的
+/// `Option<&str>` 是给无固定值的调用方（marketplace）留的口子，而更新路径一旦在
+/// 这里传 `None`，校验就静默消失，且旧行为（"拿下载内容跟下载内容比"）会带着全绿
+/// 的测试回来。收窄成 `&str` 后，这个决定只可能显式写在下面这次调用里，而它由
+/// `tests::update_download_*` 用真实 HTTP 响应直接覆盖。
+async fn download_verified_update_package(
+    url: &str,
+    dest_path: &Path,
+    network: &NetworkSettings,
+    on_progress: impl Fn(u64, u64),
+    expected_sha256: &str,
+) -> Result<String, String> {
+    download_to_file_verified(url, dest_path, network, on_progress, Some(expected_sha256)).await
 }
 
 /// 通用下载：把 URL 内容下载到 `dest_path`，流式写入并同步计算 SHA256，返回哈希值。
@@ -1229,6 +1246,174 @@ mod tests {
         // 关键：pinned 值本身不合法时不得放行 —— 空串/短串都不能当通行证。
         assert!(verify_stream_sha256(&pin, "").is_err());
         assert!(verify_stream_sha256(&pin, "deadbeef").is_err());
+    }
+
+    // ── 下载收尾的**接线**回归测试 ──
+    //
+    // 上面那条只证明"比对函数会拒绝"，而原漏洞的成因是"校验存在但位置不对"：
+    // 把 verify 与 rename 换个顺序，或把更新路径传给共用实现的 `Some(pin)` 改成
+    // `None`，两处改动都能让全量测试保持绿色。下面两条用例用真实 HTTP 响应跑
+    // `download_verified_update_package`（更新路径实际调用的那个函数），把接线钉住。
+    //
+    // 反向自检（必须能失败，改完请还原）：
+    //   A. 把 `download_to_file_verified` 里的 rename 挪到 `verify_stream_sha256`
+    //      之前 → `update_download_rejects_mismatch_before_renaming_part` 变红。
+    //   B. 把 `download_verified_update_package` 的 `Some(expected_sha256)` 改成
+    //      `None` → 同一条用例变红（拿不到 Err，且最终文件已落盘）。
+    //
+    // 走 127.0.0.1 明文端口不削弱被测点：https/域名白名单是
+    // `download_update_with_network_settings` 的前置门，本用例测的是它下面的收尾。
+    // 若跑测试的机器设了 HTTP(S)_PROXY，`NetworkSettings::default()` 会把请求交给
+    // 代理，用例在"错误须点名不匹配"那条断言上响亮地失败 —— 不会静默放行。
+
+    /// 被测载荷，以及**独立**算出的 SHA256（`printf '%s' <载荷> | sha256sum`）。
+    /// 摘要刻意写死而不在测试里现算：自算自比正是这次修掉的自我循环。
+    const UPDATE_PAYLOAD: &[u8] = b"pinned-update-payload-for-wiring-regression-test";
+    const UPDATE_PAYLOAD_SHA256: &str =
+        "e9dff2af24a338fe8b1d29cdd4e9b7eb88188603806951d73f4708b8e144d790";
+
+    /// 一次性本地 HTTP 服务器：`TcpListener` + 手写 200 响应，不引入任何 HTTP 依赖。
+    struct LocalPayloadServer {
+        url: String,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl LocalPayloadServer {
+        fn start() -> Self {
+            // 端口写 0、再读回真实端口：不猜端口，就不会和并行跑的其它测试撞车。
+            let listener =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("绑定一次性本地 HTTP 端口");
+            let port = listener.local_addr().expect("读回分配的端口").port();
+            listener
+                .set_nonblocking(true)
+                .expect("本地监听套接字设为非阻塞");
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let worker_stop = stop.clone();
+            let worker = std::thread::spawn(move || {
+                // 非阻塞 accept + 硬超时：线程一定会自行退出，不留悬挂线程或占着端口。
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !worker_stop.load(std::sync::atomic::Ordering::Relaxed)
+                    && Instant::now() < deadline
+                {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            // 读写超时保证即使对端不发完整请求，线程也不会卡在 read 上。
+                            let half_second = Some(Duration::from_millis(500));
+                            let _ = stream.set_read_timeout(half_second);
+                            let _ = stream.set_write_timeout(half_second);
+                            let mut request = [0u8; 1024];
+                            let _ = stream.read(&mut request);
+                            let header = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                UPDATE_PAYLOAD.len()
+                            );
+                            let _ = stream.write_all(header.as_bytes());
+                            let _ = stream.write_all(UPDATE_PAYLOAD);
+                            let _ = stream.flush();
+                            // 显式 shutdown 发 FIN：直接 drop 在 Windows 上可能 RST 掉响应体。
+                            let _ = stream.shutdown(std::net::Shutdown::Both);
+                        }
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            ) =>
+                        {
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                url: format!("http://127.0.0.1:{port}/payload.zip"),
+                stop,
+                worker: Some(worker),
+            }
+        }
+    }
+
+    impl Drop for LocalPayloadServer {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+
+    /// `reqwest` 需要 tokio 的反应堆上下文，这里按生产代码同样的方式建一个当前线程 runtime。
+    fn update_test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("构建下载测试用的 tokio runtime")
+    }
+
+    #[test]
+    fn update_download_rejects_mismatch_before_renaming_part() {
+        let dir = tempfile::tempdir().expect("临时下载目录");
+        let dest = dir.path().join("payload.zip");
+        let part = dest.with_extension("zip.part");
+        let server = LocalPayloadServer::start();
+        // 形状合法但值不对：失败必须来自"比对不通过"，而不是"清单没给摘要"。
+        let wrong_pin = "0".repeat(64);
+
+        let error = update_test_runtime()
+            .block_on(download_verified_update_package(
+                &server.url,
+                &dest,
+                &NetworkSettings::default(),
+                |_, _| {},
+                &wrong_pin,
+            ))
+            .expect_err("下载内容与 pinned 摘要不一致时必须失败");
+
+        assert!(
+            error.contains("不匹配"),
+            "失败原因必须是 SHA256 比对未通过（而不是压根没跑到比对），实际：{error}"
+        );
+        assert!(
+            !dest.exists(),
+            "校验还没通过，文件却已拿到最终名字，apply 会读到未经固定的包：{dest:?}"
+        );
+        assert!(
+            !part.exists(),
+            "校验失败后必须清掉 .part，不留半截下载：{part:?}"
+        );
+    }
+
+    #[test]
+    fn update_download_renames_part_only_after_pinned_match() {
+        let dir = tempfile::tempdir().expect("临时下载目录");
+        let dest = dir.path().join("payload.zip");
+        let part = dest.with_extension("zip.part");
+        let server = LocalPayloadServer::start();
+
+        let hash = update_test_runtime()
+            .block_on(download_verified_update_package(
+                &server.url,
+                &dest,
+                &NetworkSettings::default(),
+                |_, _| {},
+                UPDATE_PAYLOAD_SHA256,
+            ))
+            .expect("流式哈希与 pinned 摘要一致时下载应当成功");
+
+        assert_eq!(
+            hash, UPDATE_PAYLOAD_SHA256,
+            "返回的自算摘要应与清单固定值一致"
+        );
+        assert!(
+            !part.exists(),
+            ".part 应已 rename 成最终文件，而不是残留：{part:?}"
+        );
+        assert_eq!(
+            std::fs::read(&dest).expect("校验通过后最终文件必须落盘"),
+            UPDATE_PAYLOAD,
+            "最终文件的内容必须就是下载到的字节"
+        );
     }
 
     #[test]
