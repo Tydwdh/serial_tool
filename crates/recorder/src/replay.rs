@@ -10,6 +10,20 @@ use tool_databus::DataBus;
 
 use serde::{Deserialize, Serialize};
 
+// ── 加载限制 ──
+//
+// 原生文件加载（`prepare_load*`）与浏览器文本加载（`ReplayTextLoader`）必须共用同一套
+// 限额与文案，否则同一个录制文件在两端解析出的事件数/错误数会不一致。
+
+/// 单个录制文件大小上限。
+const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024; // 512MB total
+
+/// 单行长度上限，超过则跳过该行。
+const MAX_LINE_BYTES: u64 = 4 * 1024 * 1024; // 4MB per line
+
+/// 一次加载最多回传给 UI 的解析错误条数。
+const MAX_REPORTED_ERRORS: usize = 5;
+
 // ── ReplayPolicy ──
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -73,17 +87,9 @@ pub struct ReplayTextLoader {
 
 impl ReplayTextLoader {
     pub fn new(name: impl Into<String>, text: impl Into<String>) -> io::Result<Self> {
-        const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
         let text = text.into();
         if text.len() as u64 > MAX_FILE_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "录制文件过大 ({} MB)，限制 {} MB",
-                    text.len() / 1024 / 1024,
-                    MAX_FILE_BYTES / 1024 / 1024
-                ),
-            ));
+            return Err(oversize_file_error(text.len() as u64));
         }
         Ok(Self {
             path: PathBuf::from(name.into()),
@@ -98,7 +104,6 @@ impl ReplayTextLoader {
 
     /// Consume at most `budget` lines. `Some` means parsing is complete.
     pub fn step(&mut self, budget: usize) -> io::Result<Option<ReplayLoadData>> {
-        const MAX_LINE_BYTES: u64 = 4 * 1024 * 1024;
         let mut consumed = 0;
         while self.offset < self.text.len() && consumed < budget {
             let remaining = &self.text[self.offset..];
@@ -109,25 +114,13 @@ impl ReplayTextLoader {
                 }
                 None => (self.text.len(), self.text.len()),
             };
-            let line_number = self.line_number;
-            let trimmed = self.text[self.offset..line_end].trim();
-            if !trimmed.is_empty() {
-                if trimmed.len() as u64 > MAX_LINE_BYTES {
-                    self.record_error(format!(
-                        "第 {line_number} 行: 行长度 {} 字节，超过限制 4MB",
-                        trimmed.len()
-                    ));
-                    self.skipped += 1;
-                } else {
-                    match serde_json::from_str::<Event>(trimmed) {
-                        Ok(event) => self.events.push(event),
-                        Err(error) => {
-                            self.record_error(format!("第 {line_number} 行: {error}"));
-                            self.skipped += 1;
-                        }
-                    }
-                }
-            }
+            parse_jsonl_line(
+                &self.text[self.offset..line_end],
+                self.line_number,
+                &mut self.events,
+                &mut self.skipped,
+                &mut self.first_errors,
+            );
             self.offset = next_offset;
             self.line_number += 1;
             consumed += 1;
@@ -137,51 +130,12 @@ impl ReplayTextLoader {
             return Ok(None);
         }
 
-        let loaded = self.events.len();
-        self.events
-            .sort_by_key(|event| (event.timestamp_ms, event.id));
-        let timestamp_index = build_timestamp_index(&self.events);
-        let has_recorded_protocol = self
-            .events
-            .iter()
-            .any(|event| event.topic.starts_with("protocol.") && !event.is_replay());
-        let first_timestamp = self
-            .events
-            .first()
-            .map(|event| event.timestamp_ms)
-            .unwrap_or(0);
-        let mut bookmarks = Vec::new();
-        for event in &self.events {
-            if event.topic == "recorder.bookmark" {
-                let name = event.payload.text_lossy();
-                let name = (!name.is_empty()).then_some(name);
-                let position_ms = event.timestamp_ms.saturating_sub(first_timestamp);
-                if !bookmarks
-                    .iter()
-                    .any(|(position, _)| *position == position_ms)
-                {
-                    bookmarks.push((position_ms, name));
-                }
-            }
-        }
-        Ok(Some(ReplayLoadData {
-            path: self.path.clone(),
-            events: std::mem::take(&mut self.events),
-            report: ReplayLoadReport {
-                loaded,
-                skipped: self.skipped,
-                first_errors: std::mem::take(&mut self.first_errors),
-            },
-            timestamp_index,
-            has_recorded_protocol,
-            bookmarks,
-        }))
-    }
-
-    fn record_error(&mut self, error: String) {
-        if self.first_errors.len() < 5 {
-            self.first_errors.push(error);
-        }
+        Ok(Some(finish_replay_load(
+            self.path.clone(),
+            std::mem::take(&mut self.events),
+            self.skipped,
+            std::mem::take(&mut self.first_errors),
+        )))
     }
 }
 
@@ -216,7 +170,7 @@ pub struct ReplayManager {
     replay_start: Option<u64>,
     position_at_start_ms: u64,
 
-    // ── 新增 ──
+    // ── 策略与 analyzer 缓存投递状态 ──
     policy: ReplayPolicy,
     has_recorded_protocol: bool,
     analyzer_cache: Vec<Event>,
@@ -280,22 +234,13 @@ impl ReplayManager {
 
     /// 只做文件读取和解析，不触碰 ReplayManager，可安全放到 worker 线程。
     pub fn prepare_load(path: impl AsRef<std::path::Path>) -> io::Result<ReplayLoadData> {
-        const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024; // 512MB total
-
         let path = path.as_ref().to_path_buf();
 
         // 文件大小检查：防止加载超大文件导致 OOM
         let metadata = std::fs::metadata(&path)
             .map_err(|e| io::Error::other(format!("获取文件大小失败: {e}")))?;
         if metadata.len() > MAX_FILE_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "录制文件过大 ({} MB)，限制 {} MB",
-                    metadata.len() / 1024 / 1024,
-                    MAX_FILE_BYTES / 1024 / 1024
-                ),
-            ));
+            return Err(oversize_file_error(metadata.len()));
         }
 
         let file = File::open(&path)?;
@@ -319,71 +264,21 @@ impl ReplayManager {
     where
         I: Iterator<Item = io::Result<String>>,
     {
-        const MAX_LINE_BYTES: u64 = 4 * 1024 * 1024; // 4MB per line
         let mut events = Vec::new();
         let mut skipped = 0usize;
         let mut first_errors: Vec<String> = Vec::new();
-        for (line_num, line) in lines.enumerate() {
+        for (line_index, line) in lines.enumerate() {
             let line = line?;
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            // 单行长度限制：拒绝解析超长行，防止畸形文件 OOM
-            if trimmed.len() as u64 > MAX_LINE_BYTES {
-                skipped += 1;
-                if first_errors.len() < 5 {
-                    first_errors.push(format!(
-                        "第 {n} 行: 行长度 {} 字节，超过限制 4MB",
-                        trimmed.len(),
-                        n = line_num + 1,
-                    ));
-                }
-                continue;
-            }
-            match serde_json::from_str::<Event>(trimmed) {
-                Ok(event) => events.push(event),
-                Err(e) => {
-                    skipped += 1;
-                    if first_errors.len() < 5 {
-                        first_errors.push(format!("第 {n} 行: {e}", n = line_num + 1));
-                    }
-                }
-            }
+            // 行号 1-based 且包含空行：与浏览器侧 `ReplayTextLoader` 的错误定位一致。
+            parse_jsonl_line(
+                &line,
+                line_index + 1,
+                &mut events,
+                &mut skipped,
+                &mut first_errors,
+            );
         }
-        let loaded = events.len();
-        events.sort_by_key(|event| (event.timestamp_ms, event.id));
-        let timestamp_index = build_timestamp_index(&events);
-        let has_recorded_protocol = events
-            .iter()
-            .any(|event| event.topic.starts_with("protocol.") && !event.is_replay());
-        let first_timestamp = events.first().map(|event| event.timestamp_ms).unwrap_or(0);
-        let mut bookmarks = Vec::new();
-        for event in &events {
-            if event.topic == "recorder.bookmark" {
-                let name = event.payload.text_lossy();
-                let name = (!name.is_empty()).then_some(name);
-                let position_ms = event.timestamp_ms.saturating_sub(first_timestamp);
-                if !bookmarks
-                    .iter()
-                    .any(|(position, _)| *position == position_ms)
-                {
-                    bookmarks.push((position_ms, name));
-                }
-            }
-        }
-        Ok(ReplayLoadData {
-            path,
-            events,
-            report: ReplayLoadReport {
-                loaded,
-                skipped,
-                first_errors,
-            },
-            timestamp_index,
-            has_recorded_protocol,
-            bookmarks,
-        })
+        Ok(finish_replay_load(path, events, skipped, first_errors))
     }
 
     /// 在 Workbench 所在线程应用已经解析好的回放数据。
@@ -407,24 +302,16 @@ impl ReplayManager {
         self.replay_start = None;
 
         // load 时 invalidate analyzer cache（因为事件变了）
-        self.analyzer_cache.clear();
-        self.analyzer_cache_valid = false;
-        self.clear_analyzer_messages();
-        self.analyzer_cursor = 0;
+        self.invalidate_analyzer_cache();
 
         self.bookmarks = bookmarks
             .into_iter()
             .map(|(pos_ms, name)| Bookmark { pos_ms, name })
             .collect();
 
-        self.state = if self.events.is_empty() {
-            ReplayState::Empty
-        } else {
-            ReplayState::Loaded
-        };
-        self.bus.publish(Event::system_log(
+        self.state = self.resting_state();
+        self.log_replay(
             LogLevel::Info,
-            "replay",
             format!(
                 "loaded {} event(s) from {} (recorded_protocol: {}, policy: {:?})",
                 self.events.len(),
@@ -432,7 +319,7 @@ impl ReplayManager {
                 self.has_recorded_protocol,
                 self.policy,
             ),
-        ));
+        );
         self.events.len()
     }
 
@@ -447,10 +334,7 @@ impl ReplayManager {
         if self.policy != policy {
             self.policy = policy;
             // 切换 policy 时 invalidate cache
-            self.analyzer_cache.clear();
-            self.analyzer_cache_valid = false;
-            self.clear_analyzer_messages();
-            self.analyzer_cursor = 0;
+            self.invalidate_analyzer_cache();
         }
     }
 
@@ -531,11 +415,8 @@ impl ReplayManager {
 
     /// 标记 analyzer 失败（会清空缓存）。
     pub fn set_analyzer_error(&mut self, error: String) {
-        self.analyzer_cache.clear();
-        self.analyzer_cache_valid = false;
+        self.invalidate_analyzer_cache();
         self.analyzer_error = Some(error);
-        self.analyzer_warning = None;
-        self.analyzer_cursor = 0;
     }
 
     /// 设置 analyzer 警告信息（不清缓存，仅 UI 提示）。
@@ -553,6 +434,15 @@ impl ReplayManager {
         self.analyzer_warning = None;
     }
 
+    /// analyzer 缓存整体失效：事件集或策略变化后，旧输出和已投递到的位置都不可再用，
+    /// 因此缓存、有效标记、错误/警告、投递游标必须一起重置，不能只清其中一项。
+    fn invalidate_analyzer_cache(&mut self) {
+        self.analyzer_cache.clear();
+        self.analyzer_cache_valid = false;
+        self.clear_analyzer_messages();
+        self.analyzer_cursor = 0;
+    }
+
     pub fn analyzer_warning(&self) -> Option<&str> {
         self.analyzer_warning.as_deref()
     }
@@ -565,6 +455,12 @@ impl ReplayManager {
         self.analyzer_error.as_deref()
     }
 
+    /// 回放状态变更日志：source 固定为 `"replay"`（UI 按 source 过滤），各处只给级别和文案。
+    fn log_replay(&mut self, level: LogLevel, message: impl Into<String>) {
+        let event = Event::system_log(level, "replay", message);
+        self.bus.publish(event);
+    }
+
     /// 开始播放。返回 false 表示被门控阻止（如需要 analyzer）。
     pub fn play(&mut self) -> bool {
         if self.events.is_empty() {
@@ -573,11 +469,10 @@ impl ReplayManager {
         }
 
         if !self.replay_ready() {
-            self.bus.publish(Event::system_log(
+            self.log_replay(
                 LogLevel::Warn,
-                "replay",
                 "playback blocked: replay analyzer is required",
-            ));
+            );
             return false;
         }
 
@@ -587,11 +482,7 @@ impl ReplayManager {
         self.position_at_start_ms = self.position_ms();
         self.replay_start = Some(tool_core::monotonic_now_nanos());
         self.state = ReplayState::Playing;
-        self.bus.publish(Event::system_log(
-            LogLevel::Info,
-            "replay",
-            "playback started",
-        ));
+        self.log_replay(LogLevel::Info, "playback started");
         true
     }
 
@@ -600,11 +491,7 @@ impl ReplayManager {
             self.position_at_start_ms = self.position_ms();
             self.replay_start = None;
             self.state = ReplayState::Paused;
-            self.bus.publish(Event::system_log(
-                LogLevel::Info,
-                "replay",
-                "playback paused",
-            ));
+            self.log_replay(LogLevel::Info, "playback paused");
         }
     }
 
@@ -613,16 +500,8 @@ impl ReplayManager {
         self.analyzer_cursor = 0;
         self.position_at_start_ms = 0;
         self.replay_start = None;
-        self.state = if self.events.is_empty() {
-            ReplayState::Empty
-        } else {
-            ReplayState::Loaded
-        };
-        self.bus.publish(Event::system_log(
-            LogLevel::Info,
-            "replay",
-            "playback stopped",
-        ));
+        self.state = self.resting_state();
+        self.log_replay(LogLevel::Info, "playback stopped");
     }
 
     pub fn seek_ms(&mut self, position_ms: u64) {
@@ -658,11 +537,7 @@ impl ReplayManager {
     /// 返回重放的事件数，调用方应在调用前清空 UI 面板
     pub fn seek_with_replay(&mut self, position_ms: u64) -> usize {
         if !self.replay_ready() {
-            self.bus.publish(Event::system_log(
-                LogLevel::Warn,
-                "replay",
-                "seek blocked: replay analyzer is required",
-            ));
+            self.log_replay(LogLevel::Warn, "seek blocked: replay analyzer is required");
             return 0;
         }
 
@@ -674,11 +549,7 @@ impl ReplayManager {
     /// 回退/步进专用：按事件 cursor 精确重建，而不是按毫秒重建。
     pub fn seek_cursor_with_replay(&mut self, target_cursor: usize) -> usize {
         if !self.replay_ready() {
-            self.bus.publish(Event::system_log(
-                LogLevel::Warn,
-                "replay",
-                "seek blocked: replay analyzer is required",
-            ));
+            self.log_replay(LogLevel::Warn, "seek blocked: replay analyzer is required");
             return 0;
         }
 
@@ -705,19 +576,19 @@ impl ReplayManager {
     /// 优化：复用 seek_panel_phase 推进的 cursor，只从 cursor 位置继续向前扫描。
     pub fn seek_data_phase(&mut self, position_ms: u64) -> usize {
         let policy = self.effective_policy();
+        // ReparseRaw 下录制的 protocol.* 不投递：它由 analyzer_cache 替代。
+        let keep_recorded_protocol = policy != ReplayPolicy::ReparseRaw;
+        let is_data_event = move |event: &Event| {
+            event.topic != tool_core::topics::UI_PANEL_CREATE
+                && (keep_recorded_protocol || !event.topic.starts_with("protocol."))
+        };
 
         // 先从 0 扫描到 cursor（seek_panel_phase 已处理过的事件范围），
         // 发布非 panel.create 事件。
-        let before_cursor = self.publish_range_filtered(0, self.cursor, position_ms, |event| {
-            event.topic != tool_core::topics::UI_PANEL_CREATE
-                && (policy != ReplayPolicy::ReparseRaw || !event.topic.starts_with("protocol."))
-        });
+        let before_cursor = self.publish_range_filtered(0, self.cursor, position_ms, is_data_event);
 
         // 再从 cursor 继续扫描剩余事件（如有）
-        let after_cursor = self.publish_until_filtered(position_ms, |event| {
-            event.topic != tool_core::topics::UI_PANEL_CREATE
-                && (policy != ReplayPolicy::ReparseRaw || !event.topic.starts_with("protocol."))
-        });
+        let after_cursor = self.publish_until_filtered(position_ms, is_data_event);
 
         let analyzer_count = if policy == ReplayPolicy::ReparseRaw && self.analyzer_cache_valid {
             self.publish_analyzer_cache_until(position_ms)
@@ -798,7 +669,7 @@ impl ReplayManager {
     }
 
     /// 在指定索引范围 [start..end) 内，按 predicate 过滤发布事件。
-    /// 不推进 cursor，供 cursor-based seek 精确重建使用。
+    /// 纯按索引投递，不看时间戳；不推进 cursor，供 cursor-based seek 精确重建使用。
     fn publish_index_range_filtered(
         &mut self,
         start: usize,
@@ -818,8 +689,8 @@ impl ReplayManager {
         count
     }
 
-    /// 在指定索引范围 [start..end) 内，按 predicate 过滤发布事件。
-    /// 不推进 cursor（由调用方管理）。
+    /// 在指定索引范围 [start..end) 内，按 predicate 过滤发布事件，
+    /// 并在事件位置超过 `target_position_ms` 时提前停止；不推进 cursor（由调用方管理）。
     fn publish_range_filtered(
         &mut self,
         start: usize,
@@ -877,7 +748,9 @@ impl ReplayManager {
         if self.cursor < self.events.len() {
             self.publish_cursor_event();
 
-            let position_ms = self.cursor_position_ms().min(self.duration_ms());
+            let position_ms = self
+                .position_for_cursor(self.cursor)
+                .min(self.duration_ms());
             self.position_at_start_ms = position_ms;
 
             if self.state == ReplayState::Playing {
@@ -892,21 +765,6 @@ impl ReplayManager {
         }
 
         self.cursor
-    }
-
-    fn cursor_position_ms(&self) -> u64 {
-        let Some(base) = self.base_timestamp_ms() else {
-            return 0;
-        };
-
-        if self.cursor == 0 {
-            return 0;
-        }
-
-        self.events
-            .get(self.cursor.saturating_sub(1))
-            .map(|event| event.timestamp_ms.saturating_sub(base))
-            .unwrap_or_else(|| self.duration_ms())
     }
 
     /// 逐事件后退：回到上一个事件位置
@@ -933,14 +791,12 @@ impl ReplayManager {
             return None;
         }
 
-        let steps = steps.max(1);
-
         // cursor 表示“下一个要发布的事件索引”。
         // 回退 N 步，就是希望最终重放到 cursor - N 之前的位置。
-        let target_cursor = self.cursor.saturating_sub(steps);
-        Some(target_cursor)
+        Some(self.cursor.saturating_sub(steps.max(1)))
     }
 
+    /// `target_cursor` 之前最后一个事件（即已投递的最后一个）相对首帧的位置（ms）。
     fn position_for_cursor(&self, target_cursor: usize) -> u64 {
         if target_cursor == 0 {
             return 0;
@@ -981,11 +837,7 @@ impl ReplayManager {
             self.state = ReplayState::Finished;
             self.replay_start = None;
             self.position_at_start_ms = self.duration_ms();
-            self.bus.publish(Event::system_log(
-                LogLevel::Info,
-                "replay",
-                "playback finished",
-            ));
+            self.log_replay(LogLevel::Info, "playback finished");
         }
         published
     }
@@ -1078,6 +930,113 @@ impl ReplayManager {
 
     fn base_timestamp_ms(&self) -> Option<u64> {
         self.events.first().map(|event| event.timestamp_ms)
+    }
+
+    /// 静止状态：空文件/未加载是 Empty，有事件则是已停在起点的 Loaded。
+    fn resting_state(&self) -> ReplayState {
+        if self.events.is_empty() {
+            ReplayState::Empty
+        } else {
+            ReplayState::Loaded
+        }
+    }
+}
+
+/// 超限错误：两条加载路径共用同一 `ErrorKind` 与文案。
+fn oversize_file_error(size_bytes: u64) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "录制文件过大 ({} MB)，限制 {} MB",
+            size_bytes / 1024 / 1024,
+            MAX_FILE_BYTES / 1024 / 1024
+        ),
+    )
+}
+
+/// 解析一行 JSONL：空行忽略；超长行与非法 JSON 计入 `skipped`，错误交给
+/// `record_parse_error` 收集。`line_number` 由调用方给出（1-based，空行也占号），
+/// 两端的错误定位必须完全一致。
+fn parse_jsonl_line(
+    line: &str,
+    line_number: usize,
+    events: &mut Vec<Event>,
+    skipped: &mut usize,
+    first_errors: &mut Vec<String>,
+) {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    // 单行长度限制：拒绝解析超长行，防止畸形文件 OOM
+    if trimmed.len() as u64 > MAX_LINE_BYTES {
+        *skipped += 1;
+        record_parse_error(
+            first_errors,
+            format!(
+                "第 {line_number} 行: 行长度 {} 字节，超过限制 4MB",
+                trimmed.len()
+            ),
+        );
+        return;
+    }
+    match serde_json::from_str::<Event>(trimmed) {
+        Ok(event) => events.push(event),
+        Err(error) => {
+            *skipped += 1;
+            record_parse_error(first_errors, format!("第 {line_number} 行: {error}"));
+        }
+    }
+}
+
+/// 只保留前 `MAX_REPORTED_ERRORS` 条错误：UI 只需少量线索，畸形长文件不能撑爆内存。
+fn record_parse_error(first_errors: &mut Vec<String>, error: String) {
+    if first_errors.len() < MAX_REPORTED_ERRORS {
+        first_errors.push(error);
+    }
+}
+
+/// 解析完成后的统一收尾：稳定排序、建稀疏时间戳索引、提取书签，组装 `ReplayLoadData`。
+/// 书签以相对首帧的位置（ms）去重，同一位置只保留第一条的 name。
+fn finish_replay_load(
+    path: PathBuf,
+    mut events: Vec<Event>,
+    skipped: usize,
+    first_errors: Vec<String>,
+) -> ReplayLoadData {
+    let loaded = events.len();
+    events.sort_by_key(|event| (event.timestamp_ms, event.id));
+    let timestamp_index = build_timestamp_index(&events);
+    let has_recorded_protocol = events
+        .iter()
+        .any(|event| event.topic.starts_with("protocol.") && !event.is_replay());
+    let first_timestamp = events.first().map(|event| event.timestamp_ms).unwrap_or(0);
+    let mut bookmarks = Vec::new();
+    for event in &events {
+        if event.topic != "recorder.bookmark" {
+            continue;
+        }
+        let name = event.payload.text_lossy();
+        let name = (!name.is_empty()).then_some(name);
+        let position_ms = event.timestamp_ms.saturating_sub(first_timestamp);
+        if !bookmarks
+            .iter()
+            .any(|(position, _)| *position == position_ms)
+        {
+            bookmarks.push((position_ms, name));
+        }
+    }
+    ReplayLoadData {
+        path,
+        events,
+        report: ReplayLoadReport {
+            loaded,
+            skipped,
+            first_errors,
+        },
+        timestamp_index,
+        has_recorded_protocol,
+        bookmarks,
     }
 }
 

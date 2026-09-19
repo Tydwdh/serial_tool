@@ -154,10 +154,7 @@ mod tests {
     #[test]
     fn plugin_schema_is_valid_json() {
         let schema_path = repo_root().join("plugins").join("plugin.schema.json");
-        let text = fs::read_to_string(&schema_path)
-            .unwrap_or_else(|error| panic!("{}: {error}", schema_path.display()));
-        let value: serde_json::Value = serde_json::from_str(&text)
-            .unwrap_or_else(|error| panic!("{}: {error}", schema_path.display()));
+        let value = read_json(&schema_path);
 
         assert_eq!(
             value.get("title").and_then(serde_json::Value::as_str),
@@ -169,10 +166,7 @@ mod tests {
     fn lua_authoring_support_files_exist() {
         let root = repo_root();
         let luarc_path = root.join(".luarc.json");
-        let luarc_text = fs::read_to_string(&luarc_path)
-            .unwrap_or_else(|error| panic!("{}: {error}", luarc_path.display()));
-        let luarc: serde_json::Value = serde_json::from_str(&luarc_text)
-            .unwrap_or_else(|error| panic!("{}: {error}", luarc_path.display()));
+        let luarc = read_json(&luarc_path);
         assert_eq!(
             luarc
                 .get("runtime.version")
@@ -209,11 +203,9 @@ mod tests {
             }
 
             assert_manifest_is_valid(&manifest_path);
-            let manifest: PluginManifest = serde_json::from_str(
-                &fs::read_to_string(&manifest_path)
-                    .unwrap_or_else(|error| panic!("{}: {error}", manifest_path.display())),
-            )
-            .unwrap_or_else(|error| panic!("{}: {error}", manifest_path.display()));
+            let text = read_text(&manifest_path);
+            let manifest: PluginManifest = serde_json::from_str(&text)
+                .unwrap_or_else(|error| panic!("{}: {error}", manifest_path.display()));
             let live_path = path.join(manifest.live_main());
             assert!(
                 live_path.is_file(),
@@ -295,11 +287,19 @@ mod tests {
             manifest.live_subscriptions(),
             &["transport.serial.default.rx".to_owned()]
         );
-        // 不填 subscriptions 时返回空
-        let manifest2: PluginManifest =
-            serde_json::from_str(r#"{"id":"t","name":"T","version":"1","runtime":"lua","main":"m.lua","permissions":[]}"#)
-                .unwrap();
-        assert!(manifest2.live_subscriptions().is_empty());
+        // 完全没有 `live` 配置时，subscriptions 视为空
+        let without_live: PluginManifest = serde_json::from_str(
+            r#"{
+              "id": "t",
+              "name": "T",
+              "version": "1",
+              "runtime": "lua",
+              "main": "m.lua",
+              "permissions": []
+            }"#,
+        )
+        .unwrap();
+        assert!(without_live.live_subscriptions().is_empty());
     }
 
     #[test]
@@ -333,11 +333,18 @@ mod tests {
             .join("..")
     }
 
+    /// 读文件失败时把路径带进 panic 信息，否则看不出是哪个插件/文件坏掉。
+    fn read_text(path: &Path) -> String {
+        fs::read_to_string(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+    }
+
+    fn read_json(path: &Path) -> serde_json::Value {
+        let text = read_text(path);
+        serde_json::from_str(&text).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+    }
+
     fn assert_manifest_is_valid(path: &Path) {
-        let text =
-            fs::read_to_string(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-        let value: serde_json::Value = serde_json::from_str(&text)
-            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        let value = read_json(path);
         assert_eq!(
             value.get("$schema").and_then(serde_json::Value::as_str),
             Some("../plugin.schema.json"),

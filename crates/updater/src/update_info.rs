@@ -70,11 +70,8 @@ pub fn is_newer_version(remote: &str, local: &str) -> bool {
     for i in 0..rp.len().max(lp.len()) {
         let r = rp.get(i).copied().unwrap_or(0);
         let l = lp.get(i).copied().unwrap_or(0);
-        if r > l {
-            return true;
-        }
-        if r < l {
-            return false;
+        if r != l {
+            return r > l;
         }
     }
     false

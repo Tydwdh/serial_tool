@@ -60,47 +60,42 @@ pub fn generated_reference() -> String {
     )
 }
 
+/// `plugins/plugin.schema.json` 里每个枚举所在的位置，以及拥有这些取值的协议常量。
+/// 每项是 `(schema 路径, 事实源常量)`；同步示例按此表逐条覆写，避免手写多份枚举。
+const SCHEMA_ENUMS: &[(&[&str], &[&str])] = &[
+    (
+        &["properties", "api_version", "enum"],
+        crate::manifest::SUPPORTED_PLUGIN_API_VERSIONS,
+    ),
+    (&["properties", "runtime", "enum"], RUNTIMES),
+    (&["$defs", "permission", "enum"], LIVE_PERMISSIONS),
+    (&["$defs", "replayPermission", "enum"], REPLAY_PERMISSIONS),
+    (
+        &["$defs", "panelContribution", "properties", "kind", "enum"],
+        PANEL_KINDS,
+    ),
+    (
+        &["$defs", "uiContribution", "properties", "slot", "enum"],
+        UI_SLOTS,
+    ),
+    (
+        &["$defs", "uiContribution", "properties", "kind", "enum"],
+        UI_KINDS,
+    ),
+    (
+        &["$defs", "setting", "properties", "kind", "enum"],
+        SETTING_KINDS,
+    ),
+];
+
 pub fn synchronize_repository(root: &Path) -> Result<(), String> {
     let schema_path = root.join("plugins/plugin.schema.json");
     let mut schema: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&schema_path).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
-    set_enum(
-        &mut schema,
-        &["properties", "api_version", "enum"],
-        crate::manifest::SUPPORTED_PLUGIN_API_VERSIONS,
-    )?;
-    set_enum(&mut schema, &["properties", "runtime", "enum"], RUNTIMES)?;
-    set_enum(
-        &mut schema,
-        &["$defs", "permission", "enum"],
-        LIVE_PERMISSIONS,
-    )?;
-    set_enum(
-        &mut schema,
-        &["$defs", "replayPermission", "enum"],
-        REPLAY_PERMISSIONS,
-    )?;
-    set_enum(
-        &mut schema,
-        &["$defs", "panelContribution", "properties", "kind", "enum"],
-        PANEL_KINDS,
-    )?;
-    set_enum(
-        &mut schema,
-        &["$defs", "uiContribution", "properties", "slot", "enum"],
-        UI_SLOTS,
-    )?;
-    set_enum(
-        &mut schema,
-        &["$defs", "uiContribution", "properties", "kind", "enum"],
-        UI_KINDS,
-    )?;
-    set_enum(
-        &mut schema,
-        &["$defs", "setting", "properties", "kind", "enum"],
-        SETTING_KINDS,
-    )?;
+    for &(path, values) in SCHEMA_ENUMS {
+        set_enum(&mut schema, path, values)?;
+    }
     let schema_text = serde_json::to_string_pretty(&schema).map_err(|e| e.to_string())? + "\n";
     std::fs::write(schema_path, schema_text).map_err(|e| e.to_string())?;
     std::fs::write(
@@ -143,6 +138,7 @@ mod tests {
     fn schema_enums_match_runtime_spec() {
         let schema: serde_json::Value =
             serde_json::from_str(include_str!("../../../plugins/plugin.schema.json")).unwrap();
+        // 有意重述一遍 schema 路径，不复用 SCHEMA_ENUMS：任一侧写错都不会被另一侧掩盖。
         let cases: &[(&[&str], &[&str])] = &[
             (&["$defs", "permission", "enum"], LIVE_PERMISSIONS),
             (&["$defs", "replayPermission", "enum"], REPLAY_PERMISSIONS),

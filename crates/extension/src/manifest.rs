@@ -22,7 +22,7 @@ pub struct PluginManifest {
     #[serde(default = "default_api_version")]
     pub api_version: String,
     pub runtime: String,
-    /// 默认入口（live.replay 不存在时使用）
+    /// 实时入口的回退值：`live.main` 缺失时使用（见 `live_main`）
     pub main: String,
 
     #[serde(default)]
@@ -91,6 +91,7 @@ impl PluginManifest {
             errors.push("plugin live main 不能为空".to_owned());
         }
 
+        // command id 集合要留到后面的 ui 循环：ui[].command 必须指向已声明的 command。
         let mut command_ids = BTreeSet::new();
         for command in &self.contributes.commands {
             if command.id.trim().is_empty() {
@@ -163,37 +164,34 @@ impl PluginManifest {
             }
         }
 
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors)
+        if !errors.is_empty() {
+            return Err(errors);
         }
+        Ok(())
     }
 
     pub fn api_version_supported(&self) -> bool {
-        SUPPORTED_PLUGIN_API_VERSIONS
-            .iter()
-            .any(|supported| *supported == self.api_version)
+        SUPPORTED_PLUGIN_API_VERSIONS.contains(&self.api_version.as_str())
     }
 
     pub fn live_main(&self) -> &str {
         self.live
             .as_ref()
-            .and_then(|l| l.main.as_deref())
+            .and_then(|live| live.main.as_deref())
             .unwrap_or(&self.main)
     }
 
     pub fn live_permissions(&self) -> &[String] {
         self.live
             .as_ref()
-            .and_then(|l| l.permissions.as_ref())
+            .and_then(|live| live.permissions.as_ref())
             .unwrap_or(&self.permissions)
     }
 
     pub fn live_subscriptions(&self) -> &[String] {
         self.live
             .as_ref()
-            .map(|l| l.subscriptions.as_slice())
+            .map(|live| live.subscriptions.as_slice())
             .unwrap_or(&[])
     }
 
@@ -202,27 +200,27 @@ impl PluginManifest {
     }
 
     pub fn replay_main(&self) -> Option<&str> {
-        self.replay.as_ref().map(|r| r.main.as_str())
+        self.replay.as_ref().map(|replay| replay.main.as_str())
     }
 
     pub fn replay_permissions(&self) -> &[String] {
         self.replay
             .as_ref()
-            .map(|r| r.permissions.as_slice())
+            .map(|replay| replay.permissions.as_slice())
             .unwrap_or(&[])
     }
 
     pub fn replay_subscriptions(&self) -> &[String] {
         self.replay
             .as_ref()
-            .map(|r| r.subscriptions.as_slice())
+            .map(|replay| replay.subscriptions.as_slice())
             .unwrap_or(&[])
     }
 
     pub fn replay_outputs(&self) -> &[String] {
         self.replay
             .as_ref()
-            .map(|r| r.outputs.as_slice())
+            .map(|replay| replay.outputs.as_slice())
             .unwrap_or(&[])
     }
 

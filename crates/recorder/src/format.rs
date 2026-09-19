@@ -52,10 +52,10 @@ pub(crate) fn should_record_event_with_mode(event: &Event, mode: RecordMode) -> 
     }
 
     // 录制控制事件（暂停/继续/标记）在所有模式下都写入
-    if event.topic == "recorder.pause"
-        || event.topic == "recorder.resume"
-        || event.topic == "recorder.bookmark"
-    {
+    if matches!(
+        event.topic.as_str(),
+        "recorder.pause" | "recorder.resume" | "recorder.bookmark"
+    ) {
         return true;
     }
 

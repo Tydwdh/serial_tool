@@ -5,7 +5,7 @@ use crate::{ExtensionError, ExtensionResult};
 use std::collections::BTreeSet;
 use tool_plugin_api::{PluginCapability, PluginPermissions};
 
-/// 权限管理器：维护一组允许权限，校验插件清单。
+/// 权限管理器：维护一组允许权限，校验插件清单。未列入白名单的权限一律拒绝。
 #[derive(Debug, Clone)]
 pub struct PermissionManager {
     allowed: BTreeSet<String>,
@@ -19,7 +19,6 @@ impl PermissionManager {
     }
 
     pub fn check(&self, manifest: &PluginManifest) -> ExtensionResult<()> {
-        // 检查 live 权限
         for permission in manifest.live_permissions() {
             if !self.allowed.contains(permission) {
                 return Err(ExtensionError::PermissionDenied {
@@ -29,7 +28,7 @@ impl PermissionManager {
             }
         }
 
-        // 检查 replay 权限（只允许 log / storage）
+        // replay 侧固定走协议白名单（log / storage），不受宿主 allowed 集合放宽影响。
         for permission in manifest.replay_permissions() {
             if !crate::spec::REPLAY_PERMISSIONS.contains(&permission.as_str()) {
                 return Err(ExtensionError::PermissionDenied {

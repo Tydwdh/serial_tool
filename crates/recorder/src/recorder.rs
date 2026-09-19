@@ -90,6 +90,19 @@ struct RecorderWorker {
     stats: Arc<Mutex<RecorderStats>>,
 }
 
+/// 记账一条已写入的事件：条数、字节数与平均吞吐。
+///
+/// 主循环与收尾 drain 走的是同一条账，两处必须算得一样，故只留这一份实现。
+fn account_written(stats: &Mutex<RecorderStats>, bytes: u64, started_at: Instant) {
+    let mut s = stats.lock();
+    s.events_written += 1;
+    s.bytes_written += bytes;
+    let elapsed = started_at.elapsed().as_secs_f64();
+    if elapsed > 0.0 {
+        s.write_throughput_bytes_per_sec = (s.bytes_written as f64 / elapsed) as u64;
+    }
+}
+
 impl JsonlRecorder {
     pub fn new(bus: DataBus) -> Self {
         Self {
@@ -192,19 +205,15 @@ impl JsonlRecorder {
             let started_at = Instant::now();
 
             // 统一的错误处理：记录错误、停止 worker、发布日志
-            let handle_fatal = |msg: &str,
-                                stats: &Arc<Mutex<RecorderStats>>,
-                                last_err: &Arc<Mutex<Option<String>>>,
-                                bus: &DataBus,
-                                stop: &AtomicBool| {
+            let handle_fatal = |msg: &str| {
                 {
-                    let mut s = stats.lock();
+                    let mut s = stats_thread.lock();
                     s.last_error = Some(msg.to_owned());
                     s.running = false;
                 }
-                *last_err.lock() = Some(msg.to_owned());
+                *last_error_thread.lock() = Some(msg.to_owned());
                 bus.publish(Event::system_log(LogLevel::Error, "recorder", msg));
-                stop.store(true, Ordering::SeqCst);
+                stop_thread.store(true, Ordering::SeqCst);
             };
 
             while !stop_thread.load(Ordering::Relaxed) {
@@ -216,25 +225,9 @@ impl JsonlRecorder {
                         }
                         if should_record_event_with_mode(&event, mode) {
                             match write_event_counted(&mut writer, &event) {
-                                Ok(bytes) => {
-                                    let mut s = stats_thread.lock();
-                                    s.events_written += 1;
-                                    s.bytes_written += bytes;
-                                    let elapsed = started_at.elapsed().as_secs_f64();
-                                    if elapsed > 0.0 {
-                                        s.write_throughput_bytes_per_sec =
-                                            (s.bytes_written as f64 / elapsed) as u64;
-                                    }
-                                }
+                                Ok(bytes) => account_written(&stats_thread, bytes, started_at),
                                 Err(e) => {
-                                    let msg = format!("write failed: {e}");
-                                    handle_fatal(
-                                        &msg,
-                                        &stats_thread,
-                                        &last_error_thread,
-                                        &bus,
-                                        &stop_thread,
-                                    );
+                                    handle_fatal(&format!("write failed: {e}"));
                                     break;
                                 }
                             }
@@ -251,8 +244,7 @@ impl JsonlRecorder {
                 // 周期性 flush：每 500 条或 1 秒，防止崩溃/断电丢失尾部数据
                 if written_since_flush >= 500 || last_flush.elapsed() > Duration::from_secs(1) {
                     if let Err(e) = writer.flush() {
-                        let msg = format!("flush failed: {e}");
-                        handle_fatal(&msg, &stats_thread, &last_error_thread, &bus, &stop_thread);
+                        handle_fatal(&format!("flush failed: {e}"));
                         break;
                     }
                     written_since_flush = 0;
@@ -266,22 +258,12 @@ impl JsonlRecorder {
                 for event in subscription.drain() {
                     if should_record_event_with_mode(&event, mode) {
                         match write_event_counted(&mut writer, &event) {
-                            Ok(bytes) => {
-                                let mut s = stats_thread.lock();
-                                s.events_written += 1;
-                                s.bytes_written += bytes;
-                                let elapsed = started_at.elapsed().as_secs_f64();
-                                if elapsed > 0.0 {
-                                    s.write_throughput_bytes_per_sec =
-                                        (s.bytes_written as f64 / elapsed) as u64;
-                                }
-                            }
+                            Ok(bytes) => account_written(&stats_thread, bytes, started_at),
                             Err(e) => {
+                                // 这里不走 handle_fatal：worker 已经在收尾，紧接着的尾部代码就会把
+                                // `running` / `stopping` 落回 false，只需把错误登记到两处副本并停止排空。
                                 let msg = format!("drain write failed: {e}");
-                                {
-                                    let mut s = stats_thread.lock();
-                                    s.last_error = Some(msg.clone());
-                                }
+                                stats_thread.lock().last_error = Some(msg.clone());
                                 *last_error_thread.lock() = Some(msg.clone());
                                 bus.publish(Event::system_log(LogLevel::Error, "recorder", msg));
                                 break;
@@ -293,10 +275,7 @@ impl JsonlRecorder {
 
             if let Err(e) = writer.flush() {
                 let msg = format!("flush failed: {e}");
-                {
-                    let mut s = stats_thread.lock();
-                    s.last_error = Some(msg.clone());
-                }
+                stats_thread.lock().last_error = Some(msg.clone());
                 *last_error_thread.lock() = Some(msg.clone());
                 bus.publish(Event::system_log(
                     LogLevel::Error,
@@ -557,54 +536,55 @@ impl JsonlRecorder {
     /// 检查异步停止是否完成。UI 每帧调用。
     /// 返回 Some(Ok(path)) 表示完成无错误，Some(Err(err)) 表示完成但有错误。
     pub fn reap_stopping(&mut self) -> Option<Result<PathBuf, String>> {
-        if let Some(s) = self.stopping.take() {
-            if s.join.is_finished() {
-                let _ = s.join.join();
-                // Stop **之后**才 panic 的那一侧只能在这里兜住：`stats.running` /
-                // `stats.stopping` 的唯一其它清零点是 worker 闭包尾部（panic 展开到不了），
-                // 而 `worker_panicked()` 只看 `self.worker`，线程已被 `stop_with_reason`
-                // 搬进 `self.stopping`，那条分支结构上永远不再为它触发。两个字段是 UI
-                // 唯一的读取源，留着 true 的后果是：`commands.rs` 把 `running || stopping`
-                // 映射成 StopRecording ⇒ 本次会话再也派发不出 StartRecording，面板与
-                // 状态栏也一直冻在"正在停止"。
-                // 正常 Stop（含 `handle_fatal` 的写失败路径）会置 `finished`，那两个字段
-                // 由 worker 自己清零，这里不得代劳。
-                if !s.finished.load(Ordering::SeqCst) {
-                    let mut stats = self.stats.lock();
-                    stats.running = false;
-                    stats.stopping = false;
-                }
-                let error = s.last_error.lock().take();
-                match error {
-                    Some(e) => {
-                        self.bus.publish(Event::system_log(
-                            LogLevel::Error,
-                            "recorder",
-                            format!("录制失败：{}：{e}", s.path.display()),
-                        ));
-                        return Some(Err(e));
-                    }
-                    None => {
-                        let incomplete = self.stats.lock().incomplete;
-                        let level = if incomplete {
-                            LogLevel::Warn
-                        } else {
-                            LogLevel::Info
-                        };
-                        let message = if incomplete {
-                            format!("录制已停止，但文件不完整：{}", s.path.display())
-                        } else {
-                            format!("录制已保存到 {}", s.path.display())
-                        };
-                        self.bus
-                            .publish(Event::system_log(level, "recorder", message));
-                        return Some(Ok(s.path));
-                    }
-                }
-            }
+        let s = self.stopping.take()?;
+        if !s.join.is_finished() {
             self.stopping = Some(s);
+            return None;
         }
-        None
+        let _ = s.join.join();
+        // Stop **之后**才 panic 的那一侧只能在这里兜住：`stats.running` /
+        // `stats.stopping` 的唯一其它清零点是 worker 闭包尾部（panic 展开到不了），
+        // 而 `worker_panicked()` 只看 `self.worker`，线程已被 `stop_with_reason`
+        // 搬进 `self.stopping`，那条分支结构上永远不再为它触发。两个字段是 UI
+        // 唯一的读取源，留着 true 的后果是：`commands.rs` 把 `running || stopping`
+        // 映射成 StopRecording ⇒ 本次会话再也派发不出 StartRecording，面板与
+        // 状态栏也一直冻在"正在停止"。
+        // 正常 Stop（含 `handle_fatal` 的写失败路径）会置 `finished`，那两个字段
+        // 由 worker 自己清零，这里不得代劳。
+        if !s.finished.load(Ordering::SeqCst) {
+            let mut stats = self.stats.lock();
+            stats.running = false;
+            stats.stopping = false;
+        }
+        // 单独一条语句取出错误：`last_error` 的 guard 到此即释放，不留到下面拿
+        // `stats` 锁、发日志的时候还握着。
+        let error = s.last_error.lock().take();
+        match error {
+            Some(e) => {
+                self.bus.publish(Event::system_log(
+                    LogLevel::Error,
+                    "recorder",
+                    format!("录制失败：{}：{e}", s.path.display()),
+                ));
+                Some(Err(e))
+            }
+            None => {
+                let incomplete = self.stats.lock().incomplete;
+                let level = if incomplete {
+                    LogLevel::Warn
+                } else {
+                    LogLevel::Info
+                };
+                let message = if incomplete {
+                    format!("录制已停止，但文件不完整：{}", s.path.display())
+                } else {
+                    format!("录制已保存到 {}", s.path.display())
+                };
+                self.bus
+                    .publish(Event::system_log(level, "recorder", message));
+                Some(Ok(s.path))
+            }
+        }
     }
 
     /// 检查 worker 线程是否已结束，返回 error。UI 每帧调用。
@@ -671,6 +651,13 @@ mod tests {
         std::env::temp_dir().join(name)
     }
 
+    /// 清掉一次录制留下的两个文件：`.jsonl` 本体与同名 `.summary.json`。
+    /// 摘要未必会生成（例如 start 就失败了），删不到即忽略。
+    fn remove_recording(path: &Path) {
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(path.with_extension("summary.json"));
+    }
+
     // ── Test 1: new recorder is not running ──
 
     #[test]
@@ -730,12 +717,7 @@ mod tests {
         // Verify file was created
         assert!(path.exists());
 
-        // Cleanup
-        let _ = fs::remove_file(&path);
-        let summary = path.with_extension("summary.json");
-        if summary.exists() {
-            let _ = fs::remove_file(&summary);
-        }
+        remove_recording(&path);
     }
 
     // ── Test 3: pause/resume ──
@@ -765,11 +747,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
 
-        let _ = fs::remove_file(&path);
-        let summary = path.with_extension("summary.json");
-        if summary.exists() {
-            let _ = fs::remove_file(&summary);
-        }
+        remove_recording(&path);
     }
 
     // ── Test 4: start fails when already running ──
@@ -798,12 +776,8 @@ mod tests {
         while rec.reap_stopping().is_none() {
             std::thread::sleep(Duration::from_millis(10));
         }
-        let _ = fs::remove_file(&path1);
+        remove_recording(&path1);
         let _ = fs::remove_file(&path2);
-        let s1 = path1.with_extension("summary.json");
-        if s1.exists() {
-            let _ = fs::remove_file(&s1);
-        }
     }
 
     // ── Test 5: stats are updated during recording ──
@@ -853,11 +827,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
 
-        let _ = fs::remove_file(&path);
-        let summary = path.with_extension("summary.json");
-        if summary.exists() {
-            let _ = fs::remove_file(&summary);
-        }
+        remove_recording(&path);
     }
 
     // ── Test 6: stop is idempotent (calling stop when not running doesn't crash) ──
@@ -892,11 +862,7 @@ mod tests {
         assert!(!rec.is_running());
         assert!(!rec.is_stopping());
 
-        let _ = fs::remove_file(&path);
-        let summary = path.with_extension("summary.json");
-        if summary.exists() {
-            let _ = fs::remove_file(&summary);
-        }
+        remove_recording(&path);
     }
 
     // ── Test 7: recording to an invalid path fails ──
@@ -1002,11 +968,7 @@ mod tests {
             "停止后 worker 已移出，不得报告 panic"
         );
 
-        let _ = fs::remove_file(&path);
-        let summary = path.with_extension("summary.json");
-        if summary.exists() {
-            let _ = fs::remove_file(&summary);
-        }
+        remove_recording(&path);
     }
 
     #[test]
@@ -1216,10 +1178,6 @@ mod tests {
             "正常 Stop 不得被标记为不完整，got {stats:?}"
         );
 
-        let _ = fs::remove_file(&path);
-        let summary = path.with_extension("summary.json");
-        if summary.exists() {
-            let _ = fs::remove_file(&summary);
-        }
+        remove_recording(&path);
     }
 }

@@ -96,15 +96,15 @@ impl SerialPluginScenarioRunner {
                 }
                 SerialScenarioStep::ExpectNoTx { timeout_ms } => {
                     assertions += 1;
-                    let event =
+                    let unexpected_tx =
                         self.expect_event(timeout_ms.unwrap_or(scenario.timeout_ms), |event| {
                             event.topic == serial_topics::SERIAL_TX
                                 && event.meta_str("port") == Some(scenario.port.as_str())
                         });
-                    if event.is_none() {
-                        Ok(())
-                    } else {
+                    if unexpected_tx.is_some() {
                         Err("等待窗口内出现了意外 TX".to_owned())
+                    } else {
+                        Ok(())
                     }
                 }
                 SerialScenarioStep::ExpectEvent {
@@ -147,21 +147,7 @@ impl SerialPluginScenarioRunner {
             .filter(|event| {
                 event.topic == serial_topics::SERIAL_RX || event.topic == serial_topics::SERIAL_TX
             })
-            .map(|event| TestPacketLog {
-                id: event.id,
-                timestamp_ms: event.timestamp_ms,
-                topic: event.topic.clone(),
-                direction: event.direction,
-                payload_text: event.payload.text_lossy(),
-                payload_hex: event
-                    .payload
-                    .as_bytes()
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|byte| format!("{byte:02X}"))
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            })
+            .map(packet_log)
             .collect();
         Ok(TestRunReport {
             run_id: format!("scenario-{}-{started_ms}", scenario.plugin_id),
@@ -182,6 +168,12 @@ impl SerialPluginScenarioRunner {
     }
 
     fn execute(&self, plugin_id: &str, command: &str, input: &str, payload: serde_json::Value) {
+        let target_port = self
+            .transport
+            .open_ports()
+            .first()
+            .cloned()
+            .unwrap_or_default();
         self.bus.publish(Event::new(
             topics::PLUGIN_COMMAND_EXECUTE,
             "scenario",
@@ -192,7 +184,7 @@ impl SerialPluginScenarioRunner {
                 "context": {
                     "send": {
                         "input": input,
-                        "target_port": self.transport.open_ports().first().cloned().unwrap_or_default(),
+                        "target_port": target_port,
                         "target_port_open": true
                     }
                 },
@@ -243,6 +235,28 @@ impl Default for SerialPluginScenarioRunner {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn packet_log(event: &Event) -> TestPacketLog {
+    TestPacketLog {
+        id: event.id,
+        timestamp_ms: event.timestamp_ms,
+        topic: event.topic.clone(),
+        direction: event.direction,
+        payload_text: event.payload.text_lossy(),
+        payload_hex: payload_hex(&event.payload),
+    }
+}
+
+/// 非字节负载没有十六进制形式，记为空串。
+fn payload_hex(payload: &Payload) -> String {
+    payload
+        .as_bytes()
+        .unwrap_or_default()
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn json_contains(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {

@@ -2,7 +2,7 @@
 
 use parking_lot::Mutex;
 use serde_json::json;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -609,9 +609,9 @@ impl PluginManager {
             .map(|record| {
                 // 只在 Running 状态时做命令对账；未启用时 registered 一定为空，
                 // 不应把所有声明命令都标为 missing。
-                let (registered, missing, undeclared) =
+                let (registered_commands, missing_commands, undeclared_commands) =
                     if matches!(record.state, PluginState::Running) {
-                        let reg = self
+                        let registered: Vec<String> = self
                             .registered_commands
                             .get(&record.manifest.id)
                             .cloned()
@@ -625,24 +625,24 @@ impl PluginManager {
                             .map(|c| c.id.clone())
                             .collect();
 
-                        let declared_set: std::collections::HashSet<&str> =
+                        let declared_ids: HashSet<&str> =
                             declared.iter().map(String::as_str).collect();
-                        let registered_set: std::collections::HashSet<&str> =
-                            reg.iter().map(String::as_str).collect();
+                        let registered_ids: HashSet<&str> =
+                            registered.iter().map(String::as_str).collect();
 
-                        let miss: Vec<String> = declared
+                        let missing: Vec<String> = declared
                             .iter()
-                            .filter(|id| !registered_set.contains(id.as_str()))
+                            .filter(|id| !registered_ids.contains(id.as_str()))
                             .cloned()
                             .collect();
 
-                        let undec: Vec<String> = reg
+                        let undeclared: Vec<String> = registered
                             .iter()
-                            .filter(|id| !declared_set.contains(id.as_str()))
+                            .filter(|id| !declared_ids.contains(id.as_str()))
                             .cloned()
                             .collect();
 
-                        (reg, miss, undec)
+                        (registered, missing, undeclared)
                     } else {
                         (Vec::new(), Vec::new(), Vec::new())
                     };
@@ -668,9 +668,9 @@ impl PluginManager {
                     has_replay_analyzer: record.manifest.has_replay_analyzer(),
                     replay_subscriptions: record.manifest.replay_subscriptions().to_vec(),
                     replay_outputs: record.manifest.replay_outputs().to_vec(),
-                    registered_commands: registered,
-                    missing_commands: missing,
-                    undeclared_commands: undeclared,
+                    registered_commands,
+                    missing_commands,
+                    undeclared_commands,
                 }
             })
             .collect()
@@ -746,7 +746,7 @@ impl PluginManager {
         // 关键：回放事件不再送进实时插件。
         // 否则 replay RX 会被 Lua 插件再次解析，重新发布 protocol.demo.sample，
         // 和录制文件里原有的 protocol.demo.sample 混在一起。
-        if is_replay_event(event) {
+        if event.is_replay() {
             return 0;
         }
 
@@ -784,7 +784,7 @@ impl PluginManager {
                 continue;
             }
             // 检查订阅：live.subscriptions
-            let wants = self.records.get(plugin_id).is_some_and(|record| {
+            let subscribed = self.records.get(plugin_id).is_some_and(|record| {
                 record
                     .manifest
                     .live_subscriptions()
@@ -792,10 +792,10 @@ impl PluginManager {
                     .any(|sub| tool_core::topic_matches(sub, &event.topic))
             });
             // ui.* / log.* / plugin.command.execute 系统事件始终接收
-            let is_sys = event.topic.starts_with("ui.")
+            let is_system_event = event.topic.starts_with("ui.")
                 || event.topic.starts_with("log.")
                 || event.topic == topics::PLUGIN_COMMAND_EXECUTE;
-            if !is_sys && !wants {
+            if !is_system_event && !subscribed {
                 continue;
             }
             if runtime.on_event(event) {
@@ -816,25 +816,18 @@ impl PluginManager {
     }
 
     fn update_runtime_states(&mut self) {
-        let ids: Vec<String> = self.lua_runtimes.keys().cloned().collect();
-        let mut finished = Vec::new();
-
-        for id in &ids {
-            if let Some(runtime) = self.lua_runtimes.get(id)
-                && !runtime.is_alive()
-            {
-                finished.push(id.clone());
-            }
-        }
+        let finished: Vec<String> = self
+            .lua_runtimes
+            .iter()
+            .filter(|(_, runtime)| !runtime.is_alive())
+            .map(|(id, _)| id.clone())
+            .collect();
 
         for id in &finished {
             let runtime = self.lua_runtimes.remove(id.as_str());
 
             if let Some(record) = self.records.get_mut(id.as_str()) {
                 match runtime.and_then(|r| r.outcome()) {
-                    None => {
-                        record.state = PluginState::Finished;
-                    }
                     Some(tool_lua_host::LuaRunState::Failed) => {
                         record.state = PluginState::Failed;
                         record.last_error = Some("plugin script failed with error".into());
@@ -842,12 +835,12 @@ impl PluginManager {
                     Some(tool_lua_host::LuaRunState::Stopped) => {
                         record.state = PluginState::Disabled;
                     }
-                    Some(tool_lua_host::LuaRunState::Finished)
-                    | Some(tool_lua_host::LuaRunState::Idle) => {
-                        record.state = PluginState::Finished;
-                    }
-                    Some(tool_lua_host::LuaRunState::Running) => {
-                        // 不应该走到这里：alive=false 但 outcome=Running
+                    // outcome 缺失、自然结束都记为 Finished；Running 不应该走到这里
+                    // （alive=false 但 outcome=Running），同样按结束处理。
+                    None
+                    | Some(tool_lua_host::LuaRunState::Finished)
+                    | Some(tool_lua_host::LuaRunState::Idle)
+                    | Some(tool_lua_host::LuaRunState::Running) => {
                         record.state = PluginState::Finished;
                     }
                 }
@@ -880,11 +873,9 @@ impl PluginManager {
     }
 
     fn request_cleanup(&mut self, plugin_id: &str) {
-        let newly_requested = !self.cleanup_requests.iter().any(|id| id == plugin_id);
-        if newly_requested {
+        if !self.cleanup_requests.iter().any(|id| id == plugin_id) {
             self.cleanup_requests.push(plugin_id.to_owned());
-        }
-        if newly_requested {
+
             let panel_ids: Vec<String> = self
                 .records
                 .get(plugin_id)
@@ -907,6 +898,7 @@ impl PluginManager {
                 ));
             }
         }
+
         let prefix = format!("{plugin_id}:");
         self.line_buffers
             .lock()
@@ -922,13 +914,7 @@ impl PluginManager {
     }
 
     fn handle_command_registered(&mut self, event: &Event) {
-        let Payload::Json(payload) = &event.payload else {
-            return;
-        };
-        let Some(plugin_id) = payload.get("plugin_id").and_then(serde_json::Value::as_str) else {
-            return;
-        };
-        let Some(command) = payload.get("command").and_then(serde_json::Value::as_str) else {
+        let Some((plugin_id, command)) = command_event_ids(event) else {
             return;
         };
 
@@ -943,21 +929,12 @@ impl PluginManager {
         }
 
         // 命令注册成功后清除对应的 command_not_found 诊断
-        self.diagnostics.retain(|d| {
-            !(d.code == "command_not_found"
-                && d.plugin_id.as_deref() == Some(plugin_id)
-                && d.message.contains(command))
-        });
+        self.diagnostics
+            .retain(|d| !is_command_not_found(d, plugin_id, command));
     }
 
     fn handle_command_unregistered(&mut self, event: &Event) {
-        let Payload::Json(payload) = &event.payload else {
-            return;
-        };
-        let Some(plugin_id) = payload.get("plugin_id").and_then(serde_json::Value::as_str) else {
-            return;
-        };
-        let Some(command) = payload.get("command").and_then(serde_json::Value::as_str) else {
+        let Some((plugin_id, command)) = command_event_ids(event) else {
             return;
         };
 
@@ -967,13 +944,7 @@ impl PluginManager {
     }
 
     fn check_command_registered(&mut self, event: &Event) {
-        let Payload::Json(payload) = &event.payload else {
-            return;
-        };
-        let Some(plugin_id) = payload.get("plugin_id").and_then(serde_json::Value::as_str) else {
-            return;
-        };
-        let Some(command) = payload.get("command").and_then(serde_json::Value::as_str) else {
+        let Some((plugin_id, command)) = command_event_ids(event) else {
             return;
         };
 
@@ -991,29 +962,31 @@ impl PluginManager {
             .registered_commands
             .get(plugin_id)
             .is_some_and(|cmds| cmds.iter().any(|c| c == command));
-
-        if !is_registered {
-            // 去重：如果已存在相同 plugin_id + command 的诊断，不重复添加
-            let already_diagnosed = self.diagnostics.iter().any(|d| {
-                d.code == "command_not_found"
-                    && d.plugin_id.as_deref() == Some(plugin_id)
-                    && d.message.contains(command)
-            });
-            if !already_diagnosed {
-                let path = self
-                    .records
-                    .get(plugin_id)
-                    .map(|r| r.root.clone())
-                    .unwrap_or_default();
-                self.push_diagnostic(
-                    PluginDiagnosticSeverity::Warning,
-                    "command_not_found",
-                    Some(plugin_id.to_owned()),
-                    path,
-                    format!("命令 '{command}' 未注册，点击或快捷键触发无效"),
-                );
-            }
+        if is_registered {
+            return;
         }
+
+        // 去重：如果已存在相同 plugin_id + command 的诊断，不重复添加
+        let already_diagnosed = self
+            .diagnostics
+            .iter()
+            .any(|d| is_command_not_found(d, plugin_id, command));
+        if already_diagnosed {
+            return;
+        }
+
+        let path = self
+            .records
+            .get(plugin_id)
+            .map(|r| r.root.clone())
+            .unwrap_or_default();
+        self.push_diagnostic(
+            PluginDiagnosticSeverity::Warning,
+            "command_not_found",
+            Some(plugin_id.to_owned()),
+            path,
+            format!("命令 '{command}' 未注册，点击或快捷键触发无效"),
+        );
     }
 
     /// 设置面板变更时自动持久化到 ConfigStore。
@@ -1054,6 +1027,25 @@ impl PluginManager {
     }
 }
 
+/// 命令管理事件（register / unregister / execute）的共同头部：
+/// 取出 payload 里的 `plugin_id` 与 `command`；任一缺失都表示这条事件不该处理。
+fn command_event_ids(event: &Event) -> Option<(&str, &str)> {
+    let Payload::Json(payload) = &event.payload else {
+        return None;
+    };
+    let plugin_id = payload.get("plugin_id")?.as_str()?;
+    let command = payload.get("command")?.as_str()?;
+    Some((plugin_id, command))
+}
+
+/// 这条诊断是否是「该插件的该命令未注册」：`check_command_registered` 用它避免重复添加，
+/// 注册事件用同一条件清除诊断，两边必须保持一致。
+fn is_command_not_found(diagnostic: &PluginDiagnostic, plugin_id: &str, command: &str) -> bool {
+    diagnostic.code == "command_not_found"
+        && diagnostic.plugin_id.as_deref() == Some(plugin_id)
+        && diagnostic.message.contains(command)
+}
+
 fn load_manifest(path: &Path) -> ExtensionResult<PluginManifest> {
     let text = fs::read_to_string(path)?;
     Ok(serde_json::from_str(&text)?)
@@ -1072,10 +1064,6 @@ fn manifest_context(manifest: &PluginManifest, root: &Path) -> serde_json::Value
     })
 }
 
-fn is_replay_event(event: &Event) -> bool {
-    event.is_replay()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1092,10 +1080,9 @@ ctx.bus.publish('protocol.pid.sample', { t = 1, target = 50, actual = 43, output
         );
 
         let bus = DataBus::new();
-        let transport = TransportManager::new(bus.clone());
         let rx = bus.subscribe(TopicFilter::exact(topics::PROTOCOL_PID_SAMPLE));
 
-        let mut manager = PluginManager::new(bus, transport);
+        let mut manager = PluginManager::new(bus.clone(), TransportManager::new(bus));
 
         assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
 
@@ -1138,9 +1125,7 @@ ctx.bus.publish('protocol.pid.sample', { t = 1, target = 50, actual = 43, output
     fn skips_unsupported_plugin_api_version() {
         let root = create_test_plugin_with_api_version("future.plugin", "99.0");
 
-        let bus = DataBus::new();
-        let transport = TransportManager::new(bus.clone());
-        let mut manager = PluginManager::new(bus, transport);
+        let mut manager = new_test_manager();
 
         assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 0);
         assert_eq!(manager.count(), 0);
@@ -1157,9 +1142,7 @@ ctx.bus.publish('protocol.pid.sample', { t = 1, target = 50, actual = 43, output
     fn records_manifest_parse_diagnostic() {
         let root = create_broken_plugin("broken.plugin", "{ not json");
 
-        let bus = DataBus::new();
-        let transport = TransportManager::new(bus.clone());
-        let mut manager = PluginManager::new(bus, transport);
+        let mut manager = new_test_manager();
 
         assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 0);
         assert_eq!(manager.count(), 0);
@@ -1192,9 +1175,7 @@ ctx.bus.publish('protocol.pid.sample', { t = 1, target = 50, actual = 43, output
             "ctx.log.info('bad ui')",
         );
 
-        let bus = DataBus::new();
-        let transport = TransportManager::new(bus.clone());
-        let mut manager = PluginManager::new(bus, transport);
+        let mut manager = new_test_manager();
 
         assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 0);
         assert_eq!(manager.count(), 0);
@@ -1235,18 +1216,12 @@ ctx.log.info("registered")
 "#,
         );
 
-        let bus = DataBus::new();
-        let transport = TransportManager::new(bus.clone());
-        let mut manager = PluginManager::new(bus, transport);
+        let mut manager = new_test_manager();
 
         assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
         manager.enable("cmd.tracker").unwrap();
 
-        // 等待 Lua 线程执行 + registered 事件到达 + process_pending 处理
-        for _ in 0..20 {
-            std::thread::sleep(std::time::Duration::from_millis(25));
-            manager.process_pending();
-        }
+        settle(&mut manager);
 
         let summaries = manager.summaries();
         let s = summaries.iter().find(|s| s.id == "cmd.tracker").unwrap();
@@ -1293,17 +1268,12 @@ ctx.log.info("registered")
             r#"ctx.log.info("no command registered")"#,
         );
 
-        let bus = DataBus::new();
-        let transport = TransportManager::new(bus.clone());
-        let mut manager = PluginManager::new(bus, transport);
+        let mut manager = new_test_manager();
 
         assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
         manager.enable("cmd.missing").unwrap();
 
-        for _ in 0..20 {
-            std::thread::sleep(std::time::Duration::from_millis(25));
-            manager.process_pending();
-        }
+        settle(&mut manager);
 
         let summaries = manager.summaries();
         let s = summaries.iter().find(|s| s.id == "cmd.missing").unwrap();
@@ -1336,17 +1306,12 @@ ctx.log.info("registered dynamic")
 "#,
         );
 
-        let bus = DataBus::new();
-        let transport = TransportManager::new(bus.clone());
-        let mut manager = PluginManager::new(bus, transport);
+        let mut manager = new_test_manager();
 
         assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
         manager.enable("cmd.dynamic").unwrap();
 
-        for _ in 0..20 {
-            std::thread::sleep(std::time::Duration::from_millis(25));
-            manager.process_pending();
-        }
+        settle(&mut manager);
 
         let summaries = manager.summaries();
         let s = summaries.iter().find(|s| s.id == "cmd.dynamic").unwrap();
@@ -1383,17 +1348,12 @@ ctx.log.info("registered")
 "#,
         );
 
-        let bus = DataBus::new();
-        let transport = TransportManager::new(bus.clone());
-        let mut manager = PluginManager::new(bus, transport);
+        let mut manager = new_test_manager();
 
         assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
         manager.enable("cmd.cleanup").unwrap();
 
-        for _ in 0..20 {
-            std::thread::sleep(std::time::Duration::from_millis(25));
-            manager.process_pending();
-        }
+        settle(&mut manager);
 
         // 确认注册了
         assert!(manager.registered_commands.contains_key("cmd.cleanup"));
@@ -1479,17 +1439,12 @@ ctx.log.info("registered")
             r#"ctx.log.info("no command registered")"#,
         );
 
-        let bus = DataBus::new();
-        let transport = TransportManager::new(bus.clone());
-        let mut manager = PluginManager::new(bus, transport);
+        let mut manager = new_test_manager();
 
         assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
         manager.enable("cmd.notfound").unwrap();
 
-        for _ in 0..20 {
-            std::thread::sleep(std::time::Duration::from_millis(25));
-            manager.process_pending();
-        }
+        settle(&mut manager);
 
         // 模拟触发一个未注册的命令
         let event = Event::new(
@@ -1542,17 +1497,12 @@ ctx.log.info("registered twice")
 "#,
         );
 
-        let bus = DataBus::new();
-        let transport = TransportManager::new(bus.clone());
-        let mut manager = PluginManager::new(bus, transport);
+        let mut manager = new_test_manager();
 
         assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
         manager.enable("cmd.dedup").unwrap();
 
-        for _ in 0..20 {
-            std::thread::sleep(std::time::Duration::from_millis(25));
-            manager.process_pending();
-        }
+        settle(&mut manager);
 
         let summaries = manager.summaries();
         let s = summaries.iter().find(|s| s.id == "cmd.dedup").unwrap();
@@ -1590,17 +1540,12 @@ ctx.log.info("started")
 "#,
         );
 
-        let bus = DataBus::new();
-        let transport = TransportManager::new(bus.clone());
-        let mut manager = PluginManager::new(bus, transport);
+        let mut manager = new_test_manager();
 
         assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
         manager.enable("cmd.late").unwrap();
 
-        for _ in 0..20 {
-            std::thread::sleep(std::time::Duration::from_millis(25));
-            manager.process_pending();
-        }
+        settle(&mut manager);
 
         // 模拟触发未注册命令 → 产生诊断
         let exec_event = Event::new(
@@ -1642,6 +1587,20 @@ ctx.log.info("started")
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// 一个只有空总线的管理器：大多数用例不关心事件从哪儿来，只要插件能被发现。
+    fn new_test_manager() -> PluginManager {
+        let bus = DataBus::new();
+        PluginManager::new(bus.clone(), TransportManager::new(bus))
+    }
+
+    /// 等待 Lua 线程执行 + registered 事件到达 + process_pending 处理。
+    fn settle(manager: &mut PluginManager) {
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            manager.process_pending();
+        }
     }
 
     fn create_test_plugin(id: &str, main_lua: &str) -> PathBuf {

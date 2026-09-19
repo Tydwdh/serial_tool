@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use update_info::is_pinned_sha256;
+use update_info::{is_newer_version, is_pinned_sha256};
 
 /// 远端 update.json 的 URL。
 pub const UPDATE_JSON_URL: &str =
@@ -31,6 +31,8 @@ const UPDATE_HELPER_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const UPDATE_HELPER_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const UPDATE_HELPER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(2);
 const UPDATE_HELPER_LAUNCH_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+/// helper 起来后先等这么久再动 exe，给主程序留出自行退出的时间。
+const UPDATE_HELPER_EXIT_GRACE: Duration = Duration::from_millis(800);
 /// 网络设置。`proxy_url` 非空时强制使用该代理；为空时使用环境与系统代理探测，
 /// 但回环/字面 IP 目标一律直连（见 `NetworkSettings::route_for_url`）。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -393,11 +395,7 @@ pub fn read_check_cache() -> Option<CheckCache> {
 
 /// 检查缓存是否仍然有效（24 小时内）。
 pub fn is_cache_valid(cache: &CheckCache) -> bool {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    now.saturating_sub(cache.last_check_time) < CACHE_TTL_MS
+    unix_now_ms().saturating_sub(cache.last_check_time) < CACHE_TTL_MS
 }
 
 /// 写入缓存。`sha256` 为本次 `update.json` 的 pinned 摘要，供缓存命中时复用。
@@ -406,12 +404,8 @@ pub fn write_check_cache(
     had_update: bool,
     sha256: &str,
 ) -> Result<(), String> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
     let cache = CheckCache {
-        last_check_time: now,
+        last_check_time: unix_now_ms(),
         latest_version: latest_version.to_owned(),
         had_update,
         sha256: sha256.to_owned(),
@@ -572,10 +566,7 @@ pub fn launch_update_helper(target_exe: &Path) -> Result<(), String> {
     std::fs::create_dir_all(&helper_dir).map_err(|e| format!("创建 updater 目录失败：{e}"))?;
     cleanup_old_update_helpers(&helper_dir);
 
-    let launch_id = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
+    let launch_id = unix_now_ms();
     let helper_path = helper_dir.join(format!(
         "hardware-workbench-updater-{}-{launch_id}.exe",
         std::process::id(),
@@ -672,7 +663,7 @@ pub fn launch_update_helper(target_exe: &Path) -> Result<(), String> {
 /// 临时 helper 入口：等待主程序退出后替换目标 exe，并重启目标程序。
 pub fn run_update_helper(target_exe: &Path) -> Result<bool, String> {
     append_update_helper_log(format!("helper started for {}", target_exe.display()));
-    std::thread::sleep(Duration::from_millis(800));
+    std::thread::sleep(UPDATE_HELPER_EXIT_GRACE);
 
     let deadline = Instant::now() + UPDATE_HELPER_WAIT_TIMEOUT;
 
@@ -735,7 +726,7 @@ fn apply_pending_update_impl(
     // 兼容旧版启动时更新：仅当远程版本比当前新时才替换。
     // 临时 helper 已由主程序确认是新版本更新，因此可跳过此检查。
     if let Some(current_version) = current_version
-        && !update_info::is_newer_version(&manifest.version, current_version)
+        && !is_newer_version(&manifest.version, current_version)
     {
         log::info!(
             "updater: 待更新版本 {} 不比当前 {} 新，跳过",
@@ -906,18 +897,11 @@ fn find_exe_in_extracted(dir: &Path) -> Option<PathBuf> {
         return Some(direct);
     }
     // 在子目录中查找（zip 可能包含顶层目录）
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let candidate = path.join(APP_EXE_NAME);
-                if candidate.exists() {
-                    return Some(candidate);
-                }
-            }
-        }
-    }
-    None
+    std::fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
+        let subdir = entry.path();
+        let candidate = subdir.join(APP_EXE_NAME);
+        (subdir.is_dir() && candidate.exists()).then_some(candidate)
+    })
 }
 
 /// 从解压目录复制更新的资源文件到安装目录。
@@ -925,15 +909,13 @@ fn copy_updated_resources(src_dir: &Path, dest_dir: &Path) {
     let resource_root = if src_dir.join(APP_EXE_NAME).exists() {
         src_dir.to_path_buf()
     } else if let Ok(entries) = std::fs::read_dir(src_dir) {
-        let mut found = None;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() && path.join(APP_EXE_NAME).exists() {
-                found = Some(path);
-                break;
-            }
-        }
-        found.unwrap_or_else(|| src_dir.to_path_buf())
+        entries
+            .flatten()
+            .find_map(|entry| {
+                let subdir = entry.path();
+                (subdir.is_dir() && subdir.join(APP_EXE_NAME).exists()).then_some(subdir)
+            })
+            .unwrap_or_else(|| src_dir.to_path_buf())
     } else {
         src_dir.to_path_buf()
     };
@@ -969,18 +951,21 @@ fn copy_updated_resources(src_dir: &Path, dest_dir: &Path) {
 /// Windows DLL 搜索顺序优先应用目录，若放行 .dll 等可被侧加载。
 /// 根本解是二进制签名校验；此处为纵深防御。
 fn is_unsafe_resource_extension(path: &Path) -> bool {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) => matches!(
-            ext.to_ascii_lowercase().as_str(),
-            // 原生可执行映像 / 驱动
-            "dll" | "exe" | "sys" | "cpl" | "ocx" | "drv" | "scr" | "com" | "pif"
-            // 脚本宿主（WSH / mshta）可加载执行
-            | "bat" | "cmd" | "ps1" | "vbs" | "hta" | "js" | "jse" | "wsf" | "wsh"
-            // 快捷方式 / URL 文件可侧加载
-            | "lnk" | "url" | "scf"
-        ),
-        None => false,
-    }
+    // 无扩展名 / 非 UTF-8 扩展名 ⇒ 空串：不落在下面任何一类里，按原逻辑放行。
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        // 原生可执行映像 / 驱动
+        "dll" | "exe" | "sys" | "cpl" | "ocx" | "drv" | "scr" | "com" | "pif"
+        // 脚本宿主（WSH / mshta）可加载执行
+        | "bat" | "cmd" | "ps1" | "vbs" | "hta" | "js" | "jse" | "wsf" | "wsh"
+        // 快捷方式 / URL 文件可侧加载
+        | "lnk" | "url" | "scf"
+    )
 }
 
 /// 递归复制目录。
@@ -1234,10 +1219,7 @@ pub fn write_update_manifest(version: &str, sha256: &str) -> Result<(), String> 
     let manifest = UpdateManifest {
         version: version.to_owned(),
         sha256: sha256.to_owned(),
-        downloaded_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64,
+        downloaded_at: unix_now_ms(),
     };
     let dir = update_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建更新目录失败：{e}"))?;
@@ -1251,6 +1233,14 @@ pub fn write_update_manifest(version: &str, sha256: &str) -> Result<(), String> 
 }
 
 // ── 工具函数 ──
+
+/// 当前 Unix 时间的毫秒数；系统时钟异常（早于 epoch）时取 0，与各调用点原写法一致。
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
 
 /// 下载流哈希与外置 pinned 值的唯一比对点。
 /// 独立成函数是为了让"不匹配必须拒绝"这一条可被单测直接命中。

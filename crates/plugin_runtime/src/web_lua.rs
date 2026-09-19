@@ -10,13 +10,14 @@ use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
 use omnilua::{
-    Error as LuaError, Function, Lua, LuaError as InnerLuaError, SandboxConfig, Table, Thread,
+    Error as LuaError, Function, Lua, LuaError as InnerLuaError, SandboxConfig, Table,
     ThreadStatus, Value, Variadic,
 };
+use tool_platform::PortId;
 use tool_plugin_api::{
-    CoroutineId, FileHandle, LuaEngine, PluginCallResult, PluginError, PluginFunctionId,
-    PluginHostApi, PluginHostRequest, PluginInstanceId, PluginLoadConfig, PluginResult,
-    PluginSerialSettings, PluginUiCommand, PluginValue,
+    CoroutineId, FileHandle, LogLevel, LuaEngine, PluginCallResult, PluginCapability, PluginError,
+    PluginFunctionId, PluginHostApi, PluginHostRequest, PluginInstanceId, PluginLoadConfig,
+    PluginParity, PluginResult, PluginSerialSettings, PluginUiCommand, PluginValue,
 };
 
 struct WebLuaInstance {
@@ -65,15 +66,49 @@ impl WebLuaEngine {
     }
 
     fn instance(&self, id: PluginInstanceId) -> PluginResult<&WebLuaInstance> {
-        self.instances
-            .get(&id)
-            .ok_or_else(|| PluginError::Runtime(format!("unknown plugin instance {}", id.0)))
+        self.instances.get(&id).ok_or_else(|| unknown_instance(id))
     }
 
     fn instance_mut(&mut self, id: PluginInstanceId) -> PluginResult<&mut WebLuaInstance> {
         self.instances
             .get_mut(&id)
-            .ok_or_else(|| PluginError::Runtime(format!("unknown plugin instance {}", id.0)))
+            .ok_or_else(|| unknown_instance(id))
+    }
+
+    /// Same lookup as [`Self::instance_mut`], narrowed to the instances
+    /// `load_replay_plugin` created.  Live plugin instances never get a replay
+    /// context, so the replay entry points must not run against them.
+    fn replay_instance(&mut self, id: PluginInstanceId) -> PluginResult<&mut WebLuaInstance> {
+        let instance = self.instance_mut(id)?;
+        if instance.replay_outputs.is_none() {
+            return Err(PluginError::Runtime("不是 Replay Lua 实例".to_owned()));
+        }
+        Ok(instance)
+    }
+}
+
+fn unknown_instance(id: PluginInstanceId) -> PluginError {
+    PluginError::Runtime(format!("unknown plugin instance {}", id.0))
+}
+
+/// The sandbox both browser VMs (plugin and replay) are created with.
+///
+/// The removed globals are a deliberate, narrowed boundary: a browser plugin
+/// must never reach a filesystem or spawn anything, so `dofile`, `loadfile`,
+/// `os.execute` and the whole `io` table are gone before user script runs.
+/// Both entry points share this one definition so the two sandboxes cannot
+/// drift apart.
+fn sandbox_config() -> SandboxConfig {
+    SandboxConfig {
+        instruction_limit: Some(10_000_000),
+        memory_limit_bytes: Some(64 * 1024 * 1024),
+        check_interval: 1_000,
+        remove_globals: vec![
+            b"dofile".to_vec(),
+            b"loadfile".to_vec(),
+            b"os.execute".to_vec(),
+            b"io".to_vec(),
+        ],
     }
 }
 
@@ -84,18 +119,7 @@ impl LuaEngine for WebLuaEngine {
         config: PluginLoadConfig,
         host: Rc<dyn PluginHostApi>,
     ) -> PluginResult<PluginInstanceId> {
-        let (lua, _sandbox) = Lua::sandboxed(SandboxConfig {
-            instruction_limit: Some(10_000_000),
-            memory_limit_bytes: Some(64 * 1024 * 1024),
-            check_interval: 1_000,
-            remove_globals: vec![
-                b"dofile".to_vec(),
-                b"loadfile".to_vec(),
-                b"os.execute".to_vec(),
-                b"io".to_vec(),
-            ],
-        })
-        .map_err(lua_error)?;
+        let (lua, _sandbox) = Lua::sandboxed(sandbox_config()).map_err(lua_error)?;
 
         install_codec_module(&lua).map_err(lua_error)?;
         let line_buffers = Rc::new(RefCell::new(BTreeMap::new()));
@@ -138,9 +162,7 @@ impl LuaEngine for WebLuaEngine {
             .map(|value| value_to_lua(&instance.lua, value))
             .collect::<Result<Vec<_>, _>>()
             .map_err(lua_error)?;
-        let returns: Vec<Value> = function
-            .call(omnilua::Variadic::from(args))
-            .map_err(lua_error)?;
+        let returns: Vec<Value> = function.call(Variadic::from(args)).map_err(lua_error)?;
         Ok(PluginCallResult::Completed(
             values_to_plugin(&returns).map_err(lua_error)?,
         ))
@@ -157,9 +179,10 @@ impl LuaEngine for WebLuaEngine {
     }
 
     fn stop(&mut self, instance: PluginInstanceId) -> PluginResult<()> {
-        let instance_value = self.instances.remove(&instance).ok_or_else(|| {
-            PluginError::Runtime(format!("unknown plugin instance {}", instance.0))
-        })?;
+        let instance_value = self
+            .instances
+            .remove(&instance)
+            .ok_or_else(|| unknown_instance(instance))?;
         if let Ok(callback) = instance_value
             .lua
             .globals()
@@ -187,13 +210,7 @@ impl LuaEngine for WebLuaEngine {
             .get("__plugin_bus_handlers")
             .map_err(lua_error)?;
         let topic = match &event {
-            PluginValue::Object(values) => values
-                .get("topic")
-                .and_then(|value| match value {
-                    PluginValue::String(value) => Some(value.as_str()),
-                    _ => None,
-                })
-                .unwrap_or_default(),
+            PluginValue::Object(values) => string_field(values, "topic").unwrap_or_default(),
             _ => "",
         };
         let event = value_to_lua(&instance.lua, &event).map_err(lua_error)?;
@@ -262,18 +279,7 @@ impl WebLuaEngine {
         outputs: Vec<String>,
         host: Rc<dyn PluginHostApi>,
     ) -> PluginResult<PluginInstanceId> {
-        let (lua, _sandbox) = Lua::sandboxed(SandboxConfig {
-            instruction_limit: Some(10_000_000),
-            memory_limit_bytes: Some(64 * 1024 * 1024),
-            check_interval: 1_000,
-            remove_globals: vec![
-                b"dofile".to_vec(),
-                b"loadfile".to_vec(),
-                b"os.execute".to_vec(),
-                b"io".to_vec(),
-            ],
-        })
-        .map_err(lua_error)?;
+        let (lua, _sandbox) = Lua::sandboxed(sandbox_config()).map_err(lua_error)?;
         install_codec_module(&lua).map_err(lua_error)?;
         let buffers = Rc::new(ReplayBuffers::default());
         install_replay_ctx(
@@ -310,10 +316,7 @@ impl WebLuaEngine {
         instance: PluginInstanceId,
         session: PluginValue,
     ) -> PluginResult<()> {
-        let instance = self.instance_mut(instance)?;
-        if instance.replay_outputs.is_none() {
-            return Err(PluginError::Runtime("不是 Replay Lua 实例".to_owned()));
-        }
+        let instance = self.replay_instance(instance)?;
         instance
             .lua
             .globals()
@@ -331,26 +334,11 @@ impl WebLuaEngine {
         instance: PluginInstanceId,
         event: PluginValue,
     ) -> PluginResult<()> {
-        let instance = self.instance_mut(instance)?;
-        if instance.replay_outputs.is_none() {
-            return Err(PluginError::Runtime("不是 Replay Lua 实例".to_owned()));
-        }
+        let instance = self.replay_instance(instance)?;
         let (timestamp_ms, id) = match &event {
             PluginValue::Object(values) => (
-                values
-                    .get("timestamp_ms")
-                    .and_then(|value| match value {
-                        PluginValue::Integer(value) if *value >= 0 => Some(*value as u64),
-                        _ => None,
-                    })
-                    .unwrap_or_default(),
-                values
-                    .get("id")
-                    .and_then(|value| match value {
-                        PluginValue::Integer(value) if *value >= 0 => Some(*value as u64),
-                        _ => None,
-                    })
-                    .unwrap_or_default(),
+                non_negative_u64_field(values, "timestamp_ms"),
+                non_negative_u64_field(values, "id"),
             ),
             _ => (0, 0),
         };
@@ -377,10 +365,7 @@ impl WebLuaEngine {
     }
 
     pub fn replay_end(&mut self, instance: PluginInstanceId) -> PluginResult<WebReplayOutput> {
-        let instance = self.instance_mut(instance)?;
-        if instance.replay_outputs.is_none() {
-            return Err(PluginError::Runtime("不是 Replay Lua 实例".to_owned()));
-        }
+        let instance = self.replay_instance(instance)?;
         if let Ok(function) = instance.lua.globals().get::<_, Function>("on_replay_end") {
             function.call::<_, Value>(()).map_err(lua_error)?;
         }
@@ -406,6 +391,29 @@ impl WebLuaEngine {
     }
 }
 
+/// String field of a host-produced `PluginValue::Object`.
+///
+/// A missing key and a key holding another type mean the same thing to the
+/// callers below: the field is simply not there.
+fn string_field<'a>(values: &'a BTreeMap<String, PluginValue>, key: &str) -> Option<&'a str> {
+    match values.get(key) {
+        Some(PluginValue::String(value)) => Some(value),
+        _ => None,
+    }
+}
+
+/// Timestamp/identifier field of a host-produced event object; negative or
+/// missing values collapse to 0, which is what the Lua globals expect.
+fn non_negative_u64_field(values: &BTreeMap<String, PluginValue>, key: &str) -> u64 {
+    values
+        .get(key)
+        .and_then(|value| match value {
+            PluginValue::Integer(value) if *value >= 0 => Some(*value as u64),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 fn ingest_serial_event(instance: &mut WebLuaInstance, event: &PluginValue) {
     let PluginValue::Object(event) = event else {
         return;
@@ -416,17 +424,10 @@ fn ingest_serial_event(instance: &mut WebLuaInstance, event: &PluginValue) {
     ) {
         return;
     }
-    let port = event
-        .get("metadata")
-        .and_then(|metadata| match metadata {
-            PluginValue::Object(metadata) => metadata.get("port"),
-            _ => None,
-        })
-        .and_then(|port| match port {
-            PluginValue::String(port) => Some(port.clone()),
-            _ => None,
-        })
-        .unwrap_or_else(|| "default".to_owned());
+    let port = match event.get("metadata") {
+        Some(PluginValue::Object(metadata)) => string_field(metadata, "port").unwrap_or("default"),
+        _ => "default",
+    };
     let Some(payload) = event.get("payload") else {
         return;
     };
@@ -445,7 +446,7 @@ fn ingest_serial_event(instance: &mut WebLuaInstance, event: &PluginValue) {
         _ => return,
     };
     let mut buffers = instance.line_buffers.borrow_mut();
-    let lines = buffers.entry(port).or_default();
+    let lines = buffers.entry(port.to_owned()).or_default();
     for line in text.split_inclusive(['\r', '\n']) {
         let line = line.trim_end_matches(['\r', '\n']);
         if !line.is_empty() {
@@ -502,17 +503,14 @@ fn resume_ready_tasks(instance: &mut WebLuaInstance) -> PluginResult<()> {
         if state.get::<_, bool>("finished").unwrap_or(true) {
             continue;
         }
-        let thread: Thread = match state.get::<_, Value>("thread") {
-            Ok(Value::Thread(thread)) => thread,
-            Err(_) => continue,
-            Ok(_) => continue,
+        let Ok(Value::Thread(thread)) = state.get::<_, Value>("thread") else {
+            continue;
         };
         if thread.status().map_err(lua_error)? != ThreadStatus::Suspended {
             continue;
         }
-        let op: Table = match state.get("yield_op") {
-            Ok(op) => op,
-            Err(_) => continue,
+        let Ok(op) = state.get::<_, Table>("yield_op") else {
+            continue;
         };
         let kind: String = op.get("kind").map_err(lua_error)?;
         let now = instance.host.now_ms()?;
@@ -525,13 +523,7 @@ fn resume_ready_tasks(instance: &mut WebLuaInstance) -> PluginResult<()> {
             set_task_error(&state, &kind, &instance.lua, "timeout").map_err(lua_error)?;
             true
         } else if kind == "host" {
-            !matches!(
-                state.get::<_, Value>("_host_result"),
-                Ok(Value::Nil) | Err(_)
-            ) || !matches!(
-                state.get::<_, Value>("_host_result_err"),
-                Ok(Value::Nil) | Err(_)
-            )
+            value_parked(&state, "_host_result") || value_parked(&state, "_host_result_err")
         } else {
             try_complete_wait(instance, &state, &op, &kind)?
         };
@@ -611,10 +603,10 @@ fn try_complete_wait(
     if kind == "bus_wait" {
         let topic = op.get::<_, String>("topic").map_err(lua_error)?;
         let Some(index) = instance.bus_events.iter().position(|event| {
-            matches!(event, PluginValue::Object(values) if values.get("topic").is_some_and(|value| match value {
-                PluginValue::String(value) => topic_matches(&topic, value),
-                _ => false,
-            }))
+            let PluginValue::Object(values) = event else {
+                return false;
+            };
+            string_field(values, "topic").is_some_and(|value| topic_matches(&topic, value))
         }) else {
             return Ok(false);
         };
@@ -703,6 +695,15 @@ fn try_complete_wait(
     Ok(false)
 }
 
+/// Whether a task's state table currently holds a parked result under `key`.
+///
+/// A missing key and an explicit `nil` mean the same thing: nothing has been
+/// parked for this task yet, either by `resume_ready_tasks` copying a host
+/// completion in or by `set_task_error` recording timeout/cancelled.
+fn value_parked(state: &Table, key: &str) -> bool {
+    !matches!(state.get::<_, Value>(key), Ok(Value::Nil) | Err(_))
+}
+
 fn set_task_error(state: &Table, kind: &str, lua: &Lua, error: &str) -> omnilua::Result<()> {
     match kind {
         "read_line" => state.set("_read_result_err", lua.create_string(error)?)?,
@@ -714,6 +715,31 @@ fn set_task_error(state: &Table, kind: &str, lua: &Lua, error: &str) -> omnilua:
         _ => {}
     }
     Ok(())
+}
+
+/// Reads the clock through the `__now_ms` global `install_ctx` injects.
+///
+/// The API tables are built from `&Lua` only, so the injected global is their
+/// single door to the host clock; the result is clamped to a non-negative
+/// `u64` because every deadline the scheduler compares against is unsigned.
+fn now_ms_via_globals(lua: &Lua) -> omnilua::Result<u64> {
+    Ok(lua
+        .globals()
+        .get::<_, Function>("__now_ms")?
+        .call::<_, i64>(())
+        .unwrap_or_default()
+        .max(0) as u64)
+}
+
+/// State table of the task whose coroutine is currently running.
+///
+/// The scheduler sets `__current_task_id` right before resuming a coroutine
+/// and clears it right after, which is how the `*_begin`/`*_finish` pairs find
+/// the state entry they parked their result in.
+fn current_task_state(lua: &Lua) -> omnilua::Result<Table> {
+    let task_id: String = lua.globals().get("__current_task_id").unwrap_or_default();
+    let tasks: Table = lua.globals().get("__plugin_tasks")?;
+    tasks.get(task_id.as_str())
 }
 
 fn match_pattern(line: &str, pattern: &str) -> bool {
@@ -851,8 +877,7 @@ fn install_ctx(
     line_buffers: Rc<RefCell<BTreeMap<String, VecDeque<String>>>>,
 ) -> omnilua::Result<()> {
     let globals = lua.globals();
-    let handlers = lua.create_table()?;
-    globals.set("__plugin_bus_handlers", handlers)?;
+    globals.set("__plugin_bus_handlers", lua.create_table()?)?;
     globals.set("__plugin_tasks", lua.create_table()?)?;
     globals.set("__plugin_timers", lua.create_table()?)?;
     globals.set("__current_task_id", Value::Nil)?;
@@ -862,63 +887,38 @@ fn install_ctx(
     plugin.set("name", config.plugin_name.clone())?;
     plugin.set("version", config.plugin_version.clone())?;
     ctx.set("plugin", plugin)?;
-    let context = value_to_lua(lua, &config.context)?;
-    ctx.set("context", context)?;
+    ctx.set("context", value_to_lua(lua, &config.context)?)?;
 
     let now_host = host.clone();
     let now_fn = lua.create_function(move |_, ()| now_host.now_ms().map_err(host_error))?;
     ctx.set("now_ms", now_fn.clone())?;
     globals.set("__now_ms", now_fn)?;
 
-    if config
-        .permissions
-        .contains(tool_plugin_api::PluginCapability::Log)
-    {
+    if config.permissions.contains(PluginCapability::Log) {
         ctx.set("log", create_log_api(lua, host.clone())?)?;
     }
-    if config
-        .permissions
-        .contains(tool_plugin_api::PluginCapability::Bus)
-    {
+    if config.permissions.contains(PluginCapability::Bus) {
         ctx.set("bus", create_bus_api(lua, host.clone())?)?;
     }
-    if config
-        .permissions
-        .contains(tool_plugin_api::PluginCapability::Serial)
-    {
+    if config.permissions.contains(PluginCapability::Serial) {
         ctx.set(
             "serial",
             create_serial_api(lua, host.clone(), line_buffers.clone())?,
         )?;
     }
-    if config
-        .permissions
-        .contains(tool_plugin_api::PluginCapability::Ui)
-    {
+    if config.permissions.contains(PluginCapability::Ui) {
         ctx.set("ui", create_ui_api(lua, host.clone())?)?;
     }
-    if config
-        .permissions
-        .contains(tool_plugin_api::PluginCapability::Storage)
-    {
+    if config.permissions.contains(PluginCapability::Storage) {
         ctx.set("session", create_storage_api(lua, host.clone())?)?;
     }
-    if config
-        .permissions
-        .contains(tool_plugin_api::PluginCapability::Config)
-    {
+    if config.permissions.contains(PluginCapability::Config) {
         ctx.set("config", create_config_api(lua, host.clone())?)?;
     }
-    if config
-        .permissions
-        .contains(tool_plugin_api::PluginCapability::Dialog)
-    {
+    if config.permissions.contains(PluginCapability::Dialog) {
         ctx.set("dialog", create_dialog_api(lua, host.clone())?)?;
     }
-    if config
-        .permissions
-        .contains(tool_plugin_api::PluginCapability::Filesystem)
-    {
+    if config.permissions.contains(PluginCapability::Filesystem) {
         ctx.set("fs", create_fs_api(lua, host.clone())?)?;
     }
 
@@ -935,17 +935,7 @@ fn install_ctx(
             register_host
                 .bus_publish(
                     "plugin.command.registered",
-                    PluginValue::Object(
-                        [
-                            (
-                                "plugin_id".to_owned(),
-                                PluginValue::String(register_plugin_id.clone()),
-                            ),
-                            ("command".to_owned(), PluginValue::String(id)),
-                        ]
-                        .into_iter()
-                        .collect(),
-                    ),
+                    plugin_command_payload(&register_plugin_id, id),
                 )
                 .map_err(host_error)?;
             Ok(())
@@ -961,17 +951,7 @@ fn install_ctx(
             unregister_host
                 .bus_publish(
                     "plugin.command.unregistered",
-                    PluginValue::Object(
-                        [
-                            (
-                                "plugin_id".to_owned(),
-                                PluginValue::String(unregister_plugin_id.clone()),
-                            ),
-                            ("command".to_owned(), PluginValue::String(id)),
-                        ]
-                        .into_iter()
-                        .collect(),
-                    ),
+                    plugin_command_payload(&unregister_plugin_id, id),
                 )
                 .map_err(host_error)?;
             Ok(())
@@ -1038,16 +1018,10 @@ fn install_ctx(
             Ok(())
         })?,
     )?;
-    if config
-        .permissions
-        .contains(tool_plugin_api::PluginCapability::Timer)
-    {
+    if config.permissions.contains(PluginCapability::Timer) {
         ctx.set("timer", create_timer_api(lua)?)?;
     }
-    if config
-        .permissions
-        .contains(tool_plugin_api::PluginCapability::Task)
-    {
+    if config.permissions.contains(PluginCapability::Task) {
         ctx.set("task", create_task_api(lua)?)?;
     }
     globals.set("ctx", ctx)?;
@@ -1058,11 +1032,11 @@ fn install_ctx(
 fn create_log_api(lua: &Lua, host: Rc<dyn PluginHostApi>) -> omnilua::Result<Table> {
     let api = lua.create_table()?;
     for (name, level) in [
-        ("trace", tool_plugin_api::LogLevel::Trace),
-        ("debug", tool_plugin_api::LogLevel::Debug),
-        ("info", tool_plugin_api::LogLevel::Info),
-        ("warn", tool_plugin_api::LogLevel::Warn),
-        ("error", tool_plugin_api::LogLevel::Error),
+        ("trace", LogLevel::Trace),
+        ("debug", LogLevel::Debug),
+        ("info", LogLevel::Info),
+        ("warn", LogLevel::Warn),
+        ("error", LogLevel::Error),
     ] {
         let host = host.clone();
         api.set(
@@ -1126,12 +1100,7 @@ fn create_bus_api(lua: &Lua, host: Rc<dyn PluginHostApi>) -> omnilua::Result<Tab
             let op = lua.create_table()?;
             op.set("kind", "bus_wait")?;
             op.set("topic", topic)?;
-            let now = lua
-                .globals()
-                .get::<_, Function>("__now_ms")?
-                .call::<_, i64>(())
-                .unwrap_or_default()
-                .max(0) as u64;
+            let now = now_ms_via_globals(lua)?;
             op.set("deadline_ms", now.saturating_add(timeout_ms))?;
             let tasks: Table = lua.globals().get("__plugin_tasks")?;
             let state: Table = tasks.get(task_id.as_str())?;
@@ -1142,9 +1111,7 @@ fn create_bus_api(lua: &Lua, host: Rc<dyn PluginHostApi>) -> omnilua::Result<Tab
     api.set(
         "__wait_finish",
         lua.create_function(|lua, ()| {
-            let task_id: String = lua.globals().get("__current_task_id").unwrap_or_default();
-            let tasks: Table = lua.globals().get("__plugin_tasks")?;
-            let state: Table = tasks.get(task_id.as_str())?;
+            let state = current_task_state(lua)?;
             if let Ok(value) = state.get::<_, Value>("_bus_result") {
                 state.set("_bus_result", Value::Nil)?;
                 state.set("_bus_result_err", Value::Nil)?;
@@ -1199,7 +1166,7 @@ fn create_serial_api(
                 lua,
                 &PluginValue::from_json(
                     &serde_json::to_value(devices)
-                        .map_err(|e| host_error(PluginError::Host(e.to_string())))?,
+                        .map_err(|error| host_error(PluginError::Host(error.to_string())))?,
                 ),
             )
         })?,
@@ -1269,9 +1236,7 @@ fn create_serial_api(
     api.set(
         "__request_device_finish",
         lua.create_function(|lua, ()| {
-            let task_id: String = lua.globals().get("__current_task_id").unwrap_or_default();
-            let tasks: Table = lua.globals().get("__plugin_tasks")?;
-            let state: Table = tasks.get(task_id.as_str())?;
+            let state = current_task_state(lua)?;
             if let Ok(error) = state.get::<_, String>("_host_result_err") {
                 state.set("_host_result_err", Value::Nil)?;
                 state.set("_host_result", Value::Nil)?;
@@ -1310,13 +1275,13 @@ fn create_serial_api(
                 .to_ascii_lowercase()
                 .as_str()
             {
-                "odd" => tool_plugin_api::PluginParity::Odd,
-                "even" => tool_plugin_api::PluginParity::Even,
-                _ => tool_plugin_api::PluginParity::None,
+                "odd" => PluginParity::Odd,
+                "even" => PluginParity::Even,
+                _ => PluginParity::None,
             };
             open_host
                 .serial_open(
-                    &tool_platform::PortId::new(port),
+                    &PortId::new(port),
                     PluginSerialSettings {
                         baud_rate: options.get::<_, u32>("baud_rate").unwrap_or(115_200),
                         data_bits: options.get::<_, u32>("data_bits").unwrap_or(8) as u8,
@@ -1350,7 +1315,7 @@ fn create_serial_api(
             };
             for port in ports {
                 close_host
-                    .serial_close(&tool_platform::PortId::new(port))
+                    .serial_close(&PortId::new(port))
                     .map_err(host_error)?;
             }
             Ok(())
@@ -1361,7 +1326,7 @@ fn create_serial_api(
         "close_port",
         lua.create_function(move |_, port: String| {
             close_port_host
-                .serial_close(&tool_platform::PortId::new(port))
+                .serial_close(&PortId::new(port))
                 .map_err(host_error)
         })?,
     )?;
@@ -1383,16 +1348,17 @@ fn create_serial_api(
         lua.create_function(move |lua, ()| {
             let devices = list_host.serial_devices().map_err(host_error)?;
             let mut value = serde_json::to_value(devices)
-                .map_err(|e| host_error(PluginError::Host(e.to_string())))?;
+                .map_err(|error| host_error(PluginError::Host(error.to_string())))?;
             if let serde_json::Value::Array(items) = &mut value {
                 for item in items {
-                    if let serde_json::Value::Object(item) = item {
-                        if let Some(id) = item.get("id").cloned() {
-                            item.insert("port_name".to_owned(), id);
-                        }
-                        if let Some(kind) = item.get("kind").cloned() {
-                            item.insert("port_type".to_owned(), kind);
-                        }
+                    let serde_json::Value::Object(item) = item else {
+                        continue;
+                    };
+                    if let Some(id) = item.get("id").cloned() {
+                        item.insert("port_name".to_owned(), id);
+                    }
+                    if let Some(kind) = item.get("kind").cloned() {
+                        item.insert("port_type".to_owned(), kind);
                     }
                 }
             }
@@ -1404,7 +1370,7 @@ fn create_serial_api(
         "send_to",
         lua.create_function(move |_, (port, text): (String, String)| {
             send_host
-                .serial_send(&tool_platform::PortId::new(port), text.as_bytes())
+                .serial_send(&PortId::new(port), text.as_bytes())
                 .map_err(host_error)
         })?,
     )?;
@@ -1414,7 +1380,7 @@ fn create_serial_api(
         lua.create_function(move |_, (port, text): (String, String)| {
             let bytes = parse_hex(&text).map_err(host_error)?;
             send_hex_host
-                .serial_send(&tool_platform::PortId::new(port), &bytes)
+                .serial_send(&PortId::new(port), &bytes)
                 .map_err(host_error)
         })?,
     )?;
@@ -1423,7 +1389,7 @@ fn create_serial_api(
         "status_port",
         lua.create_function(move |lua, port: String| {
             let value = status_host
-                .serial_status(&tool_platform::PortId::new(port))
+                .serial_status(&PortId::new(port))
                 .map_err(host_error)?;
             value_to_lua(lua, &value)
         })?,
@@ -1437,7 +1403,7 @@ fn create_serial_api(
                 bytes.push(b'\n');
             }
             write_host
-                .serial_send(&tool_platform::PortId::new(port), &bytes)
+                .serial_send(&PortId::new(port), &bytes)
                 .map_err(host_error)
         })?,
     )?;
@@ -1469,12 +1435,7 @@ fn create_serial_api(
         )?;
         op.set(
             "deadline_ms",
-            lua.globals()
-                .get::<_, Function>("__now_ms")?
-                .call::<_, i64>(())
-                .unwrap_or_default()
-                .max(0) as u64
-                + opts.get::<_, u64>("timeout_ms").unwrap_or(5_000),
+            now_ms_via_globals(lua)? + opts.get::<_, u64>("timeout_ms").unwrap_or(5_000),
         )?;
         let tasks: Table = lua.globals().get("__plugin_tasks")?;
         let state: Table = tasks.get(task_id.as_str())?;
@@ -1485,9 +1446,7 @@ fn create_serial_api(
     api.set(
         "__read_line_finish",
         lua.create_function(|lua, ()| {
-            let task_id: String = lua.globals().get("__current_task_id").unwrap_or_default();
-            let tasks: Table = lua.globals().get("__plugin_tasks")?;
-            let state: Table = tasks.get(task_id.as_str())?;
+            let state = current_task_state(lua)?;
             let result = lua.create_table()?;
             if let Ok(line) = state.get::<_, String>("_read_result") {
                 result.set("line", line)?;
@@ -1527,12 +1486,7 @@ fn create_serial_api(
                 op.set("port", port)?;
                 op.set("patterns", patterns)?;
                 op.set("timeout_ms", timeout_ms)?;
-                let now = lua
-                    .globals()
-                    .get::<_, Function>("__now_ms")?
-                    .call::<_, i64>(())
-                    .unwrap_or_default()
-                    .max(0) as u64;
+                let now = now_ms_via_globals(lua)?;
                 op.set("deadline_ms", now.saturating_add(timeout_ms))?;
                 let tasks: Table = lua.globals().get("__plugin_tasks")?;
                 let state: Table = tasks.get(task_id.as_str())?;
@@ -1544,9 +1498,7 @@ fn create_serial_api(
     api.set(
         "__expect_finish",
         lua.create_function(|lua, ()| {
-            let task_id: String = lua.globals().get("__current_task_id").unwrap_or_default();
-            let tasks: Table = lua.globals().get("__plugin_tasks")?;
-            let state: Table = tasks.get(task_id.as_str())?;
+            let state = current_task_state(lua)?;
             if let Ok(result) = state.get::<_, Table>("_expect_result") {
                 let line = result.get::<_, Value>("line").unwrap_or(Value::Nil);
                 state.set("_expect_result", Value::Nil)?;
@@ -1576,21 +1528,13 @@ fn create_serial_api(
                     bytes.push(b'\n');
                 }
                 expect_host
-                    .serial_send(&tool_platform::PortId::new(port.clone()), &bytes)
+                    .serial_send(&PortId::new(port.clone()), &bytes)
                     .map_err(host_error)?;
                 let op = lua.create_table()?;
                 op.set("kind", "write_line_and_expect")?;
                 op.set("port", port)?;
                 op.set("timeout_ms", timeout)?;
-                op.set(
-                    "deadline_ms",
-                    lua.globals()
-                        .get::<_, Function>("__now_ms")?
-                        .call::<_, i64>(())
-                        .unwrap_or_default()
-                        .max(0) as u64
-                        + timeout,
-                )?;
+                op.set("deadline_ms", now_ms_via_globals(lua)? + timeout)?;
                 op.set(
                     "continue_resets_timeout",
                     opts.get::<_, bool>("continue_resets_timeout")
@@ -1611,9 +1555,7 @@ fn create_serial_api(
     api.set(
         "__write_line_and_expect_finish",
         lua.create_function(|lua, ()| {
-            let task_id: String = lua.globals().get("__current_task_id").unwrap_or_default();
-            let tasks: Table = lua.globals().get("__plugin_tasks")?;
-            let state: Table = tasks.get(task_id.as_str())?;
+            let state = current_task_state(lua)?;
             let result = lua.create_table()?;
             if let Ok(value) = state.get::<_, Table>("_expect_result") {
                 result.set("result", value)?;
@@ -1742,9 +1684,7 @@ fn create_dialog_api(lua: &Lua, host: Rc<dyn PluginHostApi>) -> omnilua::Result<
             let Some(PluginValue::String(request_id)) = response.get("request_id") else {
                 return Ok(Value::Nil);
             };
-            let tasks: Table = lua.globals().get("__plugin_tasks")?;
-            let task_id: String = lua.globals().get("__current_task_id").unwrap_or_default();
-            let state: Table = tasks.get(task_id.as_str())?;
+            let state = current_task_state(lua)?;
             let op = lua.create_table()?;
             op.set("kind", "host")?;
             op.set("request_id", request_id.clone())?;
@@ -1757,9 +1697,7 @@ fn create_dialog_api(lua: &Lua, host: Rc<dyn PluginHostApi>) -> omnilua::Result<
     api.set(
         "__open_file_finish",
         lua.create_function(|lua, ()| {
-            let task_id: String = lua.globals().get("__current_task_id").unwrap_or_default();
-            let tasks: Table = lua.globals().get("__plugin_tasks")?;
-            let state: Table = tasks.get(task_id.as_str())?;
+            let state = current_task_state(lua)?;
             if let Ok(value) = state.get::<_, Value>("_host_result") {
                 state.set("_host_result", Value::Nil)?;
                 return Ok(value);
@@ -1807,12 +1745,10 @@ fn create_fs_api(lua: &Lua, host: Rc<dyn PluginHostApi>) -> omnilua::Result<Tabl
                 let lines = Rc::new(RefCell::new(
                     text.lines().map(ToOwned::to_owned).collect::<Vec<_>>(),
                 ));
-                let index = Rc::new(RefCell::new(0usize));
-                let next_lines = lines.clone();
-                let next_index = index.clone();
+                let cursor = Rc::new(RefCell::new(0usize));
                 let iterator = lua.create_function(move |lua, ()| {
-                    let mut index = next_index.borrow_mut();
-                    let Some(line) = next_lines.borrow().get(*index).cloned() else {
+                    let mut index = cursor.borrow_mut();
+                    let Some(line) = lines.borrow().get(*index).cloned() else {
                         return Ok(Value::Nil);
                     };
                     *index += 1;
@@ -1872,39 +1808,9 @@ fn create_ui_api(lua: &Lua, host: Rc<dyn PluginHostApi>) -> omnilua::Result<Tabl
             value_to_lua(lua, &panel)
         })?,
     )?;
-    for name in [
-        "create_chart",
-        "create_form",
-        "create_gauge",
-        "create_attitude",
-        "create_table",
-        "remove_panel",
-        "set_value",
-        "set_values",
-        "set_enabled",
-        "set_visible",
-        "table_set_rows",
-        "table_append_rows",
-        "table_remove_rows",
-        "table_clear",
-        "set_contribution_value",
-        "set_status",
-    ] {
-        let host = host.clone();
-        let command = name.to_owned();
-        api.set(
-            name,
-            lua.create_function(move |_, value: Value| {
-                host.ui_command(PluginUiCommand {
-                    command: command.clone(),
-                    payload: value_from_lua(value)?,
-                })
-                .map_err(host_error)
-            })?,
-        )?;
-    }
-    // The real ABI uses positional arguments for panel/field identifiers.
-    // Install variadic replacements after the simple one-value fallback.
+    // The real ABI uses positional arguments for panel/field identifiers, so
+    // each command is registered once as a variadic wrapper that maps those
+    // arguments onto the payload fields `ui_payload` defines.
     for name in [
         "create_chart",
         "create_form",
@@ -1943,8 +1849,24 @@ fn create_ui_api(lua: &Lua, host: Rc<dyn PluginHostApi>) -> omnilua::Result<Tabl
     Ok(api)
 }
 
+/// Payload shared by the `plugin.command.registered` and
+/// `plugin.command.unregistered` events: which plugin, which command.
+fn plugin_command_payload(plugin_id: &str, command: String) -> PluginValue {
+    PluginValue::Object(
+        [
+            (
+                "plugin_id".to_owned(),
+                PluginValue::String(plugin_id.to_owned()),
+            ),
+            ("command".to_owned(), PluginValue::String(command)),
+        ]
+        .into_iter()
+        .collect(),
+    )
+}
+
 fn ui_payload(command: &str, args: Vec<PluginValue>) -> PluginValue {
-    let mut object = std::collections::BTreeMap::new();
+    let mut object = BTreeMap::new();
     match command {
         "remove_panel" => {
             if let Some(value) = args.first() {
@@ -2014,15 +1936,7 @@ fn create_timer_api(lua: &Lua) -> omnilua::Result<Table> {
             let id = every_timers.len()? as i64 + 1;
             let timer = lua.create_table()?;
             timer.set("interval_ms", interval.max(1))?;
-            timer.set(
-                "next_ms",
-                lua.globals()
-                    .get::<_, Function>("__now_ms")?
-                    .call::<_, i64>(())
-                    .unwrap_or_default()
-                    .max(0) as u64
-                    + interval.max(1),
-            )?;
+            timer.set("next_ms", now_ms_via_globals(lua)? + interval.max(1))?;
             timer.set("repeat", true)?;
             timer.set("callback", callback)?;
             every_timers.set(id, timer)?;
@@ -2036,15 +1950,7 @@ fn create_timer_api(lua: &Lua) -> omnilua::Result<Table> {
             let id = after_timers.len()? as i64 + 1;
             let timer = lua.create_table()?;
             timer.set("interval_ms", interval.max(1))?;
-            timer.set(
-                "next_ms",
-                lua.globals()
-                    .get::<_, Function>("__now_ms")?
-                    .call::<_, i64>(())
-                    .unwrap_or_default()
-                    .max(0) as u64
-                    + interval.max(1),
-            )?;
+            timer.set("next_ms", now_ms_via_globals(lua)? + interval.max(1))?;
             timer.set("repeat", false)?;
             timer.set("callback", callback)?;
             after_timers.set(id, timer)?;
@@ -2247,7 +2153,7 @@ fn create_storage_api(lua: &Lua, host: Rc<dyn PluginHostApi>) -> omnilua::Result
         lua.create_function(move |lua, (key, default): (String, Option<Value>)| {
             let value = get_host.storage_get(&key).unwrap_or_else(|_| {
                 default
-                    .map(|value| value_from_lua(value).unwrap_or(PluginValue::Null))
+                    .and_then(|value| value_from_lua(value).ok())
                     .unwrap_or(PluginValue::Null)
             });
             value_to_lua(lua, &value)
@@ -2371,7 +2277,6 @@ fn create_config_api(lua: &Lua, host: Rc<dyn PluginHostApi>) -> omnilua::Result<
 fn install_codec_module(lua: &Lua) -> omnilua::Result<()> {
     let package: Table = lua.globals().get("package")?;
     let preload: Table = package.get("preload")?;
-    let hw = lua.create_table()?;
     let codec = lua.create_table()?;
     codec.set(
         "xor8",
@@ -2379,8 +2284,7 @@ fn install_codec_module(lua: &Lua) -> omnilua::Result<()> {
             Ok(text.bytes().fold(0_u8, |value, byte| value ^ byte) as i64)
         })?,
     )?;
-    hw.set("codec", codec)?;
-    let codec_module = hw.get::<_, Table>("codec")?;
+    let codec_module = codec.clone();
     preload.set(
         "hw.codec",
         lua.create_function(move |_, _args: Variadic<Value>| Ok(codec_module.clone()))?,
@@ -2460,7 +2364,7 @@ fn value_from_lua(value: Value) -> omnilua::Result<PluginValue> {
                         .collect::<Result<Vec<_>, _>>()?,
                 )
             } else {
-                let mut object = std::collections::BTreeMap::new();
+                let mut object = BTreeMap::new();
                 for (key, value) in pairs {
                     let key = match key {
                         Value::String(key) => key.to_str()?,
