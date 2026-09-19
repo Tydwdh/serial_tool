@@ -360,11 +360,13 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
      > 重新包装（`transport: ` 前缀之外的中文串就是那时换的），Part B（`74719a6`）又把这句话
      > 搬进 `SendPlanError: Display`。今天渲染为 `transport: HEX 解析失败：<原因>`
      > （`transport: ` 前缀来自 `AppError`）。判定不变，变的是披露与措辞。
-     > **这句渲染现在有测试钉着**：`crates/application/tests/headless.rs::
+     > **本轮发布的证据原文**（native 输入 `"AB C"` + `strict: true` 经 `dispatch` 的完整渲染）：
+     > `transport: HEX 解析失败：严格模式: "C" 规范化后为 1 个字符，必须恰为 2（偶数 hex 长度），请补0或关闭严格模式`
+     > **这句有测试钉着**：`crates/application/tests/headless.rs::
      > send_routing_dispatches_by_port_kind_and_rejects_invalid_hex` 除断言变体外，还断言
-     > `strict_error.to_string()` 逐字等于上面那句 —— 改 `SendPlanError` 的 `Display`、
-     > 改 `AppError::Transport` 的 `#[error("transport: {0}")]` 前缀、或改 `tool_core`
-     > 严格模式的文案，都会让该用例变红。
+     > 该输入的 `strict_error.to_string()` 逐字等于上面这整行 —— 改 `SendPlanError` 的
+     > `Display`、改 `AppError::Transport` 的 `#[error("transport: {0}")]` 前缀、或改
+     > `tool_core` 严格模式的文案，都会让该用例变红（两条变异均实测过，见 task-6 报告 M7/M7b）。
      > round-1 给两处 hover 加的 `hex_precheck_hint`（应用点 `crates/app/src/ui/bottom_panel.rs:661`、
      > `:754`）**位于不可达的子树**：那两个站点属于 `legacy_send_panel_body`（`:279-340`，
      > `#[allow(dead_code)]`，全工作区 **0 调用**，见本文件第 8 条）。所以 round-1 写成
