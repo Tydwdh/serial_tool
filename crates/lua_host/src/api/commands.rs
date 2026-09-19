@@ -24,18 +24,16 @@ pub(crate) fn create_commands_api(
         "register",
         lua.create_function(move |lua, (command, handler): (String, Function)| {
             let commands: Table = lua.globals().get(PLUGIN_COMMANDS)?;
-            commands.set(command.clone(), handler)?;
+            commands.set(command.as_str(), handler)?;
 
             // 通知管理面：命令已注册
-            reg_bus.publish(Event::new(
+            publish_command_change(
+                &reg_bus,
+                &reg_source,
+                &reg_pid,
                 topics::PLUGIN_COMMAND_REGISTERED,
-                reg_source.clone(),
-                Direction::Internal,
-                Payload::Json(json!({
-                    "plugin_id": reg_pid,
-                    "command": command,
-                })),
-            ));
+                &command,
+            );
 
             Ok(())
         })?,
@@ -49,18 +47,16 @@ pub(crate) fn create_commands_api(
         "unregister",
         lua.create_function(move |lua, command: String| {
             let commands: Table = lua.globals().get(PLUGIN_COMMANDS)?;
-            commands.set(command.clone(), Value::Nil)?;
+            commands.set(command.as_str(), Value::Nil)?;
 
             // 通知管理面：命令已注销
-            unreg_bus.publish(Event::new(
+            publish_command_change(
+                &unreg_bus,
+                &unreg_source,
+                &unreg_pid,
                 topics::PLUGIN_COMMAND_UNREGISTERED,
-                unreg_source.clone(),
-                Direction::Internal,
-                Payload::Json(json!({
-                    "plugin_id": unreg_pid,
-                    "command": command,
-                })),
-            ));
+                &command,
+            );
 
             Ok(())
         })?,
@@ -113,4 +109,23 @@ pub(crate) fn create_commands_api(
     )?;
 
     Ok(table)
+}
+
+/// 向管理面广播命令注册表的变化（注册 / 注销共用，只有 topic 不同）。
+fn publish_command_change(
+    bus: &DataBus,
+    source: &str,
+    plugin_id: &str,
+    topic: &str,
+    command: &str,
+) {
+    bus.publish(Event::new(
+        topic,
+        source.to_owned(),
+        Direction::Internal,
+        Payload::Json(json!({
+            "plugin_id": plugin_id,
+            "command": command,
+        })),
+    ));
 }

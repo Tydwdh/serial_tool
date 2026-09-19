@@ -176,8 +176,7 @@ fn install_replay_ctx(
                 && !config_emit.outputs.iter().any(|o| topic_matches(o, &topic))
             {
                 return Err(mlua::Error::RuntimeError(format!(
-                    "replay.emit: topic '{}' not in manifest replay.outputs",
-                    topic
+                    "replay.emit: topic '{topic}' not in manifest replay.outputs"
                 )));
             }
             let payload = lua_value_to_payload(payload)?;

@@ -37,9 +37,7 @@ pub(crate) fn create_ui_api(
                 if let Some(id) = config.get("id").and_then(serde_json::Value::as_str)
                     && static_ids.contains(id)
                 {
-                    return Err(mlua::Error::RuntimeError(format!(
-                        "panel '{id}' is declared in plugin.json and is managed by the host"
-                    )));
+                    return Err(host_managed_panel_error(id));
                 }
 
                 config.insert(
@@ -74,9 +72,7 @@ pub(crate) fn create_ui_api(
         "remove_panel",
         lua.create_function(move |_lua, panel_id: String| {
             if static_ids_for_remove.contains(&panel_id) {
-                return Err(mlua::Error::RuntimeError(format!(
-                    "panel '{panel_id}' is declared in plugin.json and is managed by the host"
-                )));
+                return Err(host_managed_panel_error(&panel_id));
             }
             bus_for_remove.publish(Event::new(
                 topics::UI_PANEL_REMOVE,
@@ -158,18 +154,18 @@ pub(crate) fn create_ui_api(
                 .into_iter()
                 .rev()
                 .find(|event| {
-                    (event.topic == topics::UI_PANEL_CREATE
-                        || event.topic == topics::UI_PANEL_REMOVE)
-                        && match &event.payload {
-                            Payload::Json(value) => {
-                                value
-                                    .get("id")
-                                    .or_else(|| value.get("panel_id"))
-                                    .and_then(|value| value.as_str())
-                                    == Some(&panel_id)
-                            }
-                            _ => false,
-                        }
+                    let is_panel_event = event.topic == topics::UI_PANEL_CREATE
+                        || event.topic == topics::UI_PANEL_REMOVE;
+                    // create 事件里面板 id 叫 id，remove 事件里叫 panel_id。
+                    let event_panel_id = match &event.payload {
+                        Payload::Json(value) => value
+                            .get("id")
+                            .or_else(|| value.get("panel_id"))
+                            .and_then(|value| value.as_str()),
+                        _ => None,
+                    };
+
+                    is_panel_event && event_panel_id == Some(&panel_id)
                 })
                 .and_then(|event| match event.payload {
                     Payload::Json(value) if event.topic == topics::UI_PANEL_CREATE => Some(value),
@@ -203,47 +199,32 @@ pub(crate) fn create_ui_api(
         )?,
     )?;
 
-    let bus_enabled = bus.clone();
-    let src_enabled = source.clone();
-    table.set(
-        "set_enabled",
-        lua.create_function(
-            move |_lua, (panel_id, field_id, enabled): (String, String, bool)| {
-                bus_enabled.publish(Event::new(
-                    topics::UI_FORM_SET_ENABLED,
-                    src_enabled.clone(),
-                    Direction::Internal,
-                    Payload::Json(serde_json::json!({
-                        "panel_id": panel_id,
-                        "field_id": field_id,
-                        "value": enabled,
-                    })),
-                ));
-                Ok(())
-            },
-        )?,
-    )?;
-
-    let bus_visible = bus.clone();
-    let src_visible = source.clone();
-    table.set(
-        "set_visible",
-        lua.create_function(
-            move |_lua, (panel_id, field_id, visible): (String, String, bool)| {
-                bus_visible.publish(Event::new(
-                    topics::UI_FORM_SET_VISIBLE,
-                    src_visible.clone(),
-                    Direction::Internal,
-                    Payload::Json(serde_json::json!({
-                        "panel_id": panel_id,
-                        "field_id": field_id,
-                        "value": visible,
-                    })),
-                ));
-                Ok(())
-            },
-        )?,
-    )?;
+    // ctx.ui.set_enabled / set_visible：只有 Lua 名与 topic 不同，参数与载荷形状一致。
+    for (name, topic) in [
+        ("set_enabled", topics::UI_FORM_SET_ENABLED),
+        ("set_visible", topics::UI_FORM_SET_VISIBLE),
+    ] {
+        let op_bus = bus.clone();
+        let op_source = source.clone();
+        table.set(
+            name,
+            lua.create_function(
+                move |_lua, (panel_id, field_id, value): (String, String, bool)| {
+                    op_bus.publish(Event::new(
+                        topic,
+                        op_source.clone(),
+                        Direction::Internal,
+                        Payload::Json(serde_json::json!({
+                            "panel_id": panel_id,
+                            "field_id": field_id,
+                            "value": value,
+                        })),
+                    ));
+                    Ok(())
+                },
+            )?,
+        )?;
+    }
 
     // ctx.ui.set_contribution_value(contribution_id, value)
     // 用于更新 toggle / progress / label 等 UI contribution 的运行时状态。
@@ -283,6 +264,14 @@ pub(crate) fn create_ui_api(
     )?;
 
     Ok(table)
+}
+
+/// 宿主托管面板（在 `plugin.json` 中声明）的报错文案；create 与 remove 两条路径
+/// 共用一处定义，避免插件可见的错误信息漂移。
+fn host_managed_panel_error(panel_id: &str) -> mlua::Error {
+    mlua::Error::RuntimeError(format!(
+        "panel '{panel_id}' is declared in plugin.json and is managed by the host"
+    ))
 }
 
 pub(crate) fn ensure_json_object(

@@ -30,7 +30,7 @@ pub struct DialogRequest {
 /// 跨组件共享的文件访问授权管理器。
 #[derive(Debug, Default)]
 pub struct FileAccessBroker {
-    authorized: parking_lot::Mutex<HashMap<String, HashSet<PathBuf>>>,
+    authorized: ParkingMutex<HashMap<String, HashSet<PathBuf>>>,
 }
 
 fn canonical_path(path: &Path) -> PathBuf {
@@ -52,8 +52,7 @@ impl FileAccessBroker {
         self.authorized
             .lock()
             .get(plugin_id)
-            .map(|paths| paths.contains(&canonical))
-            .unwrap_or(false)
+            .is_some_and(|paths| paths.contains(&canonical))
     }
 
     pub fn clear(&self, plugin_id: &str) {

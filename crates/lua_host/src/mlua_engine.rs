@@ -449,11 +449,11 @@ fn values_to_plugin(values: impl Iterator<Item = Value>) -> mlua::Result<PluginV
 }
 
 fn object_string(value: &PluginValue, key: &str) -> Option<String> {
-    match value {
-        PluginValue::Object(object) => object.get(key).and_then(|value| match value {
-            PluginValue::String(value) => Some(value.clone()),
-            _ => None,
-        }),
+    let PluginValue::Object(object) = value else {
+        return None;
+    };
+    match object.get(key)? {
+        PluginValue::String(value) => Some(value.clone()),
         _ => None,
     }
 }

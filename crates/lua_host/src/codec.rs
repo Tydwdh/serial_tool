@@ -66,14 +66,14 @@ fn create_codec_table(lua: &Lua, (): ()) -> mlua::Result<Value> {
         "crc16_modbus",
         lua.create_function(|_, bytes: mlua::String| {
             let mut crc: u16 = 0xFFFF;
-            for byte in bytes.as_bytes().iter() {
-                crc ^= *byte as u16;
+            for &byte in &*bytes.as_bytes() {
+                crc ^= byte as u16;
                 for _ in 0..8 {
-                    if crc & 0x0001 != 0 {
-                        crc = (crc >> 1) ^ 0xA001;
+                    crc = if crc & 0x0001 != 0 {
+                        (crc >> 1) ^ 0xA001
                     } else {
-                        crc >>= 1;
-                    }
+                        crc >> 1
+                    };
                 }
             }
             Ok(crc)
@@ -206,7 +206,7 @@ fn create_utils_table(lua: &Lua, (): ()) -> mlua::Result<Value> {
                 unit_idx += 1;
             }
             if unit_idx == 0 {
-                Ok(format!("{} {}", bytes, units[unit_idx]))
+                Ok(format!("{bytes} {}", units[unit_idx]))
             } else {
                 Ok(format!("{:.1} {}", size, units[unit_idx]))
             }

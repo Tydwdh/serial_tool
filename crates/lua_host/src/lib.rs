@@ -142,14 +142,10 @@ impl LuaPluginRuntime {
         self.event_sender.try_send(event.clone()).is_ok()
     }
 
+    /// 回放事件与实时事件走同一条投递策略（含 `alive` 判定），判据见 [`Self::on_event`]：
+    /// 用 `try_send` 而非 `send` —— 回放期间若插件处理慢，丢弃事件比阻塞 UI 线程安全。
     pub fn on_replay_event(&self, event: &Event) -> bool {
-        if !self.alive.load(Ordering::Relaxed) {
-            return false;
-        }
-
-        // 使用 try_send 而非 send：回放期间若插件处理慢，丢弃事件比阻塞 UI 线程安全。
-        // 与 on_event 保持一致行为。
-        self.event_sender.try_send(event.clone()).is_ok()
+        self.on_event(event)
     }
 
     pub fn stop(&self) {
@@ -227,11 +223,10 @@ impl LuaHost {
 
         let bus = self.bus.clone();
         let transport = self.transport.clone();
-        let run_source = config.source.clone();
 
         bus.publish(Event::system_log(
             LogLevel::Info,
-            run_source,
+            &config.source,
             format!("正在运行 {}", config.script_name),
         ));
 
@@ -345,14 +340,12 @@ pub fn run_plugin(
     let thread_stop = Arc::clone(&stop);
     let thread_alive = Arc::clone(&alive);
 
-    let plugin_source = config.source.clone();
-
     let mut host_services = host_services;
     host_services.stop_flag = Some(Arc::clone(&thread_stop));
 
     bus.publish(Event::system_log(
         LogLevel::Info,
-        &plugin_source,
+        &config.source,
         format!("正在启动插件 {}", config.script_name),
     ));
 
@@ -477,16 +470,13 @@ fn plugin_event_loop(
     host_services: LuaHostServices,
     outcome: Arc<ParkingMutex<Option<LuaRunState>>>,
 ) {
+    // 启动阶段的任何失败都要同样收尾（见 fail_startup）；这里只递上原因
+    let startup_failed = |reason: String| fail_startup(&outcome, &bus, &config, &alive, reason);
+
     let lua = match sandbox_lua() {
         Ok(lua) => lua,
         Err(error) => {
-            fail_startup(
-                &outcome,
-                &bus,
-                &config,
-                &alive,
-                format!("创建/加固 Lua 沙箱失败：{error}"),
-            );
+            startup_failed(format!("创建/加固 Lua 沙箱失败：{error}"));
             return;
         }
     };
@@ -502,36 +492,18 @@ fn plugin_event_loop(
             Ok(VmState::Continue)
         },
     ) {
-        fail_startup(
-            &outcome,
-            &bus,
-            &config,
-            &alive,
-            format!("设置指令 hook 失败：{e}"),
-        );
+        startup_failed(format!("设置指令 hook 失败：{e}"));
         return;
     }
 
     if let Err(error) = install_ctx(&lua, bus.clone(), transport, &config, &host_services) {
-        fail_startup(
-            &outcome,
-            &bus,
-            &config,
-            &alive,
-            format!("安装上下文失败：{error}"),
-        );
+        startup_failed(format!("安装上下文失败：{error}"));
         return;
     }
 
     // 注入 task 辅助函数（必须在用户脚本之前）
     if let Err(error) = install_task_helpers(&lua) {
-        fail_startup(
-            &outcome,
-            &bus,
-            &config,
-            &alive,
-            format!("安装任务辅助函数失败：{error}"),
-        );
+        startup_failed(format!("安装任务辅助函数失败：{error}"));
         return;
     }
 
@@ -546,13 +518,7 @@ fn plugin_event_loop(
         };
 
     if let Err(error) = lua.load(&source).set_name(&config.script_name).exec() {
-        fail_startup(
-            &outcome,
-            &bus,
-            &config,
-            &alive,
-            format!("脚本错误：{error}"),
-        );
+        startup_failed(format!("脚本错误：{error}"));
         return;
     }
 
@@ -663,20 +629,15 @@ fn has_active_work(lua: &Lua) -> bool {
     let table_active = |name: &str| -> bool {
         lua.globals()
             .get::<Table>(name)
-            .map(|table| !table.is_empty())
-            .unwrap_or(false)
+            .is_ok_and(|table| !table.is_empty())
     };
 
-    let has_tasks = lua
-        .globals()
-        .get::<Table>(PLUGIN_TASKS)
-        .map(|tasks| {
-            tasks
-                .pairs::<String, Table>()
-                .filter_map(|pair| pair.ok())
-                .any(|(_, state)| !state.get::<bool>(TASK_FINISHED).unwrap_or(true))
-        })
-        .unwrap_or(false);
+    let has_tasks = lua.globals().get::<Table>(PLUGIN_TASKS).is_ok_and(|tasks| {
+        tasks
+            .pairs::<String, Table>()
+            .filter_map(|pair| pair.ok())
+            .any(|(_, state)| !state.get::<bool>(TASK_FINISHED).unwrap_or(true))
+    });
 
     table_active(PLUGIN_CALLBACKS)
         || table_active(PLUGIN_COMMANDS)
@@ -797,13 +758,7 @@ fn next_timer_wait(lua: &Lua) -> Option<Duration> {
         next_trigger_at = next_trigger_at.min(trigger_at_ms);
     }
 
-    if next_trigger_at == u64::MAX {
-        None
-    } else if next_trigger_at <= now_ms {
-        Some(Duration::ZERO)
-    } else {
-        Some(Duration::from_millis(next_trigger_at - now_ms))
-    }
+    wait_until_ms(next_trigger_at, now_ms)
 }
 
 fn next_task_wait(lua: &Lua) -> Option<Duration> {
@@ -846,13 +801,23 @@ fn next_task_wait(lua: &Lua) -> Option<Duration> {
         }
     }
 
-    if next_wake_at == u64::MAX {
-        None
-    } else if next_wake_at <= now_ms {
-        Some(Duration::ZERO)
-    } else {
-        Some(Duration::from_millis(next_wake_at - now_ms))
+    wait_until_ms(next_wake_at, now_ms)
+}
+
+/// 把"最早一个到点时刻"换算成本轮该等待的时长。
+///
+/// `u64::MAX` 是没有等待者的哨兵（返回 `None`）；时刻已到或已过返回零，让调用方立刻再跑
+/// 一轮定时器/任务；其余情况等到那个时刻为止。
+fn wait_until_ms(target_ms: u64, now_ms: u64) -> Option<Duration> {
+    if target_ms == u64::MAX {
+        return None;
     }
+
+    if target_ms <= now_ms {
+        return Some(Duration::ZERO);
+    }
+
+    Some(Duration::from_millis(target_ms - now_ms))
 }
 
 fn min_wait(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
@@ -864,9 +829,8 @@ fn min_wait(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
 }
 
 fn process_timers(lua: &Lua, bus: &DataBus, config: &LuaRunConfig) {
-    let timers: Table = match lua.globals().get(PLUGIN_TIMERS) {
-        Ok(timers) => timers,
-        Err(_) => return,
+    let Ok(timers) = lua.globals().get::<Table>(PLUGIN_TIMERS) else {
+        return;
     };
 
     let now_ms = tool_core::now_timestamp_ms();
@@ -875,24 +839,26 @@ fn process_timers(lua: &Lua, bus: &DataBus, config: &LuaRunConfig) {
     for (id, timer) in timers.pairs::<String, Table>().flatten() {
         let trigger_at_ms: u64 = timer.get("trigger_at_ms").unwrap_or(u64::MAX);
 
-        if now_ms >= trigger_at_ms {
-            if let Ok(function) = timer.get::<Function>("callback")
-                && let Err(error) = function.call::<()>(())
-            {
-                bus.publish(Event::system_log(
-                    LogLevel::Warn,
-                    &config.source,
-                    format!("定时器错误：{error}"),
-                ));
-            }
+        if now_ms < trigger_at_ms {
+            continue;
+        }
 
-            let interval_ms: u64 = timer.get("interval_ms").unwrap_or(0);
+        if let Ok(function) = timer.get::<Function>("callback")
+            && let Err(error) = function.call::<()>(())
+        {
+            bus.publish(Event::system_log(
+                LogLevel::Warn,
+                &config.source,
+                format!("定时器错误：{error}"),
+            ));
+        }
 
-            if interval_ms > 0 {
-                let _ = timer.set("trigger_at_ms", now_ms + interval_ms);
-            } else {
-                expired.push(id);
-            }
+        let interval_ms: u64 = timer.get("interval_ms").unwrap_or(0);
+
+        if interval_ms > 0 {
+            let _ = timer.set("trigger_at_ms", now_ms + interval_ms);
+        } else {
+            expired.push(id);
         }
     }
 
@@ -1074,17 +1040,20 @@ fn install_ctx(
     }
 
     if has_permission(config, "storage") {
-        let storage_api = create_storage_api(lua)?;
-        ctx.set("session", storage_api)?;
+        ctx.set("session", create_storage_api(lua)?)?;
     }
 
     if has_permission(config, "dialog")
         && let Some(sender) = host_services.dialog_sender.clone()
     {
-        let stop = host_services.stop_flag.clone();
         ctx.set(
             "dialog",
-            create_dialog_api(lua, sender, host_services.plugin_id.clone(), stop)?,
+            create_dialog_api(
+                lua,
+                sender,
+                host_services.plugin_id.clone(),
+                host_services.stop_flag.clone(),
+            )?,
         )?;
     }
 
@@ -1118,19 +1087,17 @@ fn install_ctx(
         )?;
     }
 
-    if let Some(ref root) = host_services.plugin_root {
-        let root_str = root.display().to_string().replace('\\', "/");
-        let new_path = format!("{root_str}/lib/?.lua;{root_str}/?.lua");
-        if let Ok(package) = lua.globals().get::<Table>("package") {
-            let _ = package.set("path", new_path);
-            let _ = package.set("cpath", "");
+    // 无 plugin_root 时（如临时脚本/测试）把 package.path 清空，阻止 require 读非预期路径
+    let package_path = match &host_services.plugin_root {
+        Some(root) => {
+            let root_str = root.display().to_string().replace('\\', "/");
+            format!("{root_str}/lib/?.lua;{root_str}/?.lua")
         }
-    } else {
-        // 无 plugin_root 时（如临时脚本/测试），移除 package.path 阻止 require 非预期路径
-        if let Ok(package) = lua.globals().get::<Table>("package") {
-            let _ = package.set("path", "");
-            let _ = package.set("cpath", "");
-        }
+        None => String::new(),
+    };
+    if let Ok(package) = lua.globals().get::<Table>("package") {
+        let _ = package.set("path", package_path);
+        let _ = package.set("cpath", "");
     }
 
     // ── 在沙箱加固前注册 codec 模块 ──
@@ -1149,8 +1116,8 @@ fn install_ctx(
         // 将 preload 替换为冻结副本：插件的 require 可从 preload 读取，
         // 但无法写入新条目（写入被 metatable __newindex 拦截）
         let frozen = lua.create_table()?;
-        for pair in preload_table.pairs::<String, Function>().flatten() {
-            frozen.set(pair.0, pair.1)?;
+        for (name, loader) in preload_table.pairs::<String, Function>().flatten() {
+            frozen.set(name, loader)?;
         }
         let mt = lua.create_table()?;
         mt.set(
@@ -1216,8 +1183,97 @@ pub struct LuaReplayOutput {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use tool_databus::TopicFilter;
+    use tool_databus::{Subscription, TopicFilter};
     use tool_transport::serial_rx_event;
+
+    /// 测试用宿主服务：只填 `plugin_id`，对话框/文件/配置/行缓冲区等宿主能力一律不接入。
+    fn test_host_services(plugin_id: &str) -> LuaHostServices {
+        LuaHostServices {
+            plugin_root: None,
+            plugin_id: plugin_id.to_owned(),
+            dialog_sender: None,
+            file_broker: None,
+            stop_flag: None,
+            line_buffers: None,
+            config_store: None,
+            declared_panel_ids: Default::default(),
+        }
+    }
+
+    /// 同上，另接入一个空的行缓冲区映射：`ctx.serial` 的按行读取与 expect 要靠它。
+    fn test_host_services_with_line_buffers(plugin_id: &str) -> LuaHostServices {
+        LuaHostServices {
+            line_buffers: Some(Arc::new(ParkingMutex::new(HashMap::new()))),
+            ..test_host_services(plugin_id)
+        }
+    }
+
+    /// 每 50ms 轮询一次日志订阅、最多等 2 秒，返回第一条命中任一 `needles` 的日志文本。
+    ///
+    /// 判定与用例原来的手写循环一致：不匹配的日志同样被消费掉（所以下一次轮询接着往
+    /// 后读），超时返回 `None`，由各用例自己 `assert` 并给出失败消息。
+    fn wait_for_log(logs: &Subscription, needles: &[&str]) -> Option<String> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut matched = None;
+        while Instant::now() < deadline {
+            if let Ok(event) = logs.recv_timeout(Duration::from_millis(50)) {
+                let text = event.payload.text_lossy();
+                if needles.iter().any(|needle| text.contains(needle)) {
+                    matched = Some(text);
+                    break;
+                }
+            }
+        }
+        matched
+    }
+
+    /// 一条喂给回放分析器的串口 RX 事件：主题用生产常量，避免和用例里订阅的
+    /// `subscriptions` 各写一份字面量而悄悄对不上。
+    fn replay_rx_event(text: &str) -> Event {
+        Event::new(
+            serial_topics::SERIAL_RX,
+            "serial:COM2",
+            tool_core::Direction::Rx,
+            Payload::Text(text.to_owned()),
+        )
+    }
+
+    /// 跑一遍回放分析器，失败直接 panic —— 这些用例断言的是成功路径的产物。
+    fn run_replay(source: &str, config: LuaReplayConfig, inputs: &[Event]) -> LuaReplayOutput {
+        crate::replay::run_replay_analyzer(source.to_owned(), config, inputs).unwrap()
+    }
+
+    /// 在一对一次性的总线/传输上跑完脚本并交回结果：沙箱用例的断言全在脚本里，
+    /// 宿主侧只判断这段脚本有没有跑失败。
+    fn run_in_scratch_vm(source: &str) -> LuaHostResult<()> {
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+        run_script_for_test(source, bus, transport)
+    }
+
+    /// 在一次性宿主上阻塞跑一段带 task 权限的脚本：这两个用例的断言全写在 Lua 里，
+    /// 跑失败（含 Lua 断言失败）就 panic。
+    fn run_task_script(script_name: &str, source: &str) {
+        let mut permissions = default_lua_permissions();
+        permissions.push("task".to_owned());
+
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+        run_script_blocking(
+            source.to_owned(),
+            LuaRunConfig {
+                script_name: script_name.to_owned(),
+                timeout_ms: 5_000,
+                source: "test".to_owned(),
+                context: json!({}),
+                permissions,
+            },
+            bus,
+            transport,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+    }
 
     #[test]
     fn bundled_gcode_sender_lua_tests() {
@@ -1285,16 +1341,7 @@ mod tests {
         let bus = DataBus::new();
         let logs = bus.subscribe(TopicFilter::prefix("log."));
         let transport = TransportManager::new(bus.clone());
-        let host_services = LuaHostServices {
-            plugin_root: None,
-            plugin_id: "cmd.plugin".to_owned(),
-            dialog_sender: None,
-            file_broker: None,
-            stop_flag: None,
-            line_buffers: None,
-            config_store: None,
-            declared_panel_ids: Default::default(),
-        };
+        let host_services = test_host_services("cmd.plugin");
 
         let runtime = run_plugin(
             r#"
@@ -1329,31 +1376,20 @@ end)
         );
         assert!(runtime.on_event(&event));
 
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut saw_command = false;
-        while Instant::now() < deadline {
-            if let Ok(event) = logs.recv_timeout(Duration::from_millis(50))
-                && event.payload.text_lossy().contains("command:ok")
-            {
-                saw_command = true;
-                break;
-            }
-        }
-        assert!(saw_command, "registered command handler was not invoked");
+        let saw_command = wait_for_log(&logs, &["command:ok"]);
+        assert!(
+            saw_command.is_some(),
+            "registered command handler was not invoked"
+        );
     }
 
     #[test]
     fn serial_blocking_wrappers_are_exported() {
-        let bus = DataBus::new();
-        let transport = TransportManager::new(bus.clone());
-
-        run_script_for_test(
+        run_in_scratch_vm(
             r#"
 assert(type(ctx.serial.read_line) == "function", type(ctx.serial.read_line))
 assert(type(ctx.serial.write_line_and_expect) == "function", type(ctx.serial.write_line_and_expect))
 "#,
-            bus,
-            transport,
         )
         .unwrap();
     }
@@ -1363,16 +1399,7 @@ assert(type(ctx.serial.write_line_and_expect) == "function", type(ctx.serial.wri
         let bus = DataBus::new();
         let logs = bus.subscribe(TopicFilter::prefix("log."));
         let transport = TransportManager::new(bus.clone());
-        let host_services = LuaHostServices {
-            plugin_root: None,
-            plugin_id: "test-plugin".to_owned(),
-            dialog_sender: None,
-            file_broker: None,
-            stop_flag: None,
-            line_buffers: Some(Arc::new(ParkingMutex::new(HashMap::new()))),
-            config_store: None,
-            declared_panel_ids: Default::default(),
-        };
+        let host_services = test_host_services_with_line_buffers("test-plugin");
 
         let _runtime = run_plugin(
             r#"
@@ -1399,31 +1426,16 @@ ctx.log.info("reader-ready")
         )
         .unwrap();
 
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut saw_ready = false;
-        while Instant::now() < deadline {
-            if let Ok(event) = logs.recv_timeout(Duration::from_millis(50))
-                && event.payload.text_lossy().contains("reader-ready")
-            {
-                saw_ready = true;
-                break;
-            }
-        }
-        assert!(saw_ready, "plugin did not start read task");
+        let saw_ready = wait_for_log(&logs, &["reader-ready"]);
+        assert!(saw_ready.is_some(), "plugin did not start read task");
 
         bus.publish(serial_rx_event("serial:COM1", b"ok\n".to_vec()));
 
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut saw_read = false;
-        while Instant::now() < deadline {
-            if let Ok(event) = logs.recv_timeout(Duration::from_millis(50))
-                && event.payload.text_lossy().contains("read:ok")
-            {
-                saw_read = true;
-                break;
-            }
-        }
-        assert!(saw_read, "ctx.serial.read_line did not receive internal RX");
+        let saw_read = wait_for_log(&logs, &["read:ok"]);
+        assert!(
+            saw_read.is_some(),
+            "ctx.serial.read_line did not receive internal RX"
+        );
     }
 
     #[test]
@@ -1434,16 +1446,7 @@ ctx.log.info("reader-ready")
         let virtual_port = transport
             .open_virtual_serial("COM1")
             .expect("open virtual serial");
-        let host_services = LuaHostServices {
-            plugin_root: None,
-            plugin_id: "busy-plugin".to_owned(),
-            dialog_sender: None,
-            file_broker: None,
-            stop_flag: None,
-            line_buffers: Some(Arc::new(ParkingMutex::new(HashMap::new()))),
-            config_store: None,
-            declared_panel_ids: Default::default(),
-        };
+        let host_services = test_host_services_with_line_buffers("busy-plugin");
 
         let _runtime = run_plugin(
             r#"
@@ -1478,34 +1481,15 @@ ctx.log.info("sender-ready")
         )
         .unwrap();
 
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut saw_ready = false;
-        while Instant::now() < deadline {
-            if let Ok(event) = logs.recv_timeout(Duration::from_millis(50))
-                && event.payload.text_lossy().contains("sender-ready")
-            {
-                saw_ready = true;
-                break;
-            }
-        }
-        assert!(saw_ready, "plugin did not start expect task");
+        let saw_ready = wait_for_log(&logs, &["sender-ready"]);
+        assert!(saw_ready.is_some(), "plugin did not start expect task");
 
         thread::sleep(Duration::from_millis(250));
         virtual_port.inject_rx(b"echo:busy: processing\n".to_vec());
         thread::sleep(Duration::from_millis(250));
         virtual_port.inject_rx(b"ok\n".to_vec());
 
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut result = None;
-        while Instant::now() < deadline {
-            if let Ok(event) = logs.recv_timeout(Duration::from_millis(50)) {
-                let text = event.payload.text_lossy();
-                if text.contains("expect:") {
-                    result = Some(text);
-                    break;
-                }
-            }
-        }
+        let result = wait_for_log(&logs, &["expect:"]);
         assert_eq!(result.as_deref(), Some("expect:ok"));
     }
 
@@ -1519,16 +1503,7 @@ ctx.log.info("sender-ready")
         let virtual_port = transport
             .open_virtual_serial("COM2")
             .expect("open virtual serial");
-        let host_services = LuaHostServices {
-            plugin_root: None,
-            plugin_id: "expect-plugin".to_owned(),
-            dialog_sender: None,
-            file_broker: None,
-            stop_flag: None,
-            line_buffers: Some(Arc::new(ParkingMutex::new(HashMap::new()))),
-            config_store: None,
-            declared_panel_ids: Default::default(),
-        };
+        let host_services = test_host_services_with_line_buffers("expect-plugin");
 
         let _runtime = run_plugin(
             r#"
@@ -1556,32 +1531,13 @@ ctx.log.info("waiter-ready")
         )
         .unwrap();
 
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut saw_ready = false;
-        while Instant::now() < deadline {
-            if let Ok(event) = logs.recv_timeout(Duration::from_millis(50))
-                && event.payload.text_lossy().contains("waiter-ready")
-            {
-                saw_ready = true;
-                break;
-            }
-        }
-        assert!(saw_ready, "plugin did not start expect task");
+        let saw_ready = wait_for_log(&logs, &["waiter-ready"]);
+        assert!(saw_ready.is_some(), "plugin did not start expect task");
 
         // 发送匹配的 RX；task 协程应在 yield 后收到并记录。
         virtual_port.inject_rx(b"~ READY ~\n".to_vec());
 
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut result = None;
-        while Instant::now() < deadline {
-            if let Ok(event) = logs.recv_timeout(Duration::from_millis(50)) {
-                let text = event.payload.text_lossy();
-                if text.contains("got:") || text.contains("timeout") {
-                    result = Some(text);
-                    break;
-                }
-            }
-        }
+        let result = wait_for_log(&logs, &["got:", "timeout"]);
         assert!(
             result.as_deref() == Some("got:~ READY ~"),
             "expect should yield and receive the response, got {result:?}"
@@ -1590,41 +1546,21 @@ ctx.log.info("waiter-ready")
 
     #[test]
     fn task_start_sets_current_task_id_on_first_resume() {
-        let bus = DataBus::new();
-        let transport = TransportManager::new(bus.clone());
-        let mut permissions = default_lua_permissions();
-        permissions.push("task".to_owned());
-
-        run_script_blocking(
+        run_task_script(
+            "task-first-resume.lua",
             r#"
 local task = ctx.task.start({ id = "instant" }, function()
     assert(__current_task_id == "instant", tostring(__current_task_id))
 end)
 assert(task.finished == true)
-"#
-            .to_owned(),
-            LuaRunConfig {
-                script_name: "task-first-resume.lua".to_owned(),
-                timeout_ms: 5_000,
-                source: "test".to_owned(),
-                context: json!({}),
-                permissions,
-            },
-            bus,
-            transport,
-            Arc::new(AtomicBool::new(false)),
-        )
-        .unwrap();
+"#,
+        );
     }
 
     #[test]
     fn task_sleep_yields_from_lua_wrapper_inside_pcall() {
-        let bus = DataBus::new();
-        let transport = TransportManager::new(bus.clone());
-        let mut permissions = default_lua_permissions();
-        permissions.push("task".to_owned());
-
-        run_script_blocking(
+        run_task_script(
+            "task-sleep-yield.lua",
             r#"
 local task = ctx.task.start({ id = "sleepy" }, function(task)
     pcall(function()
@@ -1632,29 +1568,15 @@ local task = ctx.task.start({ id = "sleepy" }, function(task)
     end)
 end)
 assert(task.finished == false)
-"#
-            .to_owned(),
-            LuaRunConfig {
-                script_name: "task-sleep-yield.lua".to_owned(),
-                timeout_ms: 5_000,
-                source: "test".to_owned(),
-                context: json!({}),
-                permissions,
-            },
-            bus,
-            transport,
-            Arc::new(AtomicBool::new(false)),
-        )
-        .unwrap();
+"#,
+        );
     }
 
     #[test]
     fn next_task_wait_tracks_sleep_wake_time() {
         let lua = Lua::new();
         let tasks = lua.create_table().unwrap();
-        lua.globals()
-            .set(crate::globals::PLUGIN_TASKS, tasks.clone())
-            .unwrap();
+        lua.globals().set(PLUGIN_TASKS, tasks.clone()).unwrap();
 
         let state = lua.create_table().unwrap();
         state.set(TASK_FINISHED, false).unwrap();
@@ -1890,21 +1812,13 @@ end
             script_name: "test.lua".to_owned(),
             plugin_id: "test".to_owned(),
             plugin_version: "1.0.0".to_owned(),
-            subscriptions: vec!["transport.serial.default.rx".to_owned()],
+            subscriptions: vec![serial_topics::SERIAL_RX.to_owned()],
             outputs: vec![],
             context: json!({"id": "test", "name": "Test"}),
             plugin_root: None,
         };
 
-        let input = Event::new(
-            "transport.serial.default.rx",
-            "serial:COM2",
-            tool_core::Direction::Rx,
-            Payload::Text("hello".to_owned()),
-        );
-
-        let output =
-            crate::replay::run_replay_analyzer(source.to_owned(), config, &[input]).unwrap();
+        let output = run_replay(source, config, &[replay_rx_event("hello")]);
         // assert 失败会报 error，这里验证没有致命错误
         assert!(output.events.is_empty());
     }
@@ -1928,21 +1842,13 @@ end
             script_name: "test.lua".to_owned(),
             plugin_id: "test".to_owned(),
             plugin_version: "1.0.0".to_owned(),
-            subscriptions: vec!["transport.serial.default.rx".to_owned()],
+            subscriptions: vec![serial_topics::SERIAL_RX.to_owned()],
             outputs: vec![],
             context: json!({"id": "test", "name": "Test"}),
             plugin_root: None,
         };
 
-        let input = Event::new(
-            "transport.serial.default.rx",
-            "serial:COM2",
-            tool_core::Direction::Rx,
-            Payload::Text("hello".to_owned()),
-        );
-
-        let output =
-            crate::replay::run_replay_analyzer(source.to_owned(), config, &[input]).unwrap();
+        let output = run_replay(source, config, &[replay_rx_event("hello")]);
         assert!(output.events.is_empty());
     }
 
@@ -1962,25 +1868,16 @@ end
             script_name: "test.lua".to_owned(),
             plugin_id: "demo.plugin".to_owned(),
             plugin_version: "2.0.0".to_owned(),
-            subscriptions: vec!["transport.serial.default.rx".to_owned()],
+            subscriptions: vec![serial_topics::SERIAL_RX.to_owned()],
             outputs: vec![],
             context: json!({"id": "demo.plugin", "name": "Demo", "version": "2.0.0"}),
             plugin_root: None,
         };
 
-        let input = Event::new(
-            "transport.serial.default.rx",
-            "serial:COM2",
-            tool_core::Direction::Rx,
-            Payload::Text("test".to_owned()),
-        );
+        // 输入事件留在手里：下面还要用它的 timestamp_ms 作比对
+        let input = replay_rx_event("test");
 
-        let output = crate::replay::run_replay_analyzer(
-            source.to_owned(),
-            config,
-            std::slice::from_ref(&input),
-        )
-        .unwrap();
+        let output = run_replay(source, config, std::slice::from_ref(&input));
         assert_eq!(output.events.len(), 1);
 
         let derived = &output.events[0];
@@ -2020,28 +1917,15 @@ end
             script_name: "lifecycle.lua".to_owned(),
             plugin_id: "test.lifecycle".to_owned(),
             plugin_version: "1.0.0".to_owned(),
-            subscriptions: vec!["transport.serial.default.rx".to_owned()],
+            subscriptions: vec![serial_topics::SERIAL_RX.to_owned()],
             outputs: vec![],
             context: json!({"id": "test.lifecycle", "name": "Lifecycle"}),
             plugin_root: None,
         };
 
-        let input1 = Event::new(
-            "transport.serial.default.rx",
-            "serial:COM2",
-            tool_core::Direction::Rx,
-            Payload::Text("a".to_owned()),
-        );
-        let input2 = Event::new(
-            "transport.serial.default.rx",
-            "serial:COM2",
-            tool_core::Direction::Rx,
-            Payload::Text("b".to_owned()),
-        );
+        let inputs = [replay_rx_event("a"), replay_rx_event("b")];
 
-        let output =
-            crate::replay::run_replay_analyzer(source.to_owned(), config, &[input1, input2])
-                .unwrap();
+        let output = run_replay(source, config, &inputs);
 
         // 应该有 2 个 event 阶段 + 1 个 end 阶段 = 3 个 emit
         assert_eq!(output.events.len(), 3);
@@ -2068,28 +1952,21 @@ function on_replay_end() end
             script_name: "skip.lua".to_owned(),
             plugin_id: "test.skip".to_owned(),
             plugin_version: "1.0.0".to_owned(),
-            subscriptions: vec!["transport.serial.default.rx".to_owned()],
+            subscriptions: vec![serial_topics::SERIAL_RX.to_owned()],
             outputs: vec![],
             context: json!({"id": "test.skip", "name": "Skip"}),
             plugin_root: None,
         };
 
         // 只有 1 个匹配的 RX 事件，另 1 个是 TX
-        let rx = Event::new(
-            "transport.serial.default.rx",
-            "serial:COM2",
-            tool_core::Direction::Rx,
-            Payload::Text("rx".to_owned()),
-        );
         let tx = Event::new(
-            "transport.serial.default.tx",
+            serial_topics::SERIAL_TX,
             "serial:COM2",
             tool_core::Direction::Tx,
             Payload::Text("tx".to_owned()),
         );
 
-        let output =
-            crate::replay::run_replay_analyzer(source.to_owned(), config, &[rx, tx]).unwrap();
+        let output = run_replay(source, config, &[replay_rx_event("rx"), tx]);
         assert_eq!(
             output.events.len(),
             1,
@@ -2099,11 +1976,8 @@ function on_replay_end() end
 
     #[test]
     fn sandbox_package_preload_is_read_only() {
-        let bus = DataBus::new();
-        let transport = TransportManager::new(bus.clone());
-
         // 尝试写入 package.preload 应该被 metatable 拦截
-        let result = run_script_for_test(
+        let result = run_in_scratch_vm(
             r#"
 local ok, err = pcall(function()
     package.preload.evil = function() return "pwned" end
@@ -2111,18 +1985,14 @@ end)
 assert(not ok, "package.preload must be read-only, got success")
 assert(err ~= nil, "expected error message")
 "#,
-            bus,
-            transport,
         );
         assert!(result.is_ok(), "sandbox test should pass: {result:?}");
     }
 
     #[test]
     fn sandbox_base_file_loaders_are_absent() {
-        let bus = DataBus::new();
-        let transport = TransportManager::new(bus.clone());
         // 断言"全局不存在"，不是"调用报错了"：后者在文件缺失时与被禁不可区分。
-        let result = run_script_for_test(
+        let result = run_in_scratch_vm(
             r#"
 assert(dofile == nil, "dofile must be nil, got " .. type(dofile))
 assert(loadfile == nil, "loadfile must be nil, got " .. type(loadfile))
@@ -2131,19 +2001,15 @@ assert(load == nil, "load must be nil, got " .. type(load))
 assert(type(pcall) == "function", "pcall must survive")
 assert(type(assert) == "function", "assert must survive")
 "#,
-            bus,
-            transport,
         );
         assert!(result.is_ok(), "沙箱基线断言失败：{result:?}");
     }
 
     #[test]
     fn sandbox_cannot_require_os_or_io() {
-        let bus = DataBus::new();
-        let transport = TransportManager::new(bus.clone());
         // PACKAGE 在沙箱构造点（sandbox_lua）上是启用的（插件要 require("hw.codec")），
         // 所以 require 是真实逃逸面。
-        let result = run_script_for_test(
+        let result = run_in_scratch_vm(
             r#"
 -- 真风险不在"require 报不报错"上：require 只有在标准库被装进 package.loaded 之后才可能拿到
 -- 活模块，那是 stdlib 位集的**后果**，不是沙箱边界本身。原来的写法把后果当判据：抹掉
@@ -2177,18 +2043,14 @@ assert(package.searchpath == nil,
 assert(pcall(require, "hw.codec") == true,
     "require('hw.codec') must still resolve from the preload searcher")
 "#,
-            bus,
-            transport,
         );
         assert!(result.is_ok(), "require 逃逸用例失败：{result:?}");
     }
 
     #[test]
     fn sandbox_cannot_rebind_globals_to_escape_harden() {
-        let bus = DataBus::new();
-        let transport = TransportManager::new(bus.clone());
         // load(string) 被抹掉后，插件不得还有办法从字符串造 chunk。
-        let result = run_script_for_test(
+        let result = run_in_scratch_vm(
             r#"
 assert(load == nil, "load must be nil, got " .. type(load))
 assert(loadfile == nil, "loadfile must be nil, got " .. type(loadfile))
@@ -2198,8 +2060,6 @@ assert(dofile == nil, "dofile must be nil, got " .. type(dofile))
 -- load 那一行 —— 5.4 里从字符串造 chunk 的入口只剩 load，没有别的拼法可查。
 assert(package.loadlib == nil or pcall(package.loadlib, "x.so", "y") == false)
 "#,
-            bus,
-            transport,
         );
         assert!(result.is_ok(), "字符串→chunk 逃逸未被挡住：{result:?}");
     }
@@ -2236,7 +2096,7 @@ function on_replay_end() end
             script_name: "harden_probe.lua".to_owned(),
             plugin_id: "test.harden".to_owned(),
             plugin_version: "1.0.0".to_owned(),
-            subscriptions: vec!["transport.serial.default.rx".to_owned()],
+            subscriptions: vec![serial_topics::SERIAL_RX.to_owned()],
             outputs: vec![],
             context: json!({"id": "test.harden", "name": "Harden"}),
             plugin_root: None,
@@ -2272,16 +2132,7 @@ function on_replay_end() end
         let bus = DataBus::new();
         let system_logs = bus.subscribe(TopicFilter::exact(topics::LOG_SYSTEM));
         let transport = TransportManager::new(bus.clone());
-        let host_services = LuaHostServices {
-            plugin_root: None,
-            plugin_id: "sandbox-probe".to_owned(),
-            dialog_sender: None,
-            file_broker: None,
-            stop_flag: None,
-            line_buffers: None,
-            config_store: None,
-            declared_panel_ids: Default::default(),
-        };
+        let host_services = test_host_services("sandbox-probe");
 
         let runtime = run_plugin(
             r#"

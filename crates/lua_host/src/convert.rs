@@ -106,22 +106,22 @@ pub(crate) fn lua_value_to_payload(value: Value) -> mlua::Result<Payload> {
 /// Convert the VM-native value only at the Lua adapter boundary. Nothing
 /// beyond this module needs to know about `mlua::Value`.
 pub(crate) fn lua_value_to_plugin_value(value: Value) -> mlua::Result<PluginValue> {
-    Ok(match value {
-        Value::Nil => PluginValue::Null,
-        Value::Boolean(value) => PluginValue::Bool(value),
-        Value::Integer(value) => PluginValue::Integer(value),
-        Value::Number(value) => PluginValue::Number(value),
-        Value::String(value) => PluginValue::String(value.to_str()?.to_owned()),
-        Value::Table(value) => lua_table_to_plugin_value(value)?,
-        other => {
-            return Err(mlua::Error::RuntimeError(format!(
-                "unsupported value: {}",
-                other.type_name()
-            )));
-        }
-    })
+    match value {
+        Value::Nil => Ok(PluginValue::Null),
+        Value::Boolean(value) => Ok(PluginValue::Bool(value)),
+        Value::Integer(value) => Ok(PluginValue::Integer(value)),
+        Value::Number(value) => Ok(PluginValue::Number(value)),
+        Value::String(value) => Ok(PluginValue::String(value.to_str()?.to_owned())),
+        Value::Table(value) => lua_table_to_plugin_value(value),
+        other => Err(mlua::Error::RuntimeError(format!(
+            "unsupported value: {}",
+            other.type_name()
+        ))),
+    }
 }
 
+/// 数组表 / 对象表的判定（插件可见契约）：所有键都是正整数且铺满 `1..=max_index`
+/// （空表也算）时转成数组，否则转成对象，键由 [`lua_key_to_string`] 字符串化。
 pub(crate) fn lua_table_to_plugin_value(table: Table) -> mlua::Result<PluginValue> {
     let mut entries = Vec::new();
     let mut is_array = true;
@@ -134,15 +134,15 @@ pub(crate) fn lua_table_to_plugin_value(table: Table) -> mlua::Result<PluginValu
             && index > 0
         {
             max_index = max_index.max(index);
-            entries.push((key, lua_value_to_plugin_value(value)?));
-            continue;
+        } else {
+            is_array = false;
         }
 
-        is_array = false;
         entries.push((key, lua_value_to_plugin_value(value)?));
     }
 
     if is_array && max_index as usize == entries.len() {
+        // `pairs()` 的遍历顺序不保证，数组表必须按整数键排序后再取值。
         entries.sort_by_key(|(key, _)| match key {
             Value::Integer(index) => *index,
             _ => 0,
@@ -173,17 +173,15 @@ pub(crate) fn lua_value_to_json(value: Value) -> mlua::Result<serde_json::Value>
 // ── Helpers ──
 
 pub(crate) fn lua_key_to_string(key: Value) -> mlua::Result<String> {
-    Ok(match key {
-        Value::String(value) => value.to_str()?.to_owned(),
-        Value::Integer(value) => value.to_string(),
-        Value::Number(value) => value.to_string(),
-        other => {
-            return Err(mlua::Error::RuntimeError(format!(
-                "unsupported key: {}",
-                other.type_name()
-            )));
-        }
-    })
+    match key {
+        Value::String(value) => Ok(value.to_str()?.to_owned()),
+        Value::Integer(value) => Ok(value.to_string()),
+        Value::Number(value) => Ok(value.to_string()),
+        other => Err(mlua::Error::RuntimeError(format!(
+            "unsupported key: {}",
+            other.type_name()
+        ))),
+    }
 }
 
 pub(crate) fn number_to_json(value: f64) -> mlua::Result<serde_json::Value> {
