@@ -29,8 +29,11 @@ fn create_codec_table(lua: &Lua, (): ()) -> mlua::Result<Value> {
         "from_hex",
         lua.create_function(|lua, hex: mlua::String| {
             let hex_str = hex.to_str()?;
-            // 与 tool_transport::parse_hex 的 normalize_hex_token 保持一致：
+            // 与 `tool_core::parse_hex` 的 `normalize_hex_token` 保持一致（Task 6 起，
+            // HEX 判定的唯一真相在 tool-core，transport 与 web 都调它）：
             // 去除 0x/0X 前缀、删除 _/- 分隔符、过滤空白，使两端对 0xFF/AA_BB 等输入行为一致。
+            // 刻意不一致的一处：本函数面向 Lua，要求偶数长度并直接报错，
+            // 而 `parse_hex` 的宽松模式会给奇数长 token 左补 0——见 `#25` 一致性用例。
             let hex_clean: String = hex_str
                 .trim()
                 .trim_start_matches("0x")
@@ -258,6 +261,9 @@ mod tests {
             .load("local c = require('hw.codec'); c.from_hex('ABC')")
             .exec();
         assert!(result.is_err());
+        // 唯一有意的分歧（见 `from_hex` 注释）：Rust 宽松模式给奇数长 token 左补 0 后放行，
+        // Lua 侧则直接报错。这里钉住的是「分歧」本身，不是漂移。
+        assert_eq!(tool_core::parse_hex("ABC").unwrap(), vec![0x0A, 0xBC]);
     }
 
     #[test]
@@ -269,13 +275,20 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── #25: from_hex 与 Rust parse_hex 归一化规则一致 ──
+    // ── #25: from_hex 与 Rust 侧唯一真相 `tool_core::parse_hex` 归一化规则一致 ──
+    //
+    // 一致性不能只靠注释：每条都在 Lua 断言之后，用**同一段输入**直接调 Rust 函数比对。
     #[test]
     fn from_hex_strips_0x_prefix() {
         let lua = setup();
         lua.load("local c = require('hw.codec'); assert(c.from_hex('0xFF') == '\\xFF')")
             .exec()
             .unwrap();
+        assert_eq!(
+            tool_core::parse_hex("0xFF").unwrap(),
+            vec![0xFF],
+            "归一化规则与 tool_core::parse_hex 分叉了"
+        );
     }
 
     #[test]
@@ -286,6 +299,11 @@ mod tests {
         )
         .exec()
         .unwrap();
+        assert_eq!(
+            tool_core::parse_hex("AA_BB-CC").unwrap(),
+            vec![0xAA, 0xBB, 0xCC],
+            "分隔符处理与 tool_core::parse_hex 分叉了"
+        );
     }
 
     #[test]

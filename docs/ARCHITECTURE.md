@@ -317,18 +317,26 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
    > ```
    - 主要原因：`tool-core`/`tool-platform` 的用法贯穿 wasm 与 native 两套 UI 代码，
      收敛需要 `tool-application` 先提供等价 DTO 与构造入口，属独立迭代，不是"打磨"。
-   - `tool-transport` 在 `crates/app` 的生产引用共 **5 处**（早期估为 2 处，已按实测更正）：
+   - `tool-transport` 在 `crates/app` 的生产引用共 **2 处**（曾为 5 处：3 处 HEX 直连已随
+     「HEX 判定下沉 `tool-core`」收敛，见下）：
      | 位置 | 用途 | 备注 |
      |---|---|---|
      | `app/src/commands.rs:312` | `tool_transport::natural_sort_key(&port.port_name)` | 端口自然排序 |
      | `app/src/app/mod.rs:15` | `use tool_transport::RepaintWaker;`（用于 `Arc<dyn RepaintWaker>`） | 重绘唤醒器 |
-     | `app/src/ui/bottom_panel.rs:617` | `tool_transport::parse_hex(input_trim)`（HEX 输入实时校验） | 生产调用 |
-     | `app/src/ui/bottom_panel.rs:707` | `tool_transport::parse_hex(...)` | 生产调用 |
-     | `app/src/ui/bottom_panel.rs:694` | `hex_preview(&self.send.input)`（模块级 `use` 在 `:1104`） | 生产调用 |
+     | ~~`app/src/ui/bottom_panel.rs` `tool_transport::parse_hex` ×2~~ | 已改为 `Workbench::validate_hex` | 已收敛 |
+     | ~~`app/src/ui/bottom_panel.rs` `tool_transport::hex_preview`~~ | 已改为 `tool_core::hex_preview` | 已收敛 |
 
      **所需 application 能力（下一轮候选，本轮不做）**：re-export `RepaintWaker`、暴露 `event_bus()`
-     共享总线句柄、以及端口自然排序能力（`natural_sort_key` 或等价 DTO 排序）；
-     `parse_hex` / `hex_preview` 需等价的应用层入口，或保留 `tool-transport` 直连。
+     共享总线句柄、以及端口自然排序能力（`natural_sort_key` 或等价 DTO 排序）。
+   - **HEX 判定的残留重复（实测，刻意未收敛）**：判定的唯一真相已在 `tool_core::{parse_hex,
+     parse_hex_strict, hex_preview}`（native 与 wasm 共用），但仍有 3 处各自实现：
+     | 位置 | 为什么留 |
+     |---|---|
+     | `crates/panels/src/sender.rs:517` `hex_preview` | 与 `tool_core::hex_preview` **渲染不同**：空输入返回 `""` 而非 `"—"`、无 `|ASCII|` 列、无 32 字节截断、报错带具体原因。二者谁都不该被悄悄替换 —— 那会改变界面输出。 |
+     | `crates/panels/src/sender.rs:492` `hex_error` | 同上：它只判「能不能发」并渲染红色标签文案（`"HEX 中包含无效字符：{token}"`），文案本身是渲染结果。它是**校验器**而非解码器，不被 `grep parse_hex` 命中，容易被漏数。 |
+     | `crates/plugin_runtime/src/web_lua.rs:2508` `parse_hex` | wasm 插件 Lua API `ctx.serial.send_hex_to` 的后端，语义与 `tool_core::parse_hex` 不同（要求偶数长度、不认 `0x` 前缀），收敛即改动已发布文档（`docs/lua-plugin-api.md`）承诺的插件行为；且 `tool-plugin-runtime` 目前不依赖 `tool-core`，新增该边会改写 `Cargo.lock`（本轮约束为锁文件不变）。 |
+     另：`crates/lua_host/src/codec.rs` 的 `from_hex` 是**有意**独立的 Lua 侧解析器，其归一化规则与
+     `tool_core::parse_hex` 对齐，由该文件的 `#25` 用例用同一段输入双向比对钉住。
    - `tool-databus`：`app/mod.rs` 的 `DataBus::new()`、`bus.publish(..)` 与四个面板的 `::new(&bus)`；
      `web.rs`、`settings_panel.rs`、`perf.rs`、`web_perf.rs` 另有引用。
      所需 application 能力：一个返回共享总线句柄的 accessor（供 presentation 订阅），

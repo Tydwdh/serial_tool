@@ -2026,11 +2026,14 @@ impl WebApplication {
             }
             AppCommand::SendText { port, text } => self.send(port, text.into_bytes()),
             AppCommand::SendHex { port, hex, strict } => {
+                // 判定规则唯一真相在 `tool_core`，与 native 完全同一份函数：
+                // 此前这里是本文件的手抄副本，同一串输入两端判定相反。
                 let bytes = if strict {
-                    parse_hex_strict(&hex)?
+                    tool_core::parse_hex_strict(&hex)
                 } else {
-                    parse_hex(&hex)?
-                };
+                    tool_core::parse_hex(&hex)
+                }
+                .map_err(|error| format!("HEX 解析失败：{error}"))?;
                 self.send(port, bytes)
             }
             AppCommand::SendRaw { port, bytes } => self.send(port, bytes),
@@ -2072,6 +2075,18 @@ impl WebApplication {
                 Err("浏览器插件通过导入或插件市场加载".to_owned())
             }
         }
+    }
+
+    /// presentation 只做输入校验，规则与真正发送时完全一致：与 native 共用
+    /// `tool_core` 里唯一的 HEX 判定（本 crate 的 wasm 侧错误类型是 `String`，
+    /// 因为 `AppError` 整体受 `cfg(not(target_arch = "wasm32"))` 门控）。
+    pub fn validate_hex(&self, hex: &str, strict: bool) -> Result<Vec<u8>, String> {
+        let parsed = if strict {
+            tool_core::parse_hex_strict(hex)
+        } else {
+            tool_core::parse_hex(hex)
+        };
+        parsed.map_err(|error| format!("HEX 解析失败：{error}"))
     }
 
     fn send(&self, port: PortId, bytes: Vec<u8>) -> Result<CommandOutcome, String> {
@@ -2287,69 +2302,11 @@ fn should_record_event(event: &Event, mode: tool_recorder::RecordMode) -> bool {
     }
 }
 
-fn parse_hex(input: &str) -> Result<Vec<u8>, String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return Err("HEX 输入为空".to_owned());
-    }
-    let tokens = trimmed
-        .split(|ch: char| ch.is_ascii_whitespace() || ch == ',' || ch == ';')
-        .filter(|token| !token.is_empty());
-    let mut bytes = Vec::new();
-    for token in tokens {
-        let mut token = token
-            .strip_prefix("0x")
-            .or_else(|| token.strip_prefix("0X"))
-            .unwrap_or(token)
-            .chars()
-            .filter(|ch| *ch != '_' && *ch != '-')
-            .collect::<String>();
-        if token.is_empty() {
-            return Err("HEX token 为空".to_owned());
-        }
-        if token.len() > 2 && !token.len().is_multiple_of(2) {
-            token.insert(0, '0');
-        }
-        if token.len() <= 2 {
-            let value = if token.len() == 1 {
-                format!("0{token}")
-            } else {
-                token
-            };
-            bytes.push(u8::from_str_radix(&value, 16).map_err(|_| format!("无效 HEX：{value}"))?);
-        } else {
-            for pair in token.as_bytes().chunks(2) {
-                let value = std::str::from_utf8(pair).unwrap_or_default();
-                bytes
-                    .push(u8::from_str_radix(value, 16).map_err(|_| format!("无效 HEX：{value}"))?);
-            }
-        }
-    }
-    if bytes.is_empty() {
-        return Err("HEX 输入为空".to_owned());
-    }
-    Ok(bytes)
-}
-
-fn parse_hex_strict(input: &str) -> Result<Vec<u8>, String> {
-    for token in input
-        .trim()
-        .split(|ch: char| ch.is_ascii_whitespace() || ch == ',' || ch == ';')
-        .filter(|token| !token.is_empty())
-    {
-        let normalized = token
-            .strip_prefix("0x")
-            .or_else(|| token.strip_prefix("0X"))
-            .unwrap_or(token)
-            .chars()
-            .filter(|ch| *ch != '_' && *ch != '-')
-            .collect::<String>();
-        if normalized.len() != 2 || !normalized.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(format!("无效 HEX：{token}"));
-        }
-    }
-    parse_hex(input)
-}
+// 这里曾有 `parse_hex` / `parse_hex_strict` 两份手抄副本：它们只剥一层 `0x` 前缀，
+// 且严格模式仅按空白分词，于是 `"0x0xAB"`、`"0A,BB"` 这类输入在 web 被判非法、
+// 在 native 被判合法。判定规则的唯一真相现在在 `tool_core::{parse_hex, parse_hex_strict}`，
+// 由 `WebApplication::validate_hex`（presentation 预检）与本文件的 `dispatch`
+// （真正发送）共同调用，native 走的是同一对函数。
 
 fn wake_handle(handle: &Rc<RefCell<Option<RepaintWaker>>>) {
     let waker = handle.borrow().clone();

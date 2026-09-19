@@ -611,13 +611,15 @@ impl WorkbenchApp {
 
     /// 发送 + 清空 按钮
     fn render_send_and_clear_buttons(&mut self, ui: &mut egui::Ui, send_port_open: bool) {
-        // HEX 模式下实时检查输入是否可解析（严格模式 vs 宽松模式）。
+        // HEX 模式下实时检查输入是否可解析。判定与真正发送时同源（`Workbench::validate_hex`
+        // → `tool_core`），不再由 presentation 自己调 transport 解析。
+        // 语义与迁移前一致：这里按宽松模式预检，严格模式的拒绝仍由 dispatch 在点击后报出。
         let input_trim = self.send.input.trim();
         let hex_error = if self.send.hex_mode && !input_trim.is_empty() {
-            match tool_transport::parse_hex(input_trim) {
-                Ok(_) => None,
-                Err(e) => Some(e.to_string()),
-            }
+            self.workbench
+                .validate_hex(input_trim, false)
+                .err()
+                .map(|error| error.to_string())
         } else {
             None
         };
@@ -629,7 +631,8 @@ impl WorkbenchApp {
             })
             .inner;
         if let Some(ref err) = hex_error {
-            send_btn = send_btn.on_disabled_hover_text(format!("HEX 解析失败: {err}"));
+            // `validate_hex` 已带「HEX 解析失败：」文案，与点击发送后红字标签同源同文。
+            send_btn = send_btn.on_disabled_hover_text(err.clone());
         }
         if send_btn.clicked() {
             self.do_send();
@@ -704,9 +707,10 @@ impl WorkbenchApp {
                     .small(),
             )
             .on_hover_text(if is_err {
-                match tool_transport::parse_hex(self.send.input.trim()) {
+                // 预览报错与发送/按钮预检同一判定：`Workbench::validate_hex` → `tool_core`。
+                match self.workbench.validate_hex(self.send.input.trim(), false) {
                     Ok(_) => String::new(),
-                    Err(e) => format!("HEX 解析失败: {e}"),
+                    Err(error) => error.to_string(),
                 }
             } else {
                 String::new()
@@ -1101,7 +1105,7 @@ impl WorkbenchApp {
     }
 }
 
-use tool_transport::hex_preview;
+use tool_core::hex_preview;
 
 #[cfg(test)]
 mod tests {

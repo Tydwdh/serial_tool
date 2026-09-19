@@ -945,7 +945,10 @@ impl TransportManager {
     }
 
     pub fn send_hex_to(&self, port_name: &str, input: &str) -> TransportResult<()> {
-        self.send_to(port_name, parse_hex(input)?)
+        // HEX 判定唯一真相在 `tool_core`（native/wasm 共用）；这里只把它返回的裸文案
+        // 重建成本 crate 的错误变体，`translate_error` 的中文提示不变。
+        let bytes = tool_core::parse_hex(input).map_err(TransportError::InvalidHex)?;
+        self.send_to(port_name, bytes)
     }
 
     // ── 状态 ──
@@ -1325,104 +1328,9 @@ fn execute_virtual_command(bus: &DataBus, source: &str, command: SerialCommand) 
     }
 }
 
-// ── parse_hex 等辅助函数不变 ──
-
-pub fn parse_hex(input: &str) -> TransportResult<Vec<u8>> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return Err(TransportError::InvalidHex("empty input".to_owned()));
-    }
-
-    let tokens: Vec<&str> = trimmed
-        .split(|ch: char| ch.is_ascii_whitespace() || ch == ',' || ch == ';')
-        .filter(|token| !token.is_empty())
-        .collect();
-
-    // 单 token 与多 token 走同一个 parse_hex_token，保证分块/补0规则一致。
-    let mut out = Vec::new();
-    for token in &tokens {
-        out.extend(parse_hex_token(token)?);
-    }
-    Ok(out)
-}
-
-/// Parse HEX without the compatibility padding rules used by [`parse_hex`].
-///
-/// The strictness choice belongs to the Application command, so both Native
-/// and Web can validate the same input before the backend sends it.
-pub fn parse_hex_strict(input: &str) -> TransportResult<Vec<u8>> {
-    parse_hex_strict_line(input)
-}
-
-/// 解析单个 HEX token，返回其对应的字节。
-///
-/// 规则（单 token 与多 token 一致）：
-/// - 去除 `0x`/`0X` 前缀，删除 `_`/`-` 分隔符。
-/// - 长度 ≤ 2：直接解析为单字节（单 nibble 如 `"A"` 自动左补 0 → `0x0A`）。
-/// - 长度 > 2 且为奇数：左补一个 `0` 再按每 2 字符分块。
-/// - 长度 > 2 且为偶数：直接按每 2 字符分块。
-fn parse_hex_token(token: &str) -> TransportResult<Vec<u8>> {
-    let mut token = normalize_hex_token(token);
-    if token.is_empty() {
-        return Err(TransportError::InvalidHex("empty token".to_owned()));
-    }
-    if token.len() > 2 && !token.len().is_multiple_of(2) {
-        token.insert(0, '0');
-    }
-    if token.len() <= 2 {
-        Ok(vec![parse_byte(&token)?])
-    } else {
-        token
-            .as_bytes()
-            .chunks(2)
-            .map(|chunk| parse_byte(std::str::from_utf8(chunk).unwrap_or_default()))
-            .collect()
-    }
-}
-
-/// 严格模式解析整行 HEX：每个 token normalize 后长度必须恰为 2（拒绝单 nibble
-/// 自动补0，与 hover 提示"严格模式：奇数 HEX 长度报错而非自动补0"一致）。
-/// 逐 token 校验，确保 `"0xA 0xB"` 这类单 nibble 输入报错而非静默补0。
-fn parse_hex_strict_line(line: &str) -> TransportResult<Vec<u8>> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return Err(TransportError::InvalidHex("empty input".to_owned()));
-    }
-    let tokens: Vec<&str> = trimmed
-        .split(|ch: char| ch.is_ascii_whitespace() || ch == ',' || ch == ';')
-        .filter(|token| !token.is_empty())
-        .collect();
-    let mut out = Vec::new();
-    for token in &tokens {
-        let normalized = normalize_hex_token(token);
-        if normalized.is_empty() {
-            return Err(TransportError::InvalidHex(format!(
-                "严格模式: 空 token \"{token}\""
-            )));
-        }
-        if normalized.len() != 2 {
-            return Err(TransportError::InvalidHex(format!(
-                "严格模式: \"{token}\" 规范化后为 {nib} 个字符，必须恰为 2（偶数 hex 长度），请补0或关闭严格模式",
-                nib = normalized.len()
-            )));
-        }
-        out.push(parse_byte(&normalized)?);
-    }
-    Ok(out)
-}
-
-fn normalize_hex_token(token: &str) -> String {
-    token
-        .trim()
-        .trim_start_matches("0x")
-        .trim_start_matches("0X")
-        .replace(['_', '-'], "")
-}
-
-fn parse_byte(token: &str) -> TransportResult<u8> {
-    u8::from_str_radix(token, 16)
-        .map_err(|_| TransportError::InvalidHex(format!("'{token}' is not hex")))
-}
+// HEX 解析（含 `0x` 前缀、`_`/`-` 分隔符、补 0 与严格模式规则）已下沉到
+// `tool_core::{parse_hex, parse_hex_strict}`：本 crate 只负责投递，不再持有判定规则。
+// 调用点用 `.map_err(TransportError::InvalidHex)` 把裸文案重建成本 crate 的错误变体。
 
 pub fn natural_sort_key(name: &str) -> (String, u64) {
     let prefix: String = name.chars().take_while(|c| !c.is_ascii_digit()).collect();
@@ -1464,49 +1372,8 @@ impl From<Parity> for sp::Parity {
 }
 
 // ── 发送辅助函数 ──
-
-/// HEX 预览：将输入解析为 HEX 字节并显示 ASCII 预览。
-pub fn hex_preview(input: &str) -> String {
-    if input.trim().is_empty() {
-        return "—".to_owned();
-    }
-    const MAX_PREVIEW: usize = 32;
-    match parse_hex(input) {
-        Ok(bytes) if !bytes.is_empty() => {
-            let count = bytes.len();
-            let ascii: String = bytes
-                .iter()
-                .take(MAX_PREVIEW)
-                .map(|&b| {
-                    if b.is_ascii_graphic() || b == b' ' {
-                        b as char
-                    } else {
-                        '.'
-                    }
-                })
-                .collect();
-            let hex = if count > MAX_PREVIEW {
-                format!(
-                    "{}… (共{count}B)",
-                    bytes[..MAX_PREVIEW]
-                        .iter()
-                        .map(|b| format!("{b:02X}"))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                )
-            } else {
-                bytes
-                    .iter()
-                    .map(|b| format!("{b:02X}"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            };
-            format!("{hex}  |{ascii}|")
-        }
-        Ok(_) => "空".to_owned(),
-        Err(_) => "解析失败".to_owned(),
-    }
-}
+//
+// HEX 预览已迁到 `tool_core::hex_preview`（同一份渲染规则，native 与 wasm 共用）。
 
 /// 向指定端口发送文本或 HEX 数据。
 pub fn send_impl_to(
@@ -1522,18 +1389,20 @@ pub fn send_impl_to(
     }
     if hex {
         // 事务性预校验：先解析所有行，任一行失败则不发送任何数据（避免部分发送）。
-        // 严格模式下额外要求每个 token normalize 后长度恰为 2（拒绝单 nibble 自动补0）。
+        // 判定规则在 `tool_core`（与 web 侧同一份）；这里按行调用，
+        // `parse_hex_strict` 即原 `parse_hex_strict_line`，对单行输入语义不变。
         let mut pending: Vec<Vec<u8>> = Vec::with_capacity(input.lines().count());
         for line in input.lines() {
             let x = line.trim();
             if x.is_empty() {
                 continue;
             }
-            pending.push(if hex_strict {
-                parse_hex_strict_line(x)?
+            let parsed = if hex_strict {
+                tool_core::parse_hex_strict(x)
             } else {
-                parse_hex(x)?
-            });
+                tool_core::parse_hex(x)
+            };
+            pending.push(parsed.map_err(TransportError::InvalidHex)?);
         }
         for bytes in pending {
             t.send_to(port, bytes)?;
@@ -1613,68 +1482,8 @@ fn serial_permission_message(detail: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn parses_spaced_hex() {
-        assert_eq!(parse_hex("01 0x02 ff").unwrap(), vec![1, 2, 255]);
-    }
-    #[test]
-    fn parses_compact_hex() {
-        assert_eq!(parse_hex("0102ff").unwrap(), vec![1, 2, 255]);
-    }
-    #[test]
-    fn pads_odd_length_compact_hex() {
-        assert_eq!(parse_hex("abc").unwrap(), vec![0x0a, 0xbc]);
-    }
-    #[test]
-    fn parses_single_hex_token() {
-        assert_eq!(parse_hex("FF").unwrap(), vec![255]);
-    }
-    #[test]
-    fn parses_spaced_single_digits() {
-        assert_eq!(parse_hex("1 2 3").unwrap(), vec![1, 2, 3]);
-    }
-
-    // ── #9: 单 token 与多 token 路径一致性 ──
-    #[test]
-    fn parse_hex_multitoken_long_token_chunks_like_single() {
-        // "0A0B0C 0D"（多 token，首段 len=6）应与 "0A0B0C0D"（单 token）结果一致。
-        assert_eq!(
-            parse_hex("0A0B0C 0D").unwrap(),
-            vec![0x0A, 0x0B, 0x0C, 0x0D]
-        );
-        assert_eq!(parse_hex("0A0B0C0D").unwrap(), vec![0x0A, 0x0B, 0x0C, 0x0D]);
-    }
-
-    #[test]
-    fn parse_hex_multitoken_odd_long_token_pads_left() {
-        // 多 token 中含奇数长度长 token（"abc 01"）应左补0，与单 token "abc" 一致。
-        assert_eq!(parse_hex("abc 01").unwrap(), vec![0x0A, 0xBC, 0x01]);
-        assert_eq!(parse_hex("abc").unwrap(), vec![0x0A, 0xBC]);
-    }
-
-    // ── #23: 严格模式逐 token 校验，拒绝单 nibble ──
-    #[test]
-    fn parse_hex_strict_rejects_single_nibble_token() {
-        // "0xA 0xB" 在旧实现中通过（compact 长度偶数），严格模式应拒绝单 nibble。
-        assert!(parse_hex_strict_line("0xA 0xB").is_err());
-        assert!(parse_hex_strict_line("A B").is_err());
-    }
-
-    #[test]
-    fn parse_hex_strict_accepts_even_tokens() {
-        assert_eq!(
-            parse_hex_strict_line("0A 0B 0C").unwrap(),
-            vec![0x0A, 0x0B, 0x0C]
-        );
-        assert_eq!(parse_hex_strict_line("0xFF").unwrap(), vec![0xFF]);
-        assert_eq!(parse_hex_strict("0A 0B").unwrap(), vec![0x0A, 0x0B]);
-    }
-
-    #[test]
-    fn parse_hex_strict_rejects_odd_long_token() {
-        // 三字符 token "ABC" 严格模式应报错（不能自动补0）。
-        assert!(parse_hex_strict_line("ABC").is_err());
-    }
+    // HEX 解析用例（原 `parses_spaced_hex` … `parse_hex_strict_rejects_odd_long_token`，共 10 条）
+    // 随函数一并迁入 `crates/core/src/lib.rs` 的 `mod tests`，断言逐字未改。
 
     // ── #8: translate_error 按变体分发 ──
     #[test]
@@ -2100,14 +1909,21 @@ mod transport_tests {
         assert!(tm.open_ports().is_empty());
     }
 
+    // `parse_hex_rejects_empty` / `parse_hex_rejects_invalid_chars` 随函数一并迁入
+    // `crates/core/src/lib.rs`（断言逐字未改）。这里改为钉住迁移后 transport 仍然负责的
+    // 那一环：裸文案必须重建为 `TransportError::InvalidHex`，否则 `translate_error`
+    // 的中文提示会退化成未知错误。
     #[test]
-    fn parse_hex_rejects_empty() {
-        assert!(parse_hex("").is_err());
-    }
-
-    #[test]
-    fn parse_hex_rejects_invalid_chars() {
-        assert!(parse_hex("gg").is_err());
+    fn send_hex_to_maps_core_parse_error() {
+        let bus = DataBus::new();
+        let tm = TransportManager::new(bus);
+        let error = tm
+            .send_hex_to("NO-SUCH-PORT", "gg")
+            .expect_err("非 HEX 字符必须在投递前被拒绝");
+        assert!(
+            matches!(&error, TransportError::InvalidHex(message) if message == "'gg' is not hex"),
+            "transport 必须把 tool_core 的裸文案包进 InvalidHex，实际: {error:?}"
+        );
     }
 
     #[test]

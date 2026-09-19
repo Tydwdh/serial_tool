@@ -362,60 +362,16 @@ fn select_web_port_state(serial: &mut WebSerialState, selected: Option<PortId>) 
     }
 }
 
-fn web_hex_error(input: &str, strict: bool) -> Option<String> {
-    if strict {
-        for token in input.split_whitespace() {
-            let token = token
-                .strip_prefix("0x")
-                .or_else(|| token.strip_prefix("0X"))
-                .unwrap_or(token);
-            if token.len() != 2 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                return Some(format!("无效 HEX：{token}"));
-            }
-        }
-    }
-    web_parse_hex(input)
-        .err()
-        .map(|error| format!("HEX 解析失败：{error}"))
-}
-
-fn web_parse_hex(input: &str) -> Result<(), String> {
-    let tokens = input
-        .trim()
-        .split(|ch: char| ch.is_ascii_whitespace() || ch == ',' || ch == ';')
-        .filter(|token| !token.is_empty());
-    let mut found = false;
-    for token in tokens {
-        found = true;
-        let mut token = token
-            .strip_prefix("0x")
-            .or_else(|| token.strip_prefix("0X"))
-            .unwrap_or(token)
-            .chars()
-            .filter(|ch| *ch != '_' && *ch != '-')
-            .collect::<String>();
-        if token.is_empty() {
-            return Err("空 HEX token".to_owned());
-        }
-        if token.len() > 2 && !token.len().is_multiple_of(2) {
-            token.insert(0, '0');
-        }
-        if token.len() <= 2 {
-            if !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                return Err(format!("无效 HEX：{token}"));
-            }
-        } else {
-            for pair in token.as_bytes().chunks(2) {
-                if pair.len() != 2 || !pair.iter().all(|byte| byte.is_ascii_hexdigit()) {
-                    return Err(format!("无效 HEX：{token}"));
-                }
-            }
-        }
-    }
-    if found {
-        Ok(())
-    } else {
-        Err("输入为空".to_owned())
+/// wasm 侧的 HEX 预检：判定与真正发送时**同源**——`WebApplication::validate_hex` 调的
+/// 就是 native `dispatch` 用的 `tool_core::{parse_hex, parse_hex_strict}`。
+///
+/// 这里原本是本文件手抄的第三份判定：它的严格分支只按空白分词、既不认 `,`/`;` 分隔，
+/// 也只剥一层 `0x` 前缀，于是 `"0A,BB"`、`"0x0xAB"` 一类输入在 web 被拒、在 native 放行。
+/// 收敛后 web 与 native 判定完全一致（即 web 在这几例上变得更宽松）。
+fn web_hex_error(runtime: Option<&WebRuntime>, input: &str, strict: bool) -> Option<String> {
+    match runtime {
+        Some(runtime) => runtime.validate_hex(input, strict).err(),
+        None => Some("当前浏览器不支持 Web Serial".to_owned()),
     }
 }
 
@@ -3290,7 +3246,8 @@ impl WorkbenchApp {
                 return;
             }
             if serial.tx_hex {
-                if let Some(error) = web_hex_error(&input, serial.hex_strict) {
+                if let Some(error) = web_hex_error(self.runtime.as_ref(), &input, serial.hex_strict)
+                {
                     serial.send_error = Some(error);
                     return;
                 }

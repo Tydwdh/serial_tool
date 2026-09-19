@@ -424,12 +424,13 @@ impl Workbench {
                 self.send_transport_bytes(port.to_string(), bytes)
             }
             AppCommand::SendHex { port, hex, strict } => {
+                // HEX 判定唯一真相在 `tool_core`（wasm 侧共用同一份），transport 只管投递。
                 let bytes = if strict {
-                    tool_transport::parse_hex_strict(&hex)
+                    tool_core::parse_hex_strict(&hex)
                 } else {
-                    tool_transport::parse_hex(&hex)
+                    tool_core::parse_hex(&hex)
                 }
-                .map_err(|error| AppError::Transport(error.to_string()))?;
+                .map_err(|error| AppError::Transport(format!("HEX 解析失败：{error}")))?;
                 self.send_transport_bytes(port.to_string(), bytes)
             }
             AppCommand::SendRaw { port, bytes } => {
@@ -1055,6 +1056,17 @@ impl Workbench {
                 _ => SerialParity::None,
             },
         }
+    }
+
+    /// presentation 只做输入校验，规则与真正发送时完全一致：两者共用 `tool_core`
+    /// 里唯一的 HEX 判定，所以「按钮亮起但 dispatch 报错」不再有第二个判定来源。
+    pub fn validate_hex(&self, hex: &str, strict: bool) -> Result<Vec<u8>, AppError> {
+        let parsed = if strict {
+            tool_core::parse_hex_strict(hex)
+        } else {
+            tool_core::parse_hex(hex)
+        };
+        parsed.map_err(|error| AppError::Transport(format!("HEX 解析失败：{error}")))
     }
 
     fn is_network_port(&self, port_name: &str) -> bool {

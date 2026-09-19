@@ -449,6 +449,155 @@ pub fn topic_matches(pattern: &str, topic: &str) -> bool {
     }
 }
 
+// ── HEX 解析与预览：native 与 wasm 共用的唯一判定 ──
+//
+// 原先 `tool-transport` 与 `tool-application` 的 wasm 侧各有一份手抄实现，判定实际已经
+// 分叉到「同一串 HEX 在 native 合法、在 web 非法」。`tool-core` 是两端都无条件依赖的
+// crate，规则收到这里之后：transport 只管投递、application 只管路由、presentation 只管
+// 校验，四方共用同一个判定函数。
+//
+// 错误值刻意只带裸文案（`"empty input"`、`"'ZZ' is not hex"`、`"严格模式: …"`）：
+// `tool-transport` 用它重建 `TransportError::InvalidHex`，`translate_error` 的中文文案不变。
+
+/// 宽松模式解析 HEX：接受 `0x`/`0X` 前缀、`_`/`-` 分隔符、空白/`,`/`;` 分词，
+/// 并按兼容规则给奇数长度的长 token 左补 `0`。
+pub fn parse_hex(input: &str) -> Result<Vec<u8>, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("empty input".to_owned());
+    }
+
+    let tokens: Vec<&str> = trimmed
+        .split(|ch: char| ch.is_ascii_whitespace() || ch == ',' || ch == ';')
+        .filter(|token| !token.is_empty())
+        .collect();
+
+    // 单 token 与多 token 走同一个 parse_hex_token，保证分块/补0规则一致。
+    let mut out = Vec::new();
+    for token in &tokens {
+        out.extend(parse_hex_token(token)?);
+    }
+    Ok(out)
+}
+
+/// Parse HEX without the compatibility padding rules used by [`parse_hex`].
+///
+/// The strictness choice belongs to the Application command, so both Native
+/// and Web can validate the same input before the backend sends it.
+pub fn parse_hex_strict(input: &str) -> Result<Vec<u8>, String> {
+    parse_hex_strict_line(input)
+}
+
+/// 解析单个 HEX token，返回其对应的字节。
+///
+/// 规则（单 token 与多 token 一致）：
+/// - 去除 `0x`/`0X` 前缀，删除 `_`/`-` 分隔符。
+/// - 长度 ≤ 2：直接解析为单字节（单 nibble 如 `"A"` 自动左补 0 → `0x0A`）。
+/// - 长度 > 2 且为奇数：左补一个 `0` 再按每 2 字符分块。
+/// - 长度 > 2 且为偶数：直接按每 2 字符分块。
+fn parse_hex_token(token: &str) -> Result<Vec<u8>, String> {
+    let mut token = normalize_hex_token(token);
+    if token.is_empty() {
+        return Err("empty token".to_owned());
+    }
+    if token.len() > 2 && !token.len().is_multiple_of(2) {
+        token.insert(0, '0');
+    }
+    if token.len() <= 2 {
+        Ok(vec![parse_byte(&token)?])
+    } else {
+        token
+            .as_bytes()
+            .chunks(2)
+            .map(|chunk| parse_byte(std::str::from_utf8(chunk).unwrap_or_default()))
+            .collect()
+    }
+}
+
+/// 严格模式解析整行 HEX：每个 token normalize 后长度必须恰为 2（拒绝单 nibble
+/// 自动补0，与 hover 提示"严格模式：奇数 HEX 长度报错而非自动补0"一致）。
+/// 逐 token 校验，确保 `"0xA 0xB"` 这类单 nibble 输入报错而非静默补0。
+fn parse_hex_strict_line(line: &str) -> Result<Vec<u8>, String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Err("empty input".to_owned());
+    }
+    let tokens: Vec<&str> = trimmed
+        .split(|ch: char| ch.is_ascii_whitespace() || ch == ',' || ch == ';')
+        .filter(|token| !token.is_empty())
+        .collect();
+    let mut out = Vec::new();
+    for token in &tokens {
+        let normalized = normalize_hex_token(token);
+        if normalized.is_empty() {
+            return Err(format!("严格模式: 空 token \"{token}\""));
+        }
+        if normalized.len() != 2 {
+            return Err(format!(
+                "严格模式: \"{token}\" 规范化后为 {nib} 个字符，必须恰为 2（偶数 hex 长度），请补0或关闭严格模式",
+                nib = normalized.len()
+            ));
+        }
+        out.push(parse_byte(&normalized)?);
+    }
+    Ok(out)
+}
+
+fn normalize_hex_token(token: &str) -> String {
+    token
+        .trim()
+        .trim_start_matches("0x")
+        .trim_start_matches("0X")
+        .replace(['_', '-'], "")
+}
+
+fn parse_byte(token: &str) -> Result<u8, String> {
+    u8::from_str_radix(token, 16).map_err(|_| format!("'{token}' is not hex"))
+}
+
+/// HEX 预览：将输入解析为 HEX 字节并显示 ASCII 预览。
+pub fn hex_preview(input: &str) -> String {
+    if input.trim().is_empty() {
+        return "—".to_owned();
+    }
+    const MAX_PREVIEW: usize = 32;
+    match parse_hex(input) {
+        Ok(bytes) if !bytes.is_empty() => {
+            let count = bytes.len();
+            let ascii: String = bytes
+                .iter()
+                .take(MAX_PREVIEW)
+                .map(|&b| {
+                    if b.is_ascii_graphic() || b == b' ' {
+                        b as char
+                    } else {
+                        '.'
+                    }
+                })
+                .collect();
+            let hex = if count > MAX_PREVIEW {
+                format!(
+                    "{}… (共{count}B)",
+                    bytes[..MAX_PREVIEW]
+                        .iter()
+                        .map(|b| format!("{b:02X}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            } else {
+                bytes
+                    .iter()
+                    .map(|b| format!("{b:02X}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            format!("{hex}  |{ascii}|")
+        }
+        Ok(_) => "空".to_owned(),
+        Err(_) => "解析失败".to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,5 +724,116 @@ mod tests {
         let event = Event::new("t", "s", Direction::Internal, Payload::Empty)
             .with_metadata(json!({"preset": 1}));
         assert_eq!(event.meta_get("preset"), Some(&json!(1)));
+    }
+
+    // ── HEX 解析：用例自 `tool-transport` 原样迁入（断言逐字未改）──
+    //
+    // 它们是「同一串 HEX 两端判定必须一致」的唯一钉住点，计数等式：
+    // tool-core +12 条 = tool-transport -12 条。
+
+    #[test]
+    fn parses_spaced_hex() {
+        assert_eq!(parse_hex("01 0x02 ff").unwrap(), vec![1, 2, 255]);
+    }
+    #[test]
+    fn parses_compact_hex() {
+        assert_eq!(parse_hex("0102ff").unwrap(), vec![1, 2, 255]);
+    }
+    #[test]
+    fn pads_odd_length_compact_hex() {
+        assert_eq!(parse_hex("abc").unwrap(), vec![0x0a, 0xbc]);
+    }
+    #[test]
+    fn parses_single_hex_token() {
+        assert_eq!(parse_hex("FF").unwrap(), vec![255]);
+    }
+    #[test]
+    fn parses_spaced_single_digits() {
+        assert_eq!(parse_hex("1 2 3").unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn parse_hex_rejects_empty() {
+        assert!(parse_hex("").is_err());
+    }
+
+    #[test]
+    fn parse_hex_rejects_invalid_chars() {
+        assert!(parse_hex("gg").is_err());
+    }
+
+    // ── #9: 单 token 与多 token 路径一致性 ──
+    #[test]
+    fn parse_hex_multitoken_long_token_chunks_like_single() {
+        // "0A0B0C 0D"（多 token，首段 len=6）应与 "0A0B0C0D"（单 token）结果一致。
+        assert_eq!(
+            parse_hex("0A0B0C 0D").unwrap(),
+            vec![0x0A, 0x0B, 0x0C, 0x0D]
+        );
+        assert_eq!(parse_hex("0A0B0C0D").unwrap(), vec![0x0A, 0x0B, 0x0C, 0x0D]);
+    }
+
+    #[test]
+    fn parse_hex_multitoken_odd_long_token_pads_left() {
+        // 多 token 中含奇数长度长 token（"abc 01"）应左补0，与单 token "abc" 一致。
+        assert_eq!(parse_hex("abc 01").unwrap(), vec![0x0A, 0xBC, 0x01]);
+        assert_eq!(parse_hex("abc").unwrap(), vec![0x0A, 0xBC]);
+    }
+
+    // ── #23: 严格模式逐 token 校验，拒绝单 nibble ──
+    #[test]
+    fn parse_hex_strict_rejects_single_nibble_token() {
+        // "0xA 0xB" 在旧实现中通过（compact 长度偶数），严格模式应拒绝单 nibble。
+        assert!(parse_hex_strict_line("0xA 0xB").is_err());
+        assert!(parse_hex_strict_line("A B").is_err());
+    }
+
+    #[test]
+    fn parse_hex_strict_accepts_even_tokens() {
+        assert_eq!(
+            parse_hex_strict_line("0A 0B 0C").unwrap(),
+            vec![0x0A, 0x0B, 0x0C]
+        );
+        assert_eq!(parse_hex_strict_line("0xFF").unwrap(), vec![0xFF]);
+        assert_eq!(parse_hex_strict("0A 0B").unwrap(), vec![0x0A, 0x0B]);
+    }
+
+    #[test]
+    fn parse_hex_strict_rejects_odd_long_token() {
+        // 三字符 token "ABC" 严格模式应报错（不能自动补0）。
+        assert!(parse_hex_strict_line("ABC").is_err());
+    }
+
+    // ── 预览渲染：presentation 侧 HEX 预览只此一份实现 ──
+    #[test]
+    fn hex_preview_renders_bytes_and_ascii() {
+        assert_eq!(hex_preview("48 69"), "48 69  |Hi|");
+        assert_eq!(hex_preview("AB CD"), "AB CD  |..|");
+    }
+
+    #[test]
+    fn hex_preview_distinguishes_empty_and_invalid() {
+        assert_eq!(hex_preview("   "), "—");
+        assert_eq!(hex_preview("gg"), "解析失败");
+    }
+
+    #[test]
+    fn hex_preview_truncates_beyond_32_bytes() {
+        let input = vec!["41"; 40].join(" ");
+        let preview = hex_preview(&input);
+        assert!(
+            preview.contains("… (共40B)"),
+            "超过 32 字节必须截断并标注总长，实际: {preview}"
+        );
+        assert_eq!(
+            preview.matches("41").count(),
+            32,
+            "十六进制列必须恰好渲染 32 字节，实际: {preview}"
+        );
+        assert_eq!(
+            preview.split('|').nth(1).unwrap().chars().count(),
+            32,
+            "ASCII 列同样必须截到 32 字节，实际: {preview}"
+        );
     }
 }
