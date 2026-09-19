@@ -268,10 +268,16 @@ impl WorkbenchApp {
         self.ui_contribution_non_button_slot(ui, "send.toolbar");
     }
 
-    /// 【不可达子树的根 · round-2 实测】`render_send_actions` 与它调用的
-    /// `render_send_and_clear_buttons` / `render_hex_preview` 只被本函数用到，
-    /// 而本函数全工作区 0 调用（核对：`grep -rn 'legacy_send_panel_body' crates/`
-    /// 只命中定义处、`grep -rn 'self\.render_send_actions' crates/` 只命中本函数体内 1 行）。
+    /// 【不可达子树的根 · 实测】本函数全工作区 0 调用，并把一族渲染代码一起拖成不可达：
+    /// 实测闭包是 **14 个方法 + 2 个自由函数**，不止下面点名的这三个。完整调用图与逐条
+    /// 核对命令见 `docs/ARCHITECTURE.md` 的「死代码子树」条（此处曾写"三个渲染函数"，低估）。
+    /// 点名的一支：`render_send_actions` 与它调用的 `render_send_and_clear_buttons` /
+    /// `render_hex_preview` 只被本函数用到。
+    /// 核对（**用调用点形式，不要用裸符号计数**）：
+    /// `grep -rn 'self\.legacy_send_panel_body' crates/` → **0 命中**，这才是"不可达"。
+    /// 反面教训：`grep -rn 'legacy_send_panel_body' crates/` 的命中数**随提及次数增长**——
+    /// 本注释与 `docs/ARCHITECTURE.md` 每提到一次这个符号就多一行，所以那个数不是证据。
+    /// `grep -rn 'self\.render_send_actions' crates/` → 只命中本函数体内 1 行。
     /// `Workbench::validate_hex` 在本平台仅有的两个调用点就在那一族里 —— 即那个函数
     /// 在本平台没有任何活的调用点。活的 HEX 门禁住在 `tool_panels::sender_ui`
     /// （`crates/panels/src/sender.rs` 的 `render_actions`），两平台共用。

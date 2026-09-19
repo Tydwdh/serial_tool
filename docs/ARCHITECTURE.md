@@ -123,9 +123,11 @@ cargo tree -p tool-application | grep -i egui    # 0 行
   **当前状态（修复后）**：`cargo +1.92.0 fmt --all --check`、
   `cargo +1.92.0 clippy --workspace --all-targets -- -D warnings`、
   `cargo +1.92.0 test --workspace --all-targets` 三条均 **exit 0**，
-  test 为 **585 passed / 0 failed / 7 ignored**（22 targets；= Task 6 落 `send_plan` 前的
+  test 为 **590 passed / 0 failed / 7 ignored**（22 targets；= Task 6 落 `send_plan` 前的
   578 + `send_plan` 的 6 条单测，该模块无 `cfg` 门控所以跑在 native 测试目标里
-  + Task 6 复审轮的 1 条 `headless.rs` 端口命名形态用例）。
+  + Task 6 复审轮的 1 条 `headless.rs` 端口命名形态用例
+  + 终审修波的 5 条：`crates/panels/src/sender.rs` 的 HEX 门禁 3 条、
+  `crates/recorder/src/recorder.rs` 的「Stop 之后 panic」2 条）。
   > **计数口径（引用数字前先看这条）**：`cargo test` 打的是**测试槽位**，不是唯一断言数。
   > `crates/app/tests/manifest_deps.rs` 既是独立 test target，又被两份守卫各用 `#[path]`
   > 引一次，所以它的 13 条元测试在 **3 个 target 各跑一遍**（13 条 → 39 槽）。
@@ -387,10 +389,10 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
      > 可达性核对（本轮在当前树上重跑，非继承自上轮结论）：
      > ```bash
      > grep -rn 'legacy_send_panel_body' crates/
-     > # 5 处命中，其中只有 1 处是函数体定义（`app/src/ui/bottom_panel.rs:280`），
-     > # 另 4 处全是注释/文档提及：`bottom_panel.rs:30`、`:273`、`:644` 与
-     > # `application/src/workbench.rs:1077`。—— 上一版把期望输出写成"只命中定义处
-     > # 1 行"是**错的**（错在把"提及"当"调用"，且计数发布它的那次提交就已经不成立）。
+     > # **6** 处命中（本轮重测；上版本记的 5 已被本轮扩写的注释自己推翻，正好演示了
+     > # 这个数为什么不能当证据）：函数体定义 1 处 + `crates/` 内提及 5 处。
+     > # 它每被 `crates/` 里任何一处注释提到就 +1，所以只能当"某次测量"的快照读。
+     > # —— 上一版把期望输出写成"只命中定义处 1 行"是**错的**（错在把"提及"当"调用"）。
      > # 这条字符串计数因此**不能**用来判可达性，判可达性看下面这条：
      > grep -rn 'self\.render_send_actions' crates/
      > # 1 处命中：`bottom_panel.rs:327`，位于 legacy 体内（即唯一调用点整体不可达）
@@ -455,27 +457,35 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
    279..340；早期估为"约 350 行"，已按实测更正。行号会随上方插入漂移：`249-310` →
    round-1 加 `hex_precheck_hint` 后 `265-326` → round-2 加注释后 `279-340`；**本文件的行号按
    本轮提交实测**，符号名才是稳定锚点）。
-   **它把整族渲染函数拖成不可达 —— 实测 13 个，不是"三个"**（此前写"三个"，终审的更正
-   建议写"四个"（补 `render_send_error`），两者都仍低估；下面是逐条实测的闭包）：
-   死体 `legacy_send_panel_body`（`:280`）直接调 `render_send_options`（`:286`）、
-   `render_send_input`（`:324`）、`render_send_actions`（`:327`）、`render_send_error`（`:328`），
-   而 `render_send_actions`（`:576-622`）又调 `render_send_and_clear_buttons`（`:589`/`:611`）、
+   **它把整族渲染函数拖成不可达 —— 实测 14 个方法 + 2 个自由函数**（此前写"三个"，终审建议
+   写"四个"，都仍低估；漏的是 `send_target_port_combo`、`hex_precheck_hint`、
+   `response_id_for_send_input`。下面是本轮在当前树上逐条实测的闭包，符号名为准）：
+   死体 `legacy_send_panel_body`（def `:280`）直接调 `render_send_options`（`:286`）、
+   `render_send_input`（`:324`）、`render_send_actions`（`:327`）、`render_send_error`（`:328`）；
+   `render_send_actions`（`:576-622`）调 `render_send_and_clear_buttons`（`:589`/`:611`）、
    `send_history_combo`（`:590`/`:612`）、`render_periodic_controls`（`:601`/`:617`）、
-   `send_signal_controls`（`:603`/`:619`）、`render_hex_preview`（`:604`/`:620`），
-   `render_send_options` 再调 `render_send_target_options`（`:346`）、`render_hex_toggle`（`:392`）、
-   `render_line_ending_combo`（`:393`），后者又调 `render_send_target_options_row`（`:362`/`:372`）。
-   这 13 个函数的**每一个**调用点都落在这 13 个函数体内部，族外 0 引用（核对命令见下）；
+   `send_signal_controls`（`:603`/`:619`）、`render_hex_preview`（`:604`/`:620`）；
+   `render_send_options`（def `:344`）调 `render_send_target_options`（`:346`），
+   后者（def `:349`）调 `render_send_target_options_row`（`:362`/`:372`），
+   再后者（def `:382`）调 `send_target_port_combo`（`:390`）、`render_hex_toggle`（`:392`）、
+   `render_line_ending_combo`（`:393`）—— **注意这两条边的父节点此前写错成了
+   `render_send_options`，且 `render_line_ending_combo` 不调用任何东西**。
+   两个自由函数走同一条路：`render_send_input`（def `:435`）调 `response_id_for_send_input`
+   （def `:44`，唯一调用点 `:470`），`render_hex_preview`（def `:735`）调 `hex_precheck_hint`
+   （def `:36`，唯一调用点 `:754`）。
+   这 16 项的**每一个**调用点都落在族内，族外 0 引用（核对命令见下）；
    唯一的例外是 `do_send`（`:678` 虽在死族里调它，但 `crates/app/src/commands.rs:214`
    的 Ctrl+Enter 路径活着，故 `do_send` 本身可达）。
-   编译侧只报 `legacy_send_panel_body` 一处，是因为 rustc 的 `dead_code` 见调用边即算"用过"、
-   不沿死调用者向下传递，所以那 12 个函数各自都不报警 —— **别把"没报警"读成"可达"**。
+   编译侧只报 `legacy_send_panel_body` 一处 —— **但不要把"没报警"读成"可达"**：
+   这一族的可达性只由上面的调用图决定，与 rustc 报几条无关（报警条数的传播机制本轮未复现，
+   故不在此断言）。
    连带后果：**native 的 `Workbench::validate_hex` 仅有的两个调用点（`:658`、`:752`）就在这一族里**，
    所以那个函数在本平台没有任何活的调用点。核对（本轮在当前树上重跑）：
    ```bash
    grep -rn 'legacy_send_panel_body' crates/
-   # 5 处命中：函数体定义 1 处（`bottom_panel.rs:280`）+ 注释/文档提及 4 处
-   # （`bottom_panel.rs:30`、`:273`、`:644`、`application/src/workbench.rs:1077`）。
-   # 这条串计数判不了可达性（"被提到"≠"被调用"），可达性看下面三条：
+   # ↑ 这条串的命中数**不是证据**：它随"提到这个符号的次数"增长，改一次注释就变一次
+   # （本轮把下面这段注释扩写后，它已从实测的 5 变成 6）。可达性只看下面三条调用点形式：
+   grep -rn 'self\.legacy_send_panel_body' crates/   # **0 命中 = 不可达**，且不随提及次数变化
    grep -rn 'self\.render_send_actions' crates/   # 1 处命中：`bottom_panel.rs:327`，在死体内
    grep -rn 'self\.render_send_error' crates/     # 1 处命中：`bottom_panel.rs:328`，在死体内
    grep -rn 'validate_hex(' crates/app/src/       # 恰好 3 行：native 两处（都在死子树）+ wasm 的 :373

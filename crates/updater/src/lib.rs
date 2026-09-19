@@ -382,7 +382,9 @@ pub fn check_cache_path() -> PathBuf {
     update_dir().join("check_cache.json")
 }
 
-/// 读取缓存。返回 None 表示无缓存或缓存无效。
+/// 读取缓存记录本身。**不做时效判断**：读不到文件或反序列化失败才返回 `None`，
+/// 返回 `Some` 只说明"磁盘上有一条能解析的记录"，可能已经过期。
+/// 时效由 [`is_cache_valid`] 单独判定，调用方两步都要走。
 pub fn read_check_cache() -> Option<CheckCache> {
     let path = check_cache_path();
     let data = std::fs::read_to_string(&path).ok()?;
