@@ -1,8 +1,7 @@
-//! Shared recorder presentation.
+//! 共用的录制面板。
 //!
-//! The recorder implementation is platform-specific (filesystem on Native,
-//! Blob download on Web), but its user-facing state machine and card layout
-//! are the same. This module keeps those two concerns separate.
+//! 录制实现按平台不同（Native 写文件、Web 走 Blob 下载），但面向用户的状态机
+//! 和卡片布局是同一套。本模块把这两件事分开：这里只渲染面板、只返回用户动作。
 
 use crate::{design, theme};
 use egui::TextEdit;
@@ -10,6 +9,7 @@ use egui_material_icons::icons::{
     ICON_FIBER_MANUAL_RECORD, ICON_FOLDER_OPEN, ICON_PAUSE, ICON_PLAY_ARROW, ICON_STOP,
 };
 
+/// 录制内容模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingMode {
     StandardReplay,
@@ -27,6 +27,7 @@ impl RecordingMode {
     }
 }
 
+/// 面板回传给平台层的用户动作，具体落地（选路径、开写、暂停）由调用方执行。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingAction {
     Browse,
@@ -34,6 +35,7 @@ pub enum RecordingAction {
     PauseResume,
 }
 
+/// 渲染录制卡片所需的全部状态，由 Native/Web 组合根借出。
 pub struct RecordingView<'a> {
     pub file_name: &'a mut String,
     pub mode: &'a mut RecordingMode,
@@ -50,7 +52,7 @@ pub struct RecordingView<'a> {
     pub show_browse: bool,
 }
 
-/// Render the common recorder card and return platform-neutral user actions.
+/// 渲染两个平台共用的录制卡片，返回本帧产生的平台无关用户动作。
 pub fn recording_ui(ui: &mut egui::Ui, view: &mut RecordingView<'_>) -> Vec<RecordingAction> {
     let mut actions = Vec::new();
     design::card().show(ui, |ui| {
@@ -86,37 +88,30 @@ pub fn recording_ui(ui: &mut egui::Ui, view: &mut RecordingView<'_>) -> Vec<Reco
                 ui.ctx().request_repaint();
                 ui.spinner();
             }
+
+            let (record_icon, record_label) = if view.running {
+                (ICON_STOP, "停止")
+            } else {
+                (ICON_FIBER_MANUAL_RECORD, "录制")
+            };
+            let record_btn = egui::Button::new(design::icon_text(record_icon, record_label));
             if ui
-                .add_enabled(
-                    !view.stopping,
-                    egui::Button::new(design::icon_text(
-                        if view.running {
-                            ICON_STOP
-                        } else {
-                            ICON_FIBER_MANUAL_RECORD
-                        },
-                        if view.running { "停止" } else { "录制" },
-                    )),
-                )
+                .add_enabled(!view.stopping, record_btn)
                 .on_disabled_hover_text("正在停止中...")
                 .clicked()
             {
                 actions.push(RecordingAction::StartStop);
             }
 
+            let (pause_icon, pause_label) = if view.paused {
+                (ICON_PLAY_ARROW, "继续")
+            } else {
+                (ICON_PAUSE, "暂停")
+            };
+            let pause_btn = egui::Button::new(design::icon_text(pause_icon, pause_label));
             if view.running
                 && ui
-                    .add_enabled(
-                        !view.stopping,
-                        egui::Button::new(design::icon_text(
-                            if view.paused {
-                                ICON_PLAY_ARROW
-                            } else {
-                                ICON_PAUSE
-                            },
-                            if view.paused { "继续" } else { "暂停" },
-                        )),
-                    )
+                    .add_enabled(!view.stopping, pause_btn)
                     .on_disabled_hover_text("正在停止中...")
                     .clicked()
             {

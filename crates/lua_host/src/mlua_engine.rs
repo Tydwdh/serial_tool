@@ -10,8 +10,9 @@ use std::rc::Rc;
 
 use mlua::{Function, Lua, Table, Value, Variadic};
 use tool_plugin_api::{
-    LuaEngine, PluginCallResult, PluginError, PluginFunctionId, PluginHostApi, PluginHostRequest,
-    PluginInstanceId, PluginLoadConfig, PluginResult, PluginUiCommand, PluginValue,
+    LogLevel, LuaEngine, PluginCallResult, PluginCapability, PluginError, PluginFunctionId,
+    PluginHostApi, PluginHostRequest, PluginInstanceId, PluginLoadConfig, PluginResult,
+    PluginUiCommand, PluginValue,
 };
 
 use crate::convert::{lua_value_to_plugin_value, plugin_value_to_lua};
@@ -190,40 +191,22 @@ fn install_ctx(
         "now_ms",
         lua.create_function(move |_, ()| now_host.now_ms().map_err(host_error))?,
     )?;
-    if config
-        .permissions
-        .contains(tool_plugin_api::PluginCapability::Log)
-    {
+    if config.permissions.contains(PluginCapability::Log) {
         ctx.set("log", create_log_api(lua, host.clone())?)?;
     }
-    if config
-        .permissions
-        .contains(tool_plugin_api::PluginCapability::Bus)
-    {
+    if config.permissions.contains(PluginCapability::Bus) {
         ctx.set("bus", create_bus_api(lua, host.clone())?)?;
     }
-    if config
-        .permissions
-        .contains(tool_plugin_api::PluginCapability::Serial)
-    {
+    if config.permissions.contains(PluginCapability::Serial) {
         ctx.set("serial", create_serial_api(lua, host.clone())?)?;
     }
-    if config
-        .permissions
-        .contains(tool_plugin_api::PluginCapability::Ui)
-    {
+    if config.permissions.contains(PluginCapability::Ui) {
         ctx.set("ui", create_ui_api(lua, host.clone())?)?;
     }
-    if config
-        .permissions
-        .contains(tool_plugin_api::PluginCapability::Storage)
-    {
+    if config.permissions.contains(PluginCapability::Storage) {
         ctx.set("session", create_storage_api(lua, host.clone())?)?;
     }
-    if config
-        .permissions
-        .contains(tool_plugin_api::PluginCapability::Config)
-    {
+    if config.permissions.contains(PluginCapability::Config) {
         ctx.set("config", create_config_api(lua, host.clone())?)?;
     }
     let disable_globals = globals.clone();
@@ -252,11 +235,11 @@ fn install_ctx(
 fn create_log_api(lua: &Lua, host: Rc<dyn PluginHostApi>) -> mlua::Result<Table> {
     let api = lua.create_table()?;
     for (name, level) in [
-        ("trace", tool_plugin_api::LogLevel::Trace),
-        ("debug", tool_plugin_api::LogLevel::Debug),
-        ("info", tool_plugin_api::LogLevel::Info),
-        ("warn", tool_plugin_api::LogLevel::Warn),
-        ("error", tool_plugin_api::LogLevel::Error),
+        ("trace", LogLevel::Trace),
+        ("debug", LogLevel::Debug),
+        ("info", LogLevel::Info),
+        ("warn", LogLevel::Warn),
+        ("error", LogLevel::Error),
     ] {
         let host = host.clone();
         api.set(

@@ -168,6 +168,29 @@ impl WebPluginHost {
     }
 }
 
+/// 持久化的 JSON 值 → 插件值。Lua 侧读不到键时看到的就是 `null`。
+fn json_value(value: serde_json::Value) -> PluginValue {
+    PluginValue::from_json(&value)
+}
+
+/// 一张键值表的键名列表 → 插件值数组（保持 BTreeMap 的字典序）。
+fn json_keys(values: &BTreeMap<String, serde_json::Value>) -> Vec<PluginValue> {
+    values.keys().cloned().map(PluginValue::String).collect()
+}
+
+/// 写入一张键值表：序列化失败统一报成 `InvalidValue`，让 Lua 拿到与 Native 一致的错误形状。
+fn store_json(
+    values: &mut BTreeMap<String, serde_json::Value>,
+    key: String,
+    value: PluginValue,
+) -> PluginResult<()> {
+    let json = value
+        .to_json()
+        .map_err(|error| PluginError::InvalidValue(error.to_string()))?;
+    values.insert(key, json);
+    Ok(())
+}
+
 fn normalize_ui_payload(plugin_id: &str, command: &str, payload: PluginValue) -> PluginValue {
     let kind = match command {
         "create_chart" => Some("chart"),
@@ -376,14 +399,9 @@ impl PluginHostApi for WebPluginHost {
             PluginHostRequest::StorageGet { key } => Ok(self
                 .data()
                 .and_then(|data| data.storage.get(&key).cloned())
-                .map_or(PluginValue::Null, |value| PluginValue::from_json(&value))),
+                .map_or(PluginValue::Null, json_value)),
             PluginHostRequest::StorageSet { key, value } => {
-                self.data_mut().storage.insert(
-                    key,
-                    value
-                        .to_json()
-                        .map_err(|error| PluginError::InvalidValue(error.to_string()))?,
-                );
+                store_json(&mut self.data_mut().storage, key, value)?;
                 Ok(PluginValue::Null)
             }
             PluginHostRequest::StorageDelete { key } => {
@@ -392,26 +410,15 @@ impl PluginHostApi for WebPluginHost {
             }
             PluginHostRequest::StorageKeys => Ok(PluginValue::Array(
                 self.data()
-                    .map(|data| {
-                        data.storage
-                            .keys()
-                            .cloned()
-                            .map(PluginValue::String)
-                            .collect()
-                    })
+                    .map(|data| json_keys(&data.storage))
                     .unwrap_or_default(),
             )),
             PluginHostRequest::ConfigGet { key, default } => Ok(self
                 .data()
                 .and_then(|data| data.settings.get(&key).cloned())
-                .map_or(default, |value| PluginValue::from_json(&value))),
+                .map_or(default, json_value)),
             PluginHostRequest::ConfigSet { key, value } => {
-                self.data_mut().settings.insert(
-                    key,
-                    value
-                        .to_json()
-                        .map_err(|error| PluginError::InvalidValue(error.to_string()))?,
-                );
+                store_json(&mut self.data_mut().settings, key, value)?;
                 Ok(PluginValue::Null)
             }
             PluginHostRequest::ConfigRemove { key } => {
@@ -420,37 +427,20 @@ impl PluginHostApi for WebPluginHost {
             }
             PluginHostRequest::ConfigKeys => Ok(PluginValue::Array(
                 self.data()
-                    .map(|data| {
-                        data.settings
-                            .keys()
-                            .cloned()
-                            .map(PluginValue::String)
-                            .collect()
-                    })
+                    .map(|data| json_keys(&data.settings))
                     .unwrap_or_default(),
             )),
             PluginHostRequest::ConfigProfileList => Ok(PluginValue::Array(
                 self.data()
-                    .map(|data| {
-                        data.profiles
-                            .keys()
-                            .cloned()
-                            .map(PluginValue::String)
-                            .collect()
-                    })
+                    .map(|data| json_keys(&data.profiles))
                     .unwrap_or_default(),
             )),
             PluginHostRequest::ConfigProfileLoad { name } => Ok(self
                 .data()
                 .and_then(|data| data.profiles.get(&name).cloned())
-                .map_or(PluginValue::Null, |value| PluginValue::from_json(&value))),
+                .map_or(PluginValue::Null, json_value)),
             PluginHostRequest::ConfigProfileSave { name, value } => {
-                self.data_mut().profiles.insert(
-                    name,
-                    value
-                        .to_json()
-                        .map_err(|error| PluginError::InvalidValue(error.to_string()))?,
-                );
+                store_json(&mut self.data_mut().profiles, name, value)?;
                 Ok(PluginValue::Null)
             }
             PluginHostRequest::ConfigProfileDelete { name } => {

@@ -7,21 +7,49 @@
 use super::DynamicPanel;
 use super::form_render::publish_form_changed;
 use super::schema::{DynamicField, parse_fields};
-use crate::{AttitudePanel, ChartPanel, DataTablePanel, GaugePanel, PanelId, PanelManager};
+use crate::{
+    AttitudePanel, ChartPanel, DataTablePanel, GaugePanel, MAX_INGEST_PER_FRAME, PanelId,
+    PanelManager,
+};
 use serde_json::Value;
 use tool_core::{Event, LogLevel, Payload, topics};
+use tool_databus::{DataBus, Subscription};
 
-fn event_source_for_owner(event: &Event) -> &str {
+/// 取出用于鉴权的事件来源。
+///
+/// 回放事件本身带的是 `replay:` 前缀来源，真正的发起方记录在 metadata 的
+/// `original_source` 里，鉴权必须按原始来源判定。返回 `String` 而不是 `&str`
+/// 是因为调用点随后会把 `event.payload` move 走。
+fn event_source_for_owner(event: &Event) -> String {
     if event.source.starts_with("replay:") {
-        event.meta_str("original_source").unwrap_or(&event.source)
+        event
+            .meta_str("original_source")
+            .unwrap_or(&event.source)
+            .to_owned()
     } else {
-        &event.source
+        event.source.clone()
     }
 }
 
+/// 字段更新失败的上报：写 `last_error`（面板显示用）并发一条 `ui.dynamic` 系统日志。
+///
+/// 写成自由函数而非 `&mut self` 方法：调用点仍持有 `self.panels` 的可变借用，
+/// 只借用 `last_error` 与 `bus` 两个字段才不冲突。
+fn report_field_error(last_error: &mut Option<String>, bus: &DataBus, msg: String) {
+    bus.publish(Event::system_log(LogLevel::Warn, "ui.dynamic", msg.clone()));
+    *last_error = Some(msg);
+}
+
+/// 每个摄入周期从订阅里最多取这么多事件——上限与其余面板一致，
+/// 避免一次摄入把整帧 UI 时间吃掉。
+fn drain_for_frame(subscription: &Subscription) -> Vec<Event> {
+    subscription.drain_limited(MAX_INGEST_PER_FRAME)
+}
+
 impl super::DynamicPanels {
+    /// 每帧调度一轮动态面板事件：创建/移除、字段状态更新、表格行操作。
     pub fn ingest(&mut self, panel_manager: &mut PanelManager) {
-        for event in self.subscription.drain_limited(500) {
+        for event in drain_for_frame(&self.subscription) {
             match self.create_from_event(event) {
                 // 插件主动创建面板时立即显示并聚焦；同一插件的多个面板自动分组。
                 Ok(Some(id)) => {
@@ -38,7 +66,7 @@ impl super::DynamicPanels {
             }
         }
 
-        for event in self.remove_subscription.drain_limited(500) {
+        for event in drain_for_frame(&self.remove_subscription) {
             match self.remove_from_event(event) {
                 Ok(Some(id)) => {
                     self.panels.remove(&id);
@@ -50,22 +78,22 @@ impl super::DynamicPanels {
         }
 
         // UI 状态更新事件
-        for event in self.set_value_subscription.drain_limited(500) {
+        for event in drain_for_frame(&self.set_value_subscription) {
             self.handle_field_update(event, |field, value| {
                 field.value = value;
             });
         }
-        for event in self.set_values_subscription.drain_limited(500) {
+        for event in drain_for_frame(&self.set_values_subscription) {
             self.handle_values_update(event);
         }
-        for event in self.set_enabled_subscription.drain_limited(500) {
+        for event in drain_for_frame(&self.set_enabled_subscription) {
             self.handle_field_update(event, |field, val| {
                 if let Some(enabled) = val.as_bool() {
                     field.enabled = enabled;
                 }
             });
         }
-        for event in self.set_visible_subscription.drain_limited(500) {
+        for event in drain_for_frame(&self.set_visible_subscription) {
             self.handle_field_update(event, |field, val| {
                 if let Some(visible) = val.as_bool() {
                     field.visible = visible;
@@ -77,53 +105,44 @@ impl super::DynamicPanels {
 
         // file selected 事件：更新字段值，并触发 form.changed（视为用户输入）
         // 只接受来自 ui/app 的事件，防止插件伪造文件选择结果
-        for event in self.file_selected_subscription.drain_limited(500) {
+        for event in drain_for_frame(&self.file_selected_subscription) {
             if event.source != "ui" && event.source != "app" {
                 continue;
             }
-            if let Payload::Json(val) = event.payload {
-                let panel_id = val.get("panel_id").and_then(Value::as_str).unwrap_or("");
-                let field_id = val.get("field_id").and_then(Value::as_str).unwrap_or("");
-                let path = val.get("path").and_then(Value::as_str).unwrap_or("");
-                if let Some(panel) = self.panels.get_mut(panel_id) {
-                    let auto = matches!(
-                        panel,
-                        DynamicPanel::Form {
-                            auto_apply: true,
-                            ..
-                        }
-                    );
-                    if let DynamicPanel::Form { fields, .. } = panel
-                        && let Some(field) = fields.iter_mut().find(|f| f.id == field_id)
-                    {
-                        field.value = Value::String(path.to_owned());
-                    }
-                    if auto {
-                        let panel_id = panel_id.to_owned();
-                        if let Some(DynamicPanel::Form { fields, .. }) = self.panels.get(&panel_id)
-                        {
-                            publish_form_changed(&self.bus, &panel_id, fields);
-                        }
-                    }
+            let Payload::Json(val) = event.payload else {
+                continue;
+            };
+            let panel_id = val.get("panel_id").and_then(Value::as_str).unwrap_or("");
+            let field_id = val.get("field_id").and_then(Value::as_str).unwrap_or("");
+            let path = val.get("path").and_then(Value::as_str).unwrap_or("");
+            if let Some(DynamicPanel::Form {
+                fields, auto_apply, ..
+            }) = self.panels.get_mut(panel_id)
+            {
+                if let Some(field) = fields.iter_mut().find(|f| f.id == field_id) {
+                    field.value = Value::String(path.to_owned());
+                }
+                if *auto_apply {
+                    publish_form_changed(&self.bus, panel_id, fields.as_slice());
                 }
             }
         }
 
-        for event in self.table_set_rows_subscription.drain_limited(500) {
+        for event in drain_for_frame(&self.table_set_rows_subscription) {
             self.handle_table_rows(event, TableOperation::Set);
         }
-        for event in self.table_append_rows_subscription.drain_limited(500) {
+        for event in drain_for_frame(&self.table_append_rows_subscription) {
             self.handle_table_rows(event, TableOperation::Append);
         }
-        for event in self.table_remove_rows_subscription.drain_limited(500) {
+        for event in drain_for_frame(&self.table_remove_rows_subscription) {
             self.handle_table_rows(event, TableOperation::Remove);
         }
-        for event in self.table_clear_subscription.drain_limited(500) {
+        for event in drain_for_frame(&self.table_clear_subscription) {
             self.handle_table_rows(event, TableOperation::Clear);
         }
     }
 
-    /// 处理通用字段更新事件（set_value / set_enabled / set_visible）
+    /// owner 鉴权：判断 `source` 是否允许修改 `panel_id` 指向的面板。
     fn is_allowed(&self, panel_id: &str, source: &str) -> bool {
         let owner = self.panel_owner(panel_id);
         match owner {
@@ -136,16 +155,14 @@ impl super::DynamicPanels {
                 }
                 !source.starts_with("plugin:")
             }
-            Some(owner_id) => {
-                // 有 owner 的插件面板：只允许同 owner 修改
-                let expected = format!("plugin:{owner_id}");
-                source == expected
-            }
+            // 有 owner 的插件面板：只允许同 owner 修改
+            Some(owner_id) => source == format!("plugin:{owner_id}"),
         }
     }
 
+    /// 处理通用字段更新事件（set_value / set_enabled / set_visible）
     fn handle_field_update(&mut self, event: Event, apply: impl Fn(&mut DynamicField, Value)) {
-        let source = event_source_for_owner(&event).to_owned();
+        let source = event_source_for_owner(&event);
         let Payload::Json(value) = event.payload else {
             return;
         };
@@ -153,59 +170,50 @@ impl super::DynamicPanels {
         let field_id = value.get("field_id").and_then(Value::as_str).unwrap_or("");
         let new_value = value.get("value").cloned().unwrap_or(Value::Null);
 
-        // owner 校验
         if !self.is_allowed(panel_id, &source) {
             self.bus.publish(Event::system_log(
                 LogLevel::Warn,
                 "ui.dynamic",
                 format!(
-                    "set field '{panel_id}.{field_id}' rejected: source '{}' not allowed",
-                    source
+                    "set field '{panel_id}.{field_id}' rejected: source '{source}' not allowed"
                 ),
             ));
             return;
         }
 
-        if let Some(panel) = self.panels.get_mut(panel_id) {
-            match panel {
-                DynamicPanel::Form { fields, .. } => {
-                    if let Some(field) = fields.iter_mut().find(|f| f.id == field_id) {
-                        apply(field, new_value);
-                    } else {
-                        let msg =
-                            format!("set field: field '{field_id}' not found in '{panel_id}'");
-                        self.last_error = Some(msg.clone());
-                        self.bus
-                            .publish(Event::system_log(LogLevel::Warn, "ui.dynamic", msg));
-                    }
-                }
-                DynamicPanel::Gauge { gauge, .. } if field_id == "value" => {
-                    if let Some(v) = new_value.as_f64() {
-                        gauge.set_value(v);
-                    }
-                }
-                DynamicPanel::Gauge { gauge, .. } if field_id == "status" => {
-                    if let Some(s) = new_value.as_str() {
-                        gauge.set_status(s.to_owned());
-                    }
-                }
-                _ => {
-                    let msg = format!("set field: panel '{panel_id}' does not support set_value");
-                    self.last_error = Some(msg.clone());
-                    self.bus
-                        .publish(Event::system_log(LogLevel::Warn, "ui.dynamic", msg));
+        let Some(panel) = self.panels.get_mut(panel_id) else {
+            let msg = format!("set field: panel '{panel_id}' not found");
+            report_field_error(&mut self.last_error, &self.bus, msg);
+            return;
+        };
+        match panel {
+            DynamicPanel::Form { fields, .. } => {
+                if let Some(field) = fields.iter_mut().find(|f| f.id == field_id) {
+                    apply(field, new_value);
+                } else {
+                    let msg = format!("set field: field '{field_id}' not found in '{panel_id}'");
+                    report_field_error(&mut self.last_error, &self.bus, msg);
                 }
             }
-        } else {
-            let msg = format!("set field: panel '{panel_id}' not found");
-            self.last_error = Some(msg.clone());
-            self.bus
-                .publish(Event::system_log(LogLevel::Warn, "ui.dynamic", msg));
+            DynamicPanel::Gauge { gauge, .. } if field_id == "value" => {
+                if let Some(v) = new_value.as_f64() {
+                    gauge.set_value(v);
+                }
+            }
+            DynamicPanel::Gauge { gauge, .. } if field_id == "status" => {
+                if let Some(s) = new_value.as_str() {
+                    gauge.set_status(s.to_owned());
+                }
+            }
+            _ => {
+                let msg = format!("set field: panel '{panel_id}' does not support set_value");
+                report_field_error(&mut self.last_error, &self.bus, msg);
+            }
         }
     }
 
     fn handle_values_update(&mut self, event: Event) {
-        let source = event_source_for_owner(&event).to_owned();
+        let source = event_source_for_owner(&event);
         let Payload::Json(value) = event.payload else {
             return;
         };
@@ -249,7 +257,7 @@ impl super::DynamicPanels {
     }
 
     fn handle_table_rows(&mut self, event: Event, operation: TableOperation) {
-        let source = event_source_for_owner(&event).to_owned();
+        let source = event_source_for_owner(&event);
         let Payload::Json(value) = event.payload else {
             return;
         };
@@ -270,7 +278,7 @@ impl super::DynamicPanels {
     }
 
     fn create_from_event(&mut self, event: Event) -> Result<Option<String>, String> {
-        let source = event_source_for_owner(&event).to_owned();
+        let source = event_source_for_owner(&event);
         let Payload::Json(value) = event.payload else {
             return Ok(None);
         };
@@ -296,9 +304,11 @@ impl super::DynamicPanels {
             .and_then(Value::as_str)
             .unwrap_or("chart");
 
-        // owner 从 event.source 推导，不信任 payload 中的 plugin_id
-        let owner_plugin_id: Option<String> = source.strip_prefix("plugin:").map(|s| s.to_owned());
-        let owner_for_check = owner_plugin_id.clone();
+        // owner 从 event.source 推导，不信任 payload 中的 plugin_id。
+        // 冲突检查发生在面板构建之后，届时 String 版的 owner 已经被 move 进面板，
+        // 所以这里另外留一份指向 `source` 的借用供它比较。
+        let new_owner = source.strip_prefix("plugin:");
+        let owner_plugin_id: Option<String> = new_owner.map(str::to_owned);
 
         let card = object.get("card").and_then(Value::as_bool).unwrap_or(false);
 
@@ -389,7 +399,6 @@ impl super::DynamicPanels {
         // 冲突检查：已有面板不能被不同 owner 覆盖，无 owner 面板不能被插件覆盖
         if self.panels.contains_key(&id) {
             let existing_owner = self.panel_owner(&id);
-            let new_owner = owner_for_check.as_deref();
             match existing_owner {
                 Some(existing) if existing != new_owner.unwrap_or("") => {
                     return Err(format!(
@@ -412,7 +421,7 @@ impl super::DynamicPanels {
     }
 
     fn remove_from_event(&mut self, event: Event) -> Result<Option<String>, String> {
-        let source = event_source_for_owner(&event).to_owned();
+        let source = event_source_for_owner(&event);
         let id = match event.payload {
             Payload::Json(value) => value
                 .get("id")
@@ -432,10 +441,7 @@ impl super::DynamicPanels {
             self.bus.publish(Event::system_log(
                 LogLevel::Warn,
                 "ui.dynamic",
-                format!(
-                    "remove panel '{id}' rejected: source '{}' not allowed",
-                    source
-                ),
+                format!("remove panel '{id}' rejected: source '{source}' not allowed"),
             ));
             return Ok(None);
         }

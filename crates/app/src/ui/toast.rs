@@ -54,10 +54,11 @@ impl ToastOverlay {
                 toast.dismissing = true;
             }
 
+            let step = dt / ANIMATION_SECONDS;
             toast.visibility = if toast.dismissing {
-                (toast.visibility - dt / ANIMATION_SECONDS).max(0.0)
+                (toast.visibility - step).max(0.0)
             } else {
-                (toast.visibility + dt / ANIMATION_SECONDS).min(1.0)
+                (toast.visibility + step).min(1.0)
             };
 
             let slide = (1.0 - ease_out_cubic(toast.visibility)) * (TOAST_WIDTH + VIEW_MARGIN);

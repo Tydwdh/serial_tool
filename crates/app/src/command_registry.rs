@@ -65,12 +65,12 @@ pub(crate) enum CommandHandler {
 impl CommandHandler {
     fn run(&self, app: &mut WorkbenchApp) {
         match self {
-            Self::App(cmd) => {
-                if let Err(e) = app.workbench.dispatch(cmd.clone()) {
+            Self::App(command) => {
+                if let Err(error) = app.workbench.dispatch(command.clone()) {
                     app.notifications.push(
                         "command",
                         crate::state::StatusLevel::Error,
-                        e.to_string(),
+                        error.to_string(),
                     );
                 }
             }
@@ -94,34 +94,41 @@ pub(crate) struct Command {
 }
 
 impl Command {
+    /// 内置命令统一用 `ICON_BOLT`；插件命令的 `ICON_EXTENSION` 见
+    /// `CommandRegistry::rebuild_plugin_commands`。
+    fn new(
+        id: &'static str,
+        title: &'static str,
+        category: CommandCategory,
+        handler: CommandHandler,
+    ) -> Self {
+        Self {
+            id: id.to_owned(),
+            title: title.to_owned(),
+            icon: ICON_BOLT,
+            category,
+            handler,
+        }
+    }
+
+    /// 纯 UI 命令：直接改 `WorkbenchApp`。
     fn builtin(
         id: &'static str,
         title: &'static str,
         category: CommandCategory,
         handler: fn(&mut WorkbenchApp),
     ) -> Self {
-        Self {
-            id: id.to_owned(),
-            title: title.to_owned(),
-            icon: ICON_BOLT,
-            category,
-            handler: CommandHandler::Ui(handler),
-        }
+        Self::new(id, title, category, CommandHandler::Ui(handler))
     }
 
+    /// 业务命令：经 `Workbench::dispatch` 下发。
     fn app_builtin(
         id: &'static str,
         title: &'static str,
         category: CommandCategory,
-        cmd: tool_application::AppCommand,
+        command: tool_application::AppCommand,
     ) -> Self {
-        Self {
-            id: id.to_owned(),
-            title: title.to_owned(),
-            icon: ICON_BOLT,
-            category,
-            handler: CommandHandler::App(cmd),
-        }
+        Self::new(id, title, category, CommandHandler::App(command))
     }
 }
 

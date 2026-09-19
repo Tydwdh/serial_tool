@@ -129,21 +129,19 @@ pub struct SendView<'a> {
 
 pub fn sender_ui(ui: &mut Ui, view: &mut SendView<'_>) -> Vec<SendAction> {
     let mut actions = Vec::new();
-    let target_open = view.target_open;
-    let layout = view.layout;
 
     render_options(ui, view);
 
     let available = ui.available_size();
-    let reserved = match layout {
+    let reserved = match view.layout {
         SendLayout::Horizontal => 92.0,
         SendLayout::Vertical => 150.0,
     };
     let min_input = 40.0_f32.min(available.y.max(0.0));
     let input_height = (available.y - reserved).max(min_input);
-    let response = render_input(ui, view, input_height, layout);
+    let response = render_input(ui, view, input_height);
 
-    render_actions(ui, view, target_open, &mut actions);
+    render_actions(ui, view, &mut actions);
     if let Some(error) = view.error.as_deref() {
         ui.colored_label(crate::theme::red(), error);
     }
@@ -207,28 +205,29 @@ fn render_options(ui: &mut Ui, view: &mut SendView<'_>) {
     }
 }
 
-fn render_input(
-    ui: &mut Ui,
-    view: &mut SendView<'_>,
-    input_height: f32,
-    layout: SendLayout,
-) -> egui::Response {
-    let id = Id::new(match layout {
-        SendLayout::Horizontal => "shared-send-input-horizontal",
-        SendLayout::Vertical => "shared-send-input-vertical",
-    });
-    let cursor_before = ui.ctx().data_mut(|data| {
+/// 读取文本框当前光标所在的字符下标；该文本框尚未布局过时返回 `None`。
+fn cursor_index(ui: &Ui, id: Id) -> Option<usize> {
+    ui.ctx().data_mut(|data| {
         data.get_persisted::<TextEditState>(id)
             .and_then(|state| state.cursor.char_range())
             .map(|range| range.primary.index.into())
+    })
+}
+
+fn render_input(ui: &mut Ui, view: &mut SendView<'_>, input_height: f32) -> egui::Response {
+    let id = Id::new(match view.layout {
+        SendLayout::Horizontal => "shared-send-input-horizontal",
+        SendLayout::Vertical => "shared-send-input-vertical",
     });
+    // 布局 TextEdit 之前取到的光标属于上一帧：本帧的上下键要按"按键前"的行位置判断。
+    let before = cursor_index(ui, id).unwrap_or(0);
     let hint = if view.target_open {
         "输入要发送的文本或 HEX，Ctrl+Enter 发送"
     } else {
         "请选择已打开的串口"
     };
     let response = egui::ScrollArea::vertical()
-        .id_salt(match layout {
+        .id_salt(match view.layout {
             SendLayout::Horizontal => "shared-send-input-scroll-horizontal",
             SendLayout::Vertical => "shared-send-input-scroll-vertical",
         })
@@ -245,46 +244,20 @@ fn render_input(
         .inner;
 
     if response.has_focus() && !view.history.is_empty() {
-        let cursor_after = ui.ctx().data_mut(|data| {
-            data.get_persisted::<TextEditState>(id)
-                .and_then(|state| state.cursor.char_range())
-                .map(|range| range.primary.index.into())
-        });
-        let before = cursor_before.unwrap_or(0);
-        let after = cursor_after.unwrap_or(before);
+        let after = cursor_index(ui, id).unwrap_or(before);
         let char_len = view.input.chars().count();
         let multiline = view.input.contains('\n');
         let first = !view.input.chars().take(before).any(|c| c == '\n');
         let last = !view.input.chars().skip(before).any(|c| c == '\n');
         let up = ui.input(|input| input.key_pressed(egui::Key::ArrowUp));
         let down = ui.input(|input| input.key_pressed(egui::Key::ArrowDown));
+        // 光标停在首/末行时上下键才归历史所有，否则是行内移动。
         let at_top = !multiline || (first && after == 0);
         let at_bottom = !multiline || (last && after == char_len);
         if up && at_top {
-            match *view.history_index {
-                None => {
-                    *view.saved_input = view.input.clone();
-                    *view.history_index = Some(0);
-                    *view.input = view.history[0].clone();
-                }
-                Some(index) if index + 1 < view.history.len() => {
-                    *view.history_index = Some(index + 1);
-                    *view.input = view.history[index + 1].clone();
-                }
-                _ => {}
-            }
+            recall_older(view);
         } else if down && at_bottom {
-            match *view.history_index {
-                Some(0) => {
-                    *view.history_index = None;
-                    *view.input = std::mem::take(view.saved_input);
-                }
-                Some(index) => {
-                    *view.history_index = Some(index - 1);
-                    *view.input = view.history[index - 1].clone();
-                }
-                None => {}
-            }
+            recall_newer(view);
         }
     } else if !response.has_focus() {
         *view.history_index = None;
@@ -294,19 +267,45 @@ fn render_input(
     response
 }
 
-fn render_actions(
-    ui: &mut Ui,
-    view: &mut SendView<'_>,
-    target_open: bool,
-    actions: &mut Vec<SendAction>,
-) {
+/// 向上翻到更早的一条历史；首次翻历史时先把当前输入存进 `saved_input`。
+fn recall_older(view: &mut SendView<'_>) {
+    match *view.history_index {
+        None => {
+            *view.saved_input = view.input.clone();
+            *view.history_index = Some(0);
+            *view.input = view.history[0].clone();
+        }
+        Some(index) if index + 1 < view.history.len() => {
+            *view.history_index = Some(index + 1);
+            *view.input = view.history[index + 1].clone();
+        }
+        _ => {}
+    }
+}
+
+/// 向下翻回更新的历史，翻过头则还原成进入历史前的那条输入。
+fn recall_newer(view: &mut SendView<'_>) {
+    match *view.history_index {
+        Some(0) => {
+            *view.history_index = None;
+            *view.input = std::mem::take(view.saved_input);
+        }
+        Some(index) => {
+            *view.history_index = Some(index - 1);
+            *view.input = view.history[index - 1].clone();
+        }
+        None => {}
+    }
+}
+
+fn render_actions(ui: &mut Ui, view: &mut SendView<'_>, actions: &mut Vec<SendAction>) {
     let input = view.input.trim().to_owned();
     let hex_error = if *view.hex_mode && !input.is_empty() {
         hex_error(&input, *view.hex_strict)
     } else {
         None
     };
-    let can_send = target_open && !input.is_empty() && hex_error.is_none();
+    let can_send = view.target_open && !input.is_empty() && hex_error.is_none();
     let target = view.target_port.clone();
 
     let render_main_row = |ui: &mut Ui, view: &mut SendView<'_>, actions: &mut Vec<SendAction>| {
@@ -388,7 +387,7 @@ fn render_actions(
             }
             ui.separator();
 
-            let enabled = target_open && target.is_some();
+            let enabled = view.target_open && target.is_some();
             ui.add_enabled_ui(enabled, |ui| {
                 if ui.checkbox(view.dtr, "DTR").changed()
                     && let Some(port) = target.clone()
@@ -488,19 +487,33 @@ fn render_history(ui: &mut Ui, view: &mut SendView<'_>) {
     });
 }
 
-fn hex_error(input: &str, strict: bool) -> Option<String> {
-    let tokens = input
+/// HEX 输入的分词：按空白、`,`、`;` 切开，丢掉空 token。
+fn hex_tokens(input: &str) -> impl Iterator<Item = &str> {
+    input
         .trim()
         .split(|ch: char| ch.is_ascii_whitespace() || ch == ',' || ch == ';')
-        .filter(|token| !token.is_empty());
-    let mut found = false;
+        .filter(|token| !token.is_empty())
+}
+
+/// 规范化单个 token：剥掉**一层** `0x`/`0X` 前缀，再去掉 `_`、`-` 分隔符。
+///
+/// 只剥一层是这里的实际规则，与 `tool_core::normalize_hex_token`（反复剥）不同；
+/// 该差异由 `gate_and_decoder_disagree_on_repeated_0x_prefix` 钉住，别顺手改成多遍剥。
+fn normalize_hex_token(token: &str) -> String {
+    token
+        .strip_prefix("0x")
+        .or_else(|| token.strip_prefix("0X"))
+        .unwrap_or(token)
+        .replace(['_', '-'], "")
+}
+
+fn hex_error(input: &str, strict: bool) -> Option<String> {
+    let mut tokens = hex_tokens(input).peekable();
+    if tokens.peek().is_none() {
+        return Some("HEX 输入为空".to_owned());
+    }
     for token in tokens {
-        found = true;
-        let normalized = token
-            .strip_prefix("0x")
-            .or_else(|| token.strip_prefix("0X"))
-            .unwrap_or(token)
-            .replace(['_', '-'], "");
+        let normalized = normalize_hex_token(token);
         if normalized.is_empty() {
             return Some("HEX 中包含空 token".to_owned());
         }
@@ -511,7 +524,7 @@ fn hex_error(input: &str, strict: bool) -> Option<String> {
             return Some(format!("HEX 中包含无效字符：{token}"));
         }
     }
-    (!found).then_some("HEX 输入为空".to_owned())
+    None
 }
 
 fn hex_preview(input: &str) -> String {
@@ -522,28 +535,15 @@ fn hex_preview(input: &str) -> String {
         return format!("解析失败：{error}");
     }
     let mut bytes = Vec::new();
-    for token in input
-        .trim()
-        .split(|ch: char| ch.is_ascii_whitespace() || ch == ',' || ch == ';')
-        .filter(|token| !token.is_empty())
-    {
-        let mut normalized = token
-            .strip_prefix("0x")
-            .or_else(|| token.strip_prefix("0X"))
-            .unwrap_or(token)
-            .replace(['_', '-'], "");
-        if normalized.len() > 2 && !normalized.len().is_multiple_of(2) {
-            normalized.insert(0, '0');
-        }
-        if normalized.len() == 1 {
+    for token in hex_tokens(input) {
+        let mut normalized = normalize_hex_token(token);
+        // 宽松档允许奇数个 hex 字符：左补一个 '0' 再两两成字节（"C" → 0x0C，不是 0xC0）。
+        if !normalized.len().is_multiple_of(2) {
             normalized.insert(0, '0');
         }
         bytes.extend(normalized.as_bytes().chunks(2).map(|pair| {
             u8::from_str_radix(std::str::from_utf8(pair).unwrap_or_default(), 16).unwrap_or(0)
         }));
-    }
-    if bytes.is_empty() {
-        return String::new();
     }
     bytes
         .iter()
@@ -569,7 +569,7 @@ mod tests {
     // ── 活的 HEX 门禁真值表 ───────────────────────────────────────────────
     //
     // `hex_error` 是**两平台发送按钮实际读到的那道门**：`render_actions` 里
-    // `can_send = target_open && !input.is_empty() && hex_error.is_none()`，
+    // `can_send = view.target_open && !input.is_empty() && hex_error.is_none()`，
     // native 经 `bottom_panel.rs` 的 `tool_panels::sender_ui` 走到它，web 经
     // `crates/app/src/web.rs` 的同一个组件走到它（见 docs/ARCHITECTURE.md 的
     // 「预检的规则来源」行）。本文件此前一条 `#[test]` 都没有：把严格档的

@@ -87,20 +87,14 @@ impl GaugePanel {
     }
 
     fn push_event(&mut self, event: Event) {
-        match event.payload {
-            Payload::Json(value) => {
-                if let Some(v) = gauge_value_from_json(&value) {
-                    self.value = v;
-                    self.samples += 1;
-                }
-            }
-            Payload::Text(text) => {
-                if let Some(v) = gauge_value_from_text(&text) {
-                    self.value = v;
-                    self.samples += 1;
-                }
-            }
-            Payload::Bytes(_) | Payload::Empty => {}
+        let value = match &event.payload {
+            Payload::Json(value) => gauge_value_from_json(value),
+            Payload::Text(text) => gauge_value_from_text(text),
+            Payload::Bytes(_) | Payload::Empty => None,
+        };
+        if let Some(value) = value {
+            self.value = value;
+            self.samples += 1;
         }
     }
 
@@ -141,21 +135,29 @@ impl GaugePanel {
     }
 
     fn zone_kind_for_value(&self) -> ZoneKind {
+        self.zone_for_value()
+            .map_or(ZoneKind::None, |zone| zone.kind)
+    }
+
+    /// 当前值对应的色区：优先取值落在 `[from, to]` 内的那个。
+    ///
+    /// 越界时不返回 `None`：低于所有色区取首个、高于取末个，让颜色和状态都跟着端点
+    /// 色区走，避免超限时突变成一条无关的默认色。没有任何色区时才返回 `None`。
+    fn zone_for_value(&self) -> Option<&GaugeZone> {
         for zone in &self.zones {
             if self.value >= zone.from && self.value <= zone.to {
-                return zone.kind;
+                return Some(zone);
             }
         }
-        // 越界：低于所有 zone 取首个，高于取末个，与 value_color 保持一致
-        if let (Some(first), Some(last)) = (self.zones.first(), self.zones.last()) {
-            if self.value < first.from {
-                return first.kind;
-            }
-            if self.value > last.to {
-                return last.kind;
-            }
+        let first = self.zones.first()?;
+        if self.value < first.from {
+            return Some(first);
         }
-        ZoneKind::None
+        let last = self.zones.last()?;
+        if self.value > last.to {
+            return Some(last);
+        }
+        None
     }
 
     pub fn clear(&mut self) {
@@ -311,27 +313,11 @@ impl GaugePanel {
         );
     }
 
-    /// 根据当前值所在色区返回颜色：
-    /// - 值在某个 zone 内 → 该 zone 颜色
-    /// - 值低于所有 zone → 第一个 zone 的颜色
-    /// - 值高于所有 zone → 最后一个 zone 的颜色
-    /// - 无 zone → 默认值颜色
+    /// 当前值的颜色：取 [`Self::zone_for_value`] 命中的色区颜色，
+    /// 没有任何色区可用时退回默认的值颜色。
     fn value_color(&self) -> Color32 {
-        for zone in &self.zones {
-            if self.value >= zone.from && self.value <= zone.to {
-                return zone.color;
-            }
-        }
-        // 不在任何 zone 内：按越界方向取端点 zone 颜色，避免超限时突变为无关色
-        if let (Some(first), Some(last)) = (self.zones.first(), self.zones.last()) {
-            if self.value < first.from {
-                return first.color;
-            }
-            if self.value > last.to {
-                return last.color;
-            }
-        }
-        theme::gauge_value()
+        self.zone_for_value()
+            .map_or(theme::gauge_value(), |zone| zone.color)
     }
 }
 
@@ -351,9 +337,8 @@ fn gauge_radius(rect: Rect) -> f32 {
     // 高度：top_clearance(r+stroke) + max(0.707r, text) + bottom_stroke <= height
     //   => r + STROKE_HALF + max(0.707r, TEXT_BOTTOM) + STROKE_HALF <= height
     //   0.707r 在 r>=105 时才超过 74，通常 text 占主导；用两者都满足的保守上界。
-    let by_height = ((rect.height() - 2.0 * STROKE_HALF - TEXT_BOTTOM) / 1.0)
-        .min((rect.height() - 2.0 * STROKE_HALF) / 1.707)
-        .max(MIN_RADIUS);
+    let usable = rect.height() - 2.0 * STROKE_HALF;
+    let by_height = (usable - TEXT_BOTTOM).min(usable / 1.707).max(MIN_RADIUS);
     by_width.min(by_height)
 }
 

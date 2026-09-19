@@ -145,6 +145,7 @@ pub struct DockStack {
 }
 
 impl DockStack {
+    /// 打开面板并把它设为激活标签。
     pub fn open(&mut self, kind: PanelId) {
         if !self.tabs.contains(&kind) {
             self.tabs.push(kind.clone());
@@ -162,6 +163,7 @@ impl DockStack {
         }
     }
 
+    /// 关闭标签，并在它正是激活标签时把焦点交给相邻标签。
     pub fn close(&mut self, kind: &PanelId) {
         // 找到关闭位置，优先选择相邻的 tab 而非最后一个
         let closed_pos = self.tabs.iter().position(|tab| tab == kind);
@@ -177,12 +179,14 @@ impl DockStack {
         }
     }
 
+    /// 关闭标签并返回它原本是否存在于该 stack。
     pub fn remove(&mut self, kind: &PanelId) -> bool {
-        let old_len = self.tabs.len();
+        let existed = self.contains(kind);
         self.close(kind);
-        old_len != self.tabs.len()
+        existed
     }
 
+    /// 标签是否已在该 stack 中。
     pub fn contains(&self, kind: &PanelId) -> bool {
         self.tabs.contains(kind)
     }
@@ -279,6 +283,20 @@ impl TilesLayout {
             .collect()
     }
 
+    /// 在 `group` 标签容器中激活 `active` 对应的窗格。
+    /// 面板不存在或目标不是标签容器时保持原样，与旧配置逐项对应。
+    fn activate_pane_in(tiles: &mut Tiles<PanelId>, group: TileId, active: Option<&PanelId>) {
+        let Some(active) = active else {
+            return;
+        };
+        let Some(pane) = tiles.find_pane(active) else {
+            return;
+        };
+        if let Some(Tile::Container(Container::Tabs(tabs))) = tiles.get_mut(group) {
+            tabs.set_active(pane);
+        }
+    }
+
     /// 将 v0.7.3 的三栏 Dock 配置转换为可自由拆分、拖拽的 tiles 树。
     pub fn from_legacy(dock: &DockLayout) -> Self {
         let mut tiles = Tiles::default();
@@ -305,24 +323,9 @@ impl TilesLayout {
         let bottom_tabs = tiles.insert_tab_tile(bottom_panes);
         let right_tabs = tiles.insert_tab_tile(right_panes);
 
-        if let Some(active) = dock.center.active.as_ref()
-            && let Some(id) = tiles.find_pane(active)
-            && let Some(Tile::Container(Container::Tabs(tabs))) = tiles.get_mut(main_tabs)
-        {
-            tabs.set_active(id);
-        }
-        if let Some(active) = dock.bottom.active.as_ref()
-            && let Some(id) = tiles.find_pane(active)
-            && let Some(Tile::Container(Container::Tabs(tabs))) = tiles.get_mut(bottom_tabs)
-        {
-            tabs.set_active(id);
-        }
-        if let Some(active) = dock.right.active.as_ref()
-            && let Some(id) = tiles.find_pane(active)
-            && let Some(Tile::Container(Container::Tabs(tabs))) = tiles.get_mut(right_tabs)
-        {
-            tabs.set_active(id);
-        }
+        Self::activate_pane_in(&mut tiles, main_tabs, dock.center.active.as_ref());
+        Self::activate_pane_in(&mut tiles, bottom_tabs, dock.bottom.active.as_ref());
+        Self::activate_pane_in(&mut tiles, right_tabs, dock.right.active.as_ref());
 
         let main_column = tiles.insert_vertical_tile(vec![main_tabs, bottom_tabs]);
         let root = tiles.insert_horizontal_tile(vec![main_column, right_tabs]);
@@ -707,6 +710,8 @@ impl Default for DockLayout {
         bottom.open(PanelId::builtin(PANEL_TERMINAL));
         bottom.open(PanelId::builtin(PANEL_LOGS));
         bottom.open(PanelId::builtin(PANEL_SENDER));
+        // open() 会把激活项停在最后加入的 sender；这里显式指回终端，
+        // 让底部区域默认标签与 PanelManager::default_workspace 的 active_tab 一致。
         bottom.active = Some(PanelId::builtin(PANEL_TERMINAL));
 
         Self {
@@ -738,34 +743,38 @@ impl DockLayout {
         }
     }
 
-    pub fn move_panel(&mut self, kind: PanelId, to: DockArea) {
-        self.center.remove(&kind);
-        self.bottom.remove(&kind);
-        self.right.remove(&kind);
-        self.stack_mut(to).open(kind);
+    /// 从三个停靠区同时摘掉面板：跨区移动与关闭都必须先做这一步，
+    /// 否则同一个面板会在两个 stack 里同时出现。
+    fn remove_from_all_areas(&mut self, kind: &PanelId) {
+        self.center.remove(kind);
+        self.bottom.remove(kind);
+        self.right.remove(kind);
+    }
 
-        match to {
+    /// 面板落到隐藏区域时要把它重新展开，否则用户会以为移动失败。
+    /// Center 常驻可见，无需处理。
+    fn reveal_area(&mut self, area: DockArea) {
+        match area {
+            DockArea::Center => {}
             DockArea::Bottom => self.bottom_visible = true,
             DockArea::Right => self.right_visible = true,
-            DockArea::Center => {}
         }
+    }
+
+    pub fn move_panel(&mut self, kind: PanelId, to: DockArea) {
+        self.remove_from_all_areas(&kind);
+        self.stack_mut(to).open(kind);
+        self.reveal_area(to);
     }
 
     /// 移动面板到目标停靠区的指定位置。
     pub fn insert_panel_at(&mut self, kind: PanelId, to: DockArea, index: usize) {
-        self.center.remove(&kind);
-        self.bottom.remove(&kind);
-        self.right.remove(&kind);
+        self.remove_from_all_areas(&kind);
         let stack = self.stack_mut(to);
         let idx = index.min(stack.tabs.len());
         stack.tabs.insert(idx, kind.clone());
         stack.active = Some(kind);
-
-        match to {
-            DockArea::Bottom => self.bottom_visible = true,
-            DockArea::Right => self.right_visible = true,
-            DockArea::Center => {}
-        }
+        self.reveal_area(to);
     }
 
     pub fn all_tabs(&self) -> Vec<PanelId> {
@@ -798,14 +807,12 @@ impl DockLayout {
             }
         }
 
-        // Sender 不允许在 Center stack 中存在
-        self.center.remove(&PanelId::builtin(PANEL_SENDER));
-
-        // Sender 如果没有在任何区域，默认放到底部
-        if !self.bottom.contains(&PanelId::builtin(PANEL_SENDER))
-            && !self.right.contains(&PanelId::builtin(PANEL_SENDER))
-        {
-            self.bottom.open(PanelId::builtin(PANEL_SENDER));
+        // Sender 不允许在 Center stack 中存在；
+        // 如果没有在任何区域，默认放到底部。
+        let sender = PanelId::builtin(PANEL_SENDER);
+        self.center.remove(&sender);
+        if !self.bottom.contains(&sender) && !self.right.contains(&sender) {
+            self.bottom.open(sender);
         }
 
         // 确保功能面板（回放、插件、设置）至少在一个停靠区中存在。
@@ -823,23 +830,16 @@ impl DockLayout {
             }
         }
 
-        if self.bottom.active.is_none()
-            || self
-                .bottom
+        // 激活标签必须真实存在于该 stack 中，否则回落到第一个标签；
+        // 旧配置里的 active 可能指向已经被移除的面板。
+        for stack in [&mut self.bottom, &mut self.right] {
+            let active_is_open = stack
                 .active
                 .as_ref()
-                .is_none_or(|k| !self.bottom.contains(k))
-        {
-            self.bottom.active = self.bottom.tabs.first().cloned();
-        }
-        if self.right.active.is_none()
-            || self
-                .right
-                .active
-                .as_ref()
-                .is_none_or(|k| !self.right.contains(k))
-        {
-            self.right.active = self.right.tabs.first().cloned();
+                .is_some_and(|kind| stack.tabs.contains(kind));
+            if !active_is_open {
+                stack.active = stack.tabs.first().cloned();
+            }
         }
     }
 }
@@ -946,7 +946,7 @@ impl PanelManager {
         self.tiles.as_ref()?.plugin_group_id(tile_id)
     }
 
-    /// 从 dock 的所有 stack 中派生 tabs 列表（唯一真相来源）
+    /// 当前布局中的全部面板：优先取 tiles 树的窗格，尚未迁移时回落到 dock 的三个 stack。
     pub fn tabs(&self) -> Vec<PanelId> {
         if let Some(tiles) = self.tiles.as_ref() {
             return tiles
@@ -981,16 +981,12 @@ impl PanelManager {
 
     /// 同步 active_tab 到 Center 当前激活面板（Center 渲染后调用）。
     pub fn sync_active_tab_from_center(&mut self) {
-        if let Some(kind) = self.dock.center.active_or_first() {
-            self.active_tab = kind;
-        } else {
-            self.active_tab = self
-                .dock
-                .all_tabs()
-                .first()
-                .cloned()
-                .unwrap_or_else(|| PanelId::builtin(PANEL_DEVICES));
-        }
+        self.active_tab = self
+            .dock
+            .center
+            .active_or_first()
+            .or_else(|| self.dock.all_tabs().first().cloned())
+            .unwrap_or_else(|| PanelId::builtin(PANEL_DEVICES));
     }
 
     pub fn is_panel_visible(&self, kind: &PanelId) -> bool {
@@ -1045,15 +1041,15 @@ impl PanelManager {
                 .or_else(|| self.dock.all_tabs().first().cloned())
                 .unwrap_or_else(|| PanelId::builtin(PANEL_DEVICES));
         }
-        self.dock.center.remove(&kind);
-        self.dock.bottom.remove(&kind);
-        self.dock.right.remove(&kind);
+        self.dock.remove_from_all_areas(&kind);
     }
 
     pub fn active_dynamic_id(&self) -> Option<&str> {
         self.active_tab.dynamic_suffix()
     }
 
+    /// 丢弃插件动态面板：它们只在插件运行期间存在，因此既不写入工作区配置，
+    /// 也不从配置恢复（关闭插件本身由运行时另行负责）。
     pub fn discard_dynamic_tabs(&mut self) {
         if let Some(tiles) = self.tiles.as_mut() {
             tiles.discard_dynamic_panes();

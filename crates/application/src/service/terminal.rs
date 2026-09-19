@@ -171,17 +171,18 @@ fn payload_bytes(payload: &Payload) -> std::borrow::Cow<'_, [u8]> {
 }
 
 fn entry_from_item(item: &TerminalItem) -> TerminalEntry {
-    let raw_text = String::from_utf8_lossy(item.bytes()).into_owned();
+    // 同一个字节序列的有损解码只做一次：三个文本字段读的就是同一份内容。
+    let text = String::from_utf8_lossy(item.bytes()).into_owned();
     TerminalEntry {
         seq: item.id(),
         event_id: item.first_event_id(),
         timestamp_ms: item.first_timestamp_ms(),
         port: item.port().to_owned(),
         direction: item.direction(),
-        display_text: raw_text.clone(),
-        raw_text,
+        display_text: text.clone(),
+        raw_text: text.clone(),
         hex_text: format_hex(item.bytes()),
-        preview_text: String::from_utf8_lossy(item.bytes()).into_owned(),
+        preview_text: text,
     }
 }
 

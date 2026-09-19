@@ -16,7 +16,7 @@ use egui_material_icons::icons::{
     ICON_CANCEL, ICON_DELETE_SWEEP, ICON_DOWNLOAD, ICON_FILTER_ALT_OFF, ICON_SEARCH,
 };
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use tool_application::service::terminal_store::{
     MAX_TERMINAL_BLOCK_BYTES, TerminalAssembler, TerminalItem, TerminalStore, TerminalStoreUpdate,
@@ -37,7 +37,7 @@ const COPY_OWNER: &str = "terminal";
 /// 只显示 IP 后两段（`1.100`），避免长端口名占据接收区视野；
 /// 其余端口名（COM3、虚拟端口等）原样返回。
 /// 仅用于界面显示，CSV/JSONL 导出与回放仍使用完整端口名。
-fn short_port_display(port: &str) -> std::borrow::Cow<'_, str> {
+fn short_port_display(port: &str) -> Cow<'_, str> {
     let host = port.rsplit_once(':').map(|(h, _)| h).unwrap_or(port);
     let segments: Vec<&str> = host.split('.').collect();
     if segments.len() == 4
@@ -45,26 +45,23 @@ fn short_port_display(port: &str) -> std::borrow::Cow<'_, str> {
             .iter()
             .all(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
     {
-        std::borrow::Cow::Owned(format!(
+        Cow::Owned(format!(
             "{}.{}",
             segments[segments.len() - 2],
             segments[segments.len() - 1]
         ))
     } else {
-        std::borrow::Cow::Borrowed(port)
+        Cow::Borrowed(port)
     }
 }
 
 /// 端口列的显示名：配置了别名则显示别名，否则回退到短显示（IPv4 后两段）。
 /// 仅用于界面显示，CSV/JSONL 导出与回放仍使用完整端口名。
-fn port_display_name<'b>(
-    port: &'b str,
-    port_aliases: &'b std::collections::HashMap<String, String>,
-) -> std::borrow::Cow<'b, str> {
+fn port_display_name<'b>(port: &'b str, port_aliases: &'b HashMap<String, String>) -> Cow<'b, str> {
     if let Some(alias) = port_aliases.get(port)
         && !alias.trim().is_empty()
     {
-        std::borrow::Cow::Borrowed(alias.as_str())
+        Cow::Borrowed(alias.as_str())
     } else {
         short_port_display(port)
     }
@@ -88,7 +85,7 @@ pub struct TerminalPanel {
     assembler: TerminalAssembler,
     view_index: TerminalViewIndex,
     /// 端口别名（app 层注入，渲染端口列时优先显示）。
-    port_aliases: std::collections::HashMap<String, String>,
+    port_aliases: HashMap<String, String>,
 
     show_rx: bool,
     show_tx: bool,
@@ -275,7 +272,11 @@ impl VisibleRow<'static> {
     }
 }
 
-fn render_terminal_cursor_chunk(
+/// 渲染一段导出内容：`first` 决定是否补表头/数组左括号，`has_previous` 决定是否补
+/// 分段之间的分隔符，`done` 决定是否收尾（TXT 末尾换行、JSON 右括号）。
+/// 增量游标（[`TerminalExportCursor`]）和快照 job（[`TerminalExportJob::render_chunk`]）
+/// 共用这一份实现，保证两条导出路径的字节输出一致。
+fn render_terminal_export_chunk(
     format: TerminalExportFormat,
     rows: &[VisibleRow<'static>],
     show_hex: bool,
@@ -306,29 +307,11 @@ fn render_terminal_cursor_chunk(
             let mut output = String::new();
             if first {
                 output.push_str("time,port,direction,");
-                output.push_str(if show_hex {
-                    "hex\n"
-                } else if show_raw {
-                    "raw\n"
-                } else {
-                    "text\n"
-                });
+                output.push_str(content_column_name(show_hex, show_raw));
+                output.push('\n');
             }
             for row in rows {
-                let direction = match row.direction {
-                    Direction::Rx => "RX",
-                    Direction::Tx => "TX",
-                    Direction::Internal => "INTERNAL",
-                };
-                output.push_str(
-                    &[
-                        csv_cell(&row.timestamp_label),
-                        csv_cell(row.port.as_deref().unwrap_or("")),
-                        csv_cell(direction),
-                        csv_cell(&visible_row_content(row, show_hex, show_raw)),
-                    ]
-                    .join(","),
-                );
+                output.push_str(&visible_row_csv_record(row, show_hex, show_raw));
                 output.push('\n');
             }
             output
@@ -372,84 +355,19 @@ impl TerminalExportJob {
     pub fn render_chunk(&self, format: TerminalExportFormat, start: usize, end: usize) -> String {
         let start = start.min(self.rows.len());
         let end = end.min(self.rows.len()).max(start);
-        let rows = &self.rows[start..end];
-        match format {
-            TerminalExportFormat::Txt => {
-                let mut output = String::new();
-                if start > 0 && !rows.is_empty() {
-                    output.push('\n');
-                }
-                output.push_str(
-                    &rows
-                        .iter()
-                        .map(|row| visible_row_content(row, self.show_hex, self.show_raw))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                );
-                if end == self.rows.len() && !rows.is_empty() {
-                    output.push('\n');
-                }
-                output
-            }
-            TerminalExportFormat::Csv => {
-                let mut output = String::new();
-                if start == 0 {
-                    output.push_str("time,port,direction,");
-                    output.push_str(if self.show_hex {
-                        "hex\n"
-                    } else if self.show_raw {
-                        "raw\n"
-                    } else {
-                        "text\n"
-                    });
-                }
-                for row in rows {
-                    let direction = match row.direction {
-                        Direction::Rx => "RX",
-                        Direction::Tx => "TX",
-                        Direction::Internal => "INTERNAL",
-                    };
-                    output.push_str(
-                        &[
-                            csv_cell(&row.timestamp_label),
-                            csv_cell(row.port.as_deref().unwrap_or("")),
-                            csv_cell(direction),
-                            csv_cell(&visible_row_content(row, self.show_hex, self.show_raw)),
-                        ]
-                        .join(","),
-                    );
-                    output.push('\n');
-                }
-                output
-            }
-            TerminalExportFormat::Json => {
-                let mut output = String::new();
-                if start == 0 {
-                    output.push('[');
-                } else if !rows.is_empty() {
-                    output.push(',');
-                }
-                for (index, row) in rows.iter().enumerate() {
-                    if index > 0 {
-                        output.push(',');
-                    }
-                    output.push_str(
-                        &serde_json::to_string(&visible_row_json(
-                            row,
-                            self.show_hex,
-                            self.show_raw,
-                        ))
-                        .unwrap_or_else(|_| "null".to_owned()),
-                    );
-                }
-                if end == self.rows.len() {
-                    output.push(']');
-                }
-                output
-            }
-        }
+        render_terminal_export_chunk(
+            format,
+            &self.rows[start..end],
+            self.show_hex,
+            self.show_raw,
+            start == 0,
+            start > 0,
+            end == self.rows.len(),
+        )
     }
 
+    /// 一次性渲染全部行。不能直接复用分块渲染：JSON 需要 pretty 输出，
+    /// TXT 的末尾换行判据也不同（这里看渲染结果是否为空）。
     pub fn render(&self, format: TerminalExportFormat) -> String {
         match format {
             TerminalExportFormat::Txt => {
@@ -466,28 +384,10 @@ impl TerminalExportJob {
             }
             TerminalExportFormat::Csv => {
                 let mut output = String::from("time,port,direction,");
-                output.push_str(if self.show_hex {
-                    "hex\n"
-                } else if self.show_raw {
-                    "raw\n"
-                } else {
-                    "text\n"
-                });
+                output.push_str(content_column_name(self.show_hex, self.show_raw));
+                output.push('\n');
                 for row in &self.rows {
-                    let direction = match row.direction {
-                        Direction::Rx => "RX",
-                        Direction::Tx => "TX",
-                        Direction::Internal => "INTERNAL",
-                    };
-                    output.push_str(
-                        &[
-                            csv_cell(&row.timestamp_label),
-                            csv_cell(row.port.as_deref().unwrap_or("")),
-                            csv_cell(direction),
-                            csv_cell(&visible_row_content(row, self.show_hex, self.show_raw)),
-                        ]
-                        .join(","),
-                    );
+                    output.push_str(&visible_row_csv_record(row, self.show_hex, self.show_raw));
                     output.push('\n');
                 }
                 output
@@ -496,44 +396,7 @@ impl TerminalExportJob {
                 let values = self
                     .rows
                     .iter()
-                    .map(|row| {
-                        let content_key = if self.show_hex {
-                            "hex"
-                        } else if self.show_raw {
-                            "raw"
-                        } else {
-                            "text"
-                        };
-                        let mut object = serde_json::Map::new();
-                        object.insert(
-                            "time".to_owned(),
-                            serde_json::Value::String(row.timestamp_label.to_string()),
-                        );
-                        object.insert(
-                            "port".to_owned(),
-                            serde_json::Value::String(row.port.as_deref().unwrap_or("").to_owned()),
-                        );
-                        object.insert(
-                            "direction".to_owned(),
-                            serde_json::Value::String(
-                                match row.direction {
-                                    Direction::Rx => "RX",
-                                    Direction::Tx => "TX",
-                                    Direction::Internal => "INTERNAL",
-                                }
-                                .to_owned(),
-                            ),
-                        );
-                        object.insert(
-                            content_key.to_owned(),
-                            serde_json::Value::String(visible_row_content(
-                                row,
-                                self.show_hex,
-                                self.show_raw,
-                            )),
-                        );
-                        serde_json::Value::Object(object)
-                    })
+                    .map(|row| visible_row_json(row, self.show_hex, self.show_raw))
                     .collect::<Vec<_>>();
                 serde_json::to_string_pretty(&values).unwrap_or_default()
             }
@@ -541,23 +404,34 @@ impl TerminalExportJob {
     }
 }
 
-fn visible_row_json(row: &VisibleRow<'_>, show_hex: bool, show_raw: bool) -> serde_json::Value {
-    let content_key = if show_hex {
+/// 导出记录里的内容列名/JSON 字段名：HEX 模式为 `hex`，原始模式为 `raw`，否则为 `text`。
+fn content_column_name(show_hex: bool, show_raw: bool) -> &'static str {
+    if show_hex {
         "hex"
     } else if show_raw {
         "raw"
     } else {
         "text"
-    };
-    let direction = match row.direction {
-        Direction::Rx => "RX",
-        Direction::Tx => "TX",
-        Direction::Internal => "INTERNAL",
-    };
+    }
+}
+
+/// 一行终端记录的 CSV 文本（不含行尾换行）；列顺序与表头 `time,port,direction,<内容列>` 对应。
+fn visible_row_csv_record(row: &VisibleRow<'_>, show_hex: bool, show_raw: bool) -> String {
+    [
+        csv_cell(&row.timestamp_label),
+        csv_cell(row.port.as_deref().unwrap_or("")),
+        csv_cell(direction_export_label(row.direction)),
+        csv_cell(&visible_row_content(row, show_hex, show_raw)),
+    ]
+    .join(",")
+}
+
+fn visible_row_json(row: &VisibleRow<'_>, show_hex: bool, show_raw: bool) -> serde_json::Value {
+    let content_key = content_column_name(show_hex, show_raw);
     serde_json::json!({
         "time": row.timestamp_label.to_string(),
         "port": row.port.as_deref().unwrap_or(""),
-        "direction": direction,
+        "direction": direction_export_label(row.direction),
         content_key: visible_row_content(row, show_hex, show_raw),
     })
 }
@@ -584,18 +458,6 @@ fn terminal_item_matches(
     row_matches_search(&row, query, filter.show_hex, filter.show_raw)
 }
 
-#[derive(Clone)]
-struct EntryDetail {
-    id: u64,
-    port: String,
-    timestamp_label: String,
-    direction: Direction,
-
-    raw_text: String,
-    display_text: String,
-    hex_text: String,
-}
-
 struct RenderOutcome {
     inner_rect: egui::Rect,
     content_height: f32,
@@ -617,7 +479,7 @@ impl TerminalPanel {
                 max_block_bytes: MAX_TERMINAL_BLOCK_BYTES,
             },
             view_index: TerminalViewIndex::default(),
-            port_aliases: std::collections::HashMap::new(),
+            port_aliases: HashMap::new(),
 
             show_rx: true,
             show_tx: true,
@@ -647,33 +509,23 @@ impl TerminalPanel {
             virtual_rows: VirtualRowIndex::default(),
         }
     }
+
+    /// 一次性摄入积压事件：启动或长时间卡顿后的追赶路径。
     pub fn ingest_all_pending(&mut self) -> usize {
         // 每帧最多摄入 5000 条，防止大量数据突发时 UI 卡顿
         const MAX_INGEST_ALL: usize = 5000;
-        let mut count = 0;
-
-        for event in self.subscription.drain_limited(MAX_INGEST_ALL) {
-            if !matches!(
-                event.topic.as_str(),
-                serial_topics::SERIAL_RX | serial_topics::SERIAL_TX
-            ) {
-                continue;
-            }
-
-            self.push_event(event);
-            count += 1;
-        }
-
-        if count > 0 {
-            self.enforce_max_entries();
-        }
-
-        count
+        self.ingest(MAX_INGEST_ALL)
     }
+
+    /// 常规每帧摄入，预算受 `MAX_INGEST_PER_FRAME` 限制。
     pub fn ingest_pending(&mut self) -> usize {
+        self.ingest(MAX_INGEST_PER_FRAME)
+    }
+
+    fn ingest(&mut self, budget: usize) -> usize {
         let mut count = 0;
 
-        for event in self.subscription.drain_limited(MAX_INGEST_PER_FRAME) {
+        for event in self.subscription.drain_limited(budget) {
             if !matches!(
                 event.topic.as_str(),
                 serial_topics::SERIAL_RX | serial_topics::SERIAL_TX
@@ -724,17 +576,23 @@ impl TerminalPanel {
     }
 
     /// 同步端口别名（app 层在别名变更后调用）。
-    pub fn set_port_aliases(&mut self, aliases: &std::collections::HashMap<String, String>) {
+    pub fn set_port_aliases(&mut self, aliases: &HashMap<String, String>) {
         self.port_aliases = aliases.clone();
     }
 
     fn enforce_max_entries(&mut self) {
         let removed = self.store.set_max_entries(self.max_entries);
         self.view_index.mark_removed(removed.iter().copied());
-        if !removed.is_empty() {
-            self.truncated = true;
+        self.forget_removed_entries(&removed);
+    }
+
+    /// 条目已从 Store 移除后，清掉仍指向它们的面板状态并标记发生过截断。
+    fn forget_removed_entries(&mut self, removed: &[u64]) {
+        if removed.is_empty() {
+            return;
         }
-        for id in removed {
+        self.truncated = true;
+        for &id in removed {
             if self.selected_entry_id == Some(id) {
                 self.selected_entry_id = None;
             }
@@ -746,14 +604,9 @@ impl TerminalPanel {
     }
 
     pub fn toggle_bookmark(&mut self, entry_id: u64) {
-        if !self.bookmarked_entry_ids.insert(entry_id) {
-            self.bookmarked_entry_ids.remove(&entry_id);
+        if !self.bookmarked_entry_ids.remove(&entry_id) {
+            self.bookmarked_entry_ids.insert(entry_id);
         }
-    }
-
-    /// 编译当前搜索词（普通词字面量 / `re:` 前缀正则）。
-    fn search_query(&self) -> crate::search::SearchQuery {
-        self.search.query()
     }
 
     fn current_view_filter(&self) -> TerminalViewFilter {
@@ -784,10 +637,10 @@ impl TerminalPanel {
     /// `&self` 导出 API 而让 ViewIndex 使用内部可变性。
     fn collect_visible_rows_unindexed(&self) -> Vec<VisibleRow<'static>> {
         let filter = self.current_view_filter();
-        let search_key = self.search_query();
+        let query = self.search.query();
         self.store
             .iter()
-            .filter(|item| terminal_item_matches(item, &filter, &search_key))
+            .filter(|item| terminal_item_matches(item, &filter, &query))
             .map(VisibleRow::from_item)
             .collect()
     }
@@ -856,7 +709,7 @@ impl TerminalPanel {
         let exported = rows.len();
         cursor.emitted |= exported > 0;
         (
-            render_terminal_cursor_chunk(
+            render_terminal_export_chunk(
                 format,
                 &rows,
                 cursor.filter.show_hex,
@@ -870,99 +723,41 @@ impl TerminalPanel {
         )
     }
 
+    /// 原生导出入口：TXT/CSV 与快照 job 的整份渲染完全一致，直接复用。
     pub fn export_visible_csv(&self) -> String {
-        let show_hex = self.show_hex;
-        let show_raw = self.show_raw;
-        let rows = self.collect_visible_rows_unindexed();
-        let show_metadata = true;
-
-        let mut headers: Vec<&str> = Vec::new();
-        if show_metadata {
-            headers.push("time");
-            headers.push("port");
-            headers.push("direction");
-        }
-        headers.push(if show_hex {
-            "hex"
-        } else if show_raw {
-            "raw"
-        } else {
-            "text"
-        });
-
-        let mut out = headers.join(",");
-        out.push('\n');
-
-        for row in rows {
-            let mut cells: Vec<String> = Vec::new();
-            if show_metadata {
-                cells.push(csv_cell(&row.timestamp_label));
-                cells.push(csv_cell(row.port.as_deref().unwrap_or("")));
-                cells.push(csv_cell(match row.direction {
-                    Direction::Rx => "RX",
-                    Direction::Tx => "TX",
-                    Direction::Internal => "INTERNAL",
-                }));
-            }
-            cells.push(csv_cell(&visible_row_content(&row, show_hex, show_raw)));
-            out.push_str(&cells.join(","));
-            out.push('\n');
-        }
-        out
+        self.export_job().render(TerminalExportFormat::Csv)
     }
 
     pub fn export_visible_text(&self) -> String {
-        let mut out = self
-            .collect_visible_rows_unindexed()
-            .iter()
-            .map(|row| visible_row_content(row, self.show_hex, self.show_raw))
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out
+        self.export_job().render(TerminalExportFormat::Txt)
     }
 
+    /// 与 [`Self::export_job`] 的 JSON 渲染不同：没有端口的行会省略 `port` 字段，
+    /// 而不是写成空串。
     pub fn export_visible_json(&self) -> String {
         let show_hex = self.show_hex;
         let show_raw = self.show_raw;
-        let rows = self.collect_visible_rows_unindexed();
-        let show_metadata = true;
-
-        let mut values = Vec::with_capacity(rows.len());
-        for row in rows {
-            let mut obj = serde_json::Map::new();
-            if show_metadata {
-                obj.insert(
-                    "time".into(),
-                    serde_json::Value::String(row.timestamp_label.to_string()),
-                );
+        let content_key = content_column_name(show_hex, show_raw);
+        let values = self
+            .collect_visible_rows_unindexed()
+            .iter()
+            .map(|row| {
+                let mut obj = serde_json::Map::new();
+                obj.insert("time".into(), json_str(row.timestamp_label.as_ref()));
                 if let Some(port) = row.port.as_deref() {
-                    obj.insert("port".into(), serde_json::Value::String(port.to_owned()));
+                    obj.insert("port".into(), json_str(port));
                 }
                 obj.insert(
                     "direction".into(),
-                    serde_json::Value::String(match row.direction {
-                        Direction::Rx => "RX".into(),
-                        Direction::Tx => "TX".into(),
-                        Direction::Internal => "INTERNAL".into(),
-                    }),
+                    json_str(direction_export_label(row.direction)),
                 );
-            }
-            let content_key = if show_hex {
-                "hex"
-            } else if show_raw {
-                "raw"
-            } else {
-                "text"
-            };
-            obj.insert(
-                content_key.into(),
-                serde_json::Value::String(visible_row_content(&row, show_hex, show_raw)),
-            );
-            values.push(serde_json::Value::Object(obj));
-        }
+                obj.insert(
+                    content_key.into(),
+                    json_str(&visible_row_content(row, show_hex, show_raw)),
+                );
+                serde_json::Value::Object(obj)
+            })
+            .collect::<Vec<_>>();
         serde_json::to_string_pretty(&values).expect("serializable terminal export values")
     }
 
@@ -1008,17 +803,15 @@ impl TerminalPanel {
             force_scroll_to_bottom |= self.auto_scroll.button(ui);
 
             ui.menu_button(design::icon_text(ICON_DOWNLOAD, "导出"), |ui| {
-                if ui.button("导出 TXT 纯文本…").clicked() {
-                    self.export_request = Some(TerminalExportFormat::Txt);
-                    ui.close();
-                }
-                if ui.button("导出 CSV…").clicked() {
-                    self.export_request = Some(TerminalExportFormat::Csv);
-                    ui.close();
-                }
-                if ui.button("导出 JSON…").clicked() {
-                    self.export_request = Some(TerminalExportFormat::Json);
-                    ui.close();
+                for (label, format) in [
+                    ("导出 TXT 纯文本…", TerminalExportFormat::Txt),
+                    ("导出 CSV…", TerminalExportFormat::Csv),
+                    ("导出 JSON…", TerminalExportFormat::Json),
+                ] {
+                    if ui.button(label).clicked() {
+                        self.export_request = Some(format);
+                        ui.close();
+                    }
                 }
             });
 
@@ -1120,7 +913,6 @@ impl TerminalPanel {
             }
 
             let scroll_height = ui.available_height().max(40.0);
-            let show_metadata = true;
             // 空状态引导：从未收到任何数据 vs 有数据但被筛选/搜索过滤光。
             let empty_hint = if self.store.is_empty() {
                 "暂无数据 · 选择并打开串口后开始接收"
@@ -1137,9 +929,6 @@ impl TerminalPanel {
                 scroll_to_row,
                 self.show_hex,
                 self.show_raw,
-                show_metadata,
-                show_metadata,
-                show_metadata,
                 self.auto_scroll.enabled,
                 force_scroll_to_bottom,
                 scroll_delta_y,
@@ -1207,37 +996,9 @@ impl TerminalPanel {
         self.view_index.mark_changed(update.changed_ids);
         self.view_index
             .mark_removed(update.removed_ids.iter().copied());
-        let removed = update.removed_ids;
-        let limit_removed = self.store.set_max_entries(self.max_entries);
-        self.view_index.mark_removed(limit_removed.iter().copied());
-        let mut removed = removed;
-        removed.extend(limit_removed);
-        if !removed.is_empty() {
-            self.truncated = true;
-        }
-        for id in removed {
-            if self.selected_entry_id == Some(id) {
-                self.selected_entry_id = None;
-            }
-            if self.detail_entry_id == Some(id) {
-                self.detail_entry_id = None;
-            }
-            self.bookmarked_entry_ids.remove(&id);
-        }
-    }
-
-    fn entry_detail(&self, entry_id: u64) -> Option<EntryDetail> {
-        let item = self.store.get(entry_id)?;
-        let raw_text = String::from_utf8_lossy(item.bytes()).into_owned();
-        Some(EntryDetail {
-            id: item.id(),
-            port: item.port().to_owned(),
-            timestamp_label: format!("[{}]", fmt_ts(item.first_timestamp_ms())),
-            direction: item.direction(),
-            display_text: format_terminal_text(&raw_text),
-            hex_text: format_hex(item.bytes()),
-            raw_text,
-        })
+        self.forget_removed_entries(&update.removed_ids);
+        // 全局上限裁掉的条目走与 set_max_entries 相同的清理路径。
+        self.enforce_max_entries();
     }
 
     fn detail_popup(&mut self, ctx: &egui::Context) {
@@ -1245,7 +1006,8 @@ impl TerminalPanel {
             return;
         };
 
-        let Some(detail) = self.entry_detail(entry_id) else {
+        // 详情行与接收区行共用同一套文本构造，避免两套格式化逻辑漂移。
+        let Some(detail) = self.store.get(entry_id).map(VisibleRow::from_item) else {
             self.detail_entry_id = None;
             return;
         };
@@ -1261,9 +1023,9 @@ impl TerminalPanel {
                 let (dir_label, dir_color) = direction_label(detail.direction);
 
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(&detail.timestamp_label).monospace());
+                    ui.label(RichText::new(detail.timestamp_label.as_ref()).monospace());
                     ui.label(
-                        RichText::new(&detail.port)
+                        RichText::new(detail.port.as_deref().unwrap_or(""))
                             .monospace()
                             .color(theme::yellow()),
                     );
@@ -1275,15 +1037,19 @@ impl TerminalPanel {
                     );
 
                     if ui.button("复制内容").clicked() {
-                        copy_text_with_feedback(ui, detail.raw_text.clone(), "已复制原始内容");
+                        copy_text_with_feedback(ui, detail.raw_text.to_string(), "已复制原始内容");
                     }
 
                     if ui.button("复制显示文本").clicked() {
-                        copy_text_with_feedback(ui, detail.display_text.clone(), "已复制显示文本");
+                        copy_text_with_feedback(
+                            ui,
+                            detail.display_text.to_string(),
+                            "已复制显示文本",
+                        );
                     }
 
                     if ui.button("复制 HEX").clicked() {
-                        copy_text_with_feedback(ui, detail.hex_text.clone(), "已复制 HEX");
+                        copy_text_with_feedback(ui, detail.hex_text.to_string(), "已复制 HEX");
                     }
                 });
 
@@ -1293,35 +1059,36 @@ impl TerminalPanel {
                     .auto_shrink([false, false])
                     .max_height(ui.available_height())
                     .show(ui, |ui| {
-                        ui.label(RichText::new("原始内容").strong());
-                        let mut raw_text = format_raw_visible(&detail.raw_text);
-                        ui.add(
-                            egui::TextEdit::multiline(&mut raw_text)
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(detail_text_rows(&detail.raw_text, 6, 14))
-                                .font(egui::TextStyle::Monospace),
+                        // 原始段显示的是转义后的文本，行数仍按未转义内容估算。
+                        detail_text_block(
+                            ui,
+                            "原始内容",
+                            format_raw_visible(&detail.raw_text),
+                            &detail.raw_text,
+                            6,
+                            14,
                         );
 
                         ui.separator();
 
-                        ui.label(RichText::new("显示文本").strong());
-                        let mut display_text = detail.display_text.clone();
-                        ui.add(
-                            egui::TextEdit::multiline(&mut display_text)
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(detail_text_rows(&detail.display_text, 4, 10))
-                                .font(egui::TextStyle::Monospace),
+                        detail_text_block(
+                            ui,
+                            "显示文本",
+                            detail.display_text.to_string(),
+                            &detail.display_text,
+                            4,
+                            10,
                         );
 
                         ui.separator();
 
-                        ui.label(RichText::new("HEX").strong());
-                        let mut hex_text = detail.hex_text.clone();
-                        ui.add(
-                            egui::TextEdit::multiline(&mut hex_text)
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(detail_text_rows(&detail.hex_text, 4, 12))
-                                .font(egui::TextStyle::Monospace),
+                        detail_text_block(
+                            ui,
+                            "HEX",
+                            detail.hex_text.to_string(),
+                            &detail.hex_text,
+                            4,
+                            12,
                         );
                     });
             });
@@ -1352,14 +1119,6 @@ fn terminal_layout_key(
     hasher.finish()
 }
 
-fn terminal_live_line_count(row: &VisibleRow<'_>, _show_hex: bool, _show_raw: bool) -> usize {
-    if !row.live {
-        return 0;
-    }
-
-    1
-}
-
 fn live_tail_max_chars(width: f32, glyph_width: f32) -> usize {
     (width.max(glyph_width) / glyph_width.max(1.0))
         .floor()
@@ -1374,17 +1133,15 @@ fn compact_live_tail_preview(content: &str, max_chars: usize) -> String {
 }
 
 fn compact_live_tail_segment(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
         return text.to_owned();
     }
 
+    // 省略号本身占一格，所以尾部只保留 max_chars-1 个字符。
     let tail: String = text
         .chars()
-        .rev()
-        .take(max_chars.saturating_sub(1))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
+        .skip(char_count - max_chars.saturating_sub(1))
         .collect();
     format!("…{tail}")
 }
@@ -1418,6 +1175,7 @@ fn terminal_table_widths(
     }
 }
 
+/// 渲染接收区行视图。时间 / 端口 / 方向三列固定显示，只有内容列随 `show_hex` / `show_raw` 切换。
 #[allow(clippy::too_many_arguments)]
 fn render_rows_view(
     ui: &mut egui::Ui,
@@ -1429,14 +1187,11 @@ fn render_rows_view(
     scroll_to_row: Option<usize>,
     show_hex: bool,
     show_raw: bool,
-    show_timestamp: bool,
-    show_port: bool,
-    show_direction: bool,
     stick_to_bottom: bool,
     force_scroll_to_bottom: bool,
     wheel_scroll_delta_y: f32,
     font_size: f32,
-    port_aliases: &std::collections::HashMap<String, String>,
+    port_aliases: &HashMap<String, String>,
     selection: &mut RowSelection,
     text_selection_rows: &mut TextSelectionRows,
     empty_hint: &str,
@@ -1477,17 +1232,12 @@ fn render_rows_view(
         };
     }
 
-    // Compute label column width based on visible flags
-    let mut label_width = row_left_padding;
-    if show_timestamp {
-        label_width += time_col_width + col_gap;
-    }
-    if show_port {
-        label_width += port_col_width + col_gap;
-    }
-    if show_direction {
-        label_width += dir_col_width + col_gap;
-    }
+    // 标签列 = 左内边距 + 时间 / 端口 / 方向三列（各带一个列间距）
+    // 保持逐项累加的顺序：列宽参与 layout 哈希，浮点结合顺序不能变。
+    let label_width = row_left_padding
+        + (time_col_width + col_gap)
+        + (port_col_width + col_gap)
+        + (dir_col_width + col_gap);
 
     let mut navigate_id: Option<u64> = None;
     let mut measured_content_height: Option<f32> = None;
@@ -1541,7 +1291,7 @@ fn render_rows_view(
             let (full_rect, _alloc_response) =
                 ui.allocate_exact_size(egui::vec2(full_width, total_height), Sense::hover());
 
-            // Split into: labels | hex/raw/display | preview (HEX mode only)
+            // 区域划分：元数据列 | 正文（hex/raw/display） | 预览列（仅 HEX 模式）
             let label_rect = egui::Rect::from_min_size(
                 full_rect.left_top(),
                 egui::vec2(label_width, total_height),
@@ -1576,7 +1326,7 @@ fn render_rows_view(
 
             let label_painter = ui.painter_at(label_rect);
 
-            // Draw rows with accumulated Y
+            // 逐行几何状态：记录每行的 y 与高度，供 hover / 框选命中判定
             let mut hl = RowHighlight::new(ui, scroll_key);
 
             let scroll_offset = (viewport_rect.top() - full_rect.top()).max(0.0);
@@ -1689,7 +1439,9 @@ fn render_rows_view(
                 };
                 let current_y = label_rect.top() + virtual_rows.row_top(row_idx);
                 let content = visible_row_content(&row, show_hex, show_raw);
-                let content = if terminal_live_line_count(&row, show_hex, show_raw) > 0 {
+                // LiveTail 是固定单行的 transient 记录：只保留最后一段的尾部字符，
+                // 避免未封存的长行把视口顶开。
+                let content = if row.live {
                     compact_live_tail_preview(
                         &content,
                         live_tail_max_chars(galley_width, glyph_width),
@@ -1710,7 +1462,7 @@ fn render_rows_view(
                     galley_width,
                 );
                 layout_job.halign = egui::Align::LEFT;
-                let galley = Some(ui.fonts_mut(|f| f.layout_job(layout_job)));
+                let galley = ui.fonts_mut(|f| f.layout_job(layout_job));
 
                 let preview_galley = if show_hex {
                     let preview_text = if row.preview_text.is_empty() {
@@ -1718,7 +1470,7 @@ fn render_rows_view(
                     } else {
                         row.preview_text.to_string()
                     };
-                    let preview_text = if terminal_live_line_count(&row, show_hex, show_raw) > 0 {
+                    let preview_text = if row.live {
                         compact_live_tail_preview(
                             &preview_text,
                             live_tail_max_chars(preview_galley_width, glyph_width),
@@ -1738,22 +1490,10 @@ fn render_rows_view(
                     None
                 };
 
-                let entry_height = if let Some(ref pg) = preview_galley {
-                    galley
-                        .as_ref()
-                        .expect("terminal galley exists")
-                        .size()
-                        .y
-                        .max(pg.size().y)
-                        .max(row_height)
-                } else {
-                    galley
-                        .as_ref()
-                        .expect("terminal galley exists")
-                        .size()
-                        .y
-                        .max(row_height)
-                };
+                let mut entry_height = galley.size().y.max(row_height);
+                if let Some(preview) = &preview_galley {
+                    entry_height = entry_height.max(preview.size().y);
+                }
                 let entry_height = entry_height.round().max(row_height);
                 row_heights_changed |= virtual_rows.set_height(row_idx, entry_height);
 
@@ -1794,64 +1534,56 @@ fn render_rows_view(
                     }
                 }
 
-                // --- Draw left labels ---
+                // --- 左侧元数据列 ---
                 let mut x = label_rect.left() + row_left_padding;
 
-                if show_timestamp {
-                    label_painter.text(
-                        egui::pos2(x, label_y),
-                        egui::Align2::LEFT_CENTER,
-                        row.timestamp_label.as_ref(),
-                        font_id.clone(),
-                        theme::text_secondary(),
-                    );
-                    x += time_col_width + col_gap;
-                }
+                label_painter.text(
+                    egui::pos2(x, label_y),
+                    egui::Align2::LEFT_CENTER,
+                    row.timestamp_label.as_ref(),
+                    font_id.clone(),
+                    theme::text_secondary(),
+                );
+                x += time_col_width + col_gap;
 
-                if show_port {
-                    if let Some(port) = row.port.as_deref() {
-                        let port_text = port_display_name(port, port_aliases);
-                        let port_galley = egui::WidgetText::from(port_text.as_ref())
-                            .color(theme::yellow())
-                            .into_galley(
-                                ui,
-                                Some(egui::TextWrapMode::Truncate),
-                                port_col_width.max(0.0),
-                                font_id.clone(),
-                            );
-                        label_painter.galley(
-                            egui::pos2(x, label_y - port_galley.size().y / 2.0),
-                            port_galley,
-                            theme::yellow(),
+                if let Some(port) = row.port.as_deref() {
+                    let port_text = port_display_name(port, port_aliases);
+                    let port_galley = egui::WidgetText::from(port_text.as_ref())
+                        .color(theme::yellow())
+                        .into_galley(
+                            ui,
+                            Some(egui::TextWrapMode::Truncate),
+                            port_col_width.max(0.0),
+                            font_id.clone(),
                         );
-                        ui.interact(
-                            egui::Rect::from_min_size(
-                                egui::pos2(x, current_y),
-                                egui::vec2(port_col_width.max(0.0), entry_height),
-                            ),
-                            ui.make_persistent_id(("terminal-port", row.id)),
-                            Sense::hover(),
-                        )
-                        .on_hover_text(port);
-                    }
-                    x += port_col_width + col_gap;
-                }
-
-                if show_direction {
-                    let (dir_label, dir_color) = direction_label(row.direction);
-                    label_painter.text(
-                        egui::pos2(x, label_y),
-                        egui::Align2::LEFT_CENTER,
-                        dir_label,
-                        font_id.clone(),
-                        dir_color,
+                    label_painter.galley(
+                        egui::pos2(x, label_y - port_galley.size().y / 2.0),
+                        port_galley,
+                        theme::yellow(),
                     );
+                    ui.interact(
+                        egui::Rect::from_min_size(
+                            egui::pos2(x, current_y),
+                            egui::vec2(port_col_width.max(0.0), entry_height),
+                        ),
+                        ui.make_persistent_id(("terminal-port", row.id)),
+                        Sense::hover(),
+                    )
+                    .on_hover_text(port);
                 }
+                x += port_col_width + col_gap;
 
-                // --- Draw selectable content text (HEX / raw / display) ---
-                if let Some(ref galley) = galley
-                    && hex_width > 0.0
-                {
+                let (dir_label, dir_color) = direction_label(row.direction);
+                label_painter.text(
+                    egui::pos2(x, label_y),
+                    egui::Align2::LEFT_CENTER,
+                    dir_label,
+                    font_id.clone(),
+                    dir_color,
+                );
+
+                // --- 可选择的正文内容（HEX / 原始 / 显示文本） ---
+                if hex_width > 0.0 {
                     let galley_pos = egui::pos2(hex_rect.left() + text_padding, current_y);
                     // row_text_rect 只覆盖 galley 实际文本区域。点击文本 → egui 字符级拖选；
                     // 点击文本外的空白（文本前 padding、行尾、文本上下）→ 整行选中。
@@ -1863,7 +1595,7 @@ fn render_rows_view(
                     );
                     // 先构造 response：文本外空白分支（按下即选）与文本内 clicked 分支
                     // （松开判定）都要用到它。
-                    // Use a separate id salt for hex column to avoid id collision with preview
+                    // 正文列用独立的 id salt，避免与预览列的交互 id 冲突
                     let row_id = ui.make_persistent_id(("hex", row.id));
                     // 字符拖选已经开始后，将命中区扩展到整条内容行。这样从面板外
                     // 移回来时，即使当前行比起点短、指针落在文字右侧，egui 也能
@@ -1932,7 +1664,7 @@ fn render_rows_view(
                     }
                 }
 
-                // --- Draw preview text (HEX mode only) ---
+                // --- 预览列文本（仅 HEX 模式） ---
                 if let (Some(pr), Some(pg)) = (preview_rect, &preview_galley)
                     && preview_width > 0.0
                 {
@@ -1997,16 +1729,11 @@ fn render_rows_view(
                 i.pointer
                     .button_double_clicked(egui::PointerButton::Primary)
             }) && ui.rect_contains_pointer(full_rect);
-            let mut pending_navigate: Option<u64> = None;
             if double_clicked
                 && let Some(idx) = frozen_row_idx.or_else(|| hl.hover_index(ui))
                 && let Some(row_id) = row_ids.get(idx)
             {
-                pending_navigate = Some(*row_id);
-            }
-            // 捕获到外层变量
-            if pending_navigate.is_some() {
-                navigate_id = pending_navigate;
+                navigate_id = Some(*row_id);
             }
 
             // 跳转到目标行（搜索时双击 → 离开搜索进入上下文）
@@ -2029,14 +1756,10 @@ fn render_rows_view(
                     .and_then(|id| store.get(*id))
                     .map(VisibleRow::from_item)
                     .map(|row| {
-                        let content_only = visible_row_content(&row, show_hex, show_raw);
-                        let port = row.port.as_deref().unwrap_or("");
-                        let (dir_label, _) = direction_label(row.direction);
-                        let full_line = format!(
-                            "{} {} {} {}",
-                            row.timestamp_label, port, dir_label, content_only
-                        );
-                        (full_line, content_only)
+                        (
+                            visible_row_full_line(&row, show_hex, show_raw),
+                            visible_row_content(&row, show_hex, show_raw),
+                        )
                     })
             });
 
@@ -2064,16 +1787,11 @@ fn render_rows_view(
                 && copy_requested
                 && owns_copy_focus(ui, COPY_OWNER)
                 && !ui.ctx().text_edit_focused()
-                && let Some(full) = {
-                    let selected_rows = visible_rows_for_indices(store, row_ids, &selected_indices);
-                    let selected_row_indices: Vec<usize> = (0..selected_rows.len()).collect();
-                    build_selected_full_text(
-                        &selected_rows,
-                        &selected_row_indices,
-                        show_hex,
-                        show_raw,
-                    )
-                }
+                && let Some(full) = build_selected_full_text(
+                    &visible_rows_for_indices(store, row_ids, &selected_indices),
+                    show_hex,
+                    show_raw,
+                )
             {
                 copy_text_with_feedback(
                     ui,
@@ -2108,12 +1826,8 @@ fn render_rows_view(
                 };
                 if bulk_copy_button(ctx_ui, "terminal-selected-full", full_label, target_count) {
                     let text = if selected_count > 0 {
-                        let selected_rows =
-                            visible_rows_for_indices(store, row_ids, &selected_indices);
-                        let selected_row_indices: Vec<usize> = (0..selected_rows.len()).collect();
                         build_selected_full_text(
-                            &selected_rows,
-                            &selected_row_indices,
+                            &visible_rows_for_indices(store, row_ids, &selected_indices),
                             show_hex,
                             show_raw,
                         )
@@ -2137,12 +1851,8 @@ fn render_rows_view(
                 };
                 if bulk_copy_button(ctx_ui, "terminal-selected-data", data_label, target_count) {
                     let text = if selected_count > 0 {
-                        let selected_rows =
-                            visible_rows_for_indices(store, row_ids, &selected_indices);
-                        let selected_row_indices: Vec<usize> = (0..selected_rows.len()).collect();
                         build_selected_data_text(
-                            &selected_rows,
-                            &selected_row_indices,
+                            &visible_rows_for_indices(store, row_ids, &selected_indices),
                             show_hex,
                             show_raw,
                         )
@@ -2168,8 +1878,7 @@ fn render_rows_view(
                     format!("复制全部可见内容（{} 行）", row_ids.len()),
                     row_ids.len(),
                 ) {
-                    let all_indices: Vec<usize> = (0..row_ids.len()).collect();
-                    let rows = visible_rows_for_indices(store, row_ids, &all_indices);
+                    let rows = visible_rows_for_ids(store, row_ids);
                     let combined_text: String = rows
                         .iter()
                         .map(|row| visible_row_content(row, show_hex, show_raw))
@@ -2189,14 +1898,7 @@ fn render_rows_view(
                     "复制全部可见为 CSV",
                     row_ids.len(),
                 ) {
-                    let all_indices: Vec<usize> = (0..row_ids.len()).collect();
-                    let rows = visible_rows_for_indices(store, row_ids, &all_indices);
-                    let csv = build_csv(
-                        &rows,
-                        show_hex,
-                        show_raw,
-                        show_timestamp || show_port || show_direction,
-                    );
+                    let csv = build_csv(&visible_rows_for_ids(store, row_ids), show_hex, show_raw);
                     copy_text_with_feedback(
                         ctx_ui,
                         csv,
@@ -2211,16 +1913,7 @@ fn render_rows_view(
                     "复制全部可见为 JSONL",
                     row_ids.len(),
                 ) {
-                    let all_indices: Vec<usize> = (0..row_ids.len()).collect();
-                    let rows = visible_rows_for_indices(store, row_ids, &all_indices);
-                    let jsonl = build_jsonl(
-                        &rows,
-                        show_hex,
-                        show_raw,
-                        show_timestamp,
-                        show_port,
-                        show_direction,
-                    );
+                    let jsonl = build_jsonl(&visible_rows_for_ids(store, row_ids), show_hex);
                     copy_text_with_feedback(
                         ctx_ui,
                         jsonl,
@@ -2245,83 +1938,43 @@ fn render_rows_view(
     }
 }
 
-/// Build CSV string from visible rows.
-fn build_csv(
-    rows: &[VisibleRow<'_>],
-    show_hex: bool,
-    show_raw: bool,
-    show_metadata: bool,
-) -> String {
-    let mut out = if show_metadata {
-        "time,port,direction,content\n".to_owned()
-    } else {
-        "content\n".to_owned()
-    };
+/// 右键菜单「复制全部可见为 CSV」的行文本。与导出文件的 CSV 不同：
+/// 内容取原始列并把换行压成空格，方向沿用界面短名（Internal 为 `IN`）。
+fn build_csv(rows: &[VisibleRow<'_>], show_hex: bool, show_raw: bool) -> String {
+    let mut out = String::from("time,port,direction,content\n");
     for row in rows {
-        let content = row_content_text(row, show_hex, show_raw);
-        let port = row.port.as_deref().unwrap_or("");
-        if show_metadata {
-            out.push_str(&format!(
-                "{},{},{},{}\n",
-                csv_cell(&row.timestamp_label),
-                csv_cell(port),
-                match row.direction {
-                    Direction::Rx => "RX",
-                    Direction::Tx => "TX",
-                    Direction::Internal => "IN",
-                },
-                csv_cell(&content.replace('\n', " ")),
-            ));
-        } else {
-            out.push_str(&csv_cell(&content.replace('\n', " ")));
-            out.push('\n');
-        }
+        let content = row_content_text(row, show_hex, show_raw).replace('\n', " ");
+        out.push_str(&format!(
+            "{},{},{},{}\n",
+            csv_cell(&row.timestamp_label),
+            csv_cell(row.port.as_deref().unwrap_or("")),
+            direction_label(row.direction).0,
+            csv_cell(&content),
+        ));
     }
     out
 }
 
-/// Build JSONL string from visible rows.
-fn build_jsonl(
-    rows: &[VisibleRow<'_>],
-    show_hex: bool,
-    _show_raw: bool,
-    show_timestamp: bool,
-    show_port: bool,
-    show_direction: bool,
-) -> String {
+/// 右键菜单「复制全部可见为 JSONL」：每行一个 JSON 对象。
+/// HEX 模式导出 `hex`，其余模式导出原始字节文本 `text`（不剥末尾换行）。
+fn build_jsonl(rows: &[VisibleRow<'_>], show_hex: bool) -> String {
     let mut out = String::new();
     for row in rows {
-        let mut obj = serde_json::Map::new();
-        if show_timestamp {
-            obj.insert(
-                "time".into(),
-                serde_json::Value::String(row.timestamp_label.to_string()),
-            );
-        }
-        if show_port && let Some(port) = row.port.as_deref() {
-            obj.insert("port".into(), serde_json::Value::String(port.to_owned()));
-        }
-        if show_direction {
-            obj.insert(
-                "direction".into(),
-                serde_json::Value::String(match row.direction {
-                    Direction::Rx => "RX".into(),
-                    Direction::Tx => "TX".into(),
-                    Direction::Internal => "INTERNAL".into(),
-                }),
-            );
-        }
-        if show_hex {
-            obj.insert(
-                "hex".into(),
-                serde_json::Value::String(row.hex_text.to_string()),
-            );
+        let (content_key, content): (&str, &str) = if show_hex {
+            ("hex", row.hex_text.as_ref())
         } else {
-            obj.insert(
-                "text".into(),
-                serde_json::Value::String(row.raw_text.to_string()),
-            );
+            ("text", row.raw_text.as_ref())
+        };
+        let mut obj = serde_json::Map::new();
+        obj.insert("time".into(), json_str(row.timestamp_label.as_ref()));
+        if let Some(port) = row.port.as_deref() {
+            obj.insert("port".into(), json_str(port));
         }
+        obj.insert(
+            "direction".into(),
+            json_str(direction_export_label(row.direction)),
+        );
+        obj.insert(content_key.into(), json_str(content));
         out.push_str(
             &serde_json::to_string(&serde_json::Value::Object(obj))
                 .unwrap_or_else(|_| "{}".to_owned()),
@@ -2329,6 +1982,11 @@ fn build_jsonl(
         out.push('\n');
     }
     out
+}
+
+/// JSON 字符串值，省掉到处重复的 `serde_json::Value::String(..)` 包裹。
+fn json_str(value: &str) -> serde_json::Value {
+    serde_json::Value::String(value.to_owned())
 }
 
 /// Returns the content text for a row based on display priority: hex > raw > display.
@@ -2377,7 +2035,27 @@ fn entry_visible(direction: Direction, show_rx: bool, show_tx: bool) -> bool {
     }
 }
 
-/// 构造选中行的完整文本（含时间戳、端口和方向）。
+/// 一行的整行文本：`时间 端口 方向 内容`，用于复制（方向沿用界面短名）。
+fn visible_row_full_line(row: &VisibleRow<'_>, show_hex: bool, show_raw: bool) -> String {
+    format!(
+        "{} {} {} {}",
+        row.timestamp_label,
+        row.port.as_deref().unwrap_or(""),
+        direction_label(row.direction).0,
+        visible_row_content(row, show_hex, show_raw)
+    )
+}
+
+/// 按可见顺序取回全部行（右键菜单「复制全部可见…」）。
+fn visible_rows_for_ids(store: &TerminalStore, row_ids: &[u64]) -> Vec<VisibleRow<'static>> {
+    row_ids
+        .iter()
+        .filter_map(|id| store.get(*id))
+        .map(VisibleRow::from_item)
+        .collect()
+}
+
+/// 按可见行下标取回对应行；下标越界或条目已被裁掉时跳过。
 fn visible_rows_for_indices(
     store: &TerminalStore,
     row_ids: &[u64],
@@ -2390,46 +2068,34 @@ fn visible_rows_for_indices(
         .collect()
 }
 
-fn build_selected_full_text<'a>(
-    rows: &[VisibleRow<'a>],
-    selected_indices: &[usize],
+/// 构造选中行的完整文本（含时间戳、端口和方向）；无选中行时返回 None。
+fn build_selected_full_text(
+    rows: &[VisibleRow<'_>],
     show_hex: bool,
     show_raw: bool,
 ) -> Option<String> {
-    if selected_indices.is_empty() {
-        return None;
-    }
-    let full: String = selected_indices
-        .iter()
-        .map(|&index| &rows[index])
-        .map(|row| {
-            let content_only = visible_row_content(row, show_hex, show_raw);
-            let port = row.port.as_deref().unwrap_or("");
-            let (dir_label, _) = direction_label(row.direction);
-            format!(
-                "{} {} {} {}",
-                row.timestamp_label, port, dir_label, content_only
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    Some(full)
-}
-
-/// 构造选中行的纯数据文本。
-fn build_selected_data_text<'a>(
-    rows: &[VisibleRow<'a>],
-    selected_indices: &[usize],
-    show_hex: bool,
-    show_raw: bool,
-) -> Option<String> {
-    if selected_indices.is_empty() {
+    if rows.is_empty() {
         return None;
     }
     Some(
-        selected_indices
-            .iter()
-            .map(|&index| &rows[index])
+        rows.iter()
+            .map(|row| visible_row_full_line(row, show_hex, show_raw))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+/// 构造选中行的纯数据文本；无选中行时返回 None。
+fn build_selected_data_text(
+    rows: &[VisibleRow<'_>],
+    show_hex: bool,
+    show_raw: bool,
+) -> Option<String> {
+    if rows.is_empty() {
+        return None;
+    }
+    Some(
+        rows.iter()
             .map(|row| visible_row_content(row, show_hex, show_raw))
             .collect::<Vec<_>>()
             .join("\n"),
@@ -2474,7 +2140,7 @@ fn format_hex(bytes: &[u8]) -> String {
         if i > 0 {
             s.push(' ');
         }
-        // write! to String is infallible (fmt::Write for String never returns Err)
+        // 写入 String 不可能失败（fmt::Write for String 永不返回 Err）
         write!(s, "{byte:02X}").expect("write to String should be infallible");
     }
     s
@@ -2534,6 +2200,37 @@ fn direction_label(direction: Direction) -> (&'static str, Color32) {
     }
 }
 
+/// 导出文本（CSV / JSON / JSONL）里的方向标记。
+/// 与界面用的 [`direction_label`] 对 `Internal` 的写法不同（`INTERNAL` vs `IN`），
+/// 两者都不能互相替换。
+fn direction_export_label(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Rx => "RX",
+        Direction::Tx => "TX",
+        Direction::Internal => "INTERNAL",
+    }
+}
+
+/// 详情窗口的一段只读文本：加粗标题 + 等宽多行 TextEdit。
+/// `text` 是显示内容，`measured` 用于估算行数（原始模式显示的是转义后的文本，
+/// 但行数仍按未转义内容计算）。
+fn detail_text_block(
+    ui: &mut egui::Ui,
+    title: &str,
+    mut text: String,
+    measured: &str,
+    min_rows: usize,
+    max_rows: usize,
+) {
+    ui.label(RichText::new(title).strong());
+    ui.add(
+        egui::TextEdit::multiline(&mut text)
+            .desired_width(f32::INFINITY)
+            .desired_rows(detail_text_rows(measured, min_rows, max_rows))
+            .font(egui::TextStyle::Monospace),
+    );
+}
+
 fn detail_text_rows(text: &str, min_rows: usize, max_rows: usize) -> usize {
     let line_count = text.lines().count().max(1);
     line_count.clamp(min_rows, max_rows)
@@ -2578,21 +2275,21 @@ mod tests {
 
     #[test]
     fn port_display_name_prefers_alias() {
-        let mut aliases = std::collections::HashMap::new();
+        let mut aliases = HashMap::new();
         aliases.insert("192.168.1.100:7125".to_owned(), "主控板".to_owned());
         assert_eq!(port_display_name("192.168.1.100:7125", &aliases), "主控板");
     }
 
     #[test]
     fn port_display_name_falls_back_to_short() {
-        let aliases = std::collections::HashMap::new();
+        let aliases = HashMap::new();
         assert_eq!(port_display_name("192.168.1.100:7125", &aliases), "1.100");
         assert_eq!(port_display_name("COM3", &aliases), "COM3");
     }
 
     #[test]
     fn port_display_name_ignores_blank_alias() {
-        let mut aliases = std::collections::HashMap::new();
+        let mut aliases = HashMap::new();
         aliases.insert("COM3".to_owned(), "  ".to_owned());
         assert_eq!(port_display_name("COM3", &aliases), "COM3");
     }

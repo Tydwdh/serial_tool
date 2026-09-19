@@ -38,8 +38,9 @@ pub(crate) use crate::api::timer::create_timer_api;
 pub(crate) use crate::api::ui::create_ui_api;
 pub(crate) use crate::convert::{event_to_lua_table, json_to_lua_value};
 use crate::globals::{
-    PLUGIN_COMMANDS, TASK_CANCELLED, TASK_FINISHED, TASK_YIELD_OP, YIELD_DEADLINE_MS, YIELD_EXPECT,
-    YIELD_KIND, YIELD_READ_LINE, YIELD_SLEEP, YIELD_WAIT_PAUSED, YIELD_WRITE_LINE_AND_EXPECT,
+    PLUGIN_CALLBACKS, PLUGIN_COMMANDS, PLUGIN_DISABLE, PLUGIN_STORAGE, PLUGIN_TASKS, PLUGIN_TIMERS,
+    TASK_CANCELLED, TASK_FINISHED, TASK_YIELD_OP, YIELD_DEADLINE_MS, YIELD_EXPECT, YIELD_KIND,
+    YIELD_READ_LINE, YIELD_SLEEP, YIELD_WAIT_PAUSED, YIELD_WRITE_LINE_AND_EXPECT,
 };
 use crate::host_services::line_buffer_key;
 pub use config::ConfigStore;
@@ -163,24 +164,31 @@ impl LuaPluginRuntime {
         *self.outcome.lock()
     }
 }
+
+/// 超时 join Lua 线程：防止线程卡住时阻塞 UI 线程的 Drop。
+///
+/// Lua 线程装有指令 hook，正常情况下几 ms 内就会响应 stop 标记；超时说明它卡在宿主之外
+/// （例如阻塞在回调里），此时分离线程、让它自行结束，比无限等待安全。
+fn join_with_timeout(join: JoinHandle<()>) {
+    const DROP_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
+
+    let deadline = Instant::now() + DROP_JOIN_TIMEOUT;
+    while Instant::now() < deadline {
+        if join.is_finished() {
+            let _ = join.join();
+            return;
+        }
+        std::thread::yield_now();
+    }
+    // 超时：分离线程，不再等待
+}
+
 impl Drop for LuaPluginRuntime {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
 
-        // 超时 join：防止 Lua 线程卡住时阻塞 UI 线程 Drop。
-        // Lua 线程有指令 hook，正常情况几 ms 内响应 stop flag；
-        // 超时后分离线程，让其自行结束。
         if let Some(join) = self.join.take() {
-            const DROP_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
-            let deadline = std::time::Instant::now() + DROP_JOIN_TIMEOUT;
-            while std::time::Instant::now() < deadline {
-                if join.is_finished() {
-                    let _ = join.join();
-                    return;
-                }
-                std::thread::yield_now();
-            }
-            // 超时：分离线程，不再等待
+            join_with_timeout(join);
         }
     }
 }
@@ -236,35 +244,27 @@ impl LuaHost {
                 Arc::clone(&thread_stop),
             );
 
-            match result {
-                Ok(()) => {
-                    *thread_outcome.lock() = Some(LuaRunState::Finished);
+            // 结局与日志成对产生：任何分支都不会出现"写了结局没写日志"
+            let (state, level, message) = match result {
+                Ok(()) => (
+                    LuaRunState::Finished,
+                    LogLevel::Info,
+                    format!("{} 已完成", config.script_name),
+                ),
+                Err(error) if thread_stop.load(Ordering::Relaxed) => (
+                    LuaRunState::Stopped,
+                    LogLevel::Warn,
+                    format!("{} 已停止：{error}", config.script_name),
+                ),
+                Err(error) => (
+                    LuaRunState::Failed,
+                    LogLevel::Error,
+                    format!("{} 失败：{error}", config.script_name),
+                ),
+            };
 
-                    bus.publish(Event::system_log(
-                        LogLevel::Info,
-                        config.source,
-                        format!("{} 已完成", config.script_name),
-                    ));
-                }
-                Err(error) if thread_stop.load(Ordering::Relaxed) => {
-                    *thread_outcome.lock() = Some(LuaRunState::Stopped);
-
-                    bus.publish(Event::system_log(
-                        LogLevel::Warn,
-                        config.source,
-                        format!("{} 已停止：{error}", config.script_name),
-                    ));
-                }
-                Err(error) => {
-                    *thread_outcome.lock() = Some(LuaRunState::Failed);
-
-                    bus.publish(Event::system_log(
-                        LogLevel::Error,
-                        config.source,
-                        format!("{} 失败：{error}", config.script_name),
-                    ));
-                }
-            }
+            *thread_outcome.lock() = Some(state);
+            bus.publish(Event::system_log(level, config.source, message));
 
             thread_finished.store(true, Ordering::Relaxed);
         });
@@ -301,8 +301,7 @@ impl LuaHost {
         let worker_done = self
             .worker
             .as_ref()
-            .map(|worker| worker.finished.load(Ordering::Relaxed))
-            .unwrap_or(false);
+            .is_some_and(|worker| worker.finished.load(Ordering::Relaxed));
 
         if worker_done && let Some(mut worker) = self.worker.take() {
             let outcome = *worker.outcome.lock();
@@ -322,20 +321,11 @@ impl Drop for LuaHost {
             worker.stop.store(true, Ordering::Relaxed);
         }
 
-        // 超时 join（同 LuaPluginRuntime::drop 的策略）
+        // 超时 join（策略见 join_with_timeout）
         if let Some(mut worker) = self.worker.take()
             && let Some(join) = worker.join.take()
         {
-            const DROP_JOIN_TIMEOUT: Duration = Duration::from_millis(500);
-            let deadline = std::time::Instant::now() + DROP_JOIN_TIMEOUT;
-            while std::time::Instant::now() < deadline {
-                if join.is_finished() {
-                    let _ = join.join();
-                    return;
-                }
-                std::thread::yield_now();
-            }
-            // 超时：分离线程
+            join_with_timeout(join);
         }
     }
 }
@@ -367,9 +357,10 @@ pub fn run_plugin(
     ));
 
     let thread_outcome = Arc::new(ParkingMutex::new(None));
-    let outcome_for_thread = Arc::clone(&thread_outcome);
+    // 两份克隆各有用途：loop_outcome 会被 move 进事件循环，fallback_outcome 留给兜底判定
+    let fallback_outcome = Arc::clone(&thread_outcome);
+    let loop_outcome = Arc::clone(&thread_outcome);
 
-    let outcome_in_thread = Arc::clone(&outcome_for_thread);
     let join = thread::spawn(move || {
         plugin_event_loop(
             source,
@@ -380,14 +371,12 @@ pub fn run_plugin(
             thread_stop,
             thread_alive,
             host_services,
-            outcome_in_thread,
+            loop_outcome,
         );
         // plugin_event_loop 在错误路径已设置 Failed；这里做兜底
-        {
-            let mut guard = outcome_for_thread.lock();
-            if guard.is_none() {
-                *guard = Some(LuaRunState::Finished);
-            }
+        let mut guard = fallback_outcome.lock();
+        if guard.is_none() {
+            *guard = Some(LuaRunState::Finished);
         }
     });
 
@@ -460,6 +449,22 @@ pub(crate) fn sandbox_lua() -> mlua::Result<Lua> {
     Ok(lua)
 }
 
+/// 插件启动阶段失败：记 `Failed` 结局、把原因发到总线、宣告线程不再存活。
+///
+/// 三件事必须一起做完 —— 漏写 outcome 宿主会一直等到超时，漏置 `alive` 则事件会继续
+/// 塞进一条已经死掉的循环。原因文本由调用方给出，日志级别统一为 Error。
+fn fail_startup(
+    outcome: &ParkingMutex<Option<LuaRunState>>,
+    bus: &DataBus,
+    config: &LuaRunConfig,
+    alive: &AtomicBool,
+    reason: String,
+) {
+    *outcome.lock() = Some(LuaRunState::Failed);
+    bus.publish(Event::system_log(LogLevel::Error, &config.source, reason));
+    alive.store(false, Ordering::Relaxed);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn plugin_event_loop(
     source: String,
@@ -475,13 +480,13 @@ fn plugin_event_loop(
     let lua = match sandbox_lua() {
         Ok(lua) => lua,
         Err(error) => {
-            *outcome.lock() = Some(LuaRunState::Failed);
-            bus.publish(Event::system_log(
-                LogLevel::Error,
-                &config.source,
+            fail_startup(
+                &outcome,
+                &bus,
+                &config,
+                &alive,
                 format!("创建/加固 Lua 沙箱失败：{error}"),
-            ));
-            alive.store(false, Ordering::Relaxed);
+            );
             return;
         }
     };
@@ -497,36 +502,36 @@ fn plugin_event_loop(
             Ok(VmState::Continue)
         },
     ) {
-        *outcome.lock() = Some(LuaRunState::Failed);
-        bus.publish(Event::system_log(
-            LogLevel::Error,
-            &config.source,
+        fail_startup(
+            &outcome,
+            &bus,
+            &config,
+            &alive,
             format!("设置指令 hook 失败：{e}"),
-        ));
-        alive.store(false, Ordering::Relaxed);
+        );
         return;
     }
 
     if let Err(error) = install_ctx(&lua, bus.clone(), transport, &config, &host_services) {
-        *outcome.lock() = Some(LuaRunState::Failed);
-        bus.publish(Event::system_log(
-            LogLevel::Error,
-            &config.source,
+        fail_startup(
+            &outcome,
+            &bus,
+            &config,
+            &alive,
             format!("安装上下文失败：{error}"),
-        ));
-        alive.store(false, Ordering::Relaxed);
+        );
         return;
     }
 
     // 注入 task 辅助函数（必须在用户脚本之前）
     if let Err(error) = install_task_helpers(&lua) {
-        *outcome.lock() = Some(LuaRunState::Failed);
-        bus.publish(Event::system_log(
-            LogLevel::Error,
-            &config.source,
+        fail_startup(
+            &outcome,
+            &bus,
+            &config,
+            &alive,
             format!("安装任务辅助函数失败：{error}"),
-        ));
-        alive.store(false, Ordering::Relaxed);
+        );
         return;
     }
 
@@ -541,45 +546,17 @@ fn plugin_event_loop(
         };
 
     if let Err(error) = lua.load(&source).set_name(&config.script_name).exec() {
-        *outcome.lock() = Some(LuaRunState::Failed);
-        bus.publish(Event::system_log(
-            LogLevel::Error,
-            &config.source,
+        fail_startup(
+            &outcome,
+            &bus,
+            &config,
+            &alive,
             format!("脚本错误：{error}"),
-        ));
-        alive.store(false, Ordering::Relaxed);
+        );
         return;
     }
 
-    let has_callbacks = lua
-        .globals()
-        .get::<Table>(crate::globals::PLUGIN_CALLBACKS)
-        .map(|table| !table.is_empty())
-        .unwrap_or(false);
-
-    let has_commands = lua
-        .globals()
-        .get::<Table>(crate::globals::PLUGIN_COMMANDS)
-        .map(|table| !table.is_empty())
-        .unwrap_or(false);
-
-    let has_timers = lua
-        .globals()
-        .get::<Table>(crate::globals::PLUGIN_TIMERS)
-        .map(|table| !table.is_empty())
-        .unwrap_or(false);
-
-    let has_tasks = lua
-        .globals()
-        .get::<Table>(crate::globals::PLUGIN_TASKS)
-        .map(|t| {
-            t.pairs::<String, Table>()
-                .filter_map(|p| p.ok())
-                .any(|(_, state)| !state.get::<bool>("finished").unwrap_or(true))
-        })
-        .unwrap_or(false);
-
-    if !has_callbacks && !has_commands && !has_timers && !has_tasks {
+    if !has_active_work(&lua) {
         bus.publish(Event::system_log(
             LogLevel::Info,
             &config.source,
@@ -651,19 +628,17 @@ fn plugin_event_loop(
                     continue;
                 }
 
-                if let Some(callback) = get_callback(&lua, &event.topic) {
-                    let event_table = lua.create_table().ok();
+                if let Some(callback) = get_callback(&lua, &event.topic)
+                    && let Ok(event_table) = lua.create_table()
+                {
+                    let _ = event_to_lua_table(&lua, &event_table, &event);
 
-                    if let Some(event_table) = event_table {
-                        let _ = event_to_lua_table(&lua, &event_table, &event);
-
-                        if let Err(error) = callback.call::<Value>(event_table) {
-                            bus.publish(Event::system_log(
-                                LogLevel::Warn,
-                                &config.source,
-                                format!("on_event 回调错误：{error}"),
-                            ));
-                        }
+                    if let Err(error) = callback.call::<Value>(event_table) {
+                        bus.publish(Event::system_log(
+                            LogLevel::Warn,
+                            &config.source,
+                            format!("on_event 回调错误：{error}"),
+                        ));
                     }
                 }
             }
@@ -671,45 +646,42 @@ fn plugin_event_loop(
             Some(Err(())) => break,
         }
 
-        let timers_empty = lua
-            .globals()
-            .get::<Table>(crate::globals::PLUGIN_TIMERS)
-            .map(|table| table.is_empty())
-            .unwrap_or(true);
-
-        let callbacks_empty = lua
-            .globals()
-            .get::<Table>(crate::globals::PLUGIN_CALLBACKS)
-            .map(|table| table.is_empty())
-            .unwrap_or(true);
-
-        let commands_empty = lua
-            .globals()
-            .get::<Table>(crate::globals::PLUGIN_COMMANDS)
-            .map(|table| table.is_empty())
-            .unwrap_or(true);
-
-        let tasks_all_done = lua
-            .globals()
-            .get::<Table>(crate::globals::PLUGIN_TASKS)
-            .map(|t| {
-                t.pairs::<String, Table>()
-                    .filter_map(|p| p.ok())
-                    .all(|(_, state)| state.get::<bool>("finished").unwrap_or(true))
-            })
-            .unwrap_or(true);
-
-        if timers_empty
-            && callbacks_empty
-            && commands_empty
-            && tasks_all_done
-            && event_receiver.is_empty()
-        {
+        if !has_active_work(&lua) && event_receiver.is_empty() {
             break;
         }
     }
 
     alive.store(false, Ordering::Relaxed);
+}
+
+/// 插件是否还有"活着的东西"：回调、命令、定时器、未结束的任务，任一存在即为真。
+///
+/// 启动后的"没有回调就直接结束"与事件循环的退出条件必须是同一套判据，否则常驻插件会
+/// 在某一侧被提前收回。四个全局表读不到时一律按"没有活动"处理（宁可退出，也不会卡住
+/// 宿主）；任务按 `finished` 标记计数，缺标记视为已结束。
+fn has_active_work(lua: &Lua) -> bool {
+    let table_active = |name: &str| -> bool {
+        lua.globals()
+            .get::<Table>(name)
+            .map(|table| !table.is_empty())
+            .unwrap_or(false)
+    };
+
+    let has_tasks = lua
+        .globals()
+        .get::<Table>(PLUGIN_TASKS)
+        .map(|tasks| {
+            tasks
+                .pairs::<String, Table>()
+                .filter_map(|pair| pair.ok())
+                .any(|(_, state)| !state.get::<bool>(TASK_FINISHED).unwrap_or(true))
+        })
+        .unwrap_or(false);
+
+    table_active(PLUGIN_CALLBACKS)
+        || table_active(PLUGIN_COMMANDS)
+        || table_active(PLUGIN_TIMERS)
+        || has_tasks
 }
 
 fn handle_plugin_command_event(
@@ -796,8 +768,9 @@ fn handle_plugin_command_event(
 
     true
 }
+
 fn get_callback(lua: &Lua, topic: &str) -> Option<Function> {
-    let callbacks: Table = lua.globals().get(crate::globals::PLUGIN_CALLBACKS).ok()?;
+    let callbacks: Table = lua.globals().get(PLUGIN_CALLBACKS).ok()?;
 
     if let Ok(callback) = callbacks.get::<Function>(topic) {
         return Some(callback);
@@ -812,8 +785,9 @@ fn get_callback(lua: &Lua, topic: &str) -> Option<Function> {
 
     None
 }
+
 fn next_timer_wait(lua: &Lua) -> Option<Duration> {
-    let timers: Table = lua.globals().get(crate::globals::PLUGIN_TIMERS).ok()?;
+    let timers: Table = lua.globals().get(PLUGIN_TIMERS).ok()?;
     let now_ms = tool_core::now_timestamp_ms();
 
     let mut next_trigger_at = u64::MAX;
@@ -824,18 +798,16 @@ fn next_timer_wait(lua: &Lua) -> Option<Duration> {
     }
 
     if next_trigger_at == u64::MAX {
-        return None;
-    }
-
-    if next_trigger_at <= now_ms {
-        Some(Duration::from_millis(0))
+        None
+    } else if next_trigger_at <= now_ms {
+        Some(Duration::ZERO)
     } else {
         Some(Duration::from_millis(next_trigger_at - now_ms))
     }
 }
 
 fn next_task_wait(lua: &Lua) -> Option<Duration> {
-    let tasks: Table = lua.globals().get(crate::globals::PLUGIN_TASKS).ok()?;
+    let tasks: Table = lua.globals().get(PLUGIN_TASKS).ok()?;
     let now_ms = tool_core::now_timestamp_ms();
     let mut next_wake_at = u64::MAX;
 
@@ -892,7 +864,7 @@ fn min_wait(a: Option<Duration>, b: Option<Duration>) -> Option<Duration> {
 }
 
 fn process_timers(lua: &Lua, bus: &DataBus, config: &LuaRunConfig) {
-    let timers: Table = match lua.globals().get(crate::globals::PLUGIN_TIMERS) {
+    let timers: Table = match lua.globals().get(PLUGIN_TIMERS) {
         Ok(timers) => timers,
         Err(_) => return,
     };
@@ -1037,16 +1009,16 @@ fn install_ctx(
 ) -> mlua::Result<()> {
     let ctx = lua.create_table()?;
 
-    lua.globals()
-        .set(crate::globals::PLUGIN_CALLBACKS, lua.create_table()?)?;
-    lua.globals()
-        .set(crate::globals::PLUGIN_COMMANDS, lua.create_table()?)?;
-    lua.globals()
-        .set(crate::globals::PLUGIN_TIMERS, lua.create_table()?)?;
-    lua.globals()
-        .set(crate::globals::PLUGIN_STORAGE, lua.create_table()?)?;
-    lua.globals()
-        .set(crate::globals::PLUGIN_TASKS, lua.create_table()?)?;
+    // 插件回调写入的几张全局表：每次装载都从空表开始，避免上一次运行的残留。
+    for name in [
+        PLUGIN_CALLBACKS,
+        PLUGIN_COMMANDS,
+        PLUGIN_TIMERS,
+        PLUGIN_STORAGE,
+        PLUGIN_TASKS,
+    ] {
+        lua.globals().set(name, lua.create_table()?)?;
+    }
 
     if has_permission(config, "log") {
         ctx.set(
@@ -1207,9 +1179,7 @@ fn install_ctx(
 
     lua.globals().set(
         "on_disable",
-        lua.create_function(|lua, function: Function| {
-            lua.globals().set(crate::globals::PLUGIN_DISABLE, function)
-        })?,
+        lua.create_function(|lua, function: Function| lua.globals().set(PLUGIN_DISABLE, function))?,
     )?;
 
     if has_permission(config, "testing") {

@@ -61,6 +61,11 @@ fn now_seconds() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// `performance.now()` 是秒基时间戳，这里换算成从 `started_at` 到现在的毫秒耗时。
+fn elapsed_ms_since(started_at: f64) -> f64 {
+    (now_seconds() - started_at) * 1000.0
+}
+
 /// Bounded Web performance telemetry.  The latest report is emitted at most
 /// once every five seconds; this must never become another source of console
 /// or allocation pressure during a high-rate serial session.
@@ -89,35 +94,29 @@ impl WebPerfDiagnostics {
     }
 
     pub(crate) fn record_terminal_render(&mut self, started_at: f64) {
-        self.terminal_render
-            .push_ms((now_seconds() - started_at) * 1000.0);
+        self.terminal_render.push_ms(elapsed_ms_since(started_at));
     }
 
     pub(crate) fn record_terminal_ingest(&mut self, started_at: f64, events: usize) {
-        self.terminal_ingest
-            .push_ms((now_seconds() - started_at) * 1000.0);
+        self.terminal_ingest.push_ms(elapsed_ms_since(started_at));
         self.last_terminal_ingest_events = events as u64;
     }
 
     pub(crate) fn record_log_render(&mut self, started_at: f64) {
-        self.log_render
-            .push_ms((now_seconds() - started_at) * 1000.0);
+        self.log_render.push_ms(elapsed_ms_since(started_at));
     }
 
     pub(crate) fn record_log_ingest(&mut self, started_at: f64, events: usize) {
-        self.log_ingest
-            .push_ms((now_seconds() - started_at) * 1000.0);
+        self.log_ingest.push_ms(elapsed_ms_since(started_at));
         self.last_log_ingest_events = events as u64;
     }
 
     pub(crate) fn record_chart_render(&mut self, started_at: f64) {
-        self.chart_render
-            .push_ms((now_seconds() - started_at) * 1000.0);
+        self.chart_render.push_ms(elapsed_ms_since(started_at));
     }
 
     pub(crate) fn record_plugin_callback(&mut self, started_at: f64) {
-        self.plugin_callback
-            .push_ms((now_seconds() - started_at) * 1000.0);
+        self.plugin_callback.push_ms(elapsed_ms_since(started_at));
     }
 
     pub(crate) fn end_frame(

@@ -35,10 +35,9 @@ pub use attitude::AttitudePanel;
 pub use chart::ChartPanel;
 pub use data_settings::{DataSettingsView, data_settings_ui};
 pub use data_table::{DataTableColumn, DataTablePanel};
-pub use dynamic::DynamicPanels;
 pub use dynamic::{
-    DynamicField, DynamicFieldKind, FieldFilter, FieldOption, PortItem, dynamic_form_ui,
-    parse_fields,
+    DynamicField, DynamicFieldKind, DynamicPanels, FieldFilter, FieldOption, PortItem,
+    dynamic_form_ui, parse_fields,
 };
 pub use gauge::GaugePanel;
 pub use keymap::{KeymapAction, KeymapEntry, keymap_ui};
@@ -156,26 +155,21 @@ pub(crate) fn next_auto_scroll_state(
     auto_scroll
 }
 
-/// 截断字符串中间，用 "..." 连接
+/// 截断字符串中间，用 "…" 连接首尾
 pub fn compact_middle(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         return s.to_owned();
     }
     let chars: Vec<char> = s.chars().collect();
     let head = max_chars / 2;
-    let tail = max_chars - head - 1; // -1 for the "…"
-    let mut out = String::with_capacity(max_chars);
-    for &c in &chars[..head] {
-        out.push(c);
-    }
+    let tail = max_chars - head - 1; // 给 "…" 留一个字符位
+    let mut out: String = chars[..head].iter().collect();
     out.push('…');
-    for &c in &chars[chars.len() - tail..] {
-        out.push(c);
-    }
+    out.extend(chars[chars.len() - tail..].iter());
     out
 }
 
-/// 截断字符串尾部，添加 "..."
+/// 截断字符串尾部，添加 "…"
 pub fn ellipsize_tail(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         return s.to_owned();
@@ -192,15 +186,14 @@ mod tests {
 
     #[test]
     fn fmt_ts_returns_expected_format() {
-        // Use a known UTC timestamp: 2025-01-15T08:30:45.123Z
-        // ms = 1736929845123
+        // 固定 UTC 时间戳：2025-01-15T08:30:45.123Z，即 1736929845123ms
         let result = fmt_ts(1_736_929_845_123);
-        // Format should be HH:MM:SS.mmm (11 or 12 chars depending on leading zero)
+        // 输出格式为 HH:MM:SS.mmm，前导零会让长度在 11~12 之间浮动
         assert!(
             result.len() >= 11 && result.len() <= 12,
             "unexpected length: {result:?}"
         );
-        // Should contain two colons and one dot
+        // 应包含两个冒号、一个小数点
         assert_eq!(
             result.matches(':').count(),
             2,
@@ -212,7 +205,7 @@ mod tests {
     #[test]
     fn fmt_ts_zero_timestamp() {
         let result = fmt_ts(0);
-        // Unix epoch should still format cleanly
+        // Unix 纪元起点也应能正常格式化
         assert!(!result.is_empty());
         assert_eq!(result.matches(':').count(), 2);
         assert_eq!(result.matches('.').count(), 1);
@@ -220,9 +213,8 @@ mod tests {
 
     #[test]
     fn fmt_ts_large_timestamp() {
-        // Far-future timestamp should not panic
+        // 远期时间戳不应 panic：超出 chrono 范围时返回占位串
         let result = fmt_ts(u64::MAX);
-        // If the timestamp is out of range, it returns the fallback string
         assert!(!result.is_empty());
     }
 
@@ -240,7 +232,7 @@ mod tests {
         ];
         let colors: Vec<egui::Color32> = levels.iter().map(|&l| level_color(l)).collect();
 
-        // All colors should be distinct
+        // 各等级的颜色必须互不相同，否则日志会失去可辨识度
         for i in 0..colors.len() {
             for j in (i + 1)..colors.len() {
                 assert_ne!(
@@ -262,10 +254,8 @@ mod tests {
             LogLevel::Warn,
             LogLevel::Error,
         ] {
-            let color = level_color(level);
-            // Color32 should have non-zero alpha (fully opaque or nearly so)
-            // We just check it's a real color value
-            let _ = color; // at minimum, the function returned without panicking
+            // 至少保证每个等级都能取到一个颜色且不 panic
+            let _ = level_color(level);
         }
     }
 
@@ -339,9 +329,9 @@ mod tests {
 
     #[test]
     fn compact_middle_exact_length() {
-        let input = "1234567890"; // 10 chars
+        let input = "1234567890"; // 10 个字符
         assert_eq!(compact_middle(input, 10), input);
-        // One more char should trigger truncation
+        // 再多一个字符就应触发截断
         assert_ne!(compact_middle("12345678901", 10), "12345678901");
     }
 
@@ -353,10 +343,9 @@ mod tests {
 
     #[test]
     fn compact_middle_zero_max_chars() {
-        // max_chars = 0: char count (0) <= 0, so returns as-is
+        // max_chars = 0：空串字符数 0 <= 0，原样返回
         assert_eq!(compact_middle("", 0), "");
-        // max_chars = 0 with non-empty string is a degenerate case;
-        // the function is only called with reasonable max_chars in practice.
+        // max_chars = 0 配非空串是退化输入，实际调用只会传合理上限，不覆盖
     }
 
     // ── ellipsize_tail ────────────────────────────────────────────────
@@ -379,9 +368,9 @@ mod tests {
 
     #[test]
     fn ellipsize_tail_exact_length() {
-        let input = "1234567890"; // 10 chars
+        let input = "1234567890"; // 10 个字符
         assert_eq!(ellipsize_tail(input, 10), input);
-        // One more char should trigger truncation
+        // 再多一个字符就应触发截断
         let truncated = ellipsize_tail("12345678901", 10);
         assert!(truncated.ends_with('…'));
         assert_eq!(truncated.chars().count(), 10);
@@ -395,9 +384,9 @@ mod tests {
 
     #[test]
     fn ellipsize_tail_max_chars_one() {
-        // max_chars=1: "abc" has 3 chars > 1, so take 0 chars + "…" = "…"
+        // max_chars=1："abc" 有 3 个字符 > 1，取 0 个字符 + "…" = "…"
         assert_eq!(ellipsize_tail("abc", 1), "…");
-        // Single char with max_chars=1: no truncation
+        // 单字符且 max_chars=1：无需截断
         assert_eq!(ellipsize_tail("a", 1), "a");
     }
 }

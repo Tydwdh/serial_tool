@@ -1,12 +1,12 @@
-//! Shared replay-policy presentation.
+//! 共用的回放策略选择器。
 //!
-//! Loading and analyzer execution remain platform/application concerns. The
-//! policy selector itself is deliberately small and platform-neutral so the
-//! Native and Web replay panels cannot drift visually or semantically.
+//! 载入文件与执行 analyzer 仍归平台/应用层负责；策略选择器本身刻意做得很小、
+//! 且不依赖平台，这样 Native 与 Web 的回放面板不会在视觉和语义上各自漂移。
 
 use crate::theme;
 use serde::{Deserialize, Serialize};
 
+/// 用户可选的回放策略，两个平台共用同一份定义与文案。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ReplayPolicyOption {
     #[default]
@@ -39,8 +39,7 @@ impl ReplayPolicyOption {
     }
 }
 
-/// Render the shared policy selector. Returns whether the selected policy
-/// changed during this frame.
+/// 渲染共用的策略选择器；返回本帧内选中策略是否发生变化。
 pub fn replay_policy_ui(
     ui: &mut egui::Ui,
     policy: &mut ReplayPolicyOption,

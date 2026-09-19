@@ -3,9 +3,10 @@
 use crate::LuaRunConfig;
 use crate::api::serial::match_pat;
 use crate::globals::{
-    CURRENT_TASK_ID, PLUGIN_DISABLE, PLUGIN_TASKS, TASK_CANCELLED, TASK_FINISHED, TASK_YIELD_OP,
-    YIELD_CONTINUE_RESETS_TIMEOUT, YIELD_DEADLINE_MS, YIELD_EXPECT, YIELD_KIND, YIELD_PORT,
-    YIELD_READ_LINE, YIELD_SLEEP, YIELD_TIMEOUT_MS, YIELD_WAIT_PAUSED, YIELD_WRITE_LINE_AND_EXPECT,
+    CURRENT_TASK_ID, EXPECT_ACTION, EXPECT_PATTERN, PLUGIN_DISABLE, PLUGIN_TASKS, TASK_CANCELLED,
+    TASK_FINISHED, TASK_YIELD_OP, YIELD_CONTINUE_RESETS_TIMEOUT, YIELD_DEADLINE_MS, YIELD_EXPECT,
+    YIELD_KIND, YIELD_PORT, YIELD_READ_LINE, YIELD_SLEEP, YIELD_TIMEOUT_MS, YIELD_WAIT_PAUSED,
+    YIELD_WRITE_LINE_AND_EXPECT,
 };
 use crate::host_services::{LuaHostServices, line_buffer_key};
 use mlua::{Function, Lua, Table, Thread, Value};
@@ -27,6 +28,29 @@ pub(crate) fn install_task_helpers(lua: &Lua) -> mlua::Result<()> {
     .set_name("task-helpers")
     .exec()?;
     Ok(())
+}
+
+/// 把字符串写进 task state 的某个键。`create_string` 失败时退回 nil：
+/// 调度循环每帧都跑，这里绝不允许因为一次字符串分配失败而 panic。
+fn write_state_string(lua: &Lua, state: &Table, key: &str, value: &str) {
+    let _ = state.set(
+        key,
+        lua.create_string(value)
+            .map(Value::String)
+            .unwrap_or(Value::Nil),
+    );
+}
+
+/// 一次等待以失败收尾：结果置 nil + 错误原因（"cancelled" / "timeout"）。
+fn wait_failed(lua: &Lua, state: &Table, result_key: &str, err_key: &str, reason: &str) {
+    let _ = state.set(result_key, Value::Nil);
+    write_state_string(lua, state, err_key, reason);
+}
+
+/// 一次等待以命中收尾：结果 + 清空错误。
+fn wait_hit(lua: &Lua, state: &Table, result_key: &str, err_key: &str, value: &str) {
+    write_state_string(lua, state, result_key, value);
+    let _ = state.set(err_key, Value::Nil);
 }
 
 /// 每帧恢复可运行的 task coroutine。
@@ -52,38 +76,16 @@ pub(crate) fn process_tasks(
         }
 
         // ── cancelled 优先：打断 sleep/read_line/expect/paused 等一切等待 ──
-        let cancelled: bool = state.get(TASK_CANCELLED).unwrap_or(false);
-        if cancelled {
-            let yield_op: Option<Table> = state.get(TASK_YIELD_OP).ok();
-            if let Some(ref op) = yield_op {
+        if state.get::<bool>(TASK_CANCELLED).unwrap_or(false) {
+            if let Ok(op) = state.get::<Table>(TASK_YIELD_OP) {
                 let kind: String = op.get(YIELD_KIND).unwrap_or_default();
                 match kind.as_str() {
                     YIELD_READ_LINE => {
-                        let _ = state.set("_read_result", Value::Nil);
-                        let _ = state.set(
-                            "_read_result_err",
-                            lua.create_string("cancelled")
-                                .map(Value::String)
-                                .unwrap_or(Value::Nil),
-                        );
+                        wait_failed(lua, &state, "_read_result", "_read_result_err", "cancelled");
                     }
-                    YIELD_WRITE_LINE_AND_EXPECT => {
-                        let _ = state.set("_expect_result", Value::Nil);
-                        let _ = state.set(
-                            "_expect_err",
-                            lua.create_string("cancelled")
-                                .map(Value::String)
-                                .unwrap_or(Value::Nil),
-                        );
-                    }
-                    YIELD_EXPECT => {
-                        let _ = state.set("_expect_result", Value::Nil);
-                        let _ = state.set(
-                            "_expect_err",
-                            lua.create_string("cancelled")
-                                .map(Value::String)
-                                .unwrap_or(Value::Nil),
-                        );
+                    // expect 与 write_line_and_expect 共用同一对结果槽
+                    YIELD_EXPECT | YIELD_WRITE_LINE_AND_EXPECT => {
+                        wait_failed(lua, &state, "_expect_result", "_expect_err", "cancelled");
                     }
                     _ => {
                         // sleep / wait_paused / unknown: 直接恢复
@@ -95,13 +97,11 @@ pub(crate) fn process_tasks(
         }
 
         // ── 非 cancelled：正常调度 ──
-        let paused: bool = state.get("paused").unwrap_or(false);
-        if paused {
+        if state.get::<bool>("paused").unwrap_or(false) {
             continue;
         }
 
-        let yield_op: Option<Table> = state.get(TASK_YIELD_OP).ok();
-        if let Some(ref op) = yield_op {
+        if let Ok(op) = state.get::<Table>(TASK_YIELD_OP) {
             let kind: String = op.get(YIELD_KIND).unwrap_or_default();
             match kind.as_str() {
                 YIELD_SLEEP => {
@@ -117,33 +117,20 @@ pub(crate) fn process_tasks(
                     let port: String = op.get(YIELD_PORT).unwrap_or_default();
                     let deadline_ms: u64 = op.get(YIELD_DEADLINE_MS).unwrap_or(0);
                     if deadline_ms > 0 && now_ms > deadline_ms {
-                        let _ = state.set("_read_result", Value::Nil);
-                        let _ = state.set(
-                            "_read_result_err",
-                            lua.create_string("timeout")
-                                .map(Value::String)
-                                .unwrap_or(Value::Nil),
-                        );
-                    } else if let Some(ref map) = host_services.line_buffers {
+                        wait_failed(lua, &state, "_read_result", "_read_result_err", "timeout");
+                    } else {
+                        let Some(ref map) = host_services.line_buffers else {
+                            continue;
+                        };
                         let key = line_buffer_key(&host_services.plugin_id, &port);
                         let mut map_lock = map.lock();
-                        if let Some(buffer) = map_lock.get_mut(&key) {
-                            if let Some(line) = buffer.next_line() {
-                                let _ = state.set(
-                                    "_read_result",
-                                    lua.create_string(&line)
-                                        .map(Value::String)
-                                        .unwrap_or(Value::Nil),
-                                );
-                                let _ = state.set("_read_result_err", Value::Nil);
-                            } else {
-                                continue;
-                            }
-                        } else {
+                        let Some(buffer) = map_lock.get_mut(&key) else {
                             continue;
-                        }
-                    } else {
-                        continue;
+                        };
+                        let Some(line) = buffer.next_line() else {
+                            continue;
+                        };
+                        wait_hit(lua, &state, "_read_result", "_read_result_err", &line);
                     }
                 }
                 YIELD_EXPECT => {
@@ -151,56 +138,39 @@ pub(crate) fn process_tasks(
                     let pattern: String = op.get("pattern").unwrap_or_default();
                     let deadline_ms: u64 = op.get(YIELD_DEADLINE_MS).unwrap_or(0);
                     if deadline_ms > 0 && now_ms > deadline_ms {
-                        let _ = state.set("_expect_result", Value::Nil);
-                        let _ = state.set(
-                            "_expect_err",
-                            lua.create_string("timeout")
-                                .map(Value::String)
-                                .unwrap_or(Value::Nil),
-                        );
-                    } else if let Some(ref map) = host_services.line_buffers {
-                        let key = line_buffer_key(&host_services.plugin_id, &port);
-                        let mut map_lock = map.lock();
-                        let matched = if let Some(buffer) = map_lock.get_mut(&key) {
-                            let mut found: Option<String> = None;
-                            while let Some(line) = buffer.next_line() {
-                                if line.contains(&pattern) {
-                                    found = Some(line);
-                                    break;
-                                }
-                            }
-                            found
-                        } else {
+                        wait_failed(lua, &state, "_expect_result", "_expect_err", "timeout");
+                    } else {
+                        let Some(ref map) = host_services.line_buffers else {
                             continue;
                         };
-                        match matched {
-                            Some(line) => {
-                                let _ = state.set(
-                                    "_expect_result",
-                                    lua.create_string(&line)
-                                        .map(Value::String)
-                                        .unwrap_or(Value::Nil),
-                                );
-                                let _ = state.set("_expect_err", Value::Nil);
+                        let key = line_buffer_key(&host_services.plugin_id, &port);
+                        let mut map_lock = map.lock();
+                        let Some(buffer) = map_lock.get_mut(&key) else {
+                            continue;
+                        };
+                        // 逐行消费到命中为止：不匹配的行属于本次 expect 的无关输出
+                        let mut matched: Option<String> = None;
+                        while let Some(line) = buffer.next_line() {
+                            if line.contains(&pattern) {
+                                matched = Some(line);
+                                break;
                             }
-                            None => continue,
                         }
-                    } else {
-                        continue;
+                        let Some(line) = matched else {
+                            continue;
+                        };
+                        wait_hit(lua, &state, "_expect_result", "_expect_err", &line);
                     }
                 }
                 YIELD_WRITE_LINE_AND_EXPECT => {
                     let port: String = op.get(YIELD_PORT).unwrap_or_default();
                     let deadline_ms: u64 = op.get(YIELD_DEADLINE_MS).unwrap_or(0);
                     if deadline_ms > 0 && now_ms > deadline_ms {
-                        let _ = state.set("_expect_result", Value::Nil);
-                        let _ = state.set(
-                            "_expect_err",
-                            lua.create_string("timeout")
-                                .map(Value::String)
-                                .unwrap_or(Value::Nil),
-                        );
-                    } else if let Some(ref map) = host_services.line_buffers {
+                        wait_failed(lua, &state, "_expect_result", "_expect_err", "timeout");
+                    } else {
+                        let Some(ref map) = host_services.line_buffers else {
+                            continue;
+                        };
                         let key = line_buffer_key(&host_services.plugin_id, &port);
                         // 在锁内只收集行，释放锁后再做 Lua 匹配（避免死锁）
                         let lines: Vec<String> = {
@@ -222,19 +192,19 @@ pub(crate) fn process_tasks(
                         // 遍历匹配。未命中的候选行属于本次 expect 的无关输出，扫描后
                         // 必须消费；否则 64 行以上的噪声会被反复回灌并永久挡住后续 ACK。
                         // 命中 return 时，只保留命中行之后尚未检查的尾部。
+                        let patterns: Option<Table> = op.get("patterns").ok();
                         let mut matched = None;
                         let mut matched_through = None;
                         for (i, line) in lines.iter().enumerate() {
-                            let patterns: Option<Table> = op.get("patterns").ok();
                             if let Some(ref pts) = patterns {
                                 for pair in pts.pairs::<Value, Table>().flatten() {
                                     let p: Table = pair.1;
-                                    let pat: String = p.get("pattern").unwrap_or_default();
-                                    let action: String =
-                                        p.get("action").unwrap_or_else(|_| "return".to_owned());
+                                    let pat: String = p.get(EXPECT_PATTERN).unwrap_or_default();
+                                    let action: String = p
+                                        .get(EXPECT_ACTION)
+                                        .unwrap_or_else(|_| "return".to_owned());
                                     let pname: String = p.get("name").unwrap_or_default();
-                                    let hit = match_pat(line, &pat);
-                                    if hit {
+                                    if match_pat(line, &pat) {
                                         if action == "continue" {
                                             let _ = state
                                                 .set("status", format!("设备忙: {pname}: {line}"));
@@ -272,22 +242,20 @@ pub(crate) fn process_tasks(
                                 buffer.finish_expect_scan(lines, matched_through);
                             }
                         }
-                        if let Some((name, line)) = matched {
-                            let result = lua.create_table().ok();
-                            if let Some(ref r) = result {
-                                let _ = r.set("name", name.as_str());
-                                let _ = r.set("line", line.as_str());
-                                let _ = r.set("elapsed_ms", 0_u64);
-                            }
-                            let _ = state.set(
-                                "_expect_result",
-                                result.map(Value::Table).unwrap_or(Value::Nil),
-                            );
-                        } else {
+                        let Some((name, line)) = matched else {
                             continue;
+                        };
+                        // 结果表建不出来时退回 nil：一次分配失败不该弄崩整条调度
+                        let result = lua.create_table().ok();
+                        if let Some(ref r) = result {
+                            let _ = r.set("name", name.as_str());
+                            let _ = r.set("line", line.as_str());
+                            let _ = r.set("elapsed_ms", 0_u64);
                         }
-                    } else {
-                        continue;
+                        let _ = state.set(
+                            "_expect_result",
+                            result.map(Value::Table).unwrap_or(Value::Nil),
+                        );
                     }
                 }
                 _ => {
@@ -620,7 +588,7 @@ pub(crate) fn create_task_api(
     )?;
 
     // ctx.task.cancel(id)
-    let tasks_ref = bus.clone();
+    let bus_cancel = bus.clone();
     let src_cancel = source.clone();
     table.set(
         "cancel",
@@ -629,7 +597,7 @@ pub(crate) fn create_task_api(
             if let Ok(state) = tasks.get::<Table>(id.as_str()) {
                 let _ = state.set(TASK_CANCELLED, true);
                 let _ = state.set("paused", false);
-                tasks_ref.publish(Event::system_log(
+                bus_cancel.publish(Event::system_log(
                     LogLevel::Info,
                     &src_cancel,
                     format!("任务 {} 已取消", id),
@@ -644,11 +612,10 @@ pub(crate) fn create_task_api(
         "pause",
         lua.create_function(move |lua, id: String| {
             let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
-            if let Ok(state) = tasks.get::<Table>(id.as_str()) {
-                let pausable: bool = state.get("pausable").unwrap_or(false);
-                if pausable {
-                    let _ = state.set("paused", true);
-                }
+            if let Ok(state) = tasks.get::<Table>(id.as_str())
+                && state.get::<bool>("pausable").unwrap_or(false)
+            {
+                let _ = state.set("paused", true);
             }
             Ok(())
         })?,
@@ -672,9 +639,7 @@ pub(crate) fn create_task_api(
         lua.create_function(move |lua, ()| {
             let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
             let result = lua.create_table()?;
-            let mut idx = 0_u32;
-            for (_id, state) in tasks.pairs::<String, Table>().flatten() {
-                idx += 1;
+            for (index, (_id, state)) in tasks.pairs::<String, Table>().flatten().enumerate() {
                 let summary = lua.create_table()?;
                 summary.set("id", state.get::<String>("id").unwrap_or_default())?;
                 summary.set("title", state.get::<String>("title").unwrap_or_default())?;
@@ -701,7 +666,7 @@ pub(crate) fn create_task_api(
                 )?;
                 summary.set("status", state.get::<String>("status").unwrap_or_default())?;
                 summary.set("error", state.get::<String>("error").unwrap_or_default())?;
-                result.set(idx, summary)?;
+                result.set(index + 1, summary)?;
             }
             Ok(Value::Table(result))
         })?,

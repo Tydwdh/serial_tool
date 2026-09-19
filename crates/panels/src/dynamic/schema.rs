@@ -2,7 +2,7 @@
 //!
 //! [`DynamicField`]/[`DynamicFieldKind`]/[`FieldOption`]/[`FieldFilter`] 描述
 //! 插件通过 `ui.panel.create` 事件声明的表单字段；`parse_fields` 等函数把
-//! `serde_json::Value` 解析为这些类型。解析逻辑与渲染（`dynamic.rs` 的
+//! `serde_json::Value` 解析为这些类型。解析逻辑与渲染（`form_render.rs` 的
 //! `dynamic_form_ui`）解耦，便于独立测试。
 
 use serde_json::Value;
@@ -120,29 +120,12 @@ pub fn parse_fields(value: Option<&Value>) -> Result<Vec<DynamicField>, String> 
             let options = parse_options(object.get("options"))?;
             let filters = parse_filters(object.get("filters"))?;
 
-            // value 优先使用 value 字段，否则 default，否则按类型 fallback
+            // value 优先使用 value 字段，否则 default，最后按类型兜底
             let field_value = object
                 .get("value")
                 .cloned()
                 .or_else(|| object.get("default").cloned())
-                .or_else(|| {
-                    if matches!(kind, DynamicFieldKind::Progress) {
-                        Some(Value::Number(0.into()))
-                    } else if matches!(kind, DynamicFieldKind::Status) {
-                        Some(serde_json::json!({"text": "空闲", "level": "idle"}))
-                    } else if matches!(
-                        kind,
-                        DynamicFieldKind::Boolean
-                            | DynamicFieldKind::Button
-                            | DynamicFieldKind::Separator
-                            | DynamicFieldKind::Label
-                    ) {
-                        None
-                    } else {
-                        options.first().map(|o| Value::String(o.value.clone()))
-                    }
-                })
-                .unwrap_or(Value::String(String::new()));
+                .unwrap_or_else(|| fallback_field_value(kind, &options));
 
             Ok(DynamicField {
                 id,
@@ -181,6 +164,24 @@ pub fn parse_fields(value: Option<&Value>) -> Result<Vec<DynamicField>, String> 
             })
         })
         .collect()
+}
+
+/// 字段既没有 `value` 也没有 `default` 时的兜底值。
+fn fallback_field_value(kind: DynamicFieldKind, options: &[FieldOption]) -> Value {
+    match kind {
+        DynamicFieldKind::Progress => Value::Number(0.into()),
+        DynamicFieldKind::Status => serde_json::json!({"text": "空闲", "level": "idle"}),
+        // 开关与 display-only 字段没有可编辑的值，统一用空串占位
+        DynamicFieldKind::Boolean
+        | DynamicFieldKind::Button
+        | DynamicFieldKind::Separator
+        | DynamicFieldKind::Label => Value::String(String::new()),
+        // 其余类型（text/select/serial…）默认取第一个选项，没有选项时同样为空串
+        _ => match options.first() {
+            Some(option) => Value::String(option.value.clone()),
+            None => Value::String(String::new()),
+        },
+    }
 }
 
 pub(super) fn parse_filters(value: Option<&Value>) -> Result<Vec<FieldFilter>, String> {
@@ -227,21 +228,9 @@ pub(super) fn parse_options(value: Option<&Value>) -> Result<Vec<FieldOption>, S
 
     for option in options {
         match option {
-            Value::String(value) => {
-                result.push(FieldOption {
-                    label: value.clone(),
-                    value: value.clone(),
-                });
-            }
-            Value::Number(value) => {
-                let value = value.to_string();
-                result.push(FieldOption {
-                    label: value.clone(),
-                    value,
-                });
-            }
-            Value::Bool(value) => {
-                let value = value.to_string();
+            // 标量选项：label 与 value 用同一个字面量
+            Value::String(_) | Value::Number(_) | Value::Bool(_) => {
+                let value = value_to_string(option);
                 result.push(FieldOption {
                     label: value.clone(),
                     value,
@@ -278,6 +267,7 @@ pub(super) fn value_to_string(value: &Value) -> String {
     }
 }
 
+/// 整数值不带小数点；小数最多 4 位，并去掉多余的尾零。
 pub(super) fn compact_number(value: f64) -> String {
     if value.fract() == 0.0 {
         format!("{value:.0}")
@@ -440,8 +430,6 @@ mod tests {
     fn compact_number_trims_trailing_zeros() {
         assert_eq!(compact_number(3.0), "3");
         assert_eq!(compact_number(3.15), "3.15");
-        assert_eq!(compact_number(3.0), "3");
-        // 5 位小数截断到 4 位后去尾零
         assert_eq!(compact_number(1.5), "1.5");
     }
 }

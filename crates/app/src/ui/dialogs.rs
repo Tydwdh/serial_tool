@@ -5,29 +5,18 @@ use tool_core::{Direction, Event, LogLevel, Payload};
 impl WorkbenchApp {
     /// 处理 Lua ctx.dialog.open_file 请求。每帧最多处理一个。
     pub(crate) fn poll_dialog_requests(&mut self) {
-        if let Some(request) = self.workbench.try_dialog_request() {
-            let mut dialog = rfd::FileDialog::new().set_title(&request.title);
-            for filter in &request.filters {
-                if !filter.extensions.is_empty() && filter.extensions[0] != "*" {
-                    dialog = dialog.add_filter(
-                        &filter.name,
-                        &filter
-                            .extensions
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<_>>(),
-                    );
-                }
-            }
-            let result = dialog.pick_file();
-            if let Some(ref path) = result {
-                self.workbench.authorize_plugin_file(
-                    &request.plugin_id,
-                    tool_platform::storage::FileHandle::from_native_path(path.clone()),
-                );
-            }
-            let _ = request.response_sender.send(result);
+        let Some(request) = self.workbench.try_dialog_request() else {
+            return;
+        };
+        let dialog = rfd::FileDialog::new().set_title(&request.title);
+        let result = add_file_filters(dialog, &request.filters).pick_file();
+        if let Some(path) = &result {
+            self.workbench.authorize_plugin_file(
+                &request.plugin_id,
+                tool_platform::storage::FileHandle::from_native_path(path.clone()),
+            );
         }
+        let _ = request.response_sender.send(result);
     }
 
     /// 处理 ui.form.file_browse 请求。每帧最多处理一个，避免连续弹多个模态对话框。
@@ -41,19 +30,21 @@ impl WorkbenchApp {
             let filters: Vec<tool_lua_host::FileFilter> = value
                 .get("filters")
                 .and_then(Value::as_array)
-                .map(|arr| {
-                    arr.iter()
-                        .map(|f| tool_lua_host::FileFilter {
-                            name: f
+                .map(|filter_values| {
+                    filter_values
+                        .iter()
+                        .map(|filter_value| tool_lua_host::FileFilter {
+                            name: filter_value
                                 .get("name")
                                 .and_then(Value::as_str)
                                 .unwrap_or("")
                                 .to_owned(),
-                            extensions: f
+                            extensions: filter_value
                                 .get("extensions")
                                 .and_then(Value::as_array)
-                                .map(|arr| {
-                                    arr.iter()
+                                .map(|extensions| {
+                                    extensions
+                                        .iter()
                                         .filter_map(|v| v.as_str().map(String::from))
                                         .collect()
                                 })
@@ -63,22 +54,10 @@ impl WorkbenchApp {
                 })
                 .unwrap_or_default();
 
-            let mut dialog = rfd::FileDialog::new().set_title("选择文件");
-            for filter in &filters {
-                if !filter.extensions.is_empty() && filter.extensions[0] != "*" {
-                    dialog = dialog.add_filter(
-                        &filter.name,
-                        &filter
-                            .extensions
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<_>>(),
-                    );
-                }
-            }
-            let result = dialog.pick_file();
+            let dialog = rfd::FileDialog::new().set_title("选择文件");
+            let result = add_file_filters(dialog, &filters).pick_file();
 
-            if let Some(ref selected_path) = result {
+            if let Some(selected_path) = &result {
                 if let Some(owner) = self.dynamic_panels.panel_owner(panel_id) {
                     self.workbench.authorize_plugin_file(
                         owner,
@@ -104,4 +83,19 @@ impl WorkbenchApp {
             }
         }
     }
+}
+
+/// 把 `FileFilter` 列表挂到 rfd 对话框上；扩展名为空或以 `*` 打头的条目不生成过滤器。
+fn add_file_filters(
+    mut dialog: rfd::FileDialog,
+    filters: &[tool_lua_host::FileFilter],
+) -> rfd::FileDialog {
+    for filter in filters {
+        if filter.extensions.is_empty() || filter.extensions[0] == "*" {
+            continue;
+        }
+        let extensions: Vec<&str> = filter.extensions.iter().map(|ext| ext.as_str()).collect();
+        dialog = dialog.add_filter(&filter.name, &extensions);
+    }
+    dialog
 }

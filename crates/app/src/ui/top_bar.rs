@@ -2,11 +2,10 @@ use eframe::egui;
 use egui_material_icons::icons::{ICON_CANCEL, ICON_FIBER_MANUAL_RECORD, ICON_REFRESH, ICON_STOP};
 use std::collections::BTreeMap;
 use tool_panels::design::{self, ButtonKind};
-use tool_panels::{SerialPanel, SerialPortItem, SerialTopBarAction, SerialTopBarView};
+use tool_panels::{SerialPanel, SerialPortItem, SerialTopBarAction, SerialTopBarView, theme};
 
 use crate::app::WorkbenchApp;
 use crate::state::StatusLevel;
-use tool_panels::theme;
 
 impl WorkbenchApp {
     pub(super) fn top_bar(&mut self, ui: &mut egui::Ui) {
@@ -89,8 +88,8 @@ impl WorkbenchApp {
             ui.separator();
             // ── 插件贡献：top_bar.left ──
             self.ui_contribution_slot(ui, "top_bar.left");
-            let rec = self.workbench.query_recording().stats.running;
-            let record_response = if rec {
+            let recording_running = self.workbench.query_recording().stats.running;
+            let record_response = if recording_running {
                 design::button(ui, ICON_STOP, "停止录制", ButtonKind::Danger)
             } else {
                 design::button(ui, ICON_FIBER_MANUAL_RECORD, "开始录制", ButtonKind::Ghost)

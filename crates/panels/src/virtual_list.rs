@@ -29,12 +29,13 @@ impl FenwickTree {
         }
     }
 
+    /// 在末尾追加一个值。新节点落在 `tree.len()`，它负责的那一段已经由前面的节点
+    /// 累加过，所以只要把「本段已有的和」加上自己即可，不必像 `from_values` 那样重算。
     fn append(&mut self, value: f32) {
         let index = self.tree.len();
-        let low_bit = index & index.wrapping_neg();
-        let start = index - low_bit;
-        let existing_range = self.prefix_sum(index - 1) - self.prefix_sum(start);
-        self.tree.push(existing_range + value);
+        let block_start = index - (index & index.wrapping_neg());
+        let covered = self.prefix_sum(index - 1) - self.prefix_sum(block_start);
+        self.tree.push(covered + value);
     }
 
     fn prefix_sum(&self, count: usize) -> f32 {
@@ -114,7 +115,6 @@ impl VirtualRowIndex {
         let default_height = default_height.max(1.0);
         if self.layout_key == Some(layout_key)
             && (self.default_height - default_height).abs() <= f32::EPSILON
-            && ids.len() >= self.ids.len()
             && ids.len() > self.ids.len()
         {
             for &id in &ids[self.ids.len()..] {

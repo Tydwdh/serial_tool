@@ -5,6 +5,7 @@ use egui::widgets::text_edit::TextEditState;
 use egui_material_icons::icons::{
     ICON_CANCEL, ICON_DELETE, ICON_DELETE_SWEEP, ICON_HISTORY, ICON_SEARCH, ICON_SEND,
 };
+use tool_core::hex_preview;
 use tool_panels::{
     SendAction, SendLayout as SharedSendLayout, SendLineEnding, SendPortItem, SendToolbarButton,
     SendView,
@@ -27,8 +28,8 @@ const SEND_BOTTOM_MIN_INPUT_HEIGHT: f32 = 40.0;
 /// `WebApplication::validate_hex` 返回 `Result<_, String>`，本就无前缀）。
 ///
 /// **可达性（round-2 实测，更正 round-1 写在这里的说法）**：本函数只有两个调用点
-/// （`:661` 按钮 hover、`:754` HEX 预览 hover），两者都在 `legacy_send_panel_body`
-/// 的不可达子树里（`:279-340`，`#[allow(dead_code)]`，全工作区 0 调用）。
+/// （`render_send_and_clear_buttons` 的按钮 hover、`render_hex_preview` 的预览 hover），
+/// 两者都在 `legacy_send_panel_body` 的不可达子树里（`#[allow(dead_code)]`，全工作区 0 调用）。
 /// 所以本函数**没有**改变任何用户看得见的界面；native 活着的那道 HEX 门禁用的是
 /// `crates/panels/src/sender.rs:304-309`（两平台共用，按 `hex_strict` 判）。
 /// 「native 恒宽松、web 严格」这条两端分歧**不存在** —— round-1 把死代码读成了实况，
@@ -150,7 +151,6 @@ impl WorkbenchApp {
         let was_periodic = self.send.periodic_enabled;
         let toolbar_buttons: Vec<SendToolbarButton> = self.send_toolbar_buttons();
         let actions = {
-            let send = &mut self.send;
             let SendUiState {
                 input,
                 hex_mode,
@@ -166,7 +166,7 @@ impl WorkbenchApp {
                 periodic_interval_ms,
                 periodic_send_count,
                 ..
-            } = send;
+            } = &mut self.send;
             let mut view = SendView {
                 ports: &ports,
                 target_port,
@@ -204,34 +204,17 @@ impl WorkbenchApp {
             cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         for action in actions {
-            match action {
-                SendAction::SendText { port, text } => {
-                    let history_text = self.send.input.clone();
-                    match self
-                        .workbench
-                        .dispatch(tool_application::AppCommand::SendText {
-                            port: tool_platform::PortId::new(port),
-                            text,
-                        }) {
-                        Ok(_) => {
-                            record_shared_send_history(&mut history, history_text, MAX_SEND_HISTORY)
-                        }
-                        Err(error) => self.send.error = Some(error.to_string()),
-                    }
-                }
+            // SendText / SendHex 只差命令载荷，历史录制与错误处理共用同一段。
+            let command = match action {
+                SendAction::SendText { port, text } => tool_application::AppCommand::SendText {
+                    port: tool_platform::PortId::new(port),
+                    text,
+                },
                 SendAction::SendHex { port, hex, strict } => {
-                    let history_text = self.send.input.clone();
-                    match self
-                        .workbench
-                        .dispatch(tool_application::AppCommand::SendHex {
-                            port: tool_platform::PortId::new(port),
-                            hex,
-                            strict,
-                        }) {
-                        Ok(_) => {
-                            record_shared_send_history(&mut history, history_text, MAX_SEND_HISTORY)
-                        }
-                        Err(error) => self.send.error = Some(error.to_string()),
+                    tool_application::AppCommand::SendHex {
+                        port: tool_platform::PortId::new(port),
+                        hex,
+                        strict,
                     }
                 }
                 SendAction::SetDtr { port, value } => {
@@ -244,6 +227,7 @@ impl WorkbenchApp {
                     {
                         self.set_status_force(StatusLevel::Error, error.to_string());
                     }
+                    continue;
                 }
                 SendAction::SetRts { port, value } => {
                     if let Err(error) =
@@ -255,13 +239,20 @@ impl WorkbenchApp {
                     {
                         self.set_status_force(StatusLevel::Error, error.to_string());
                     }
+                    continue;
                 }
                 SendAction::ActivateToolbar {
                     plugin_id,
                     contribution_id,
                 } => {
                     self.activate_send_toolbar_button(&plugin_id, &contribution_id);
+                    continue;
                 }
+            };
+            let history_text = self.send.input.clone();
+            match self.workbench.dispatch(command) {
+                Ok(_) => record_shared_send_history(&mut history, history_text, MAX_SEND_HISTORY),
+                Err(error) => self.send.error = Some(error.to_string()),
             }
         }
         self.send.send_history = history.into_iter().collect();
@@ -980,14 +971,12 @@ impl WorkbenchApp {
                         let galley_width = (text_width - 16.0).max(20.0);
                         let count = entries.len();
                         // 历史条目用稍大字体，便于阅读。
-                        let font_id = egui::FontId::proportional(
-                            ui.style()
-                                .text_styles
-                                .get(&egui::TextStyle::Body)
-                                .map(|f| f.size)
-                                .map(|s| s.max(15.0))
-                                .unwrap_or(15.0),
-                        );
+                        let body_size = ui
+                            .style()
+                            .text_styles
+                            .get(&egui::TextStyle::Body)
+                            .map_or(15.0, |body| body.size.max(15.0));
+                        let font_id = egui::FontId::proportional(body_size);
                         let min_row_height: f32 = 28.0;
                         let row_padding = 8.0; // 上下各 4px
 
@@ -1127,7 +1116,7 @@ impl WorkbenchApp {
         });
 
         // 闭包外执行实际状态变更
-        match pending.take() {
+        match pending {
             Some(PendingHistory::Send(text)) => {
                 // 填入发送编辑器并关闭 popup
                 self.send.input = text;
@@ -1151,8 +1140,6 @@ impl WorkbenchApp {
         }
     }
 }
-
-use tool_core::hex_preview;
 
 #[cfg(test)]
 mod tests {

@@ -14,13 +14,11 @@ fn create_codec_table(lua: &Lua, (): ()) -> mlua::Result<Value> {
     tbl.set(
         "to_hex",
         lua.create_function(|_, bytes: mlua::String| {
-            let data = bytes.as_bytes();
-            let mut hex = String::with_capacity(data.len() * 2);
-            for &b in &data {
-                use std::fmt::Write;
-                // write! to String is infallible (fmt::Write for String never returns Err)
-                write!(hex, "{:02X}", b).expect("write to String should be infallible");
-            }
+            let hex: String = bytes
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02X}"))
+                .collect();
             Ok(hex)
         })?,
     )?;
@@ -97,14 +95,15 @@ fn create_codec_table(lua: &Lua, (): ()) -> mlua::Result<Value> {
     tbl.set(
         "split_lines",
         lua.create_function(|lua, text: mlua::String| {
+            // to_str 的借用在收集完就结束，下面的建表调用不再持有它
             let lines: Vec<String> = text
                 .to_str()?
                 .lines()
                 .map(|l| l.trim_end_matches('\r').to_owned())
                 .collect();
             let arr = lua.create_table()?;
-            for (i, line) in lines.iter().enumerate() {
-                arr.set(i + 1, line.as_str())?;
+            for (index, line) in lines.iter().enumerate() {
+                arr.set(index + 1, line.as_str())?;
             }
             Ok(Value::Table(arr))
         })?,
@@ -130,10 +129,9 @@ fn create_utils_table(lua: &Lua, (): ()) -> mlua::Result<Value> {
         lua.create_function(|lua, (s, sep): (mlua::String, mlua::String)| {
             let s = s.to_str()?.to_owned();
             let sep = sep.to_str()?.to_owned();
-            let parts: Vec<&str> = s.split(&sep).collect();
             let arr = lua.create_table()?;
-            for (i, part) in parts.iter().enumerate() {
-                arr.set(i + 1, *part)?;
+            for (index, part) in s.split(&sep).enumerate() {
+                arr.set(index + 1, part)?;
             }
             Ok(Value::Table(arr))
         })?,
@@ -173,10 +171,8 @@ fn create_utils_table(lua: &Lua, (): ()) -> mlua::Result<Value> {
         "table_keys",
         lua.create_function(|lua, t: Table| {
             let arr = lua.create_table()?;
-            let mut i = 0;
-            for (key, _) in t.pairs::<Value, Value>().flatten() {
-                i += 1;
-                arr.set(i, key)?;
+            for (index, (key, _)) in t.pairs::<Value, Value>().flatten().enumerate() {
+                arr.set(index + 1, key)?;
             }
             Ok(Value::Table(arr))
         })?,

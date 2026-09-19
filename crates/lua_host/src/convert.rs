@@ -4,18 +4,24 @@
 //! 被 `install_ctx`、各 `create_*_api`、`install_replay_ctx` 等广泛依赖。
 
 use mlua::{Lua, Table, Value};
-use tool_core::{Event, Payload};
+use tool_core::{Direction, Event, Payload};
 use tool_plugin_api::{PluginError, PluginValue};
 use tool_transport::{SerialConfig, parse_data_bits, parse_parity, parse_stop_bits};
 
 // ── Event → Lua ──
+
+/// Lua 侧看到的 `direction` 拼写：Debug 形式转小写（`rx` / `tx` / `internal`）。
+/// 事件表与 `ctx.bus.history` 共用这一处定义 —— 插件按字符串分支，两处必须一致。
+pub(crate) fn direction_to_lua_str(direction: Direction) -> String {
+    format!("{direction:?}").to_lowercase()
+}
 
 pub(crate) fn event_to_lua_table(lua: &Lua, table: &Table, event: &Event) -> mlua::Result<()> {
     table.set("id", event.id)?;
     table.set("timestamp_ms", event.timestamp_ms)?;
     table.set("topic", event.topic.clone())?;
     table.set("source", event.source.clone())?;
-    table.set("direction", format!("{:?}", event.direction).to_lowercase())?;
+    table.set("direction", direction_to_lua_str(event.direction))?;
     table.set("payload", payload_to_lua(lua, &event.payload)?)?;
     table.set("metadata", json_to_lua_value(lua, &event.metadata)?)?;
 

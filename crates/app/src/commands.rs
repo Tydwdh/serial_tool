@@ -14,6 +14,59 @@ pub(crate) enum NativeExportJob {
     Logs(LogExportCursor),
 }
 
+impl NativeExportJob {
+    /// 通知来源：终端与日志各自独立，避免互相顶掉。
+    fn source(&self) -> &'static str {
+        match self {
+            Self::Terminal(_) => "terminal-export",
+            Self::Logs(_) => "log-export",
+        }
+    }
+
+    /// Workbench 后台任务 kind。
+    fn spawn_kind(&self) -> &'static str {
+        match self {
+            Self::Terminal(_) => "export_terminal",
+            Self::Logs(_) => "export_log",
+        }
+    }
+}
+
+/// 导出格式对应的（菜单显示名, 文件后缀）。
+fn export_format_labels(format: TerminalExportFormat) -> (&'static str, &'static str) {
+    match format {
+        TerminalExportFormat::Txt => ("TXT", "txt"),
+        TerminalExportFormat::Csv => ("CSV", "csv"),
+        TerminalExportFormat::Json => ("JSON", "json"),
+    }
+}
+
+/// 弹出"另存为"对话框取导出目标路径；用户取消时返回 `None`。
+///
+/// 对话框标题为「{title_prefix} {格式名}」。用户手动输入其它后缀时仍以菜单中
+/// 选定的格式为准，避免内容与扩展名不一致。
+fn pick_export_path(
+    title_prefix: &str,
+    name_prefix: &str,
+    format: TerminalExportFormat,
+) -> Option<PathBuf> {
+    let (format_name, extension) = export_format_labels(format);
+    let default_name = format!("{name_prefix}-{}.{}", now_timestamp_ms(), extension);
+    let mut path = rfd::FileDialog::new()
+        .set_title(format!("{title_prefix} {format_name}"))
+        .add_filter(format_name, &[extension])
+        .set_file_name(default_name)
+        .save_file()?;
+    if !path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case(extension))
+    {
+        path.set_extension(extension);
+    }
+    Some(path)
+}
+
 pub(crate) struct NativeExportState {
     pub(crate) format: TerminalExportFormat,
     pub(crate) path: PathBuf,
@@ -29,42 +82,11 @@ impl WorkbenchApp {
                 .push("terminal-export", StatusLevel::Warn, "已有导出任务正在运行");
             return;
         }
-        let (format_name, extension) = match format {
-            TerminalExportFormat::Txt => ("TXT", "txt"),
-            TerminalExportFormat::Csv => ("CSV", "csv"),
-            TerminalExportFormat::Json => ("JSON", "json"),
-        };
-        let default_name = format!("serial-export-{}.{}", now_timestamp_ms(), extension);
-        let Some(mut path) = rfd::FileDialog::new()
-            .set_title(format!("导出接收数据为 {format_name}"))
-            .add_filter(format_name, &[extension])
-            .set_file_name(default_name)
-            .save_file()
-        else {
+        let Some(path) = pick_export_path("导出接收数据为", "serial-export", format) else {
             return;
         };
-
-        // 用户手动输入其它后缀时仍以菜单中选定的格式为准，避免内容与扩展名不一致。
-        if !path
-            .extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(|value| value.eq_ignore_ascii_case(extension))
-        {
-            path.set_extension(extension);
-        }
-
-        self.native_export = Some(NativeExportState {
-            format,
-            path: path.clone(),
-            job: NativeExportJob::Terminal(self.terminal_panel.begin_export_cursor()),
-            content: String::new(),
-            exported_rows: 0,
-        });
-        self.notifications.push(
-            "terminal-export",
-            StatusLevel::Info,
-            format!("正在准备导出：{}", path.display()),
-        );
+        let job = NativeExportJob::Terminal(self.terminal_panel.begin_export_cursor());
+        self.begin_native_export(format, path, job);
     }
 
     pub(crate) fn export_log_data(&mut self, format: TerminalExportFormat) {
@@ -73,39 +95,32 @@ impl WorkbenchApp {
                 .push("log-export", StatusLevel::Warn, "已有导出任务正在运行");
             return;
         }
-        let (format_name, extension) = match format {
-            TerminalExportFormat::Txt => ("TXT", "txt"),
-            TerminalExportFormat::Csv => ("CSV", "csv"),
-            TerminalExportFormat::Json => ("JSON", "json"),
-        };
-        let default_name = format!("log-export-{}.{}", now_timestamp_ms(), extension);
-        let Some(mut path) = rfd::FileDialog::new()
-            .set_title(format!("导出日志为 {format_name}"))
-            .add_filter(format_name, &[extension])
-            .set_file_name(default_name)
-            .save_file()
-        else {
+        let Some(path) = pick_export_path("导出日志为", "log-export", format) else {
             return;
         };
-        if !path
-            .extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(|value| value.eq_ignore_ascii_case(extension))
-        {
-            path.set_extension(extension);
-        }
-        self.native_export = Some(NativeExportState {
-            format,
-            path: path.clone(),
-            job: NativeExportJob::Logs(self.bottom_log_panel.begin_export_cursor()),
-            content: String::new(),
-            exported_rows: 0,
-        });
+        let job = NativeExportJob::Logs(self.bottom_log_panel.begin_export_cursor());
+        self.begin_native_export(format, path, job);
+    }
+
+    /// 登记导出任务并提示"正在准备导出"，分帧读取与写入由 `tick_native_export` 推进。
+    fn begin_native_export(
+        &mut self,
+        format: TerminalExportFormat,
+        path: PathBuf,
+        job: NativeExportJob,
+    ) {
         self.notifications.push(
-            "log-export",
+            job.source(),
             StatusLevel::Info,
             format!("正在准备导出：{}", path.display()),
         );
+        self.native_export = Some(NativeExportState {
+            format,
+            path,
+            job,
+            content: String::new(),
+            exported_rows: 0,
+        });
     }
 
     pub(crate) fn tick_native_export(&mut self, ctx: &eframe::egui::Context) {
@@ -114,11 +129,7 @@ impl WorkbenchApp {
             return;
         };
         let format = state.format;
-        let notification_source = if matches!(&state.job, NativeExportJob::Terminal(_)) {
-            "terminal-export"
-        } else {
-            "log-export"
-        };
+        let notification_source = state.job.source();
         let (chunk, done, exported) = match &mut state.job {
             NativeExportJob::Terminal(cursor) => {
                 self.terminal_panel
@@ -144,26 +155,13 @@ impl WorkbenchApp {
         let Some(state) = self.native_export.take() else {
             return;
         };
-        let is_terminal = matches!(&state.job, NativeExportJob::Terminal(_));
-        let format_name = match state.format {
-            TerminalExportFormat::Txt => "txt",
-            TerminalExportFormat::Csv => "csv",
-            TerminalExportFormat::Json => "json",
-        }
-        .to_owned();
-        let notification_source = if is_terminal {
-            "terminal-export"
-        } else {
-            "log-export"
-        };
+        let notification_source = state.job.source();
+        let spawn_kind = state.job.spawn_kind();
+        let format_name = export_format_labels(state.format).1.to_owned();
         let path = state.path.clone();
         let outcome = self.workbench.spawn_file_export(
-            if is_terminal {
-                "export_terminal"
-            } else {
-                "export_log"
-            },
-            format_name.clone(),
+            spawn_kind,
+            format_name,
             FileHandle::from_native_path(path.clone()),
             move || Ok(state.content),
         );
@@ -233,7 +231,6 @@ impl WorkbenchApp {
 
     /// 切换串口时：保存旧端口设置到 profile，从 profile 恢复新端口设置。
     pub(crate) fn switch_port_selection(&mut self, old_port: Option<&str>, new_port: &str) {
-        // 保存旧端口配置
         if let Some(old) = old_port {
             self.serial.port_profiles.insert(
                 old.to_owned(),
@@ -245,7 +242,6 @@ impl WorkbenchApp {
                 },
             );
         }
-        // 恢复新端口配置
         if let Some(profile) = self.serial.port_profiles.get(new_port) {
             self.serial.baud_rate = profile.baud_rate.clone();
             self.serial.data_bits = profile.data_bits.clone();
@@ -318,16 +314,15 @@ impl WorkbenchApp {
         let removed_ports: Vec<String> = old_names.difference(&new_names).cloned().collect();
 
         self.serial.ports = new_ports;
-        self.dynamic_panels.set_ports(
-            &self
-                .serial
-                .ports
-                .iter()
-                .map(|d| tool_panels::PortItem {
-                    port_name: d.port_name.clone(),
-                })
-                .collect::<Vec<_>>(),
-        );
+        let port_items: Vec<tool_panels::PortItem> = self
+            .serial
+            .ports
+            .iter()
+            .map(|port| tool_panels::PortItem {
+                port_name: port.port_name.clone(),
+            })
+            .collect();
+        self.dynamic_panels.set_ports(&port_items);
 
         let selected_still_exists = self
             .serial
@@ -335,26 +330,22 @@ impl WorkbenchApp {
             .as_ref()
             .is_some_and(|selected| new_names.contains(selected));
 
-        if !selected_still_exists {
-            let selected_val = self.serial.selected_port.clone();
-            if let Some(ref selected) = selected_val {
-                if self.workbench.transport_status(selected).open {
-                    self.set_status_force(
-                        StatusLevel::Warn,
-                        format!("{selected} 已打开但不在系统列表中"),
-                    );
-                } else {
-                    self.serial.selected_port = None;
-                    self.set_status_force(StatusLevel::Warn, format!("{selected} 已拔出或不可用"));
-                }
-                if self.serial.auto_reconnect && !self.serial.manual_disconnects.contains(selected)
-                {
-                    self.serial.pending_reconnect = Some(PendingReconnect {
-                        port_name: selected.clone(),
-                        attempts: 0,
-                        next_try_at: 0.0,
-                    });
-                }
+        if !selected_still_exists && let Some(selected) = self.serial.selected_port.clone() {
+            if self.workbench.transport_status(&selected).open {
+                self.set_status_force(
+                    StatusLevel::Warn,
+                    format!("{selected} 已打开但不在系统列表中"),
+                );
+            } else {
+                self.serial.selected_port = None;
+                self.set_status_force(StatusLevel::Warn, format!("{selected} 已拔出或不可用"));
+            }
+            if self.serial.auto_reconnect && !self.serial.manual_disconnects.contains(&selected) {
+                self.serial.pending_reconnect = Some(PendingReconnect {
+                    port_name: selected,
+                    attempts: 0,
+                    next_try_at: 0.0,
+                });
             }
         }
 
@@ -486,12 +477,13 @@ impl WorkbenchApp {
     pub(crate) fn open_selected_port(&mut self) {
         match self.open_selected_port_result() {
             Ok(()) => {
-                let p = self
+                // `defer_port_open_notice` 要 `&mut self`，这里必须先持有端口名的副本。
+                let port = self
                     .serial
                     .selected_port
                     .clone()
                     .unwrap_or_else(|| "?".to_owned());
-                self.defer_port_open_notice(&p, format!("{p} 已连接"));
+                self.defer_port_open_notice(&port, format!("{port} 已连接"));
             }
             Err(e) => {
                 self.set_status_force(StatusLevel::Error, e);
@@ -512,15 +504,7 @@ impl WorkbenchApp {
             .iter()
             .any(|net| net.display_name() == p)
         {
-            let baud_rate = self
-                .serial
-                .baud_rate
-                .trim()
-                .parse::<u32>()
-                .map_err(|_| "波特率格式错误".to_owned())?;
-            if baud_rate == 0 {
-                return Err("波特率格式错误".to_owned());
-            }
+            Self::parsed_baud_rate(&self.serial)?;
         }
 
         let settings = Self::serial_settings_from_state(&self.serial)?;
@@ -543,8 +527,7 @@ impl WorkbenchApp {
             return;
         };
 
-        let selected_exists = self.serial.ports.iter().any(|port| port.port_name == p);
-        if !selected_exists {
+        if !self.serial.ports.iter().any(|port| port.port_name == p) {
             self.set_status_force(StatusLevel::Error, format!("串口 {p} 不存在"));
             return;
         }
@@ -577,9 +560,8 @@ impl WorkbenchApp {
         }
     }
 
-    fn serial_settings_from_state(
-        serial: &crate::state::SerialUiState,
-    ) -> Result<tool_platform::SerialSettings, String> {
+    /// 波特率必须是正整数字符串；无效时统一给出设置面板同款提示。
+    fn parsed_baud_rate(serial: &crate::state::SerialUiState) -> Result<u32, String> {
         let baud_rate = serial
             .baud_rate
             .trim()
@@ -588,6 +570,13 @@ impl WorkbenchApp {
         if baud_rate == 0 {
             return Err("波特率格式错误".to_owned());
         }
+        Ok(baud_rate)
+    }
+
+    fn serial_settings_from_state(
+        serial: &crate::state::SerialUiState,
+    ) -> Result<tool_platform::SerialSettings, String> {
+        let baud_rate = Self::parsed_baud_rate(serial)?;
         Ok(tool_platform::SerialSettings {
             baud_rate,
             data_bits: serial.data_bits.parse().unwrap_or(8),
@@ -622,7 +611,8 @@ impl WorkbenchApp {
 
     pub(crate) fn start_or_stop_recording(&mut self) {
         let recording = self.workbench.query_recording();
-        let command = if recording.stats.running || recording.stats.stopping {
+        let is_recording = recording.stats.running || recording.stats.stopping;
+        let command = if is_recording {
             tool_application::AppCommand::StopRecording
         } else {
             let recorder_path = resolve_recorder_path(std::path::Path::new(&self.recorder_path));
@@ -636,7 +626,7 @@ impl WorkbenchApp {
                 self.set_status_force(StatusLevel::Info, message);
             }
             Ok(tool_application::CommandOutcome::Done) => {
-                if recording.stats.running || recording.stats.stopping {
+                if is_recording {
                     self.set_status_force(StatusLevel::Info, "正在停止录制...");
                 } else {
                     self.set_status_force(StatusLevel::Info, "录制中");

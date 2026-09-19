@@ -10,6 +10,7 @@ pub struct InstalledPluginRow {
     pub state: PluginStateView,
 }
 
+/// 插件面板的只读快照：已安装列表与清单加载诊断。
 #[derive(Debug, Clone, Default)]
 pub struct PluginViewState {
     pub installed: Vec<InstalledPluginRow>,
@@ -17,6 +18,7 @@ pub struct PluginViewState {
     pub installed_ids: BTreeSet<String>,
 }
 
+/// 插件面板向上回传的意图 — 由 Workbench::dispatch 承接。
 #[derive(Debug, Clone)]
 pub enum PluginUiCommand {
     Enable(String),
@@ -29,14 +31,14 @@ impl From<&[PluginSummaryView]> for PluginViewState {
     fn from(summaries: &[PluginSummaryView]) -> Self {
         let installed = summaries
             .iter()
-            .map(|s| InstalledPluginRow {
-                id: s.id.clone(),
-                name: s.name.clone(),
-                version: s.version.clone(),
-                state: s.state,
+            .map(|summary| InstalledPluginRow {
+                id: summary.id.clone(),
+                name: summary.name.clone(),
+                version: summary.version.clone(),
+                state: summary.state,
             })
             .collect::<Vec<_>>();
-        let installed_ids = installed.iter().map(|r| r.id.clone()).collect();
+        let installed_ids = installed.iter().map(|row| row.id.clone()).collect();
         Self {
             installed,
             diagnostics: Vec::new(),

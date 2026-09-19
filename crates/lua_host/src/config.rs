@@ -67,6 +67,19 @@ impl ConfigStore {
         }
     }
 
+    /// 损坏配置的兜底：先把原文件隔离出去，再按空配置继续；原因由调用方给，日志格式统一。
+    fn quarantine_with_warning(path: &Path, reason: String) {
+        let backup = quarantine_corrupt_file(path).ok().flatten();
+        log::warn!(
+            "plugin config {} {reason}; backup: {}",
+            path.display(),
+            backup.as_ref().map_or_else(
+                || "unavailable".to_owned(),
+                |path| path.display().to_string()
+            )
+        );
+    }
+
     fn read_document(&self, path: &Path) -> (Map<String, serde_json::Value>, bool, bool) {
         let Ok(source) = fs::read_to_string(path) else {
             return (Map::new(), false, false);
@@ -74,28 +87,12 @@ impl ConfigStore {
         let value: serde_json::Value = match serde_json::from_str(&source) {
             Ok(value) => value,
             Err(error) => {
-                let backup = quarantine_corrupt_file(path).ok().flatten();
-                log::warn!(
-                    "plugin config {} is invalid: {error}; backup: {}",
-                    path.display(),
-                    backup.as_ref().map_or_else(
-                        || "unavailable".to_owned(),
-                        |path| path.display().to_string()
-                    )
-                );
+                Self::quarantine_with_warning(path, format!("is invalid: {error}"));
                 return (Map::new(), false, false);
             }
         };
         let Some(object) = value.as_object() else {
-            let backup = quarantine_corrupt_file(path).ok().flatten();
-            log::warn!(
-                "plugin config {} root must be an object; backup: {}",
-                path.display(),
-                backup.as_ref().map_or_else(
-                    || "unavailable".to_owned(),
-                    |path| path.display().to_string()
-                )
-            );
+            Self::quarantine_with_warning(path, "root must be an object".to_owned());
             return (Map::new(), false, false);
         };
 
@@ -125,11 +122,7 @@ impl ConfigStore {
     }
 
     fn write(&self, plugin_id: &str) -> std::io::Result<()> {
-        if self.unsupported_versions.lock().contains(plugin_id) {
-            return Err(std::io::Error::other(
-                "插件配置版本高于当前程序支持范围，已按只读方式打开",
-            ));
-        }
+        self.ensure_writable(plugin_id)?;
         let data = {
             let cache = self.cache.lock();
             cache.get(plugin_id).cloned()

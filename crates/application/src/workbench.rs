@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use tool_core::LogLevel;
 use tool_databus::{DataBus, TopicFilter};
@@ -252,22 +252,7 @@ impl Workbench {
             .to_path_buf();
         let task_id = self.tasks.spawn(kind, move |_context| {
             let content = render()?;
-            let mut bytes = content.into_bytes();
-            if format == "csv" {
-                let mut csv_bytes = b"\xEF\xBB\xBF".to_vec();
-                csv_bytes.append(&mut bytes);
-                bytes = csv_bytes;
-            }
-            file_service
-                .block_on_write_path(
-                    path.clone(),
-                    FileBlob {
-                        name: file.name().to_owned(),
-                        mime: "application/octet-stream".to_owned(),
-                        bytes,
-                    },
-                )
-                .map_err(|error| error.to_string())?;
+            write_exported_content(&file_service, &path, &file, &format, content)?;
             Ok(TaskResult::FileExported { file })
         });
         Ok(pending(task_id, "正在导出文件"))
@@ -425,28 +410,20 @@ impl Workbench {
             //
             // 为什么不合并成 `cmd @ (SendText { port, .. } | SendHex { port, .. }
             // | SendRaw { port, .. })`：1.92.0 报 E0382（`port` 非 Copy，`cmd` 被部分移动），
-            // 改成 `ref cmd` 就要为 payload 多付一次克隆。三个各 4 行的分支，也胜过
-            // 一个带 `_ => String::new()` 兜底的 helper —— 发送路径上的静默错值不可接受。
+            // 改成 `ref cmd` 就要为 payload 多付一次克隆。三个各 3 行的分支（都只调
+            // `dispatch_send`），也胜过在一个带 `_ => String::new()` 兜底的 helper 里
+            // 还原命令 —— 发送路径上的静默错值不可接受。
             AppCommand::SendText { port, text } => {
                 let port_name = port.to_string();
-                let command = AppCommand::SendText { port, text };
-                let plan = send_plan::plan_send(&command, self.is_network_port(&port_name))
-                    .map_err(|error| AppError::Transport(error.to_string()))?;
-                self.send_transport_bytes(port_name, plan)
+                self.dispatch_send(AppCommand::SendText { port, text }, port_name)
             }
             AppCommand::SendHex { port, hex, strict } => {
                 let port_name = port.to_string();
-                let command = AppCommand::SendHex { port, hex, strict };
-                let plan = send_plan::plan_send(&command, self.is_network_port(&port_name))
-                    .map_err(|error| AppError::Transport(error.to_string()))?;
-                self.send_transport_bytes(port_name, plan)
+                self.dispatch_send(AppCommand::SendHex { port, hex, strict }, port_name)
             }
             AppCommand::SendRaw { port, bytes } => {
                 let port_name = port.to_string();
-                let command = AppCommand::SendRaw { port, bytes };
-                let plan = send_plan::plan_send(&command, self.is_network_port(&port_name))
-                    .map_err(|error| AppError::Transport(error.to_string()))?;
-                self.send_transport_bytes(port_name, plan)
+                self.dispatch_send(AppCommand::SendRaw { port, bytes }, port_name)
             }
             AppCommand::SetDtr { port, value } => {
                 self.set_transport_signal(port.to_string(), value, true)
@@ -482,8 +459,7 @@ impl Workbench {
                 Ok(CommandOutcome::Done)
             }
             AppCommand::AddBookmark { name } => {
-                let n = name.unwrap_or_default();
-                self.recorder.add_bookmark(&n);
+                self.recorder.add_bookmark(&name.unwrap_or_default());
                 Ok(CommandOutcome::Done)
             }
             AppCommand::AddReplayBookmark { name } => {
@@ -621,26 +597,10 @@ impl Workbench {
                     .native_path()
                     .ok_or_else(|| AppError::Storage("Native 导出需要路径型文件句柄".to_owned()))?
                     .to_path_buf();
-                let task_format = format.clone();
                 let file_service = self.file_service.clone();
                 let task_id = self.tasks.spawn("export_terminal", move |_context| {
-                    let content = export_job.render(&task_format);
-                    let mut bytes = content.into_bytes();
-                    if task_format == "csv" {
-                        let mut csv_bytes = b"\xEF\xBB\xBF".to_vec();
-                        csv_bytes.append(&mut bytes);
-                        bytes = csv_bytes;
-                    }
-                    file_service
-                        .block_on_write_path(
-                            task_path.clone(),
-                            FileBlob {
-                                name: file.name().to_owned(),
-                                mime: "application/octet-stream".to_owned(),
-                                bytes,
-                            },
-                        )
-                        .map_err(|error| error.to_string())?;
+                    let content = export_job.render(&format);
+                    write_exported_content(&file_service, &task_path, &file, &format, content)?;
                     Ok(TaskResult::FileExported { file })
                 });
                 Ok(pending(task_id, "正在导出终端数据"))
@@ -983,19 +943,23 @@ impl Workbench {
     }
 
     fn apply_ports(&mut self, available: Vec<SerialPortDescriptor>) {
-        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for p in available {
-            seen.insert(p.port_name.clone());
-            if !self.ports.iter().any(|x| x.port_name == p.port_name) {
-                self.ports.push(p);
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for descriptor in available {
+            seen.insert(descriptor.port_name.clone());
+            if !self
+                .ports
+                .iter()
+                .any(|port| port.port_name == descriptor.port_name)
+            {
+                self.ports.push(descriptor);
             }
         }
-        self.ports.retain(|p| {
-            p.port_type == tool_transport::PortType::Network || seen.contains(&p.port_name)
+        self.ports.retain(|port| {
+            port.port_type == tool_transport::PortType::Network || seen.contains(&port.port_name)
         });
-        for net in &self.app_config.network_ports {
-            let name = net.display_name();
-            if !self.ports.iter().any(|p| p.port_name == name) {
+        for network in &self.app_config.network_ports {
+            let name = network.display_name();
+            if !self.ports.iter().any(|port| port.port_name == name) {
                 self.ports.push(SerialPortDescriptor {
                     port_name: name,
                     port_type: tool_transport::PortType::Network,
@@ -1102,6 +1066,19 @@ impl Workbench {
         })
     }
 
+    /// 一次发送只 plan 一次：路由与解码全在 `send_plan::plan_send`，本平台只负责
+    /// 把它的错误类型换成本侧的 `AppError::Transport`（句串仍是 `SendPlanError` 的
+    /// `Display`，由 `tests/headless.rs` 钉住），再把计划交给 `send_transport_bytes`。
+    fn dispatch_send(
+        &mut self,
+        command: AppCommand,
+        port_name: String,
+    ) -> Result<CommandOutcome, AppError> {
+        let plan = send_plan::plan_send(&command, self.is_network_port(&port_name))
+            .map_err(|error| AppError::Transport(error.to_string()))?;
+        self.send_transport_bytes(port_name, plan)
+    }
+
     /// 按 `plan_send` 算出的种类与字节投递。走哪个后端由 `PlannedSend::targets_network_port()`
     /// 决定（那是 `send_plan` 里被单测钉住的判定），本平台不再比一次字符串，
     /// 也不再对照一次端口名单。
@@ -1115,17 +1092,16 @@ impl Workbench {
         if to_network {
             let transport = self.transport.clone();
             let task_port = port_name.clone();
-            let task_bytes = bytes;
             let task_id = self.tasks.spawn_ordered(
                 format!("serial:{task_port}"),
                 task_kind,
                 move |_context| {
                     transport
-                        .send_to(&task_port, task_bytes.clone())
+                        .send_to(&task_port, bytes.clone())
                         .map_err(|error| error.to_string())?;
                     Ok(TaskResult::TransportSent {
                         port: PortId::new(task_port),
-                        bytes: task_bytes.len(),
+                        bytes: bytes.len(),
                     })
                 },
             );
@@ -1279,11 +1255,12 @@ impl Workbench {
                             }
                         }
                         TaskResult::TransportConnected { port } => {
-                            self.selected_port = Some(port.to_string());
-                            self.app_config.selected_port = Some(port.to_string());
+                            let port_name = port.to_string();
+                            self.selected_port = Some(port_name.clone());
+                            self.app_config.selected_port = Some(port_name);
                         }
                         TaskResult::TransportDisconnected { port } => {
-                            if self.selected_port.as_ref() == Some(&port.to_string()) {
+                            if self.selected_port.as_deref() == Some(port.as_str()) {
                                 self.selected_port = None;
                             }
                         }
@@ -1336,6 +1313,36 @@ impl crate::AppRuntime for Workbench {
     fn dispatch(&mut self, command: crate::AppCommand) -> Result<crate::CommandOutcome, String> {
         Workbench::dispatch(self, command).map_err(|error| error.to_string())
     }
+}
+
+/// 导出内容落盘的唯一一处：CSV 前置 UTF-8 BOM（Excel 兼容），其余格式原样写出。
+///
+/// 终端导出与 presentation 自行准备数据的 `spawn_file_export` 共用这里，避免
+/// 「改了一侧的 BOM/落盘细节，另一侧静默分叉」。错误仍是平台服务的字符串形式，
+/// 由调用方所在的 worker 闭包直接向上抛给任务模型。
+fn write_exported_content(
+    file_service: &NativeFileService,
+    path: &std::path::Path,
+    file: &FileHandle,
+    format: &str,
+    content: String,
+) -> Result<(), String> {
+    let mut bytes = content.into_bytes();
+    if format == "csv" {
+        let mut csv_bytes = b"\xEF\xBB\xBF".to_vec();
+        csv_bytes.append(&mut bytes);
+        bytes = csv_bytes;
+    }
+    file_service
+        .block_on_write_path(
+            path.to_path_buf(),
+            FileBlob {
+                name: file.name().to_owned(),
+                mime: "application/octet-stream".to_owned(),
+                bytes,
+            },
+        )
+        .map_err(|error| error.to_string())
 }
 
 fn pending(task_id: TaskId, message: impl Into<String>) -> CommandOutcome {

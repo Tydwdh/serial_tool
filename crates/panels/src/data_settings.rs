@@ -33,12 +33,14 @@ pub fn data_settings_ui(ui: &mut egui::Ui, view: &mut DataSettingsView<'_>) -> b
         }
     });
 
-    entry_limit_row(ui, "终端保留条数", view.terminal_max_entries, &mut changed);
-    entry_limit_row(ui, "日志保留条数", view.log_max_entries, &mut changed);
-    changed
+    let terminal_changed = entry_limit_row(ui, "终端保留条数", view.terminal_max_entries);
+    let log_changed = entry_limit_row(ui, "日志保留条数", view.log_max_entries);
+    changed || terminal_changed || log_changed
 }
 
-fn entry_limit_row(ui: &mut egui::Ui, label: &str, value: &mut usize, changed: &mut bool) {
+/// 一行"保留条数"编辑器；返回本行的值是否被改动。
+fn entry_limit_row(ui: &mut egui::Ui, label: &str, value: &mut usize) -> bool {
+    let mut changed = false;
     ui.horizontal_wrapped(|ui| {
         ui.label(label);
         let mut number = (*value).clamp(500, 200_000);
@@ -54,7 +56,7 @@ fn entry_limit_row(ui: &mut egui::Ui, label: &str, value: &mut usize, changed: &
             .changed();
         if drag_changed || slider_changed {
             *value = number;
-            *changed = true;
+            changed = true;
         }
     });
     ui.label(
@@ -62,4 +64,5 @@ fn entry_limit_row(ui: &mut egui::Ui, label: &str, value: &mut usize, changed: &
             .small()
             .color(theme::text_secondary()),
     );
+    changed
 }

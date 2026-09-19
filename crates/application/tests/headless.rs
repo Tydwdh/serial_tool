@@ -19,10 +19,7 @@ fn headless_workbench_can_dispatch_and_query() {
 
     // RefreshPorts should be executable without egui.
     let refresh = wb.dispatch(AppCommand::RefreshPorts).expect("refresh");
-    assert!(matches!(
-        refresh,
-        tool_application::CommandOutcome::Pending { .. }
-    ));
+    assert!(matches!(refresh, CommandOutcome::Pending { .. }));
 
     // ClearTerminal must not require egui.
     wb.dispatch(AppCommand::ClearTerminal).expect("clear");
@@ -41,30 +38,28 @@ fn headless_workbench_can_dispatch_and_query() {
 
     // Invalid connect should return transport error, not panic.
     let connect = wb.dispatch(AppCommand::Connect {
-        port: tool_platform::PortId::new("COM_NOT_EXIST_999"),
-        settings: tool_platform::SerialSettings::default(),
+        port: PortId::new("COM_NOT_EXIST_999"),
+        settings: SerialSettings::default(),
     });
-    assert!(matches!(
-        connect,
-        Ok(tool_application::CommandOutcome::Pending { .. })
-    ));
+    assert!(matches!(connect, Ok(CommandOutcome::Pending { .. })));
 
     // Tick 必须能回收后台任务；无效连接最终应落到 Failed，而不是在 dispatch
     // 阶段阻塞或直接把硬件错误同步抛回 UI。
     for i in 0..100 {
         wb.tick(i as f64 * 0.01);
         if wb.task_snapshots().iter().any(|snapshot| {
-            snapshot.kind == "connect_serial"
-                && matches!(snapshot.state, tool_application::TaskState::Failed)
+            snapshot.kind == "connect_serial" && matches!(snapshot.state, TaskState::Failed)
         }) {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        std::thread::sleep(Duration::from_millis(2));
     }
-    assert!(wb.task_snapshots().iter().any(|snapshot| {
-        snapshot.kind == "connect_serial"
-            && matches!(snapshot.state, tool_application::TaskState::Failed)
-    }));
+    assert!(
+        wb.task_snapshots()
+            .iter()
+            .any(|snapshot| snapshot.kind == "connect_serial"
+                && matches!(snapshot.state, TaskState::Failed))
+    );
 }
 
 #[test]
@@ -72,20 +67,17 @@ fn terminal_delta_is_incremental() {
     let bus = DataBus::new();
     let mut wb = Workbench::new(bus.clone());
 
-    // publish a serial RX event
     bus.publish(tool_transport::serial_rx_event(
         "serial:COM1",
         b"hello\n".to_vec(),
     ));
-
-    // terminal ingests via tick
     wb.tick(0.0);
 
     let d = wb.query_terminal_since(0, 10);
     assert_eq!(d.entries.len(), 1);
     assert!(d.next_seq > 0);
 
-    // second query with next_seq should be empty (incremental)
+    // 带着返回的 next_seq 再查一次应为空：增量查询不得重复投递已消费的条目。
     let d2 = wb.query_terminal_since(d.next_seq, 10);
     assert_eq!(d2.entries.len(), 0);
 }

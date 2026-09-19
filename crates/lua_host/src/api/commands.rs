@@ -71,14 +71,13 @@ pub(crate) fn create_commands_api(
         lua.create_function(|lua, ()| {
             let commands: Table = lua.globals().get(PLUGIN_COMMANDS)?;
             let result = lua.create_table()?;
-            let mut index = 0usize;
-            for command in commands
+            for (index, command) in commands
                 .pairs::<String, Value>()
                 .flatten()
                 .map(|pair| pair.0)
+                .enumerate()
             {
-                index += 1;
-                result.set(index, command)?;
+                result.set(index + 1, command)?;
             }
             Ok(Value::Table(result))
         })?,
@@ -88,17 +87,12 @@ pub(crate) fn create_commands_api(
     table.set(
         "execute",
         lua.create_function(move |_lua, values: Variadic<Value>| {
-            let command = values
-                .first()
-                .and_then(|value| match value {
-                    Value::String(command) => Some(command.to_string_lossy().to_string()),
-                    _ => None,
-                })
-                .ok_or_else(|| {
-                    mlua::Error::RuntimeError(
-                        "ctx.commands.execute expects command id as first argument".to_owned(),
-                    )
-                })?;
+            let Some(Value::String(command)) = values.first() else {
+                return Err(mlua::Error::RuntimeError(
+                    "ctx.commands.execute expects command id as first argument".to_owned(),
+                ));
+            };
+            let command = command.to_string_lossy().to_string();
             let args = values.get(1).cloned().unwrap_or(Value::Nil);
             let args = lua_value_to_json(args).unwrap_or(serde_json::Value::Null);
 

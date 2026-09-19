@@ -99,7 +99,10 @@ pub struct LogExportCursor {
     done: bool,
 }
 
-fn render_log_cursor_chunk(
+/// 渲染一段导出内容：`first` 决定是否补表头/数组左括号，`has_previous` 决定是否补
+/// 分段之间的分隔符，`done` 决定是否收尾。增量游标与快照 job 共用这一份实现，
+/// 保证两条导出路径的字节输出一致。
+fn render_log_export_chunk(
     format: TerminalExportFormat,
     entries: &[LogEntry],
     first: bool,
@@ -115,15 +118,7 @@ fn render_log_cursor_chunk(
             output.push_str(
                 &entries
                     .iter()
-                    .map(|entry| {
-                        format!(
-                            "{} {:<5} {:<18} {}",
-                            entry.timestamp_label,
-                            entry.level.as_str(),
-                            entry.source,
-                            entry.message
-                        )
-                    })
+                    .map(log_export_line)
                     .collect::<Vec<_>>()
                     .join("\n"),
             );
@@ -138,15 +133,7 @@ fn render_log_cursor_chunk(
                 output.push_str("time,level,source,message\n");
             }
             for entry in entries {
-                output.push_str(
-                    &[
-                        log_csv_cell(&entry.timestamp_label),
-                        log_csv_cell(entry.level.as_str()),
-                        log_csv_cell(&entry.source),
-                        log_csv_cell(&entry.message),
-                    ]
-                    .join(","),
-                );
+                output.push_str(&log_csv_record(entry));
                 output.push('\n');
             }
             output
@@ -162,15 +149,7 @@ fn render_log_cursor_chunk(
                 if index > 0 {
                     output.push(',');
                 }
-                output.push_str(
-                    &serde_json::json!({
-                        "time": entry.timestamp_label,
-                        "level": entry.level.as_str(),
-                        "source": entry.source,
-                        "message": entry.message,
-                    })
-                    .to_string(),
-                );
+                output.push_str(&log_json_value(entry).to_string());
             }
             if done {
                 output.push(']');
@@ -178,6 +157,50 @@ fn render_log_cursor_chunk(
             output
         }
     }
+}
+
+/// 导出 TXT 的一行：定宽对齐时间、级别与来源，便于肉眼比对。
+/// 只用于导出；复制到剪贴板的整行见 [`log_display_line`]。
+fn log_export_line(entry: &LogEntry) -> String {
+    format!(
+        "{} {:<5} {:<18} {}",
+        entry.timestamp_label,
+        entry.level.as_str(),
+        entry.source,
+        entry.message
+    )
+}
+
+/// 复制到剪贴板的整行文本：单个空格分隔，不做定宽补齐。
+fn log_display_line(entry: &LogEntry) -> String {
+    format!(
+        "{} {} {} {}",
+        entry.timestamp_label,
+        entry.level.as_str(),
+        entry.source,
+        entry.message
+    )
+}
+
+/// 导出 CSV 的一行（不含行尾换行），列顺序与表头 `time,level,source,message` 对应。
+fn log_csv_record(entry: &LogEntry) -> String {
+    [
+        csv_cell(&entry.timestamp_label),
+        csv_cell(entry.level.as_str()),
+        csv_cell(&entry.source),
+        csv_cell(&entry.message),
+    ]
+    .join(",")
+}
+
+/// 导出 JSON / JSONL 的一条记录。
+fn log_json_value(entry: &LogEntry) -> serde_json::Value {
+    serde_json::json!({
+        "time": entry.timestamp_label,
+        "level": entry.level.as_str(),
+        "source": entry.source,
+        "message": entry.message,
+    })
 }
 
 impl LogExportJob {
@@ -189,100 +212,27 @@ impl LogExportJob {
         self.entries.is_empty()
     }
 
-    /// Render one chunk so browser exports can yield between batches.
+    /// 渲染一段内容，供浏览器导出在批次之间让出帧。
     pub fn render_chunk(&self, format: TerminalExportFormat, start: usize, end: usize) -> String {
         let start = start.min(self.entries.len());
         let end = end.min(self.entries.len()).max(start);
-        let entries = &self.entries[start..end];
-        match format {
-            TerminalExportFormat::Txt => {
-                let mut output = String::new();
-                if start > 0 && !entries.is_empty() {
-                    output.push('\n');
-                }
-                output.push_str(
-                    &entries
-                        .iter()
-                        .map(|entry| {
-                            format!(
-                                "{} {:<5} {:<18} {}",
-                                entry.timestamp_label,
-                                entry.level.as_str(),
-                                entry.source,
-                                entry.message
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                );
-                if end == self.entries.len() && !entries.is_empty() {
-                    output.push('\n');
-                }
-                output
-            }
-            TerminalExportFormat::Csv => {
-                let mut output = String::new();
-                if start == 0 {
-                    output.push_str("time,level,source,message\n");
-                }
-                for entry in entries {
-                    output.push_str(
-                        &[
-                            log_csv_cell(&entry.timestamp_label),
-                            log_csv_cell(entry.level.as_str()),
-                            log_csv_cell(&entry.source),
-                            log_csv_cell(&entry.message),
-                        ]
-                        .join(","),
-                    );
-                    output.push('\n');
-                }
-                output
-            }
-            TerminalExportFormat::Json => {
-                let mut output = String::new();
-                if start == 0 {
-                    output.push('[');
-                } else if !entries.is_empty() {
-                    output.push(',');
-                }
-                for (index, entry) in entries.iter().enumerate() {
-                    if index > 0 {
-                        output.push(',');
-                    }
-                    output.push_str(
-                        &serde_json::json!({
-                            "time": entry.timestamp_label,
-                            "level": entry.level.as_str(),
-                            "source": entry.source,
-                            "message": entry.message,
-                        })
-                        .to_string(),
-                    );
-                }
-                if end == self.entries.len() {
-                    output.push(']');
-                }
-                output
-            }
-        }
+        render_log_export_chunk(
+            format,
+            &self.entries[start..end],
+            start == 0,
+            start > 0,
+            end == self.entries.len(),
+        )
     }
 
+    /// 一次性渲染全部行。不能直接复用分块渲染：JSON 需要 pretty 输出。
     pub fn render(&self, format: TerminalExportFormat) -> String {
         match format {
             TerminalExportFormat::Txt => {
                 let mut output = self
                     .entries
                     .iter()
-                    .map(|entry| {
-                        format!(
-                            "{} {:<5} {:<18} {}",
-                            entry.timestamp_label,
-                            entry.level.as_str(),
-                            entry.source,
-                            entry.message
-                        )
-                    })
+                    .map(log_export_line)
                     .collect::<Vec<_>>()
                     .join("\n");
                 if !output.is_empty() {
@@ -291,34 +241,15 @@ impl LogExportJob {
                 output
             }
             TerminalExportFormat::Csv => {
-                let mut output = "time,level,source,message\n".to_owned();
+                let mut output = String::from("time,level,source,message\n");
                 for entry in &self.entries {
-                    output.push_str(
-                        &[
-                            log_csv_cell(&entry.timestamp_label),
-                            log_csv_cell(entry.level.as_str()),
-                            log_csv_cell(&entry.source),
-                            log_csv_cell(&entry.message),
-                        ]
-                        .join(","),
-                    );
+                    output.push_str(&log_csv_record(entry));
                     output.push('\n');
                 }
                 output
             }
             TerminalExportFormat::Json => {
-                let values = self
-                    .entries
-                    .iter()
-                    .map(|entry| {
-                        serde_json::json!({
-                            "time": entry.timestamp_label,
-                            "level": entry.level.as_str(),
-                            "source": entry.source,
-                            "message": entry.message,
-                        })
-                    })
-                    .collect::<Vec<_>>();
+                let values = self.entries.iter().map(log_json_value).collect::<Vec<_>>();
                 serde_json::to_string_pretty(&values).unwrap_or_default()
             }
         }
@@ -329,6 +260,8 @@ struct LogRenderOutcome {
     inner_rect: egui::Rect,
     content_height: f32,
     offset_y: f32,
+    /// 双击搜索匹配行时设置：该行的 entry id，供调用方清除搜索并跳转。
+    pending_navigate_to_id: Option<u64>,
 }
 
 impl LogPanel {
@@ -430,10 +363,9 @@ impl LogPanel {
         }
     }
 
-    /// Render at most `scan_budget` source entries and return
-    /// `(text, finished, exported_rows)`.  Filtering is performed as the
-    /// cursor advances, so a large log does not need a full visible-row
-    /// vector before the first browser export frame.
+    /// 每批最多扫描 `scan_budget` 条来源事件，返回
+    /// `(text, finished, exported_rows)`。过滤是随游标推进做的，
+    /// 因此大日志不必在浏览器首次导出帧前构造出完整的可见行向量。
     pub fn export_cursor_chunk(
         &self,
         cursor: &mut LogExportCursor,
@@ -445,27 +377,14 @@ impl LogPanel {
         }
         let budget = scan_budget.max(1);
         let end = (cursor.index + budget).min(cursor.limit);
-        let query = crate::search::SearchQuery::new(
-            &cursor.filter.search_text,
-            cursor.filter.case_sensitive,
-        );
+        let query = cursor.filter.query();
         let entries = self
             .entry_order
             .iter()
             .skip(cursor.index)
             .take(end - cursor.index)
             .filter_map(|id| self.entries.get(id))
-            .filter(|entry| {
-                entry.level >= cursor.filter.min_level
-                    && cursor
-                        .filter
-                        .source_filter
-                        .as_ref()
-                        .is_none_or(|filter| entry.source == *filter)
-                    && (query.is_empty()
-                        || query.matches(&entry.source)
-                        || query.matches(&entry.message))
-            })
+            .filter(|entry| log_entry_matches(entry, &cursor.filter, &query))
             .cloned()
             .collect::<Vec<_>>();
         cursor.index = end;
@@ -476,14 +395,14 @@ impl LogPanel {
         let exported = entries.len();
         cursor.emitted |= exported > 0;
         (
-            render_log_cursor_chunk(format, &entries, first, has_previous, cursor.done),
+            render_log_export_chunk(format, &entries, first, has_previous, cursor.done),
             cursor.done,
             exported,
         )
     }
 
     fn collect_visible_entries(&self) -> Vec<&LogEntry> {
-        let search_key = self.search.query();
+        let query = self.search.query();
         self.entry_order
             .iter()
             .filter_map(|id| self.entries.get(id))
@@ -494,9 +413,8 @@ impl LogPanel {
                     .is_none_or(|filter| entry.source == *filter)
             })
             .filter(|entry| {
-                search_key.is_empty()
-                    || self.search.matches(&entry.source, &search_key)
-                    || self.search.matches(&entry.message, &search_key)
+                self.search.matches(&entry.source, &query)
+                    || self.search.matches(&entry.message, &query)
             })
             .collect()
     }
@@ -505,15 +423,7 @@ impl LogPanel {
         let mut output = self
             .collect_visible_entries()
             .into_iter()
-            .map(|entry| {
-                format!(
-                    "{} {:<5} {:<18} {}",
-                    entry.timestamp_label,
-                    entry.level.as_str(),
-                    entry.source,
-                    entry.message
-                )
-            })
+            .map(log_export_line)
             .collect::<Vec<_>>()
             .join("\n");
         if !output.is_empty() {
@@ -523,17 +433,9 @@ impl LogPanel {
     }
 
     pub fn export_visible_csv(&self) -> String {
-        let mut output = "time,level,source,message\n".to_owned();
+        let mut output = String::from("time,level,source,message\n");
         for entry in self.collect_visible_entries() {
-            output.push_str(
-                &[
-                    log_csv_cell(&entry.timestamp_label),
-                    log_csv_cell(entry.level.as_str()),
-                    log_csv_cell(&entry.source),
-                    log_csv_cell(&entry.message),
-                ]
-                .join(","),
-            );
+            output.push_str(&log_csv_record(entry));
             output.push('\n');
         }
         output
@@ -543,14 +445,7 @@ impl LogPanel {
         let values: Vec<serde_json::Value> = self
             .collect_visible_entries()
             .into_iter()
-            .map(|entry| {
-                serde_json::json!({
-                    "time": entry.timestamp_label,
-                    "level": entry.level.as_str(),
-                    "source": entry.source,
-                    "message": entry.message,
-                })
-            })
+            .map(log_json_value)
             .collect();
         serde_json::to_string_pretty(&values).expect("serializable log export values")
     }
@@ -561,6 +456,9 @@ impl LogPanel {
     }
 
     fn enforce_max_entries(&mut self) {
+        // 丢弃最旧条目不会改变过滤条件，所以缓存是否可用只需判定一次。
+        let cache_is_current = !self.visible_rows_dirty
+            && self.visible_filter_key.as_ref() == Some(&self.current_filter_key());
         while self.entry_order.len() > self.max_entries {
             let Some(removed_id) = self.entry_order.pop_front() else {
                 break;
@@ -574,11 +472,7 @@ impl LogPanel {
                     self.source_names_cache.remove(&removed.source);
                 }
             }
-            if !self.visible_rows_dirty
-                && self
-                    .visible_filter_key
-                    .as_ref()
-                    .is_some_and(|key| *key == self.current_filter_key())
+            if cache_is_current
                 && self
                     .visible_rows_cache
                     .front()
@@ -592,7 +486,7 @@ impl LogPanel {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
-        let _new_entries = self.ingest();
+        self.ingest();
 
         // 仅当指针位于本面板内时，滚轮向下才触发强制滚到底；
         // 否则全局 smooth_scroll_delta 会误捕获其它区域的滚轮事件。
@@ -653,17 +547,15 @@ impl LogPanel {
             force_scroll_to_bottom |= self.auto_scroll.button(ui);
 
             ui.menu_button("导出", |ui| {
-                if ui.button("导出 TXT…").clicked() {
-                    self.export_request = Some(TerminalExportFormat::Txt);
-                    ui.close();
-                }
-                if ui.button("导出 CSV…").clicked() {
-                    self.export_request = Some(TerminalExportFormat::Csv);
-                    ui.close();
-                }
-                if ui.button("导出 JSON…").clicked() {
-                    self.export_request = Some(TerminalExportFormat::Json);
-                    ui.close();
+                for (label, format) in [
+                    ("导出 TXT…", TerminalExportFormat::Txt),
+                    ("导出 CSV…", TerminalExportFormat::Csv),
+                    ("导出 JSON…", TerminalExportFormat::Json),
+                ] {
+                    if ui.button(label).clicked() {
+                        self.export_request = Some(format);
+                        ui.close();
+                    }
                 }
             });
 
@@ -749,14 +641,11 @@ impl LogPanel {
             self.navigate_highlight = Some((target_id, ui.ctx().input(|i| i.time)));
         }
 
-        let mut navigate_id: Option<u64> = None;
-
         let outcome = render_log_rows(
             ui,
             rows,
             !self.entry_order.is_empty(),
             scroll_to_row,
-            &mut navigate_id,
             self.auto_scroll.enabled,
             force_scroll_to_bottom,
             scroll_delta_y,
@@ -768,8 +657,8 @@ impl LogPanel {
             self.navigate_highlight,
         );
 
-        if navigate_id.is_some() {
-            self.pending_navigate_to_id = navigate_id;
+        if let Some(id) = outcome.pending_navigate_to_id {
+            self.pending_navigate_to_id = Some(id);
         }
 
         // 高亮超时清理
@@ -827,19 +716,14 @@ impl LogPanel {
             source,
             message,
         };
-        let cache_is_current = !self.visible_rows_dirty
-            && self
-                .visible_filter_key
-                .as_ref()
-                .is_some_and(|key| *key == self.current_filter_key());
-        if cache_is_current {
-            let filter_key = self.current_filter_key();
-            if self.matches_filter(&entry, &filter_key) {
-                self.visible_rows_cache.push_back(entry.clone());
-                self.visible_rows_generation = self.visible_rows_generation.wrapping_add(1);
-            }
-        } else {
+        let filter_key = self.current_filter_key();
+        let cache_is_current =
+            !self.visible_rows_dirty && self.visible_filter_key.as_ref() == Some(&filter_key);
+        if !cache_is_current {
             self.visible_rows_dirty = true;
+        } else if log_entry_matches(&entry, &filter_key, &filter_key.query()) {
+            self.visible_rows_cache.push_back(entry.clone());
+            self.visible_rows_generation = self.visible_rows_generation.wrapping_add(1);
         }
         self.entry_order.push_back(entry_id);
         *self.source_counts.entry(entry.source.clone()).or_default() += 1;
@@ -868,41 +752,17 @@ impl LogPanel {
         }
     }
 
-    fn matches_filter(&self, entry: &LogEntry, key: &LogFilterKey) -> bool {
-        if entry.level < key.min_level {
-            return false;
-        }
-        if key
-            .source_filter
-            .as_ref()
-            .is_some_and(|filter| entry.source != *filter)
-        {
-            return false;
-        }
-        let query = crate::search::SearchQuery::new(&key.search_text, key.case_sensitive);
-        query.is_empty() || query.matches(&entry.source) || query.matches(&entry.message)
-    }
-
     fn refresh_visible_rows(&mut self) {
         let key = self.current_filter_key();
         if self.visible_rows_dirty || self.visible_filter_key.as_ref() != Some(&key) {
-            let query = crate::search::SearchQuery::new(&key.search_text, key.case_sensitive);
+            let query = key.query();
             self.visible_rows_cache = self
                 .entry_order
                 .iter()
                 .filter_map(|id| {
                     self.entries
                         .get(id)
-                        .filter(|entry| {
-                            entry.level >= key.min_level
-                                && key
-                                    .source_filter
-                                    .as_ref()
-                                    .is_none_or(|filter| entry.source == *filter)
-                                && (query.is_empty()
-                                    || query.matches(&entry.source)
-                                    || query.matches(&entry.message))
-                        })
+                        .filter(|entry| log_entry_matches(entry, &key, &query))
                         .cloned()
                 })
                 .collect();
@@ -913,7 +773,29 @@ impl LogPanel {
     }
 }
 
-fn log_csv_cell(value: &str) -> String {
+impl LogFilterKey {
+    /// 按这份过滤条件编译搜索词；逐行匹配前先编译一次，别每行都重编译。
+    fn query(&self) -> crate::search::SearchQuery {
+        crate::search::SearchQuery::new(&self.search_text, self.case_sensitive)
+    }
+}
+
+/// 日志条目是否命中过滤条件。`query` 必须由调用方按同一份 `filter` 预先编译。
+fn log_entry_matches(
+    entry: &LogEntry,
+    filter: &LogFilterKey,
+    query: &crate::search::SearchQuery,
+) -> bool {
+    entry.level >= filter.min_level
+        && filter
+            .source_filter
+            .as_ref()
+            .is_none_or(|source| entry.source == *source)
+        && (query.is_empty() || query.matches(&entry.source) || query.matches(&entry.message))
+}
+
+/// CSV 单元格：始终加双引号，内部的 `"` 双写转义。
+fn csv_cell(value: &str) -> String {
     let escaped = value.replace('"', "\"\"");
     format!("\"{escaped}\"")
 }
@@ -946,13 +828,13 @@ fn estimated_log_row_height(
         .max(base_row_height)
 }
 
+/// 渲染日志消息流的行视图，返回滚动几何与双击跳转目标。
 #[allow(clippy::too_many_arguments)]
 fn render_log_rows(
     ui: &mut egui::Ui,
     rows: &VecDeque<LogEntry>,
     has_any_entries: bool,
     scroll_to_row: Option<usize>,
-    pending_navigate: &mut Option<u64>,
     stick_to_bottom: bool,
     force_scroll_to_bottom: bool,
     wheel_scroll_delta_y: f32,
@@ -963,6 +845,7 @@ fn render_log_rows(
     virtual_rows: &mut VirtualRowIndex,
     navigate_highlight: Option<(u64, f64)>,
 ) -> LogRenderOutcome {
+    let mut pending_navigate: Option<u64> = None;
     let font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
     let base_row_height = ui.fonts_mut(|f| f.row_height(&font_id));
     selection.sync_rows_with_generation(rows.iter().map(|entry| entry.id), visible_rows_generation);
@@ -994,6 +877,7 @@ fn render_log_rows(
             inner_rect: scroll_output.inner_rect,
             content_height: scroll_output.content_size.y,
             offset_y: scroll_output.state.offset.y,
+            pending_navigate_to_id: None,
         };
     }
 
@@ -1004,7 +888,6 @@ fn render_log_rows(
         .id_salt(LOG_SCROLL_ID)
         .show(ui, |ui| {
             let full_width = ui.available_width().max(0.0);
-            let font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
             let text_color = ui.style().visuals.text_color();
             let glyph_width = ui.fonts_mut(|fonts| fonts.glyph_width(&font_id, '0'));
 
@@ -1412,7 +1295,7 @@ fn render_log_rows(
                 && let Some(idx) = frozen_row_idx.or_else(|| hl.hover_index(ui))
                 && let Some(entry) = rows.get(idx)
             {
-                *pending_navigate = Some(entry.id);
+                pending_navigate = Some(entry.id);
             }
             // 跳转到目标行
             if let Some(target_row) = scroll_to_row
@@ -1430,16 +1313,8 @@ fn render_log_rows(
                 hl.hover_index(ui)
             }
             .and_then(|idx| {
-                rows.get(idx).map(|entry| {
-                    let line = format!(
-                        "{} {} {} {}",
-                        entry.timestamp_label,
-                        entry.level.as_str(),
-                        entry.source,
-                        entry.message
-                    );
-                    (line, entry.message.clone())
-                })
+                rows.get(idx)
+                    .map(|entry| (log_display_line(entry), entry.message.clone()))
             });
 
             // 框选范围文本（移入 context_menu 闭包内按需构造，避免菜单未打开时每帧构造）
@@ -1552,15 +1427,7 @@ fn render_log_rows(
                 ) {
                     let combined_text: String = rows
                         .iter()
-                        .map(|entry| {
-                            format!(
-                                "{} {} {} {}",
-                                entry.timestamp_label,
-                                entry.level.as_str(),
-                                entry.source,
-                                entry.message
-                            )
-                        })
+                        .map(log_display_line)
                         .collect::<Vec<_>>()
                         .join("\n");
                     copy_text_with_feedback(
@@ -1575,13 +1442,16 @@ fn render_log_rows(
                 {
                     let mut csv = String::from("time,level,source,message\n");
                     for entry in rows {
-                        csv.push_str(&csv_cell(&entry.timestamp_label));
-                        csv.push(',');
-                        csv.push_str(&csv_cell(entry.level.as_str()));
-                        csv.push(',');
-                        csv.push_str(&csv_cell(&entry.source));
-                        csv.push(',');
-                        csv.push_str(&csv_cell(&entry.message.replace('\n', " ")));
+                        // 与导出文件的 CSV 唯一差别：把消息里的换行压成空格，保证一行一条记录。
+                        csv.push_str(
+                            &[
+                                csv_cell(&entry.timestamp_label),
+                                csv_cell(entry.level.as_str()),
+                                csv_cell(&entry.source),
+                                csv_cell(&entry.message.replace('\n', " ")),
+                            ]
+                            .join(","),
+                        );
                         csv.push('\n');
                     }
                     copy_text_with_feedback(
@@ -1596,13 +1466,7 @@ fn render_log_rows(
                 {
                     let mut jsonl = String::new();
                     for entry in rows {
-                        let obj = serde_json::json!({
-                            "time": entry.timestamp_label,
-                            "level": entry.level.as_str(),
-                            "source": entry.source,
-                            "message": entry.message,
-                        });
-                        if let Ok(line) = serde_json::to_string(&obj) {
+                        if let Ok(line) = serde_json::to_string(&log_json_value(entry)) {
                             jsonl.push_str(&line);
                             jsonl.push('\n');
                         }
@@ -1627,6 +1491,7 @@ fn render_log_rows(
         inner_rect: scroll_output.inner_rect,
         content_height: scroll_output.content_size.y,
         offset_y: scroll_output.state.offset.y,
+        pending_navigate_to_id: pending_navigate,
     }
 }
 
@@ -1641,15 +1506,7 @@ fn build_selected_log_full_text(
     let full: String = selected_indices
         .iter()
         .map(|&index| &rows[index])
-        .map(|entry| {
-            format!(
-                "{} {} {} {}",
-                entry.timestamp_label,
-                entry.level.as_str(),
-                entry.source,
-                entry.message
-            )
-        })
+        .map(log_display_line)
         .collect::<Vec<_>>()
         .join("\n");
     Some(full)
@@ -1671,11 +1528,6 @@ fn build_selected_log_message_text(
             .collect::<Vec<_>>()
             .join("\n"),
     )
-}
-
-fn csv_cell(s: &str) -> String {
-    let escaped = s.replace('"', "\"\"");
-    format!("\"{escaped}\"")
 }
 
 #[cfg(test)]

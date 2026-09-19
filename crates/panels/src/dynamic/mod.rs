@@ -1,3 +1,8 @@
+//! 插件用 `ui.panel.create` 事件声明的动态面板（图表/表单/姿态/仪表盘/表格）。
+//!
+//! 面板状态统一保存在这里的 `DynamicPanels`：事件摄入见 `ingest.rs`，字段
+//! schema 与解析见 `schema.rs`，表单渲染见 `form_render.rs`。
+
 mod form_render;
 mod ingest;
 mod schema;
@@ -5,27 +10,31 @@ mod schema;
 pub use form_render::dynamic_form_ui;
 pub use schema::{DynamicField, DynamicFieldKind, FieldFilter, FieldOption, parse_fields};
 
-use crate::{AttitudePanel, ChartPanel, DataTablePanel, GaugePanel, theme};
-
-#[derive(Debug, Clone)]
-pub struct PortItem {
-    pub port_name: String,
-}
+use crate::{AttitudePanel, ChartPanel, DataTablePanel, GaugePanel, MAX_INGEST_PER_FRAME, theme};
 use std::collections::BTreeMap;
 use tool_core::topics;
 use tool_databus::{DataBus, Subscription, TopicFilter};
 
+/// 表单 `serial` 字段的候选串口项。
+#[derive(Debug, Clone)]
+pub struct PortItem {
+    pub port_name: String,
+}
+
+/// 所有动态面板的持有者：订阅 UI 事件、维护面板状态并负责渲染。
 pub struct DynamicPanels {
     bus: DataBus,
+    // 面板创建/移除
     subscription: Subscription,
     remove_subscription: Subscription,
-    // UI 状态更新订阅
+    // UI 状态更新
     set_value_subscription: Subscription,
     set_values_subscription: Subscription,
     set_enabled_subscription: Subscription,
     set_visible_subscription: Subscription,
     file_browse_subscription: Subscription,
     file_selected_subscription: Subscription,
+    // 表格行操作
     table_set_rows_subscription: Subscription,
     table_append_rows_subscription: Subscription,
     table_remove_rows_subscription: Subscription,
@@ -35,6 +44,7 @@ pub struct DynamicPanels {
     ports: Vec<PortItem>,
 }
 
+/// 单个动态面板：按类型持有各自的渲染器，外加三类共用元数据字段。
 enum DynamicPanel {
     Chart {
         title: String,
@@ -72,19 +82,19 @@ enum DynamicPanel {
 impl DynamicPanel {
     fn owner_plugin_id(&self) -> Option<&str> {
         match self {
-            DynamicPanel::Chart {
+            Self::Chart {
                 owner_plugin_id, ..
             }
-            | DynamicPanel::Form {
+            | Self::Form {
                 owner_plugin_id, ..
             }
-            | DynamicPanel::Attitude {
+            | Self::Attitude {
                 owner_plugin_id, ..
             }
-            | DynamicPanel::Gauge {
+            | Self::Gauge {
                 owner_plugin_id, ..
             }
-            | DynamicPanel::Table {
+            | Self::Table {
                 owner_plugin_id, ..
             } => owner_plugin_id.as_deref(),
         }
@@ -92,21 +102,21 @@ impl DynamicPanel {
 
     fn title(&self) -> &str {
         match self {
-            DynamicPanel::Chart { title, .. }
-            | DynamicPanel::Form { title, .. }
-            | DynamicPanel::Attitude { title, .. }
-            | DynamicPanel::Gauge { title, .. }
-            | DynamicPanel::Table { title, .. } => title.as_str(),
+            Self::Chart { title, .. }
+            | Self::Form { title, .. }
+            | Self::Attitude { title, .. }
+            | Self::Gauge { title, .. }
+            | Self::Table { title, .. } => title.as_str(),
         }
     }
 
     fn card(&self) -> bool {
         match self {
-            DynamicPanel::Chart { card, .. }
-            | DynamicPanel::Form { card, .. }
-            | DynamicPanel::Attitude { card, .. }
-            | DynamicPanel::Gauge { card, .. }
-            | DynamicPanel::Table { card, .. } => *card,
+            Self::Chart { card, .. }
+            | Self::Form { card, .. }
+            | Self::Attitude { card, .. }
+            | Self::Gauge { card, .. }
+            | Self::Table { card, .. } => *card,
         }
     }
 }
@@ -116,46 +126,23 @@ impl DynamicPanels {
         // UI 面板使用有界订阅（容量 1024），与 LogPanel/TerminalPanel 保持一致
         // 防止 UI 来不及消费时内存无限增长
         const UI_SUB_CAP: usize = 1024;
+        let subscribe =
+            |topic: &str| bus.subscribe_lossy_bounded(TopicFilter::exact(topic), UI_SUB_CAP);
+
         Self {
             bus: bus.clone(),
-            subscription: bus
-                .subscribe_lossy_bounded(TopicFilter::exact(topics::UI_PANEL_CREATE), UI_SUB_CAP),
-            remove_subscription: bus
-                .subscribe_lossy_bounded(TopicFilter::exact(topics::UI_PANEL_REMOVE), UI_SUB_CAP),
-            set_value_subscription: bus
-                .subscribe_lossy_bounded(TopicFilter::exact(topics::UI_FORM_SET_VALUE), UI_SUB_CAP),
-            set_values_subscription: bus.subscribe_lossy_bounded(
-                TopicFilter::exact(topics::UI_PANEL_SET_VALUES),
-                UI_SUB_CAP,
-            ),
-            set_enabled_subscription: bus.subscribe_lossy_bounded(
-                TopicFilter::exact(topics::UI_FORM_SET_ENABLED),
-                UI_SUB_CAP,
-            ),
-            set_visible_subscription: bus.subscribe_lossy_bounded(
-                TopicFilter::exact(topics::UI_FORM_SET_VISIBLE),
-                UI_SUB_CAP,
-            ),
-            file_browse_subscription: bus.subscribe_lossy_bounded(
-                TopicFilter::exact(topics::UI_FORM_FILE_BROWSE),
-                UI_SUB_CAP,
-            ),
-            file_selected_subscription: bus.subscribe_lossy_bounded(
-                TopicFilter::exact(topics::UI_FORM_FILE_SELECTED),
-                UI_SUB_CAP,
-            ),
-            table_set_rows_subscription: bus
-                .subscribe_lossy_bounded(TopicFilter::exact(topics::UI_TABLE_SET_ROWS), UI_SUB_CAP),
-            table_append_rows_subscription: bus.subscribe_lossy_bounded(
-                TopicFilter::exact(topics::UI_TABLE_APPEND_ROWS),
-                UI_SUB_CAP,
-            ),
-            table_remove_rows_subscription: bus.subscribe_lossy_bounded(
-                TopicFilter::exact(topics::UI_TABLE_REMOVE_ROWS),
-                UI_SUB_CAP,
-            ),
-            table_clear_subscription: bus
-                .subscribe_lossy_bounded(TopicFilter::exact(topics::UI_TABLE_CLEAR), UI_SUB_CAP),
+            subscription: subscribe(topics::UI_PANEL_CREATE),
+            remove_subscription: subscribe(topics::UI_PANEL_REMOVE),
+            set_value_subscription: subscribe(topics::UI_FORM_SET_VALUE),
+            set_values_subscription: subscribe(topics::UI_PANEL_SET_VALUES),
+            set_enabled_subscription: subscribe(topics::UI_FORM_SET_ENABLED),
+            set_visible_subscription: subscribe(topics::UI_FORM_SET_VISIBLE),
+            file_browse_subscription: subscribe(topics::UI_FORM_FILE_BROWSE),
+            file_selected_subscription: subscribe(topics::UI_FORM_FILE_SELECTED),
+            table_set_rows_subscription: subscribe(topics::UI_TABLE_SET_ROWS),
+            table_append_rows_subscription: subscribe(topics::UI_TABLE_APPEND_ROWS),
+            table_remove_rows_subscription: subscribe(topics::UI_TABLE_REMOVE_ROWS),
+            table_clear_subscription: subscribe(topics::UI_TABLE_CLEAR),
             panels: BTreeMap::new(),
             last_error: None,
             ports: Vec::new(),
@@ -168,18 +155,16 @@ impl DynamicPanels {
             return;
         };
 
-        let card = panel.card();
-        let title = panel.title().to_owned();
-
-        if card {
-            // 无边框嵌入：标题 + 内容直接贴在面板背景上，不套 Frame::group
-            ui.set_min_width(ui.available_width());
-            ui.label(egui::RichText::new(&title).strong());
-            ui.separator();
+        if !panel.card() {
             render_panel_inner(panel, ui, id, &self.bus, &self.ports);
-        } else {
-            render_panel_inner(panel, ui, id, &self.bus, &self.ports);
+            return;
         }
+
+        // 无边框嵌入：标题 + 内容直接贴在面板背景上，不套 Frame::group
+        ui.set_min_width(ui.available_width());
+        ui.label(egui::RichText::new(panel.title()).strong());
+        ui.separator();
+        render_panel_inner(panel, ui, id, &self.bus, &self.ports);
     }
 
     pub fn title(&self, id: &str) -> Option<&str> {
@@ -220,6 +205,8 @@ impl DynamicPanels {
         self.panels.get(panel_id).and_then(|p| p.owner_plugin_id())
     }
 
+    /// 清空所有数据类面板（图表/姿态/仪表盘）的采样数据；表单与表格不受影响。
+    /// 名字里的 charts 泛指数据类面板。
     pub fn clear_charts(&mut self) {
         for panel in self.panels.values_mut() {
             match panel {
@@ -231,6 +218,7 @@ impl DynamicPanels {
         }
     }
 
+    /// 把三类数据面板订阅中积压的事件一次性摄入，返回摄入条数。
     pub fn ingest_all_pending(&mut self) -> usize {
         let mut count = 0;
 
@@ -254,13 +242,13 @@ impl DynamicPanels {
         self.ports = ports.to_vec();
     }
 
-    /// Drain browser/native UI file-browse requests for the composition root.
+    /// 取出待处理的文件选择请求，交给组合根（composition root）落地。
     ///
-    /// Native uses `Workbench`'s shared UI event subscription; Web needs the
-    /// same request to open an `<input type=file>` without introducing a
-    /// second dynamic-panel implementation.
+    /// Native 走 `Workbench` 的共享 UI 事件订阅，Web 用同一个请求打开
+    /// `<input type=file>`——两边共用一套动态面板实现，不再各自演化。
     pub fn drain_file_browse_requests(&mut self) -> Vec<tool_core::Event> {
-        self.file_browse_subscription.drain_limited(500)
+        self.file_browse_subscription
+            .drain_limited(MAX_INGEST_PER_FRAME)
     }
 }
 

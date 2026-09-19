@@ -1,13 +1,41 @@
 //! `ctx.fs.*` — 文件读取 API（受 FileAccessBroker 授权保护）。
 
 use std::io::BufRead;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mlua::{Lua, Table, Value};
 use parking_lot::Mutex;
 
 use crate::host_services::FileAccessBroker;
+
+const MAX_TEXT_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// 授权校验：未授权时的错误要引导用户回到文件对话框重选。
+fn ensure_authorized(
+    broker: &FileAccessBroker,
+    plugin_id: &str,
+    path: &str,
+) -> mlua::Result<PathBuf> {
+    let p = PathBuf::from(path);
+    if !broker.is_authorized(plugin_id, &p) {
+        return Err(mlua::Error::RuntimeError(format!(
+            "文件未授权: {path}. 请先通过文件选择对话框选择文件。"
+        )));
+    }
+    Ok(p)
+}
+
+/// 整本读取文本：先看 metadata 再读，避免超大文件把内存打满。
+fn read_capped_text(path: &Path) -> mlua::Result<String> {
+    let meta = std::fs::metadata(path)
+        .map_err(|e| mlua::Error::RuntimeError(format!("无法获取文件信息: {e}")))?;
+    if meta.len() > MAX_TEXT_FILE_BYTES {
+        return Err(mlua::Error::RuntimeError("文件超过 16 MiB 上限".to_owned()));
+    }
+    std::fs::read_to_string(path)
+        .map_err(|e| mlua::Error::RuntimeError(format!("读取文件失败: {e}")))
+}
 
 pub(crate) fn create_fs_api(
     lua: &Lua,
@@ -21,21 +49,8 @@ pub(crate) fn create_fs_api(
     table.set(
         "read_text",
         lua.create_function(move |_lua, path: String| {
-            let p = PathBuf::from(&path);
-            if !broker_read.is_authorized(&pid_read, &p) {
-                return Err(mlua::Error::RuntimeError(format!(
-                    "文件未授权: {path}. 请先通过文件选择对话框选择文件。"
-                )));
-            }
-            // 先查 metadata，避免读超大文件
-            let meta = std::fs::metadata(&p)
-                .map_err(|e| mlua::Error::RuntimeError(format!("无法获取文件信息: {e}")))?;
-            if meta.len() > 16 * 1024 * 1024 {
-                return Err(mlua::Error::RuntimeError("文件超过 16 MiB 上限".to_owned()));
-            }
-            let content = std::fs::read_to_string(&p)
-                .map_err(|e| mlua::Error::RuntimeError(format!("读取文件失败: {e}")))?;
-            Ok(content)
+            let p = ensure_authorized(&broker_read, &pid_read, &path)?;
+            read_capped_text(&p)
         })?,
     )?;
 
@@ -44,20 +59,8 @@ pub(crate) fn create_fs_api(
     table.set(
         "read_lines",
         lua.create_function(move |lua, path: String| {
-            let p = PathBuf::from(&path);
-            if !broker_lines.is_authorized(&pid_lines, &p) {
-                return Err(mlua::Error::RuntimeError(format!(
-                    "文件未授权: {path}. 请先通过文件选择对话框选择文件。"
-                )));
-            }
-            // 先查 metadata，避免读超大文件
-            let meta = std::fs::metadata(&p)
-                .map_err(|e| mlua::Error::RuntimeError(format!("无法获取文件信息: {e}")))?;
-            if meta.len() > 16 * 1024 * 1024 {
-                return Err(mlua::Error::RuntimeError("文件超过 16 MiB 上限".to_owned()));
-            }
-            let content = std::fs::read_to_string(&p)
-                .map_err(|e| mlua::Error::RuntimeError(format!("读取文件失败: {e}")))?;
+            let p = ensure_authorized(&broker_lines, &pid_lines, &path)?;
+            let content = read_capped_text(&p)?;
             let lines: Arc<Vec<String>> = Arc::new(content.lines().map(String::from).collect());
             let index = Arc::new(Mutex::new(0usize));
             let lines_len = lines.len();
@@ -81,12 +84,7 @@ pub(crate) fn create_fs_api(
     table.set(
         "read_lines_stream",
         lua.create_function(move |lua, path: String| {
-            let p = PathBuf::from(&path);
-            if !broker_stream.is_authorized(&pid_stream, &p) {
-                return Err(mlua::Error::RuntimeError(format!(
-                    "文件未授权: {path}. 请先通过文件选择对话框选择文件。"
-                )));
-            }
+            let p = ensure_authorized(&broker_stream, &pid_stream, &path)?;
 
             let file = std::fs::File::open(&p)
                 .map_err(|e| mlua::Error::RuntimeError(format!("读取文件失败: {e}")))?;

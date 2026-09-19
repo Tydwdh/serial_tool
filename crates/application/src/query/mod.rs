@@ -171,11 +171,11 @@ pub struct TransportView {
     pub auto_reconnect: bool,
 }
 
-/// 插件清单的应用层只读视图。
-///
-/// 这里刻意不暴露 `tool_extension` 的 manifest 类型，也不把本地
-/// `PathBuf` 穿过 Application 边界。插件管理器仍然可以使用自己的内部
-/// 模型，但 UI 只依赖这些稳定的展示 DTO。
+// 插件清单的应用层只读视图。
+//
+// 这里刻意不暴露 `tool_extension` 的 manifest 类型，也不把本地
+// `PathBuf` 穿过 Application 边界。插件管理器仍然可以使用自己的内部
+// 模型，但 UI 只依赖这些稳定的展示 DTO。
 impl From<tool_extension::PluginState> for PluginStateView {
     fn from(state: tool_extension::PluginState) -> Self {
         match state {

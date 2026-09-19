@@ -42,15 +42,15 @@ impl WorkbenchApp {
                                 .ui_with_view(ui, &summaries, &diagnostics)
                         })
                         .inner;
-                    for id in self.plugins_panel.take_pending_restart() {
+                    for plugin_id in self.plugins_panel.take_pending_restart() {
                         if let Err(tool_application::AppError::Plugin(message)) = self
                             .workbench
                             .dispatch(tool_application::AppCommand::EnablePlugin {
-                                plugin_id: id.clone(),
+                                plugin_id: plugin_id.clone(),
                             })
                             && message.contains("shutting down")
                         {
-                            self.plugins_panel.push_pending_restart(id);
+                            self.plugins_panel.push_pending_restart(plugin_id);
                         }
                     }
                     self.handle_plugin_panel_events(events);
@@ -102,14 +102,12 @@ impl WorkbenchApp {
         for event in events {
             match event {
                 PluginPanelEvent::Status(message, is_error) => {
-                    self.set_status_force(
-                        if is_error {
-                            StatusLevel::Error
-                        } else {
-                            StatusLevel::Info
-                        },
-                        message,
-                    );
+                    let level = if is_error {
+                        StatusLevel::Error
+                    } else {
+                        StatusLevel::Info
+                    };
+                    self.set_status_force(level, message);
                 }
                 PluginPanelEvent::Enable(id) => {
                     match self

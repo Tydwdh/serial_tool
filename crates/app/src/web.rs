@@ -1,6 +1,6 @@
 //! Browser composition root.
 //!
-//! Browser composition root. Native-only services are replaced by browser
+//! Native-only services are replaced by browser
 //! capabilities where the platform has a real equivalent: Web Serial,
 //! local settings, Blob export, lossless in-memory recording and JSONL replay.
 
@@ -28,24 +28,25 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use tool_application::plugin::{
-    PluginCommandView, PluginContributesView, PluginPanelContributionView, PluginSettingView,
-    PluginStateView, PluginSummaryView, PluginUiContributionView, PluginView,
+    PluginCommand, PluginCommandView, PluginContributesView, PluginPanelContributionView,
+    PluginSettingView, PluginStateView, PluginSummaryView, PluginUiContributionView, PluginView,
 };
 use tool_application::replay::{ReplayPolicyView, ReplayStateView, ReplayStatusView};
-use tool_application::web::{WebAppEvent, WebRuntime};
-use tool_application::{AppCommand, AppRuntime, CommandOutcome, TaskId};
+use tool_application::web::{SignalKind, WebAppEvent, WebRuntime};
+use tool_application::{AppCommand, AppRuntime, CommandOutcome, TaskId, TransportView};
 use tool_core::Event;
 use tool_core::{Direction, Payload, topic_matches, topics};
 use tool_databus::DataBus;
 use tool_panels::{
     ChartPanel, DataSettingsView, KeymapAction, KeymapEntry, LogExportCursor, LogPanel,
     NetworkSerialAction, NetworkSerialFormView, PANEL_DEVICES, PanelId, PanelManager,
-    PluginPanelOptions, PluginSettingsView, PluginsPanel, RecordingAction, RecordingMode,
-    RecordingView, ReplayPanel, ReplayPolicyOption, SerialAction, SerialPanel, SerialPortItem,
-    SerialPortMetadata, SerialTopBarAction, SerialTopBarView, SerialView, StatusBarAction,
-    StatusBarView, StatusSignalView, TerminalExportCursor, TerminalExportFormat, TerminalPanel,
-    copy_text_with_feedback, data_settings_ui, design, keymap_ui, network_serial_form_ui,
-    plugin_settings_ui, recording_ui, status_bar_contents_ui, theme,
+    PluginPanelEvent, PluginPanelOptions, PluginSettingsView, PluginsPanel, RecordingAction,
+    RecordingMode, RecordingView, ReplayPanel, ReplayPolicyOption, ReplayUiCommand, SerialAction,
+    SerialPanel, SerialPortItem, SerialPortMetadata, SerialTopBarAction, SerialTopBarView,
+    SerialView, StatusBarAction, StatusBarView, StatusSignalView, TerminalExportCursor,
+    TerminalExportFormat, TerminalPanel, copy_text_with_feedback, data_settings_ui, design,
+    keymap_ui, network_serial_form_ui, plugin_settings_ui, recording_ui, status_bar_contents_ui,
+    theme,
 };
 use tool_panels::{
     SendAction, SendLineEnding, SendPortItem, SendToolbarButton, SendView,
@@ -362,6 +363,36 @@ fn select_web_port_state(serial: &mut WebSerialState, selected: Option<PortId>) 
     }
 }
 
+/// 端口刚被浏览器授权：先去重再选中并追加到列表末尾，保证同一端口不会在列表里出现两次。
+fn select_authorized_port(serial: &mut WebSerialState, port: PortDescriptor) {
+    serial.ports.retain(|item| item.id != port.id);
+    select_web_port_state(serial, Some(port.id.clone()));
+    serial.ports.push(port);
+}
+
+/// 当前已打开的端口：以 Application 的传输视图为准，视图缺位（运行时还没建好）时
+/// 才回退到 composition root 的本地镜像，二者正常路径下始终一致。
+fn web_connected_port(view: Option<&TransportView>, serial: &WebSerialState) -> Option<PortId> {
+    view.and_then(|view| view.connected.clone())
+        .or_else(|| serial.connected.clone())
+}
+
+/// 设备消失后登记待重连状态；vid/pid 取自拔出前最后一次看到的端口描述符，
+/// 用于在端口名变化时仍能认出同一台物理设备。
+fn web_reconnect_state(port: PortId, descriptor: Option<PortDescriptor>) -> WebReconnectState {
+    let (vendor_id, product_id) = descriptor
+        .map(|item| (item.vendor_id, item.product_id))
+        .unwrap_or((None, None));
+    WebReconnectState {
+        port,
+        vendor_id,
+        product_id,
+        attempts: 0,
+        next_attempt_at: 0.0,
+        task_id: None,
+    }
+}
+
 /// wasm 侧的 HEX 预检：判定与真正发送时**同源**——`WebApplication::validate_hex` 调的
 /// 就是 native `dispatch` 用的 `tool_core::{parse_hex, parse_hex_strict}`。
 ///
@@ -373,6 +404,46 @@ fn web_hex_error(runtime: Option<&WebRuntime>, input: &str, strict: bool) -> Opt
         Some(runtime) => runtime.validate_hex(input, strict).err(),
         None => Some("当前浏览器不支持 Web Serial".to_owned()),
     }
+}
+
+/// 创建一个 `type=file` 的 input 元素（不插入 DOM）。
+///
+/// accept/multiple 由各入口自己设置；任一步失败都返回 None，让调用点保留各自的提示文案。
+fn web_file_input(document: &web_sys::Document) -> Option<web_sys::HtmlInputElement> {
+    let input = document
+        .create_element("input")
+        .ok()
+        .and_then(|element| element.dyn_into::<web_sys::HtmlInputElement>().ok())?;
+    input.set_type("file");
+    Some(input)
+}
+
+/// 从 change 事件里取回触发它的 input 元素。
+fn web_file_input_from_event(event: &web_sys::Event) -> Option<web_sys::HtmlInputElement> {
+    event
+        .target()
+        .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok())
+}
+
+/// 挂上 change 监听并立即打开文件选择器。
+///
+/// 闭包必须泄漏：文件内容只在异步的 change 事件里到达一次，届时栈上的 `Closure` 已不存在。
+/// 返回 false 表示监听器没挂上，此时不会打开选择器，由调用点提示；闭包随之正常回收。
+fn web_open_file_picker(
+    input: &web_sys::HtmlInputElement,
+    on_change: impl FnMut(web_sys::Event) + 'static,
+) -> bool {
+    let callback: Box<dyn FnMut(web_sys::Event)> = Box::new(on_change);
+    let closure = Closure::wrap(callback);
+    if input
+        .add_event_listener_with_callback("change", closure.as_ref().unchecked_ref())
+        .is_err()
+    {
+        return false;
+    }
+    closure.forget();
+    input.click();
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -506,6 +577,27 @@ impl WebPluginManifest {
             .map(|live| live.subscriptions.as_slice())
             .unwrap_or(&[])
     }
+
+    /// 清单是否声明了某项权限。沿用 `live_permissions()` 的回落语义：
+    /// 没有 live 段时按顶层 permissions 判定。
+    fn has_permission(&self, permission: &str) -> bool {
+        self.live_permissions()
+            .iter()
+            .any(|name| name == permission)
+    }
+
+    /// 事件是否要投递给该插件。未声明 subscriptions 时收全量；`ui.`、`log.`
+    /// 与插件命令主题无条件投递，因为贡献点渲染和命令执行都靠它们驱动。
+    fn receives_event(&self, event: &Event) -> bool {
+        self.live_subscriptions().is_empty()
+            || self
+                .live_subscriptions()
+                .iter()
+                .any(|pattern| topic_matches(pattern, &event.topic))
+            || event.topic.starts_with("ui.")
+            || event.topic.starts_with("log.")
+            || event.topic == topics::PLUGIN_COMMAND_EXECUTE
+    }
 }
 
 /// Browser replay analyzer metadata. Live plugin execution uses the same Lua
@@ -552,6 +644,22 @@ struct WebPluginRecord {
     loading: bool,
     error: Option<String>,
     panels_published: bool,
+}
+
+impl WebPluginRecord {
+    /// 新安装或从持久化设置恢复的插件：只带清单与源码，运行期状态一律为空。
+    fn new(persisted: WebPluginPersisted) -> Self {
+        Self {
+            persisted,
+            host: None,
+            lua_instance: None,
+            replay_instance: None,
+            load_task: None,
+            loading: false,
+            error: None,
+            panels_published: false,
+        }
+    }
 }
 
 type PendingLuaFileRequests = Rc<RefCell<BTreeMap<TaskId, (Rc<WebPluginHost>, String)>>>;
@@ -605,19 +713,7 @@ impl WebPluginState {
         self.contribution_states.clear();
         self.pending_lua_file_requests.borrow_mut().clear();
         self.pending_lua_serial_requests.borrow_mut().clear();
-        self.records = persisted
-            .into_iter()
-            .map(|persisted| WebPluginRecord {
-                persisted,
-                host: None,
-                lua_instance: None,
-                replay_instance: None,
-                load_task: None,
-                loading: false,
-                error: None,
-                panels_published: false,
-            })
-            .collect();
+        self.records = persisted.into_iter().map(WebPluginRecord::new).collect();
     }
 
     fn persisted(&self) -> Vec<WebPluginPersisted> {
@@ -739,18 +835,7 @@ impl WebPluginState {
                         .contributes
                         .settings
                         .iter()
-                        .map(|setting| PluginSettingView {
-                            id: setting.id.clone(),
-                            title: setting.title.clone(),
-                            kind: setting.kind.clone(),
-                            default: setting.default.clone().unwrap_or(serde_json::Value::Null),
-                            options: setting.options.clone(),
-                            min: setting.min,
-                            max: setting.max,
-                            step: setting.step,
-                            rows: setting.rows,
-                            description: setting.description.clone(),
-                        })
+                        .map(plugin_setting_view)
                         .collect(),
                 };
                 PluginSummaryView {
@@ -1182,25 +1267,17 @@ impl WorkbenchApp {
             self.replay_panel.message = Some("浏览器文档不可用".to_owned());
             return;
         };
-        let Some(input) = document
-            .create_element("input")
-            .ok()
-            .and_then(|element| element.dyn_into::<web_sys::HtmlInputElement>().ok())
-        else {
+        let Some(input) = web_file_input(&document) else {
             self.replay_panel.message = Some("无法创建浏览器文件选择器".to_owned());
             return;
         };
-        input.set_type("file");
         input.set_accept(".jsonl,.ndjson,application/json");
         let Some(runtime) = self.runtime.clone() else {
             self.replay_panel.message = Some("当前浏览器没有可用的异步任务运行时".to_owned());
             return;
         };
-        let closure = Closure::wrap(Box::new(move |event: web_sys::Event| {
-            let Some(input) = event
-                .target()
-                .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok())
-            else {
+        let opened = web_open_file_picker(&input, move |event: web_sys::Event| {
+            let Some(input) = web_file_input_from_event(&event) else {
                 return;
             };
             let Some(file) = input.files().and_then(|files| files.get(0)) else {
@@ -1218,16 +1295,10 @@ impl WorkbenchApp {
                     })
             };
             let _ = runtime.load_text("replay_load", name, future);
-        }) as Box<dyn FnMut(web_sys::Event)>);
-        if input
-            .add_event_listener_with_callback("change", closure.as_ref().unchecked_ref())
-            .is_err()
-        {
+        });
+        if !opened {
             self.replay_panel.message = Some("无法监听文件选择事件".to_owned());
-            return;
         }
-        closure.forget();
-        input.click();
     }
 
     fn request_web_theme_file(&mut self, _ctx: &egui::Context) {
@@ -1235,25 +1306,17 @@ impl WorkbenchApp {
             self.serial.borrow_mut().status = "浏览器文档不可用".to_owned();
             return;
         };
-        let Some(input) = document
-            .create_element("input")
-            .ok()
-            .and_then(|element| element.dyn_into::<web_sys::HtmlInputElement>().ok())
-        else {
+        let Some(input) = web_file_input(&document) else {
             self.serial.borrow_mut().status = "无法创建主题文件选择器".to_owned();
             return;
         };
-        input.set_type("file");
         input.set_accept(".json,application/json");
         let Some(runtime) = self.runtime.clone() else {
             self.serial.borrow_mut().status = "当前浏览器没有可用的异步任务运行时".to_owned();
             return;
         };
-        let closure = Closure::wrap(Box::new(move |event: web_sys::Event| {
-            let Some(input) = event
-                .target()
-                .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok())
-            else {
+        let opened = web_open_file_picker(&input, move |event: web_sys::Event| {
+            let Some(input) = web_file_input_from_event(&event) else {
                 return;
             };
             let Some(file) = input.files().and_then(|files| files.get(0)) else {
@@ -1271,16 +1334,10 @@ impl WorkbenchApp {
                     })
             };
             let _ = runtime.load_text("theme_import", name, future);
-        }) as Box<dyn FnMut(web_sys::Event)>);
-        if input
-            .add_event_listener_with_callback("change", closure.as_ref().unchecked_ref())
-            .is_err()
-        {
+        });
+        if !opened {
             self.serial.borrow_mut().status = "无法监听主题文件选择事件".to_owned();
-            return;
         }
-        closure.forget();
-        input.click();
     }
 
     fn cancel_web_replay_analyzer(&mut self, reason: &str) {
@@ -1517,10 +1574,7 @@ impl WorkbenchApp {
         }
         self.replay_analyzer.running = false;
         self.replay_panel.analyzer_busy = false;
-        self.replay_panel.analyzer_logs.clear();
-        for line in self.replay_analyzer.logs.iter().rev().take(200).rev() {
-            self.replay_panel.push_analyzer_log(line.clone());
-        }
+        self.mirror_web_replay_analyzer_logs();
         if let Some(runtime) = self.runtime.as_ref() {
             if let Some(error) = self.replay_analyzer.error.clone() {
                 runtime.replay_set_analyzer_error(error);
@@ -1546,6 +1600,15 @@ impl WorkbenchApp {
         ctx.request_repaint();
     }
 
+    /// 把 analyzer 日志镜像进共享面板：只保留最近 200 条。
+    /// 先 `rev()` 再 `take(200)` 再 `rev()`，是为了截取尾部同时保持时间顺序。
+    fn mirror_web_replay_analyzer_logs(&mut self) {
+        self.replay_panel.analyzer_logs.clear();
+        for line in self.replay_analyzer.logs.iter().rev().take(200).rev() {
+            self.replay_panel.push_analyzer_log(line.clone());
+        }
+    }
+
     fn web_replay_status(&self) -> ReplayStatusView {
         self.runtime
             .as_ref()
@@ -1562,10 +1625,7 @@ impl WorkbenchApp {
         // the composition root. Mirror only its presentation DTO into the
         // shared panel so replay controls remain identical to Native.
         self.replay_panel.analyzer_busy = self.replay_analyzer.running;
-        self.replay_panel.analyzer_logs.clear();
-        for line in self.replay_analyzer.logs.iter().rev().take(200).rev() {
-            self.replay_panel.push_analyzer_log(line.clone());
-        }
+        self.mirror_web_replay_analyzer_logs();
         self.replay_panel.ui(ui, &status);
 
         if self.replay_panel.want_pick_file {
@@ -1598,29 +1658,29 @@ impl WorkbenchApp {
 
         for command in self.replay_panel.take_commands() {
             match command {
-                tool_panels::ReplayUiCommand::PickFile => {
+                ReplayUiCommand::PickFile => {
                     self.request_web_replay_file(ui.ctx());
                 }
-                tool_panels::ReplayUiCommand::Load { .. } => {
+                ReplayUiCommand::Load { .. } => {
                     self.replay_panel.message =
                         Some("Web 回放请使用“浏览”选择本地 JSONL 文件".to_owned());
                 }
-                tool_panels::ReplayUiCommand::Play => {
+                ReplayUiCommand::Play => {
                     self.dispatch_web_replay(AppCommand::ReplayPlay, false);
                 }
-                tool_panels::ReplayUiCommand::Pause => {
+                ReplayUiCommand::Pause => {
                     self.dispatch_web_replay(AppCommand::ReplayPause, false);
                 }
-                tool_panels::ReplayUiCommand::Stop => {
+                ReplayUiCommand::Stop => {
                     self.dispatch_web_replay(AppCommand::ReplayStop, true);
                 }
-                tool_panels::ReplayUiCommand::Seek { position_ms }
-                | tool_panels::ReplayUiCommand::SeekPanelPhase { position_ms }
-                | tool_panels::ReplayUiCommand::SeekDataPhase { position_ms } => {
+                ReplayUiCommand::Seek { position_ms }
+                | ReplayUiCommand::SeekPanelPhase { position_ms }
+                | ReplayUiCommand::SeekDataPhase { position_ms } => {
                     self.dispatch_web_replay(AppCommand::ReplaySeek { position_ms }, true);
                 }
-                tool_panels::ReplayUiCommand::SeekCursorPanelPhase { target_cursor }
-                | tool_panels::ReplayUiCommand::SeekCursorDataPhase { target_cursor } => {
+                ReplayUiCommand::SeekCursorPanelPhase { target_cursor }
+                | ReplayUiCommand::SeekCursorDataPhase { target_cursor } => {
                     let current = self.web_replay_status().cursor;
                     let delta = target_cursor as i64 - current as i64;
                     if delta != 0 {
@@ -1632,7 +1692,7 @@ impl WorkbenchApp {
                         );
                     }
                 }
-                tool_panels::ReplayUiCommand::StepBackward { steps } => {
+                ReplayUiCommand::StepBackward { steps } => {
                     self.dispatch_web_replay(
                         AppCommand::ReplayStep {
                             delta: -(steps.min(i32::MAX as usize) as i32),
@@ -1640,31 +1700,31 @@ impl WorkbenchApp {
                         true,
                     );
                 }
-                tool_panels::ReplayUiCommand::SetSpeed(speed) => {
+                ReplayUiCommand::SetSpeed(speed) => {
                     self.dispatch_web_replay(AppCommand::SetReplaySpeed { speed }, false);
                 }
-                tool_panels::ReplayUiCommand::SetPolicy(policy) => {
+                ReplayUiCommand::SetPolicy(policy) => {
                     self.dispatch_web_replay(AppCommand::SetReplayPolicy { policy }, true);
                     self.persist_settings();
                 }
-                tool_panels::ReplayUiCommand::AddReplayBookmark { name } => {
+                ReplayUiCommand::AddReplayBookmark { name } => {
                     self.dispatch_web_replay(AppCommand::AddReplayBookmark { name }, false);
                 }
-                tool_panels::ReplayUiCommand::RemoveReplayBookmark { position_ms } => {
+                ReplayUiCommand::RemoveReplayBookmark { position_ms } => {
                     self.dispatch_web_replay(
                         AppCommand::RemoveReplayBookmark { position_ms },
                         false,
                     );
                 }
-                tool_panels::ReplayUiCommand::SetLoop(value) => {
+                ReplayUiCommand::SetLoop(value) => {
                     self.replay_panel.loop_playback = value;
                 }
-                tool_panels::ReplayUiCommand::SetStepSize(_) => {}
-                tool_panels::ReplayUiCommand::SetAnalyzerCache(_)
-                | tool_panels::ReplayUiCommand::SetAnalyzerError(_)
-                | tool_panels::ReplayUiCommand::SetAnalyzerWarning(_)
-                | tool_panels::ReplayUiCommand::ClearAnalyzerError
-                | tool_panels::ReplayUiCommand::PushAnalyzerLog(_) => {}
+                ReplayUiCommand::SetStepSize(_) => {}
+                ReplayUiCommand::SetAnalyzerCache(_)
+                | ReplayUiCommand::SetAnalyzerError(_)
+                | ReplayUiCommand::SetAnalyzerWarning(_)
+                | ReplayUiCommand::ClearAnalyzerError
+                | ReplayUiCommand::PushAnalyzerLog(_) => {}
             }
         }
         let status = self.web_replay_status();
@@ -1699,25 +1759,17 @@ impl WorkbenchApp {
         let Some(document) = web_sys::window().and_then(|window| window.document()) else {
             return;
         };
-        let Some(input) = document
-            .create_element("input")
-            .ok()
-            .and_then(|element| element.dyn_into::<web_sys::HtmlInputElement>().ok())
-        else {
+        let Some(input) = web_file_input(&document) else {
             return;
         };
-        input.set_type("file");
         input.set_multiple(true);
         input.set_accept(".json,.lua");
         let Some(runtime) = self.runtime.clone() else {
             self.serial.borrow_mut().status = "当前浏览器没有可用的异步任务运行时".to_owned();
             return;
         };
-        let closure = Closure::wrap(Box::new(move |event: web_sys::Event| {
-            let Some(input) = event
-                .target()
-                .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok())
-            else {
+        web_open_file_picker(&input, move |event: web_sys::Event| {
+            let Some(input) = web_file_input_from_event(&event) else {
                 return;
             };
             let Some(files) = input.files() else {
@@ -1742,14 +1794,7 @@ impl WorkbenchApp {
                 Ok::<_, String>(contents)
             };
             let _ = runtime.load_files("plugin_import", future);
-        }) as Box<dyn FnMut(web_sys::Event)>);
-        if input
-            .add_event_listener_with_callback("change", closure.as_ref().unchecked_ref())
-            .is_ok()
-        {
-            closure.forget();
-            input.click();
-        }
+        });
     }
 
     fn load_web_plugin(&mut self, index: usize) {
@@ -1907,13 +1952,7 @@ impl WorkbenchApp {
         let Some(record) = self.plugins.records.get(index) else {
             return;
         };
-        if !record
-            .persisted
-            .manifest
-            .live_permissions()
-            .iter()
-            .any(|permission| permission == "ui")
-        {
+        if !record.persisted.manifest.has_permission("ui") {
             return;
         }
         let source = format!("plugin:{}", record.persisted.manifest.id);
@@ -1948,53 +1987,32 @@ impl WorkbenchApp {
         }
     }
 
-    fn install_web_plugin(&mut self, persisted: WebPluginPersisted) {
-        if let Some(index) = self
-            .plugins
+    /// 按清单 id 定位插件记录。浏览器插件以 manifest.id 为唯一键，安装顺序只是展示顺序。
+    fn web_plugin_index(&self, plugin_id: &str) -> Option<usize> {
+        self.plugins
             .records
             .iter()
-            .position(|record| record.persisted.manifest.id == persisted.manifest.id)
-        {
+            .position(|record| record.persisted.manifest.id == plugin_id)
+    }
+
+    fn install_web_plugin(&mut self, persisted: WebPluginPersisted) {
+        let existing = self.web_plugin_index(&persisted.manifest.id);
+        let index = if let Some(index) = existing {
             self.unload_web_plugin(index);
-            self.plugins.records[index] = WebPluginRecord {
-                persisted,
-                host: None,
-                lua_instance: None,
-                replay_instance: None,
-                load_task: None,
-                loading: false,
-                error: None,
-                panels_published: false,
-            };
-            if self.plugins.records[index].persisted.enabled {
-                self.load_web_plugin(index);
-            }
+            self.plugins.records[index] = WebPluginRecord::new(persisted);
+            index
         } else {
-            self.plugins.records.push(WebPluginRecord {
-                persisted,
-                host: None,
-                lua_instance: None,
-                replay_instance: None,
-                load_task: None,
-                loading: false,
-                error: None,
-                panels_published: false,
-            });
-            let index = self.plugins.records.len() - 1;
-            if self.plugins.records[index].persisted.enabled {
-                self.load_web_plugin(index);
-            }
+            self.plugins.records.push(WebPluginRecord::new(persisted));
+            self.plugins.records.len() - 1
+        };
+        if self.plugins.records[index].persisted.enabled {
+            self.load_web_plugin(index);
         }
         self.persist_settings();
     }
 
     fn uninstall_web_plugin(&mut self, plugin_id: &str) {
-        let Some(index) = self
-            .plugins
-            .records
-            .iter()
-            .position(|record| record.persisted.manifest.id == plugin_id)
-        else {
+        let Some(index) = self.web_plugin_index(plugin_id) else {
             self.serial.borrow_mut().status = format!("Web 插件不存在：{plugin_id}");
             return;
         };
@@ -2060,45 +2078,13 @@ impl WorkbenchApp {
         let plugin_commands = runtime.take_plugin_commands();
         for command in plugin_commands {
             match command {
-                tool_application::plugin::PluginCommand::Enable { plugin_id } => {
-                    if let Some(index) = self
-                        .plugins
-                        .records
-                        .iter()
-                        .position(|record| record.persisted.manifest.id == plugin_id)
-                    {
-                        let should_load = self
-                            .plugins
-                            .records
-                            .get(index)
-                            .is_some_and(|record| !record.persisted.enabled);
-                        if should_load {
-                            self.plugins.records[index].persisted.enabled = true;
-                            self.load_web_plugin(index);
-                            self.persist_settings();
-                        }
-                    }
+                PluginCommand::Enable { plugin_id } => {
+                    self.set_web_plugin_enabled(&plugin_id, true);
                 }
-                tool_application::plugin::PluginCommand::Disable { plugin_id } => {
-                    if let Some(index) = self
-                        .plugins
-                        .records
-                        .iter()
-                        .position(|record| record.persisted.manifest.id == plugin_id)
-                    {
-                        let should_unload = self
-                            .plugins
-                            .records
-                            .get(index)
-                            .is_some_and(|record| record.persisted.enabled);
-                        if should_unload {
-                            self.plugins.records[index].persisted.enabled = false;
-                            self.unload_web_plugin(index);
-                            self.persist_settings();
-                        }
-                    }
+                PluginCommand::Disable { plugin_id } => {
+                    self.set_web_plugin_enabled(&plugin_id, false);
                 }
-                tool_application::plugin::PluginCommand::Reload => {
+                PluginCommand::Reload => {
                     let enabled = self
                         .plugins
                         .records
@@ -2111,7 +2097,7 @@ impl WorkbenchApp {
                         self.load_web_plugin(index);
                     }
                 }
-                tool_application::plugin::PluginCommand::Execute {
+                PluginCommand::Execute {
                     plugin_id,
                     command_id,
                     context,
@@ -2135,26 +2121,17 @@ impl WorkbenchApp {
         for event in events {
             let event_value = web_event_to_plugin_value(&event);
             for record in &self.plugins.records {
-                if record.persisted.enabled
-                    && record
-                        .persisted
-                        .manifest
-                        .live_permissions()
-                        .iter()
-                        .any(|permission| permission == "bus")
-                    && let Some(instance) = record.lua_instance
-                    && (record.persisted.manifest.live_subscriptions().is_empty()
-                        || record
-                            .persisted
-                            .manifest
-                            .live_subscriptions()
-                            .iter()
-                            .any(|pattern| topic_matches(pattern, &event.topic))
-                        || event.topic.starts_with("ui.")
-                        || event.topic.starts_with("log.")
-                        || event.topic == topics::PLUGIN_COMMAND_EXECUTE)
-                    && let Err(error) = self.web_lua.dispatch_event(instance, event_value.clone())
-                {
+                if !record.persisted.enabled {
+                    continue;
+                }
+                let manifest = &record.persisted.manifest;
+                if !manifest.has_permission("bus") || !manifest.receives_event(&event) {
+                    continue;
+                }
+                let Some(instance) = record.lua_instance else {
+                    continue;
+                };
+                if let Err(error) = self.web_lua.dispatch_event(instance, event_value.clone()) {
                     self.serial.borrow_mut().status = format!("Lua 插件发送事件失败：{error}");
                 }
             }
@@ -2194,6 +2171,33 @@ impl WorkbenchApp {
         }
     }
 
+    /// 启用/禁用插件：只有状态真的翻转时才加载或卸载并落盘，避免重复触发 Lua 生命周期。
+    fn set_web_plugin_enabled(&mut self, plugin_id: &str, enabled: bool) {
+        let Some(index) = self.web_plugin_index(plugin_id) else {
+            return;
+        };
+        if self.plugins.records[index].persisted.enabled == enabled {
+            return;
+        }
+        self.plugins.records[index].persisted.enabled = enabled;
+        if enabled {
+            self.load_web_plugin(index);
+        } else {
+            self.unload_web_plugin(index);
+        }
+        self.persist_settings();
+    }
+
+    /// 作废某个插件留下的挂起 Lua 能力请求：只保留宿主句柄（Rc 身份）不同的项。
+    fn drop_pending_lua_requests(
+        pending: &RefCell<BTreeMap<TaskId, (Rc<WebPluginHost>, String)>>,
+        owner: Option<&Rc<WebPluginHost>>,
+    ) {
+        pending
+            .borrow_mut()
+            .retain(|_, (host, _)| owner.is_none_or(|owner| !Rc::ptr_eq(owner, host)));
+    }
+
     fn unload_web_plugin(&mut self, index: usize) {
         self.remove_web_plugin_panels(index);
         if let Some(plugin_id) = self
@@ -2204,26 +2208,13 @@ impl WorkbenchApp {
         {
             self.plugins.clear_contribution_values(&plugin_id);
         }
-        self.plugins
-            .pending_lua_file_requests
-            .borrow_mut()
-            .retain(|_, (host, _)| {
-                self.plugins
-                    .records
-                    .get(index)
-                    .and_then(|record| record.host.as_ref())
-                    .is_none_or(|record_host| !Rc::ptr_eq(record_host, host))
-            });
-        self.plugins
-            .pending_lua_serial_requests
-            .borrow_mut()
-            .retain(|_, (host, _)| {
-                self.plugins
-                    .records
-                    .get(index)
-                    .and_then(|record| record.host.as_ref())
-                    .is_none_or(|record_host| !Rc::ptr_eq(record_host, host))
-            });
+        let owner = self
+            .plugins
+            .records
+            .get(index)
+            .and_then(|record| record.host.as_ref());
+        Self::drop_pending_lua_requests(&self.plugins.pending_lua_file_requests, owner);
+        Self::drop_pending_lua_requests(&self.plugins.pending_lua_serial_requests, owner);
         let load_task = self
             .plugins
             .records
@@ -2234,20 +2225,13 @@ impl WorkbenchApp {
         {
             runtime.cancel_task(task_id);
         }
-        if let Some(instance) = self
+        let (lua_instance, replay_instance) = self
             .plugins
             .records
             .get(index)
-            .and_then(|record| record.lua_instance)
-        {
-            let _ = self.web_lua.stop(instance);
-        }
-        if let Some(instance) = self
-            .plugins
-            .records
-            .get(index)
-            .and_then(|record| record.replay_instance)
-        {
+            .map(|record| (record.lua_instance, record.replay_instance))
+            .unwrap_or((None, None));
+        for instance in [lua_instance, replay_instance].into_iter().flatten() {
             let _ = self.web_lua.stop(instance);
         }
         let Some(record) = self.plugins.records.get_mut(index) else {
@@ -2465,9 +2449,7 @@ impl WorkbenchApp {
                 WebAppEvent::PortRequested { id, port } => {
                     plugin_lua_serial_resolution =
                         Some((id, Ok(PluginSerialDevice::from(port.clone()))));
-                    serial.ports.retain(|item| item.id != port.id);
-                    select_web_port_state(&mut serial, Some(port.id.clone()));
-                    serial.ports.push(port);
+                    select_authorized_port(&mut serial, port);
                     serial.status = "设备已授权，可连接".to_owned();
                 }
                 WebAppEvent::PortAttached(port) => {
@@ -2493,14 +2475,7 @@ impl WorkbenchApp {
                         serial.connected = None;
                         serial.status = "设备已拔出".to_owned();
                         if serial.auto_reconnect {
-                            serial.reconnect = Some(WebReconnectState {
-                                port: port.clone(),
-                                vendor_id: descriptor.as_ref().and_then(|item| item.vendor_id),
-                                product_id: descriptor.as_ref().and_then(|item| item.product_id),
-                                attempts: 0,
-                                next_attempt_at: 0.0,
-                                task_id: None,
-                            });
+                            serial.reconnect = Some(web_reconnect_state(port.clone(), descriptor));
                         }
                     }
                     if serial.selected_port.as_ref() == Some(&port) {
@@ -2508,9 +2483,7 @@ impl WorkbenchApp {
                     }
                 }
                 WebAppEvent::NetworkPortAdded(port) => {
-                    serial.ports.retain(|item| item.id != port.id);
-                    select_web_port_state(&mut serial, Some(port.id.clone()));
-                    serial.ports.push(port);
+                    select_authorized_port(&mut serial, port);
                     serial.status = "网络串口已添加，可连接".to_owned();
                 }
                 WebAppEvent::NetworkPortRemoved(port) => {
@@ -2535,14 +2508,7 @@ impl WorkbenchApp {
                         if serial.auto_reconnect && !manual {
                             let descriptor =
                                 serial.ports.iter().find(|item| item.id == port).cloned();
-                            serial.reconnect = Some(WebReconnectState {
-                                port: port.clone(),
-                                vendor_id: descriptor.as_ref().and_then(|item| item.vendor_id),
-                                product_id: descriptor.as_ref().and_then(|item| item.product_id),
-                                attempts: 0,
-                                next_attempt_at: 0.0,
-                                task_id: None,
-                            });
+                            serial.reconnect = Some(web_reconnect_state(port.clone(), descriptor));
                         }
                     }
                     serial.status = "设备已断开".to_owned();
@@ -2552,8 +2518,8 @@ impl WorkbenchApp {
                 }
                 WebAppEvent::SignalsChanged { signal, value, .. } => {
                     match signal {
-                        tool_application::web::SignalKind::Dtr => serial.dtr = value,
-                        tool_application::web::SignalKind::Rts => serial.rts = value,
+                        SignalKind::Dtr => serial.dtr = value,
+                        SignalKind::Rts => serial.rts = value,
                     }
                     serial.status = format!("{signal:?} 已更新");
                 }
@@ -2770,18 +2736,13 @@ impl WorkbenchApp {
                     });
                     continue;
                 };
-                let Some(input) = document
-                    .create_element("input")
-                    .ok()
-                    .and_then(|element| element.dyn_into::<web_sys::HtmlInputElement>().ok())
-                else {
+                let Some(input) = web_file_input(&document) else {
                     let _ = host.complete_request(PluginHostCompletion {
                         request_id,
                         result: Err("创建文件选择器失败".to_owned()),
                     });
                     continue;
                 };
-                input.set_type("file");
                 let accept = extensions
                     .iter()
                     .filter(|extension| extension.as_str() != "*")
@@ -2801,12 +2762,9 @@ impl WorkbenchApp {
                 let pending = self.plugins.pending_lua_file_requests.clone();
                 let runtime_for_change = runtime.clone();
                 let title_for_task = title.clone();
-                let closure =
-                    Closure::wrap(Box::new(move |event: web_sys::Event| {
-                        let Some(input) = event
-                            .target()
-                            .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok())
-                        else {
+                let opened =
+                    web_open_file_picker(&input, move |event: web_sys::Event| {
+                        let Some(input) = web_file_input_from_event(&event) else {
                             return;
                         };
                         let Some(file) = input.files().and_then(|files| files.get(0)) else {
@@ -2834,14 +2792,8 @@ impl WorkbenchApp {
                                 (host_for_change.clone(), request_id_for_change.clone()),
                             );
                         }
-                    }) as Box<dyn FnMut(web_sys::Event)>);
-                if input
-                    .add_event_listener_with_callback("change", closure.as_ref().unchecked_ref())
-                    .is_ok()
-                {
-                    closure.forget();
-                    input.click();
-                } else {
+                    });
+                if !opened {
                     let _ = host.complete_request(PluginHostCompletion {
                         request_id,
                         result: Err("打开文件选择器失败".to_owned()),
@@ -2870,23 +2822,15 @@ impl WorkbenchApp {
             let Some(document) = web_sys::window().and_then(|window| window.document()) else {
                 continue;
             };
-            let Some(input) = document
-                .create_element("input")
-                .ok()
-                .and_then(|element| element.dyn_into::<web_sys::HtmlInputElement>().ok())
-            else {
+            let Some(input) = web_file_input(&document) else {
                 continue;
             };
-            input.set_type("file");
             let panel_id = panel_id.to_owned();
             let field_id = field_id.to_owned();
             let runtime = runtime.clone();
             let repaint = ctx.clone();
-            let closure = Closure::wrap(Box::new(move |event: web_sys::Event| {
-                let Some(input) = event
-                    .target()
-                    .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok())
-                else {
+            web_open_file_picker(&input, move |event: web_sys::Event| {
+                let Some(input) = web_file_input_from_event(&event) else {
                     return;
                 };
                 let Some(file) = input.files().and_then(|files| files.get(0)) else {
@@ -2916,14 +2860,7 @@ impl WorkbenchApp {
                     ));
                     repaint.request_repaint();
                 });
-            }) as Box<dyn FnMut(web_sys::Event)>);
-            if input
-                .add_event_listener_with_callback("change", closure.as_ref().unchecked_ref())
-                .is_ok()
-            {
-                closure.forget();
-                input.click();
-            }
+            });
         }
     }
 
@@ -3382,10 +3319,7 @@ impl AppShellHost for WorkbenchApp {
         ) = {
             let serial = self.serial.borrow();
             (
-                transport_view
-                    .as_ref()
-                    .and_then(|view| view.connected.clone())
-                    .or_else(|| serial.connected.clone()),
+                web_connected_port(transport_view.as_ref(), &serial),
                 transport_view.as_ref().is_some_and(|view| view.connecting),
                 serial.selected_port.clone(),
                 transport_view
@@ -3529,21 +3463,12 @@ impl AppShellHost for WorkbenchApp {
 
     fn render_status_bar(&mut self, ui: &mut egui::Ui) {
         let recording_status = self.runtime.as_ref().map(WebRuntime::query_recording);
-        let recording_running = recording_status
-            .as_ref()
-            .is_some_and(|status| status.stats.running);
-        let recording_paused = recording_status
-            .as_ref()
-            .is_some_and(|status| status.stats.paused);
-        let recording_events = recording_status
-            .as_ref()
-            .map_or(0, |status| status.stats.events_written);
-        let recording_bytes = recording_status
-            .as_ref()
-            .map_or(0, |status| status.stats.bytes_written);
-        let recording_error = recording_status
-            .as_ref()
-            .and_then(|status| status.stats.last_error.clone());
+        let recording_stats = recording_status.as_ref().map(|status| &status.stats);
+        let recording_running = recording_stats.is_some_and(|stats| stats.running);
+        let recording_paused = recording_stats.is_some_and(|stats| stats.paused);
+        let recording_events = recording_stats.map_or(0, |stats| stats.events_written);
+        let recording_bytes = recording_stats.map_or(0, |stats| stats.bytes_written);
+        let recording_error = recording_stats.and_then(|stats| stats.last_error.clone());
         let update_status = self
             .runtime
             .as_ref()
@@ -3568,10 +3493,7 @@ impl AppShellHost for WorkbenchApp {
         ) = {
             let serial = self.serial.borrow();
             (
-                transport_view
-                    .as_ref()
-                    .and_then(|view| view.connected.clone())
-                    .or_else(|| serial.connected.clone()),
+                web_connected_port(transport_view.as_ref(), &serial),
                 transport_view.as_ref().is_some_and(|view| view.connecting),
                 serial.selected_port.clone(),
                 transport_view
@@ -3848,29 +3770,16 @@ impl eframe::App for WorkbenchApp {
             self.persist_settings();
         }
         let recording_status = self.runtime.as_ref().map(WebRuntime::query_recording);
+        let recording_stats = recording_status.as_ref().map(|status| &status.stats);
         let recorder = crate::web_perf::WebRecorderPerf {
-            running: recording_status
-                .as_ref()
-                .is_some_and(|status| status.stats.running),
-            queued_events: recording_status
-                .as_ref()
-                .map_or(0, |status| status.stats.backlog_events),
-            queued_bytes: recording_status
-                .as_ref()
-                .map_or(0, |status| status.stats.backlog_bytes),
-            seconds_behind: recording_status
-                .as_ref()
-                .map_or(0.0, |status| status.stats.seconds_behind),
-            recorded_events: recording_status
-                .as_ref()
-                .map_or(0, |status| status.stats.events_written),
-            recorded_bytes: recording_status
-                .as_ref()
-                .map_or(0, |status| status.stats.bytes_written),
+            running: recording_stats.is_some_and(|stats| stats.running),
+            queued_events: recording_stats.map_or(0, |stats| stats.backlog_events),
+            queued_bytes: recording_stats.map_or(0, |stats| stats.backlog_bytes),
+            seconds_behind: recording_stats.map_or(0.0, |stats| stats.seconds_behind),
+            recorded_events: recording_stats.map_or(0, |stats| stats.events_written),
+            recorded_bytes: recording_stats.map_or(0, |stats| stats.bytes_written),
             write_bytes_per_sec: 0,
-            incomplete: recording_status
-                .as_ref()
-                .is_some_and(|status| status.stats.incomplete),
+            incomplete: recording_stats.is_some_and(|stats| stats.incomplete),
         };
         let bus_snapshot = self.runtime.as_ref().map(WebRuntime::perf_snapshot);
         self.perf.end_frame(frame_started, bus_snapshot, recorder);
@@ -4108,29 +4017,16 @@ impl WorkbenchApp {
                 }
             }
         } else {
+            let target = if state.stem == "terminal" {
+                "终端"
+            } else {
+                "日志"
+            };
+            let progress = format!("正在导出 {target}：已写入 {} 条", state.offset);
             if let Some(runtime) = self.runtime.as_ref() {
-                runtime.update_task(
-                    state.task_id,
-                    format!(
-                        "正在导出 {}：已写入 {} 条",
-                        if state.stem == "terminal" {
-                            "终端"
-                        } else {
-                            "日志"
-                        },
-                        state.offset,
-                    ),
-                );
+                runtime.update_task(state.task_id, progress.clone());
             }
-            self.serial.borrow_mut().status = format!(
-                "正在导出 {}：已写入 {} 条",
-                if state.stem == "terminal" {
-                    "终端"
-                } else {
-                    "日志"
-                },
-                state.offset,
-            );
+            self.serial.borrow_mut().status = progress;
             ctx.request_repaint();
         }
     }
@@ -4496,10 +4392,7 @@ impl WorkbenchApp {
             let mut serial = self.serial.borrow_mut();
             let previous_aliases = serial.port_aliases.clone();
             let previous_groups = serial.port_groups.clone();
-            let connected_port = transport_view
-                .as_ref()
-                .and_then(|view| view.connected.clone())
-                .or_else(|| serial.connected.clone());
+            let connected_port = web_connected_port(transport_view.as_ref(), &serial);
             let connecting_port = transport_view
                 .as_ref()
                 .filter(|view| view.connecting)
@@ -4526,15 +4419,9 @@ impl WorkbenchApp {
                     pending_reconnect: pending_reconnect_port.as_ref() == Some(&port.id),
                 })
                 .collect();
-            let connected = transport_view
-                .as_ref()
-                .and_then(|view| view.connected.clone())
-                .or_else(|| serial.connected.clone())
-                .map(|port| port.to_string());
-            let connecting = transport_view
-                .as_ref()
-                .filter(|view| view.connecting)
-                .and_then(|_| serial.selected_port.as_ref().map(ToString::to_string));
+            // 面板高亮与展示必须同源：直接复用上面算出的端口，只再转成字符串。
+            let connected = connected_port.as_ref().map(ToString::to_string);
+            let connecting = connecting_port.as_ref().map(ToString::to_string);
             let status = transport_view
                 .as_ref()
                 .filter(|view| !view.status.is_empty())
@@ -4860,6 +4747,17 @@ impl WorkbenchApp {
         }
     }
 
+    /// 发送面板提交：先记下当前输入用作历史，再派发命令，最后写回共享历史。
+    fn send_web_with_history(&mut self, command: AppCommand, ctx: &egui::Context) {
+        let history = self.serial.borrow().send_input.clone();
+        self.dispatch_serial(command, ctx);
+        record_shared_send_history(
+            &mut self.serial.borrow_mut().send_history,
+            history,
+            WEB_MAX_SEND_HISTORY,
+        );
+    }
+
     /// Render the same rich sender used by the Native composition root.
     ///
     /// Only the final action dispatch remains platform-specific.  Keeping the
@@ -4882,10 +4780,7 @@ impl WorkbenchApp {
                     label: web_port_display_name(port, &serial.port_aliases),
                 })
                 .collect::<Vec<_>>();
-            let connected = transport
-                .as_ref()
-                .and_then(|view| view.connected.clone())
-                .or_else(|| serial.connected.clone());
+            let connected = web_connected_port(transport.as_ref(), &serial);
             (ports, connected)
         };
 
@@ -4967,34 +4862,22 @@ impl WorkbenchApp {
         for action in actions {
             match action {
                 SendAction::SendText { port, text } => {
-                    let history = self.serial.borrow().send_input.clone();
-                    self.dispatch_serial(
+                    self.send_web_with_history(
                         AppCommand::SendText {
                             port: PortId::new(port),
                             text,
                         },
                         &ctx,
                     );
-                    record_shared_send_history(
-                        &mut self.serial.borrow_mut().send_history,
-                        history,
-                        WEB_MAX_SEND_HISTORY,
-                    );
                 }
                 SendAction::SendHex { port, hex, strict } => {
-                    let history = self.serial.borrow().send_input.clone();
-                    self.dispatch_serial(
+                    self.send_web_with_history(
                         AppCommand::SendHex {
                             port: PortId::new(port),
                             hex,
                             strict,
                         },
                         &ctx,
-                    );
-                    record_shared_send_history(
-                        &mut self.serial.borrow_mut().send_history,
-                        history,
-                        WEB_MAX_SEND_HISTORY,
                     );
                 }
                 SendAction::SetDtr { port, value } => {
@@ -5035,24 +4918,15 @@ impl WorkbenchApp {
             WebRecordMode::RawSerial => RecordingMode::RawSerial,
         };
         let status = self.runtime.as_ref().map(WebRuntime::query_recording);
-        let running = status.as_ref().is_some_and(|status| status.stats.running);
-        let paused = status.as_ref().is_some_and(|status| status.stats.paused);
-        let stopping = status.as_ref().is_some_and(|status| status.stats.stopping);
-        let events = status
-            .as_ref()
-            .map_or(0, |status| status.stats.events_written);
-        let bytes = status
-            .as_ref()
-            .map_or(0, |status| status.stats.bytes_written);
-        let backlog_events = status
-            .as_ref()
-            .map_or(0, |status| status.stats.backlog_events);
-        let backlog_bytes = status
-            .as_ref()
-            .map_or(0, |status| status.stats.backlog_bytes);
-        let last_error = status
-            .as_ref()
-            .and_then(|status| status.stats.last_error.as_deref());
+        let stats = status.as_ref().map(|status| &status.stats);
+        let running = stats.is_some_and(|stats| stats.running);
+        let paused = stats.is_some_and(|stats| stats.paused);
+        let stopping = stats.is_some_and(|stats| stats.stopping);
+        let events = stats.map_or(0, |stats| stats.events_written);
+        let bytes = stats.map_or(0, |stats| stats.bytes_written);
+        let backlog_events = stats.map_or(0, |stats| stats.backlog_events);
+        let backlog_bytes = stats.map_or(0, |stats| stats.backlog_bytes);
+        let last_error = stats.and_then(|stats| stats.last_error.as_deref());
         let current_path = (running || stopping)
             .then(|| status.as_ref().and_then(|status| status.path.as_deref()))
             .flatten();
@@ -5164,30 +5038,30 @@ impl WorkbenchApp {
         );
         for event in events {
             match event {
-                tool_panels::PluginPanelEvent::Status(message, _is_error) => {
+                PluginPanelEvent::Status(message, _is_error) => {
                     self.serial.borrow_mut().status = message;
                 }
-                tool_panels::PluginPanelEvent::Enable(plugin_id) => {
+                PluginPanelEvent::Enable(plugin_id) => {
                     if let Err(error) = runtime.dispatch(AppCommand::EnablePlugin { plugin_id }) {
                         self.serial.borrow_mut().status = error;
                     }
                 }
-                tool_panels::PluginPanelEvent::Disable(plugin_id) => {
+                PluginPanelEvent::Disable(plugin_id) => {
                     if let Err(error) = runtime.dispatch(AppCommand::DisablePlugin { plugin_id }) {
                         self.serial.borrow_mut().status = error;
                     }
                 }
-                tool_panels::PluginPanelEvent::RefreshMarket => {
+                PluginPanelEvent::RefreshMarket => {
                     self.request_web_marketplace_refresh(ui.ctx());
                 }
-                tool_panels::PluginPanelEvent::ImportPlugin => {
+                PluginPanelEvent::ImportPlugin => {
                     self.request_web_plugin_files(ui.ctx());
                 }
-                tool_panels::PluginPanelEvent::MarketplaceUrlChanged(url) => {
+                PluginPanelEvent::MarketplaceUrlChanged(url) => {
                     self.marketplace_url = url;
                     self.persist_settings();
                 }
-                tool_panels::PluginPanelEvent::InstallPlugin(plugin_id) => {
+                PluginPanelEvent::InstallPlugin(plugin_id) => {
                     if let Some(entry) = marketplace_view.registry.as_ref().and_then(|registry| {
                         registry.plugins.iter().find(|entry| entry.id == plugin_id)
                     }) {
@@ -5208,7 +5082,7 @@ impl WorkbenchApp {
                         );
                     }
                 }
-                tool_panels::PluginPanelEvent::UninstallPlugin(plugin_id) => {
+                PluginPanelEvent::UninstallPlugin(plugin_id) => {
                     self.uninstall_web_plugin(&plugin_id);
                 }
             }
@@ -5252,18 +5126,7 @@ impl WorkbenchApp {
                 .contributes
                 .settings
                 .iter()
-                .map(|setting| PluginSettingView {
-                    id: setting.id.clone(),
-                    title: setting.title.clone(),
-                    kind: setting.kind.clone(),
-                    default: setting.default.clone().unwrap_or(serde_json::Value::Null),
-                    options: setting.options.clone(),
-                    min: setting.min,
-                    max: setting.max,
-                    step: setting.step,
-                    rows: setting.rows,
-                    description: setting.description.clone(),
-                })
+                .map(plugin_setting_view)
                 .collect();
             if settings.is_empty() {
                 continue;
@@ -5316,10 +5179,7 @@ impl WorkbenchApp {
     fn web_ui_contribution_context(&self, slot: &str) -> serde_json::Value {
         let serial = self.serial.borrow();
         let transport = self.runtime.as_ref().map(WebRuntime::query_transport);
-        let connected = transport
-            .as_ref()
-            .and_then(|view| view.connected.clone())
-            .or_else(|| serial.connected.clone());
+        let connected = web_connected_port(transport.as_ref(), &serial);
         // The sender target is user-selectable.  Falling back to the active
         // connection keeps the plugin usable immediately after connect, but
         // an explicitly selected unopened port must remain unopened in the
@@ -5388,29 +5248,28 @@ impl WorkbenchApp {
                                     "button" | "small_button" | ""
                                 ))
                     })
-                    .map(move |item| {
-                        let contribution_id = item.id;
-                        (
-                            plugin_id.clone(),
-                            contribution_id.clone(),
-                            item.kind,
-                            item.title.unwrap_or_else(|| contribution_id.clone()),
-                            item.command,
-                            item.tooltip,
-                            item.order,
-                            item.enabled,
-                            item.default,
-                        )
-                    })
+                    .map(move |item| (plugin_id.clone(), item))
             })
             .collect::<Vec<_>>();
-        items.sort_by(|left, right| left.6.cmp(&right.6).then_with(|| left.3.cmp(&right.3)));
+        items.sort_by(|(_, left), (_, right)| {
+            left.order
+                .cmp(&right.order)
+                .then_with(|| contribution_title(left).cmp(contribution_title(right)))
+        });
 
         let mut commands = Vec::new();
-        for (plugin_id, contribution_id, kind, title, command, tooltip, order, enabled, default) in
-            items
-        {
-            let _ = order;
+        for (plugin_id, item) in items {
+            let PluginUiContributionView {
+                id: contribution_id,
+                kind,
+                title,
+                command,
+                tooltip,
+                enabled,
+                default,
+                ..
+            } = item;
+            let title = title.unwrap_or_else(|| contribution_id.clone());
             let state = self
                 .plugins
                 .contribution_value(&plugin_id, &contribution_id)
@@ -5522,12 +5381,7 @@ impl WorkbenchApp {
         command_id: String,
         context: serde_json::Value,
     ) {
-        let Some(index) = self
-            .plugins
-            .records
-            .iter()
-            .position(|record| record.persisted.manifest.id == plugin_id)
-        else {
+        let Some(index) = self.web_plugin_index(&plugin_id) else {
             self.serial.borrow_mut().status = format!("Web 插件不存在：{plugin_id}");
             return;
         };
@@ -5625,6 +5479,23 @@ fn replay_policy_view_option(policy: ReplayPolicyOption) -> ReplayPolicyView {
     }
 }
 
+/// 浏览器清单里的设置项 → 共享 DTO。缺省值缺失时按 JSON null 处理，
+/// 与 Native 插件设置面板读到的是同一个形状。
+fn plugin_setting_view(setting: &WebPluginSetting) -> PluginSettingView {
+    PluginSettingView {
+        id: setting.id.clone(),
+        title: setting.title.clone(),
+        kind: setting.kind.clone(),
+        default: setting.default.clone().unwrap_or(serde_json::Value::Null),
+        options: setting.options.clone(),
+        min: setting.min,
+        max: setting.max,
+        step: setting.step,
+        rows: setting.rows,
+        description: setting.description.clone(),
+    }
+}
+
 fn replay_policy_option_view(policy: ReplayPolicyView) -> ReplayPolicyOption {
     match policy {
         ReplayPolicyView::AutoPreferRecorded => ReplayPolicyOption::AutoPreferRecorded,
@@ -5662,6 +5533,11 @@ fn web_keymap_title(command_id: &str) -> &'static str {
         .iter()
         .find(|command| command.id == command_id)
         .map_or("命令", |command| command.title)
+}
+
+/// 贡献点的展示名：标题缺省时回落到 id。排序与渲染必须用同一个名字。
+fn contribution_title(item: &PluginUiContributionView) -> &str {
+    item.title.as_deref().unwrap_or(&item.id)
 }
 
 fn web_port_display_name(port: &PortDescriptor, aliases: &BTreeMap<String, String>) -> String {
@@ -5779,14 +5655,15 @@ fn open_web_url(url: &str) {
     }
 }
 
+/// 取浏览器 `File.name` 的叶子名（去掉目录前缀）。清单与入口脚本都只按叶子名匹配。
+fn web_file_leaf(name: &str) -> &str {
+    name.rsplit_once('/').map(|(_, leaf)| leaf).unwrap_or(name)
+}
+
 fn parse_web_plugin_files(files: &[(String, String)]) -> Result<WebPluginPersisted, String> {
     let manifest_text = files
         .iter()
-        .find(|(name, _)| {
-            name.rsplit_once('/')
-                .map(|(_, leaf)| leaf.eq_ignore_ascii_case("plugin.json"))
-                .unwrap_or_else(|| name.eq_ignore_ascii_case("plugin.json"))
-        })
+        .find(|(name, _)| web_file_leaf(name).eq_ignore_ascii_case("plugin.json"))
         .or_else(|| {
             files
                 .iter()
@@ -5814,17 +5691,10 @@ fn parse_web_plugin_files(files: &[(String, String)]) -> Result<WebPluginPersist
             manifest.id, manifest.api_version, WEB_PLUGIN_API_VERSION
         ));
     }
-    let main_name = manifest
-        .live_main()
-        .rsplit_once('/')
-        .map(|(_, leaf)| leaf)
-        .unwrap_or(manifest.live_main());
+    let main_name = web_file_leaf(manifest.live_main());
     let source = files
         .iter()
-        .find(|(name, _)| {
-            let leaf = name.rsplit_once('/').map(|(_, leaf)| leaf).unwrap_or(name);
-            leaf == main_name
-        })
+        .find(|(name, _)| web_file_leaf(name) == main_name)
         .or_else(|| {
             files
                 .iter()
@@ -5833,15 +5703,10 @@ fn parse_web_plugin_files(files: &[(String, String)]) -> Result<WebPluginPersist
         .map(|(_, text)| text.clone())
         .ok_or_else(|| format!("Web 插件缺少入口文件：{}", manifest.live_main()))?;
     let replay_source = manifest.replay.as_ref().and_then(|replay| {
-        let replay_name = replay
-            .main
-            .rsplit_once('/')
-            .map(|(_, leaf)| leaf)
-            .unwrap_or(replay.main.as_str());
-        files.iter().find_map(|(name, text)| {
-            let leaf = name.rsplit_once('/').map(|(_, leaf)| leaf).unwrap_or(name);
-            (leaf == replay_name).then_some(text.clone())
-        })
+        let replay_name = web_file_leaf(&replay.main);
+        files
+            .iter()
+            .find_map(|(name, text)| (web_file_leaf(name) == replay_name).then_some(text.clone()))
     });
     if manifest.replay.is_some() && replay_source.is_none() {
         return Err(format!(

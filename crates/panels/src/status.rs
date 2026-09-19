@@ -30,8 +30,8 @@ pub struct StatusSignalView {
 /// the same parent row after this function returns.
 pub fn status_bar_contents_ui(ui: &mut Ui, view: &StatusBarView) -> Vec<StatusBarAction> {
     let mut actions = Vec::new();
-    design::status_pill(ui, view.serial_color, view.serial_label.clone());
-    design::status_pill(ui, view.recording_color, view.recording_label.clone());
+    design::status_pill(ui, view.serial_color, &view.serial_label);
+    design::status_pill(ui, view.recording_color, &view.recording_label);
 
     if let Some(signals) = view.signals {
         ui.separator();

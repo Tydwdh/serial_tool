@@ -46,10 +46,8 @@ pub fn run_replay_analyzer_with_cancel(
 
     install_replay_ctx(&lua, emitted_events.clone(), logs.clone(), &config)?;
 
-    // 加载并执行 Lua 源码
     lua.load(&source).set_name(&config.script_name).exec()?;
 
-    // 检查取消
     if cancel.load(Ordering::Relaxed) {
         logs.lock().push("Analyzer 已取消".to_owned());
         return Ok(LuaReplayOutput {
@@ -58,7 +56,6 @@ pub fn run_replay_analyzer_with_cancel(
         });
     }
 
-    // 构建 session 信息
     let first_ts = input_events.first().map(|e| e.timestamp_ms).unwrap_or(0);
     let last_ts = input_events.last().map(|e| e.timestamp_ms).unwrap_or(0);
     let session = lua.create_table()?;
@@ -66,21 +63,18 @@ pub fn run_replay_analyzer_with_cancel(
     session.set("end_ms", last_ts)?;
     session.set("event_count", input_events.len())?;
 
-    // on_replay_begin
     if let Ok(begin_fn) = lua.globals().get::<Function>("on_replay_begin")
         && let Err(e) = begin_fn.call::<Value>(session)
     {
         logs.lock().push(format!("on_replay_begin error: {e}"));
     }
 
-    // 遍历输入事件
     for input_event in input_events {
         if cancel.load(Ordering::Relaxed) {
             logs.lock().push("Analyzer 已取消".to_owned());
             break;
         }
 
-        // 只处理匹配 subscriptions 的事件
         if !config
             .subscriptions
             .iter()
@@ -242,7 +236,6 @@ fn install_replay_ctx(
         log::warn!("replay: failed to register hw.utils: {e}");
     }
 
-    // 注册 ctx 全局变量
     lua.globals().set("ctx", ctx)?;
 
     Ok(())

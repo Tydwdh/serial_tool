@@ -22,16 +22,27 @@ struct ResolvedUiContribution {
     default: serde_json::Value,
 }
 
+/// 按钮型控件的 kind 判定；大小写不敏感，空 kind 按按钮处理。
+fn is_button_kind(kind: &str) -> bool {
+    matches!(
+        kind.to_ascii_lowercase().as_str(),
+        "button" | "small_button" | ""
+    )
+}
+
+/// tooltip 为空或只有空白时不挂悬浮提示。
+fn with_tooltip(response: egui::Response, tooltip: Option<&str>) -> egui::Response {
+    match tooltip.filter(|text| !text.trim().is_empty()) {
+        Some(text) => response.on_hover_text(text),
+        None => response,
+    }
+}
+
 impl WorkbenchApp {
     pub(super) fn send_toolbar_buttons(&mut self) -> Vec<SendToolbarButton> {
         self.resolved_ui_contributions("send.toolbar")
             .into_iter()
-            .filter(|item| {
-                matches!(
-                    item.kind.to_ascii_lowercase().as_str(),
-                    "button" | "small_button" | ""
-                )
-            })
+            .filter(|item| is_button_kind(&item.kind))
             .map(|item| SendToolbarButton {
                 plugin_id: item.plugin_id,
                 contribution_id: item.id,
@@ -50,10 +61,7 @@ impl WorkbenchApp {
             .find(|item| {
                 item.plugin_id == plugin_id
                     && item.id == contribution_id
-                    && matches!(
-                        item.kind.to_ascii_lowercase().as_str(),
-                        "button" | "small_button" | ""
-                    )
+                    && is_button_kind(&item.kind)
             });
         if let Some(item) = item {
             self.publish_ui_contribution_action(&item);
@@ -69,22 +77,11 @@ impl WorkbenchApp {
     }
 
     fn ui_contribution_slot_filtered(&mut self, ui: &mut egui::Ui, slot: &str, skip_buttons: bool) {
-        let items = self
-            .resolved_ui_contributions(slot)
-            .into_iter()
-            .filter(|item| {
-                !skip_buttons
-                    || !matches!(
-                        item.kind.to_ascii_lowercase().as_str(),
-                        "button" | "small_button" | ""
-                    )
-            })
-            .collect::<Vec<_>>();
-        if items.is_empty() {
-            return;
-        }
-
+        let items = self.resolved_ui_contributions(slot);
         for item in items {
+            if skip_buttons && is_button_kind(&item.kind) {
+                continue;
+            }
             self.ui_contribution_item(ui, item);
         }
     }
@@ -227,9 +224,7 @@ impl WorkbenchApp {
                 if !text.is_empty() {
                     ui.label(egui::RichText::new(text).color(theme::text_secondary()));
                 }
-                if let Some(tooltip) = item.tooltip.as_deref().filter(|t| !t.trim().is_empty()) {
-                    response.on_hover_text(tooltip);
-                }
+                with_tooltip(response, item.tooltip.as_deref());
             }
             "toggle" => {
                 let current = self
@@ -238,11 +233,8 @@ impl WorkbenchApp {
                     .and_then(|v| v.as_bool())
                     .unwrap_or_else(|| item.default.as_bool().unwrap_or(false));
 
-                let response = ui.selectable_label(current, &item.title);
-                let response = match item.tooltip.as_deref() {
-                    Some(tooltip) if !tooltip.trim().is_empty() => response.on_hover_text(tooltip),
-                    _ => response,
-                };
+                let label = ui.selectable_label(current, &item.title);
+                let response = with_tooltip(label, item.tooltip.as_deref());
 
                 if response.clicked() {
                     // 切换本地状态
@@ -265,11 +257,8 @@ impl WorkbenchApp {
                 }
             }
             "button" | "small_button" | "" => {
-                let response = ui.add_enabled(item.enabled, egui::Button::new(&item.title));
-                let response = match item.tooltip.as_deref() {
-                    Some(tooltip) if !tooltip.trim().is_empty() => response.on_hover_text(tooltip),
-                    _ => response,
-                };
+                let button = ui.add_enabled(item.enabled, egui::Button::new(&item.title));
+                let response = with_tooltip(button, item.tooltip.as_deref());
 
                 if response.clicked() {
                     self.publish_ui_contribution_action(&item);
@@ -329,32 +318,28 @@ impl WorkbenchApp {
     }
 
     fn ui_contribution_context(&self, slot: &str) -> serde_json::Value {
-        let mut value = json!({
-            "slot": slot,
-        });
-
-        if slot.starts_with("send.") {
-            value = json!({
-                "slot": slot,
-                "send": {
-                    "input": self.send.input.clone(),
-                    "target_port": self.send.target_port.clone(),
-                    "target_port_open": self.send_target_port_open(),
-                    "hex_mode": self.send.hex_mode,
-                    "line_ending": {
-                        "label": self.send.line_ending.label(),
-                        "suffix": self.send.line_ending.suffix(),
-                    },
-                    "periodic_enabled": self.send.periodic_enabled,
-                    "periodic_interval_ms": self.send.periodic_interval_ms,
-                },
-                "serial": {
-                    "selected_port": self.serial.selected_port.clone(),
-                    "open_ports": self.workbench.open_port_names(),
-                }
-            });
+        if !slot.starts_with("send.") {
+            return json!({ "slot": slot });
         }
 
-        value
+        json!({
+            "slot": slot,
+            "send": {
+                "input": self.send.input.clone(),
+                "target_port": self.send.target_port.clone(),
+                "target_port_open": self.send_target_port_open(),
+                "hex_mode": self.send.hex_mode,
+                "line_ending": {
+                    "label": self.send.line_ending.label(),
+                    "suffix": self.send.line_ending.suffix(),
+                },
+                "periodic_enabled": self.send.periodic_enabled,
+                "periodic_interval_ms": self.send.periodic_interval_ms,
+            },
+            "serial": {
+                "selected_port": self.serial.selected_port.clone(),
+                "open_ports": self.workbench.open_port_names(),
+            }
+        })
     }
 }

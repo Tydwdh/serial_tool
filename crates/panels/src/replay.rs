@@ -86,6 +86,8 @@ impl ReplayPanel {
         }
     }
 
+    /// 渲染回放面板。用户意图累积到 `commands`，由调用方 `take_commands` 取回；
+    /// `auto_load` 在本帧先转成一条 `Load` 命令。
     pub fn ui(&mut self, ui: &mut egui::Ui, status: &ReplayStatusView) {
         if self.auto_load {
             self.auto_load = false;
@@ -293,15 +295,16 @@ impl ReplayPanel {
             ui.separator();
             ui.label("速度");
 
-            let mut speed_log = (self.speed.ln() / 2_f64.ln()).clamp(-3.32, 4.0);
+            // 速度滑块按 log2 刻度分布：0.1x~16x 对应 -3.32~4.0
+            let (speed_log_min, speed_log_max) = (-3.32_f64, 4.0_f64);
+            let mut speed_log = (self.speed.ln() / 2_f64.ln()).clamp(speed_log_min, speed_log_max);
             let speed_resp = ui.add(
-                egui::Slider::new(&mut speed_log, -3.32..=4.0)
+                egui::Slider::new(&mut speed_log, speed_log_min..=speed_log_max)
                     .text(format!("{:.2}x", self.speed))
                     .step_by(0.01),
             );
             if speed_resp.changed() {
-                self.speed = (2_f64.powf(speed_log) * 100.0).round() / 100.0;
-                self.speed = self.speed.clamp(0.1, 16.0);
+                self.speed = ((2_f64.powf(speed_log) * 100.0).round() / 100.0).clamp(0.1, 16.0);
                 self.commands.push(ReplayUiCommand::SetSpeed(self.speed));
             }
             if ui.small_button("1x").clicked() {
@@ -351,6 +354,7 @@ impl ReplayPanel {
             ms_to_hms(status.position_ms),
             ms_to_hms(status.duration_ms),
         )));
+        // 进度条始终显示；只有在有事件、有时长且可 seek 时才接受点击/拖拽
         if status.total_events == 0 || status.duration_ms == 0 || !status.can_seek {
             return;
         }

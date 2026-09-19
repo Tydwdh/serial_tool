@@ -162,12 +162,12 @@ impl TaskManager {
         }
     }
 
-    pub fn spawn<F>(&mut self, kind: impl Into<String>, work: F) -> TaskId
-    where
-        F: FnOnce(TaskContext) -> Result<TaskResult, String> + Send + 'static,
-    {
+    /// 统一登记一个任务：分配 id、写入 `Pending` 快照、登记取消令牌。
+    ///
+    /// `spawn` 与 `spawn_ordered` 只有在「谁执行」上不同（起线程 vs 投进 per-port
+    /// 有序队列），登记必须同源，否则两条路径的初始状态会各自漂移。
+    fn register(&mut self, kind: &str) -> (TaskId, TaskContext) {
         let id = TaskId(self.next_id.fetch_add(1, Ordering::Relaxed));
-        let kind = kind.into();
         let cancelled = Arc::new(AtomicBool::new(false));
         let context = TaskContext {
             id,
@@ -177,12 +177,21 @@ impl TaskManager {
             id,
             TaskSnapshot {
                 id,
-                kind: kind.clone(),
+                kind: kind.to_owned(),
                 state: TaskState::Pending,
                 message: "等待后台任务启动".to_owned(),
             },
         );
         self.controls.insert(id, TaskControl { cancelled });
+        (id, context)
+    }
+
+    pub fn spawn<F>(&mut self, kind: impl Into<String>, work: F) -> TaskId
+    where
+        F: FnOnce(TaskContext) -> Result<TaskResult, String> + Send + 'static,
+    {
+        let kind = kind.into();
+        let (id, context) = self.register(&kind);
 
         let events = self.events_tx.clone();
         let work: TaskWork = Box::new(work);
@@ -211,24 +220,9 @@ impl TaskManager {
     where
         F: FnOnce(TaskContext) -> Result<TaskResult, String> + Send + 'static,
     {
-        let id = TaskId(self.next_id.fetch_add(1, Ordering::Relaxed));
         let key = key.into();
         let kind = kind.into();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let context = TaskContext {
-            id,
-            cancelled: Arc::clone(&cancelled),
-        };
-        self.snapshots.insert(
-            id,
-            TaskSnapshot {
-                id,
-                kind: kind.clone(),
-                state: TaskState::Pending,
-                message: "等待后台任务启动".to_owned(),
-            },
-        );
-        self.controls.insert(id, TaskControl { cancelled });
+        let (id, context) = self.register(&kind);
 
         let sender = if let Some(sender) = self.ordered_queues.get(&key) {
             sender.clone()
@@ -300,6 +294,15 @@ impl TaskManager {
                 }
             }
         }
+        self.prune_finished();
+        events
+    }
+
+    /// 快照数超过保留上限时，按 id 升序淘汰已结束（Completed/Failed/Cancelled）的任务。
+    ///
+    /// 只回收终态快照：仍在 Pending/Running 的任务必须一直可见，否则 UI 的
+    /// 「按 kind 查活跃任务」会把它看成已经结束。
+    fn prune_finished(&mut self) {
         const MAX_RETAINED_SNAPSHOTS: usize = 256;
         while self.snapshots.len() > MAX_RETAINED_SNAPSHOTS {
             let Some(id) = self.snapshots.iter().find_map(|(id, snapshot)| {
@@ -313,7 +316,6 @@ impl TaskManager {
             };
             self.snapshots.remove(&id);
         }
-        events
     }
 
     pub fn snapshots(&self) -> Vec<TaskSnapshot> {

@@ -160,6 +160,7 @@ impl DataTablePanel {
                     .striped(true)
                     .min_col_width(72.0)
                     .show(ui, |ui| {
+                        // 克隆列定义：点击表头要对 `self` 排序，不能同时借用自己的列。
                         for column in self.columns.clone() {
                             let arrow = self.sort.as_ref().and_then(|(id, asc)| {
                                 (id == &column.id).then_some(if *asc { " ↑" } else { " ↓" })

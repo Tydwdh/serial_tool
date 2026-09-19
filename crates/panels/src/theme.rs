@@ -30,6 +30,8 @@ pub enum AppTheme {
 }
 
 impl AppTheme {
+    /// 可选中的内置主题。枚举里的 `Custom` 只在加载用户主题文件后才成为当前主题，
+    /// 本身不对应任何内置配色，因此不出现在这份列表里。
     pub const ALL: [Self; 9] = [
         Self::OneDarkPro,
         Self::OneDarkProFlat,
@@ -246,12 +248,27 @@ pub fn load_theme_file(path: &Path) -> Result<String, String> {
 /// Native 通过 `load_theme_file` 调用此入口，Web 则通过浏览器文件选择器
 /// 提供文本。这样主题格式、继承和颜色校验不会因为平台而分叉。
 pub fn load_theme_text(source: &str, source_name: &str) -> Result<String, String> {
-    let custom = parse_theme_source(source, source_name, 0)?;
+    install_theme(parse_theme_source(source, source_name, 0)?)
+}
+
+/// 把解析好的主题装进全局槽位，并返回其显示名。
+fn install_theme(custom: CustomTheme) -> Result<String, String> {
     let name = custom.name.clone();
     *custom_theme_store()
         .write()
         .map_err(|_| "主题配置锁不可用".to_owned())? = Some(custom);
     Ok(name)
+}
+
+/// 隔离损坏的主题文件，并把备份位置追加到错误信息末尾；隔离失败时只报告原始错误。
+fn quarantined_theme_error(path: &Path, message: String) -> String {
+    let backup_note = quarantine_corrupt_file(path)
+        .ok()
+        .flatten()
+        .map_or_else(String::new, |backup| {
+            format!("，已备份为 {}", backup.display())
+        });
+    format!("{message}{backup_note}")
 }
 
 /// 将 v0 主题文件原地升级为带 `schema_version` 的 v1 文档。
@@ -263,22 +280,16 @@ fn migrate_theme_file(path: &Path) -> Result<(), String> {
     let mut value: serde_json::Value = match serde_json::from_str(&source) {
         Ok(value) => value,
         Err(error) => {
-            let backup = quarantine_corrupt_file(path).ok().flatten();
-            let backup_note =
-                backup.map_or_else(String::new, |path| format!("，已备份为 {}", path.display()));
-            return Err(format!(
-                "解析主题 {} 失败：{error}{backup_note}",
-                path.display()
+            return Err(quarantined_theme_error(
+                path,
+                format!("解析主题 {} 失败：{error}", path.display()),
             ));
         }
     };
     let Some(object) = value.as_object_mut() else {
-        let backup = quarantine_corrupt_file(path).ok().flatten();
-        let backup_note =
-            backup.map_or_else(String::new, |path| format!("，已备份为 {}", path.display()));
-        return Err(format!(
-            "主题 {} 根节点必须是 JSON 对象{backup_note}",
-            path.display()
+        return Err(quarantined_theme_error(
+            path,
+            format!("主题 {} 根节点必须是 JSON 对象", path.display()),
         ));
     };
     let version = object
@@ -327,6 +338,8 @@ fn parse_theme_source(source: &str, source_name: &str, depth: u8) -> Result<Cust
     for (key, value) in &file.colors {
         apply_color_override(&mut colors, key, value)?;
     }
+    // 未从 base 继承、JSON 里也没写的颜色会保持 ThemeColors 默认的全 0（即 TRANSPARENT），
+    // 直接画出会是透明窟窿；这里回落到同族的实色，保证卡片/输入框/正文始终可读。
     if colors.card == Color32::TRANSPARENT {
         colors.card = colors.mantle;
     }
@@ -354,12 +367,7 @@ fn parse_builtin_theme(theme: AppTheme, depth: u8) -> Result<CustomTheme, String
 }
 
 pub fn load_builtin_theme(theme: AppTheme, _dir: &Path) -> Result<String, String> {
-    let custom = parse_builtin_theme(theme, 0)?;
-    let name = custom.name.clone();
-    *custom_theme_store()
-        .write()
-        .map_err(|_| "主题配置锁不可用".to_owned())? = Some(custom);
-    Ok(name)
+    install_theme(parse_builtin_theme(theme, 0)?)
 }
 
 /// 内置主题对应的 JSON 文件路径。UI 和持久化统一按此路径标识主题。

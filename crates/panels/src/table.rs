@@ -184,10 +184,12 @@ impl AutoScrollState {
         self.pending_scroll_to_bottom.clear();
     }
 
+    /// 取出并清除该视图排好的一次“滚到底”请求。
     pub(crate) fn take_pending(&mut self, key: &str) -> bool {
         self.pending_scroll_to_bottom.remove(key)
     }
 
+    /// 绘制跟随开关；仅当本帧由“暂停”切回“跟随”时返回 `true`，提示调用方滚到底。
     pub(crate) fn button(&mut self, ui: &mut Ui) -> bool {
         let was_enabled = self.enabled;
         let (icon, label, tooltip) = if self.enabled {
@@ -270,11 +272,12 @@ pub(crate) fn estimated_wrapped_line_count(text: &str, width: f32, glyph_width: 
 /// 用法：
 /// 1. 在渲染循环前创建 `RowHighlight::new(ui, scroll_id)`。
 /// 2. 循环内每行调用 `paint_background()` 画高亮背景。
-/// 3. 循环内每行调用 `record_row()` 记录 Y 范围。
-/// 4. 循环结束后，用 `context_menu_data()` 获取冻结的行索引，构建右键菜单。
+/// 3. 循环内每行调用 `record_row_at()` 记录 Y 范围。
+/// 4. 循环结束后，用 `resolve_click()` 获取冻结的行索引，构建右键菜单。
 pub(crate) struct RowHighlight {
     frozen_y: Option<(f32, f32)>,
     frozen_y_id: Id,
+    /// 本帧参与交互的行：`(行索引, 行顶 y, 行底 y)`。
     /// 只记录实际参与本帧交互的行；虚拟列表中索引可能不是从 0 开始。
     row_y_ranges: Vec<(usize, f32, f32)>,
 }
@@ -397,24 +400,18 @@ impl RowHighlight {
         current_y: f32,
         entry_height: f32,
     ) -> bool {
+        let row_rect = egui::Rect::from_min_size(
+            egui::pos2(full_rect.left(), current_y),
+            egui::vec2(full_rect.width(), entry_height),
+        );
         let should_highlight = if let Some((top, bottom)) = self.frozen_y {
             current_y <= bottom && current_y + entry_height >= top
         } else {
-            let hover_rect = egui::Rect::from_min_size(
-                egui::pos2(full_rect.left(), current_y),
-                egui::vec2(full_rect.width(), entry_height),
-            );
-            ui.rect_contains_pointer(hover_rect)
+            ui.rect_contains_pointer(row_rect)
         };
         if should_highlight {
-            ui.painter_at(full_rect).rect_filled(
-                egui::Rect::from_min_size(
-                    egui::pos2(full_rect.left(), current_y),
-                    egui::vec2(full_rect.width(), entry_height),
-                ),
-                0.0,
-                theme::widget_hover(),
-            );
+            let painter = ui.painter_at(full_rect);
+            painter.rect_filled(row_rect, 0.0, theme::widget_hover());
         }
         should_highlight
     }
@@ -486,15 +483,14 @@ impl RowHighlight {
 
     /// 根据 Y 坐标查找行；拖拽越过首尾时钳制到第一/最后一行。
     pub(crate) fn row_index_at_y_clamped(&self, y: f32) -> Option<usize> {
-        let first = self.row_y_ranges.first()?;
-        if y < first.1 {
-            return Some(first.0);
+        let (first_index, first_top, _) = *self.row_y_ranges.first()?;
+        if y < first_top {
+            return Some(first_index);
         }
 
-        let last_index = self.row_y_ranges.len() - 1;
-        let last = self.row_y_ranges[last_index];
-        if y >= last.2 {
-            return Some(last.0);
+        let (last_index, _, last_bottom) = *self.row_y_ranges.last()?;
+        if y >= last_bottom {
+            return Some(last_index);
         }
 
         self.row_index_at_y(y)
@@ -622,6 +618,9 @@ impl RowSelection {
     ///
     /// 不依赖覆盖正文的 `Response`，因此可与字符级文本选择共存：在同一逻辑行内拖动
     /// 仍由文本选择处理；指针跨行后切换为整行范围选择。
+    ///
+    /// 返回本帧是否在 `interaction_rect` 内按下主键；拖拽靠近视口边缘时会往
+    /// `scroll_delta` 累加滚动量，由调用方应用到外层滚动容器。
     pub fn handle_input(
         &mut self,
         ui: &Ui,
@@ -686,8 +685,9 @@ impl RowSelection {
         self.dragging = false;
         self.ctrl_shift_drag = ctrl && shift;
 
-        if ctrl && shift {
-            // Ctrl+Shift：从 anchor 扩展到当前行（不清空已有选中）
+        if shift {
+            // Shift：从锚点扩展到当前行。带 Ctrl 时追加进已有选区，
+            // 不带 Ctrl 时替换选区（锚点缺失时以当前行为锚点）。
             let anchor_index = self
                 .anchor
                 .and_then(|anchor| self.index_of(anchor))
@@ -695,21 +695,17 @@ impl RowSelection {
             if self.anchor.is_none() {
                 self.anchor = Some(key);
             }
-            self.add_range(anchor_index, index);
+            if ctrl {
+                self.add_range(anchor_index, index);
+            } else {
+                self.select_range(anchor_index, index);
+            }
         } else if ctrl {
+            // Ctrl：切换单行的选中状态，锚点跟到手势起点。
             if !self.selected.insert(key) {
                 self.selected.remove(&key);
             }
             self.anchor = Some(key);
-        } else if shift {
-            let anchor_index = self
-                .anchor
-                .and_then(|anchor| self.index_of(anchor))
-                .unwrap_or(index);
-            if self.anchor.is_none() {
-                self.anchor = Some(key);
-            }
-            self.select_range(anchor_index, index);
         } else {
             self.selected.clear();
             self.selected.insert(key);
@@ -741,20 +737,12 @@ impl RowSelection {
     }
 
     fn select_range(&mut self, first: usize, second: usize) {
-        let (lo, hi) = if first <= second {
-            (first, second)
-        } else {
-            (second, first)
-        };
+        let (lo, hi) = (first.min(second), first.max(second));
         self.selected = self.row_keys[lo..=hi].iter().copied().collect();
     }
 
     fn add_range(&mut self, first: usize, second: usize) {
-        let (lo, hi) = if first <= second {
-            (first, second)
-        } else {
-            (second, first)
-        };
+        let (lo, hi) = (first.min(second), first.max(second));
         for &key in &self.row_keys[lo..=hi] {
             self.selected.insert(key);
         }

@@ -11,7 +11,8 @@ use tool_core::{Direction, Event};
 use tool_databus::{DataBus, TopicFilter};
 
 use crate::convert::{
-    event_to_lua_table, json_to_lua_value, lua_value_to_payload, payload_to_json,
+    direction_to_lua_str, event_to_lua_table, json_to_lua_value, lua_value_to_payload,
+    payload_to_json,
 };
 
 pub(crate) fn create_bus_api(
@@ -60,8 +61,7 @@ pub(crate) fn create_bus_api(
                 .filter(|event| {
                     topic_prefix
                         .as_ref()
-                        .map(|prefix| event.topic.starts_with(prefix))
-                        .unwrap_or(true)
+                        .is_none_or(|prefix| event.topic.starts_with(prefix))
                 })
                 .rev()
                 .take(100)
@@ -71,7 +71,7 @@ pub(crate) fn create_bus_api(
                         "timestamp_ms": event.timestamp_ms,
                         "topic": event.topic,
                         "source": event.source,
-                        "direction": format!("{:?}", event.direction).to_lowercase(),
+                        "direction": direction_to_lua_str(event.direction),
                         "payload": payload_to_json(event.payload),
                     })
                 })

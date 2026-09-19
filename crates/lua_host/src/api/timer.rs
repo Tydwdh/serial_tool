@@ -7,7 +7,7 @@ pub(crate) fn create_timer_api(lua: &Lua) -> mlua::Result<Table> {
 
     table.set(
         "after",
-        lua.create_function(move |lua, (ms, callback): (u64, Function)| {
+        lua.create_function(|lua, (ms, callback): (u64, Function)| {
             let timers: Table = lua.globals().get(crate::globals::PLUGIN_TIMERS)?;
             let now_ms = tool_core::now_timestamp_ms();
             // 使用 raw_len + 1 作为序号，避免同一毫秒内 ID 碰撞
@@ -27,7 +27,7 @@ pub(crate) fn create_timer_api(lua: &Lua) -> mlua::Result<Table> {
 
     table.set(
         "every",
-        lua.create_function(move |lua, (ms, callback): (u64, Function)| {
+        lua.create_function(|lua, (ms, callback): (u64, Function)| {
             let timers: Table = lua.globals().get(crate::globals::PLUGIN_TIMERS)?;
             let now_ms = tool_core::now_timestamp_ms();
             let interval_ms = ms.max(1);
@@ -47,7 +47,7 @@ pub(crate) fn create_timer_api(lua: &Lua) -> mlua::Result<Table> {
 
     table.set(
         "cancel",
-        lua.create_function(move |lua, id: String| {
+        lua.create_function(|lua, id: String| {
             let timers: Table = lua.globals().get(crate::globals::PLUGIN_TIMERS)?;
             timers.set(id, Value::Nil)?;
             Ok(())

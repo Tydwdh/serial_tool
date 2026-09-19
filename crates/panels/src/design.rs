@@ -58,13 +58,11 @@ pub fn button(
         ),
     };
     ui.add(
-        egui::Button::new(
-            RichText::new(format!("{} {}", icon.codepoint, label.as_ref())).color(foreground),
-        )
-        .fill(fill)
-        .stroke(stroke)
-        .corner_radius(6.0)
-        .min_size(egui::vec2(0.0, CONTROL_HEIGHT)),
+        egui::Button::new(icon_text(icon, label).color(foreground))
+            .fill(fill)
+            .stroke(stroke)
+            .corner_radius(6.0)
+            .min_size(egui::vec2(0.0, CONTROL_HEIGHT)),
     )
 }
 

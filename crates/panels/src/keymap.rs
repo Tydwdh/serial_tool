@@ -1,6 +1,7 @@
 //! Shared shortcut settings presentation.
 
 use crate::{design, theme};
+use egui_material_icons::icons::{ICON_KEYBOARD, ICON_RESTART_ALT};
 
 /// One command row supplied by a platform's command registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,24 +36,12 @@ pub fn keymap_ui(ui: &mut egui::Ui, entries: &[KeymapEntry]) -> Vec<KeymapAction
             }
             if entry.recording {
                 design::status_pill(ui, theme::yellow(), "按下按键…");
-            } else if design::button(
-                ui,
-                egui_material_icons::icons::ICON_KEYBOARD,
-                "录制",
-                design::ButtonKind::Ghost,
-            )
-            .clicked()
+            } else if design::button(ui, ICON_KEYBOARD, "录制", design::ButtonKind::Ghost).clicked()
             {
                 actions.push(KeymapAction::Record(entry.id.clone()));
             }
             if !entry.bindings.is_empty()
-                && design::button(
-                    ui,
-                    egui_material_icons::icons::ICON_RESTART_ALT,
-                    "清除",
-                    design::ButtonKind::Ghost,
-                )
-                .clicked()
+                && design::button(ui, ICON_RESTART_ALT, "清除", design::ButtonKind::Ghost).clicked()
             {
                 actions.push(KeymapAction::Clear(entry.id.clone()));
             }
@@ -62,7 +51,7 @@ pub fn keymap_ui(ui: &mut egui::Ui, entries: &[KeymapEntry]) -> Vec<KeymapAction
     ui.horizontal_wrapped(|ui| {
         if design::button(
             ui,
-            egui_material_icons::icons::ICON_RESTART_ALT,
+            ICON_RESTART_ALT,
             "恢复默认快捷键",
             design::ButtonKind::Secondary,
         )

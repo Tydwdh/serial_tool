@@ -54,26 +54,17 @@ impl AttitudePanel {
     }
 
     fn push_event(&mut self, event: &Arc<Event>) {
-        match &event.payload {
-            Payload::Json(value) => {
-                if let Some((roll, pitch, yaw)) = attitude_from_json(value) {
-                    self.roll = roll;
-                    self.pitch = pitch;
-                    self.yaw = yaw;
-                    self.samples += 1;
-                    self.last_source = event.source.clone();
-                }
-            }
-            Payload::Text(text) => {
-                if let Some((roll, pitch, yaw)) = attitude_from_text(text) {
-                    self.roll = roll;
-                    self.pitch = pitch;
-                    self.yaw = yaw;
-                    self.samples += 1;
-                    self.last_source = event.source.clone();
-                }
-            }
-            Payload::Bytes(_) | Payload::Empty => {}
+        let angles = match &event.payload {
+            Payload::Json(value) => attitude_from_json(value),
+            Payload::Text(text) => attitude_from_text(text),
+            Payload::Bytes(_) | Payload::Empty => None,
+        };
+        if let Some((roll, pitch, yaw)) = angles {
+            self.roll = roll;
+            self.pitch = pitch;
+            self.yaw = yaw;
+            self.samples += 1;
+            self.last_source = event.source.clone();
         }
     }
 
@@ -108,7 +99,7 @@ impl AttitudePanel {
         draw_body(&painter, center, radius, self.roll, self.pitch, self.yaw);
 
         // 画坐标轴（按深度排序，远的先画）
-        let axes = [
+        let mut axes = [
             (
                 rotate([1.0, 0.0, 0.0], self.roll, self.pitch, self.yaw),
                 theme::attitude_axis_x(),
@@ -127,14 +118,13 @@ impl AttitudePanel {
         ];
 
         // 按深度排序（y 分量 = 深度方向），远的先画
-        let mut sorted_axes: Vec<_> = axes.to_vec();
-        sorted_axes.sort_by(|a, b| {
+        axes.sort_by(|a, b| {
             a.0[1]
                 .partial_cmp(&b.0[1])
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        for (axis, color, label) in sorted_axes {
+        for (axis, color, label) in axes {
             let (end, _depth) = project(center, radius, axis);
             painter.line_segment([center, end], Stroke::new(3.0, color));
             painter.circle_filled(end, 4.0, color);
@@ -172,27 +162,18 @@ fn draw_body(painter: &egui::Painter, center: Pos2, radius: f32, roll: f64, pitc
     ];
 
     // 旋转到世界坐标（保留 3D 用于法线计算），再投影到屏幕
-    let rotated: Vec<[f64; 3]> = points
-        .iter()
-        .map(|&p| rotate(p, roll, pitch, yaw))
-        .collect();
-    let projected: Vec<(Pos2, f32)> = rotated
-        .iter()
-        .map(|&p| project(center, radius, p))
-        .collect();
+    let rotated = points.map(|p| rotate(p, roll, pitch, yaw));
+    let projected = rotated.each_ref().map(|p| project(center, radius, *p));
 
     // 每个面的法线（世界坐标叉积），取其 Y 分量判断朝向：观察者沿 +Y 看，Y>0 为朝前。
-    let face_facing: Vec<f32> = BODY_FACES
-        .iter()
-        .map(|face| {
-            let a = rotated[face[0]];
-            let b = rotated[face[1]];
-            let c = rotated[face[2]];
-            let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-            let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-            cross(ab, ac)[1] as f32
-        })
-        .collect();
+    let face_facing = BODY_FACES.map(|face| {
+        let a = rotated[face[0]];
+        let b = rotated[face[1]];
+        let c = rotated[face[2]];
+        let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        cross(ab, ac)[1] as f32
+    });
 
     // 按平均深度排序（远的先画）
     let mut faces: Vec<(usize, f32)> = BODY_FACES
@@ -319,8 +300,7 @@ fn clean_face(points: &[Pos2]) -> Option<Vec<Pos2>> {
         && pts
             .first()
             .zip(pts.last())
-            .map(|(&a, &b)| a.distance(b) < DEDUP_EPS)
-            .unwrap_or(false)
+            .is_some_and(|(&a, &b)| a.distance(b) < DEDUP_EPS)
     {
         pts.pop();
     }

@@ -267,7 +267,7 @@ impl PluginsPanel {
         options: &PluginPanelOptions<'_>,
     ) -> Option<PluginPanelEvent> {
         // ── 管理 ──
-        let toolbar_status = design::card()
+        let status = design::card()
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 design::section_header(ui, ICON_MANAGE_ACCOUNTS, "插件管理");
@@ -298,8 +298,6 @@ impl PluginsPanel {
                 .inner
             })
             .inner;
-
-        let status = toolbar_status;
 
         if summaries.is_empty() && diagnostics.is_empty() {
             ui.add_space(8.0);
@@ -408,6 +406,7 @@ impl PluginsPanel {
                                     }
                                 });
                             } else {
+                                // 奇数个插件时用等宽占位，保证左右两列宽度一致。
                                 ui.allocate_space(egui::vec2(card_width, 0.0));
                             }
                         });
@@ -525,20 +524,20 @@ impl PluginsPanel {
 
         ui.add_space(8.0);
 
-        let Some(reg) = self.market.registry.clone() else {
+        let Some(registry) = self.market.registry.clone() else {
             if !self.market.refreshing {
                 design::empty_state(ui, ICON_SHOPPING_CART, "尚未加载市场索引");
             }
             return events;
         };
 
-        if reg.plugins.is_empty() {
+        if registry.plugins.is_empty() {
             design::empty_state(ui, ICON_SHOPPING_CART, "市场暂无插件");
             return events;
         }
 
         let query = crate::search::SearchQuery::new(&self.market_search, false);
-        let visible_plugins: Vec<&MarketplacePluginView> = reg
+        let visible_plugins: Vec<&MarketplacePluginView> = registry
             .plugins
             .iter()
             .filter(|plugin| {
@@ -566,7 +565,7 @@ impl PluginsPanel {
             return events;
         }
 
-        let scroll_result = ScrollArea::vertical()
+        ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 if plugin_column_count(ui.available_width()) == 2 {
@@ -587,6 +586,7 @@ impl PluginsPanel {
                                     self.market_plugin_row(ui, right, &mut events);
                                 });
                             } else {
+                                // 奇数个插件时用等宽占位，保证左右两列宽度一致。
                                 ui.allocate_space(egui::vec2(card_width, 0.0));
                             }
                         });
@@ -599,7 +599,6 @@ impl PluginsPanel {
                     }
                 }
             });
-        let _ = scroll_result;
 
         events
     }
@@ -849,9 +848,8 @@ impl PluginsPanel {
                         if is_active {
                             self.pending_restart.push(summary.id.clone());
                             return Some(PluginPanelEvent::Disable(summary.id.clone()));
-                        } else {
-                            return Some(PluginPanelEvent::Enable(summary.id.clone()));
                         }
+                        return Some(PluginPanelEvent::Enable(summary.id.clone()));
                     }
 
                     // 卸载按钮（两步确认，避免误删）：

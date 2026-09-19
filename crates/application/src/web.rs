@@ -181,12 +181,14 @@ fn parse_marketplace_registry(text: &str) -> Result<MarketplaceView, String> {
             .cmp(&right.name)
             .then_with(|| left.id.cmp(&right.id))
     });
-    Ok(MarketplaceView {
-        version: registry.version,
-        updated: registry.updated,
-        plugins: registry
-            .plugins
-            .into_iter()
+    // Browser and Native consume the same plugin package.  The
+    // legacy registry fields are ignored here; point the Web
+    // importer at the package's ordinary Lua sources instead of
+    // a second browser-specific plugin bundle.
+    let base_url = "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugins";
+    let plugins = registry
+        .plugins
+        .into_iter()
         .map(|plugin| {
             let plugin_id = plugin.id.clone();
             MarketplacePluginView {
@@ -204,20 +206,15 @@ fn parse_marketplace_registry(text: &str) -> Result<MarketplaceView, String> {
                 permissions: plugin.permissions,
                 size: plugin.size,
                 published: plugin.published,
-                // Browser and Native consume the same plugin package.  The
-                // legacy registry fields are ignored here; point the Web
-                // importer at the package's ordinary Lua sources instead of
-                // a second browser-specific plugin bundle.
-                manifest_url: Some(format!(
-                    "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugins/{}/plugin.json",
-                    plugin_id
-                )),
-                main_url: Some(format!(
-                    "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugins/{}/main.lua",
-                    plugin_id
-                )),
-            }})
-            .collect(),
+                manifest_url: Some(format!("{base_url}/{plugin_id}/plugin.json")),
+                main_url: Some(format!("{base_url}/{plugin_id}/main.lua")),
+            }
+        })
+        .collect();
+    Ok(MarketplaceView {
+        version: registry.version,
+        updated: registry.updated,
+        plugins,
     })
 }
 
@@ -489,6 +486,15 @@ impl WebApplication {
 
     fn wake(&self) {
         wake_handle(&self.repaint_waker);
+    }
+
+    /// 排入一条本组合根的应用事件并请求重绘。
+    ///
+    /// 这条队列只由 `drain_events()` 交给 UI，与 `publish_event` 走的 DataBus 是两条
+    /// 通道：事件发到哪一边由调用点决定，这里不互相替代。
+    fn notify(&self, event: WebAppEvent) {
+        self.tasks.borrow_mut().events.push(event);
+        self.wake();
     }
 
     /// Publish an application event without exposing the concrete DataBus to
@@ -895,11 +901,7 @@ impl WebApplication {
             return;
         }
         *self.plugin_view.borrow_mut() = view;
-        self.tasks
-            .borrow_mut()
-            .events
-            .push(WebAppEvent::PluginsChanged);
-        self.wake();
+        self.notify(WebAppEvent::PluginsChanged);
     }
 
     /// Transfer plugin intents from the Application boundary to the Web
@@ -936,11 +938,7 @@ impl WebApplication {
                 self.fail_task(id, error);
             }
         }
-        self.tasks
-            .borrow_mut()
-            .events
-            .push(WebAppEvent::RecordingChanged);
-        self.wake();
+        self.notify(WebAppEvent::RecordingChanged);
     }
 
     pub fn serial_supported(&self) -> bool {
@@ -980,7 +978,7 @@ impl WebApplication {
         tasks.next_id += 1;
         let pending = TaskSnapshot {
             id,
-            kind,
+            kind: kind.clone(),
             state: TaskState::Pending,
             message: message.clone(),
         };
@@ -988,11 +986,7 @@ impl WebApplication {
         tasks.events.push(WebAppEvent::TaskStateChanged(pending));
         let running = TaskSnapshot {
             id,
-            kind: tasks
-                .snapshots
-                .get(&id)
-                .map(|snapshot| snapshot.kind.clone())
-                .unwrap_or_default(),
+            kind,
             state: TaskState::Running,
             message,
         };
@@ -1303,11 +1297,7 @@ impl WebApplication {
         recording.export_emitted = false;
         recording.subscription = Some(self.bus.subscribe_lossless(TopicFilter::All));
         drop(recording);
-        self.tasks
-            .borrow_mut()
-            .events
-            .push(WebAppEvent::RecordingChanged);
-        self.wake();
+        self.notify(WebAppEvent::RecordingChanged);
         Ok(CommandOutcome::Done)
     }
 
@@ -1334,11 +1324,7 @@ impl WebApplication {
         }
         recording.stop_task = Some(task_id);
         drop(recording);
-        self.tasks
-            .borrow_mut()
-            .events
-            .push(WebAppEvent::RecordingChanged);
-        self.wake();
+        self.notify(WebAppEvent::RecordingChanged);
         Ok(CommandOutcome::Pending {
             task_id,
             message: "正在分帧整理录制".to_owned(),
@@ -1498,16 +1484,12 @@ impl WebApplication {
             self.update_task(id, "正在分帧导出录制");
         }
         if let Some((id, name, content, incomplete)) = export_ready {
-            self.tasks
-                .borrow_mut()
-                .events
-                .push(WebAppEvent::RecordingExportReady {
-                    id,
-                    name,
-                    content,
-                    incomplete,
-                });
-            self.wake();
+            self.notify(WebAppEvent::RecordingExportReady {
+                id,
+                name,
+                content,
+                incomplete,
+            });
         }
     }
 
@@ -1524,11 +1506,7 @@ impl WebApplication {
             }
             AppCommand::SetRecordingMode { mode } => {
                 self.recording.borrow_mut().mode = mode.into();
-                self.tasks
-                    .borrow_mut()
-                    .events
-                    .push(WebAppEvent::RecordingChanged);
-                self.wake();
+                self.notify(WebAppEvent::RecordingChanged);
                 Ok(CommandOutcome::Done)
             }
             AppCommand::EnablePlugin { plugin_id } => {
@@ -1624,46 +1602,26 @@ impl WebApplication {
             }
             AppCommand::ReplayPlay => {
                 self.replay.borrow_mut().play();
-                self.tasks
-                    .borrow_mut()
-                    .events
-                    .push(WebAppEvent::ReplayChanged { rebuild: false });
-                self.wake();
+                self.notify(WebAppEvent::ReplayChanged { rebuild: false });
                 Ok(CommandOutcome::Done)
             }
             AppCommand::ReplayPause => {
                 self.replay.borrow_mut().pause();
-                self.tasks
-                    .borrow_mut()
-                    .events
-                    .push(WebAppEvent::ReplayChanged { rebuild: false });
-                self.wake();
+                self.notify(WebAppEvent::ReplayChanged { rebuild: false });
                 Ok(CommandOutcome::Done)
             }
             AppCommand::ReplayStop => {
                 self.replay.borrow_mut().stop();
-                self.tasks
-                    .borrow_mut()
-                    .events
-                    .push(WebAppEvent::ReplayChanged { rebuild: true });
-                self.wake();
+                self.notify(WebAppEvent::ReplayChanged { rebuild: true });
                 Ok(CommandOutcome::Done)
             }
             AppCommand::ClearTerminal => {
-                self.tasks
-                    .borrow_mut()
-                    .events
-                    .push(WebAppEvent::TerminalCleared);
-                self.wake();
+                self.notify(WebAppEvent::TerminalCleared);
                 Ok(CommandOutcome::Done)
             }
             AppCommand::ReplaySeek { position_ms } => {
                 self.replay.borrow_mut().seek_with_replay(position_ms);
-                self.tasks
-                    .borrow_mut()
-                    .events
-                    .push(WebAppEvent::ReplayChanged { rebuild: true });
-                self.wake();
+                self.notify(WebAppEvent::ReplayChanged { rebuild: true });
                 Ok(CommandOutcome::Done)
             }
             AppCommand::ReplaySeekBy { delta_ms } => {
@@ -1674,11 +1632,7 @@ impl WebApplication {
                     current.saturating_add(delta_ms as u64)
                 };
                 self.replay.borrow_mut().seek_with_replay(position_ms);
-                self.tasks
-                    .borrow_mut()
-                    .events
-                    .push(WebAppEvent::ReplayChanged { rebuild: true });
-                self.wake();
+                self.notify(WebAppEvent::ReplayChanged { rebuild: true });
                 Ok(CommandOutcome::Done)
             }
             AppCommand::ReplayStep { delta } => {
@@ -1693,11 +1647,7 @@ impl WebApplication {
                     replay.seek_cursor_with_replay(target_cursor);
                 }
                 drop(replay);
-                self.tasks
-                    .borrow_mut()
-                    .events
-                    .push(WebAppEvent::ReplayChanged { rebuild: true });
-                self.wake();
+                self.notify(WebAppEvent::ReplayChanged { rebuild: true });
                 Ok(CommandOutcome::Done)
             }
             AppCommand::AddReplayBookmark { name } => {
@@ -1727,27 +1677,19 @@ impl WebApplication {
             AppCommand::SetTerminalMergeWindow { ms } => {
                 *self.terminal_merge_window_ms.borrow_mut() = ms;
                 let max_entries = *self.terminal_max_entries.borrow();
-                self.tasks
-                    .borrow_mut()
-                    .events
-                    .push(WebAppEvent::TerminalSettingsChanged {
-                        merge_window_ms: ms,
-                        max_entries,
-                    });
-                self.wake();
+                self.notify(WebAppEvent::TerminalSettingsChanged {
+                    merge_window_ms: ms,
+                    max_entries,
+                });
                 Ok(CommandOutcome::Done)
             }
             AppCommand::SetTerminalMaxEntries { max } => {
                 *self.terminal_max_entries.borrow_mut() = max;
                 let merge_window_ms = *self.terminal_merge_window_ms.borrow();
-                self.tasks
-                    .borrow_mut()
-                    .events
-                    .push(WebAppEvent::TerminalSettingsChanged {
-                        merge_window_ms,
-                        max_entries: max,
-                    });
-                self.wake();
+                self.notify(WebAppEvent::TerminalSettingsChanged {
+                    merge_window_ms,
+                    max_entries: max,
+                });
                 Ok(CommandOutcome::Done)
             }
             AppCommand::CancelTask { task_id } => {
@@ -1833,11 +1775,7 @@ impl WebApplication {
                 self.network_ports
                     .borrow_mut()
                     .insert(descriptor.id.to_string(), config);
-                self.tasks
-                    .borrow_mut()
-                    .events
-                    .push(WebAppEvent::NetworkPortAdded(descriptor));
-                self.wake();
+                self.notify(WebAppEvent::NetworkPortAdded(descriptor));
                 Ok(CommandOutcome::Done)
             }
             AppCommand::RemoveNetworkPort { port } => {
@@ -1855,11 +1793,7 @@ impl WebApplication {
                         message: "正在关闭并移除网络串口".to_owned(),
                     })
                 } else {
-                    self.tasks
-                        .borrow_mut()
-                        .events
-                        .push(WebAppEvent::NetworkPortRemoved(port));
-                    self.wake();
+                    self.notify(WebAppEvent::NetworkPortRemoved(port));
                     Ok(CommandOutcome::Done)
                 }
             }

@@ -17,6 +17,9 @@ use tool_platform::{SerialParity, SerialSettings, TransportCapabilities};
 // top of the status row in narrow docks.
 const PORT_INLINE_MIN_WIDTH: f32 = 560.0;
 
+/// 未归入任何分组的端口所在的分组名，同时充当“该端口没有分组”的哨兵值。
+const UNGROUPED: &str = "未分组";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SerialPortItem {
     pub id: String,
@@ -284,18 +287,15 @@ impl SerialPanel {
     /// platform composition root from changing the visual order of the
     /// shared device panel.
     pub fn port_list_ui(ui: &mut Ui, view: &mut SerialView<'_>) -> Vec<SerialAction> {
-        if view.show_ports && view.metadata.is_some() {
-            let mut actions = Vec::new();
-            if !view.status.is_empty() {
-                ui.label(view.status);
-            }
-            actions.extend(Self::grouped_port_list_ui(ui, view));
-            return actions;
-        }
         let mut actions = Vec::new();
 
         if !view.status.is_empty() {
             ui.label(view.status);
+        }
+
+        if view.show_ports && view.metadata.is_some() {
+            actions.extend(Self::grouped_port_list_ui(ui, view));
+            return actions;
         }
 
         if view.show_ports {
@@ -349,12 +349,12 @@ impl SerialPanel {
                 .groups
                 .get(&port.id)
                 .cloned()
-                .unwrap_or_else(|| "未分组".to_owned());
+                .unwrap_or_else(|| UNGROUPED.to_owned());
             groups.entry(group).or_default().push(port);
         }
         let group_names: Vec<String> = groups
             .keys()
-            .filter(|name| name.as_str() != "未分组")
+            .filter(|name| name.as_str() != UNGROUPED)
             .cloned()
             .collect();
 
@@ -375,7 +375,7 @@ impl SerialPanel {
                     actions.push(SerialAction::Refresh);
                 }
                 ui.label(
-                    egui::RichText::new(&group_name).color(if group_name == "未分组" {
+                    egui::RichText::new(&group_name).color(if group_name == UNGROUPED {
                         crate::theme::text_secondary()
                     } else {
                         crate::theme::text_primary()
@@ -393,9 +393,6 @@ impl SerialPanel {
                 for port in ports {
                     let mut alias = metadata.aliases.get(&port.id).cloned().unwrap_or_default();
                     let mut selected_group = group_name.clone();
-                    let connected = port.open;
-                    let connecting = port.connecting;
-                    let pending_reconnect = port.pending_reconnect;
                     let inline = ui.available_width() >= PORT_INLINE_MIN_WIDTH;
                     let capabilities = view.capabilities;
                     let settings = *view.settings;
@@ -407,9 +404,6 @@ impl SerialPanel {
                             Self::render_port_status(
                                 ui,
                                 port,
-                                connected,
-                                connecting,
-                                pending_reconnect,
                                 capabilities,
                                 settings,
                                 &mut actions,
@@ -434,9 +428,6 @@ impl SerialPanel {
                                 Self::render_port_status(
                                     ui,
                                     port,
-                                    connected,
-                                    connecting,
-                                    pending_reconnect,
                                     capabilities,
                                     settings,
                                     &mut actions,
@@ -544,11 +535,11 @@ impl SerialPanel {
             metadata.groups.retain(|_, value| value != &group);
         }
         if let Some((old_group, new_group)) = rename_group {
-            metadata.groups.values_mut().for_each(|value| {
+            for value in metadata.groups.values_mut() {
                 if value == &old_group {
                     *value = new_group.clone();
                 }
-            });
+            }
         }
 
         view.metadata = Some(metadata);
@@ -556,32 +547,29 @@ impl SerialPanel {
     }
 
     /// Render the stable, non-wrapping portion of one grouped port row.
-    #[allow(clippy::too_many_arguments)]
     fn render_port_status(
         ui: &mut Ui,
         port: &SerialPortItem,
-        connected: bool,
-        connecting: bool,
-        pending_reconnect: bool,
         capabilities: TransportCapabilities,
         settings: SerialSettings,
         actions: &mut Vec<SerialAction>,
     ) {
-        let (status_label, tooltip) = if pending_reconnect {
+        let (status_label, tooltip) = if port.pending_reconnect {
             ("⟳连", "重连中，点击取消")
-        } else if connected {
+        } else if port.open {
             ("●开", "已打开，点击关闭")
-        } else if connecting {
+        } else if port.connecting {
             ("◌中", "连接中")
         } else {
             ("○关", "未打开，点击打开")
         };
-        let status_color = if pending_reconnect || connecting {
+        // The colour chain is deliberately not merged with the label chain
+        // above: it treats "connecting" as yellow together with pending
+        // reconnects, so it must stay a separate decision.
+        let status_color = if port.pending_reconnect || port.connecting {
             crate::theme::yellow()
-        } else if connected {
+        } else if port.open {
             crate::theme::green()
-        } else if connecting {
-            crate::theme::yellow()
         } else {
             crate::theme::red()
         };
@@ -598,17 +586,15 @@ impl SerialPanel {
             .on_hover_text(tooltip)
             .clicked()
         {
-            if pending_reconnect {
+            if port.pending_reconnect {
                 actions.push(SerialAction::CancelReconnect {
                     port: port.id.clone(),
                 });
-            } else if connected {
-                if capabilities.disconnect {
-                    actions.push(SerialAction::Disconnect {
-                        port: port.id.clone(),
-                    });
-                }
-            } else if !connecting && capabilities.connect {
+            } else if port.open && capabilities.disconnect {
+                actions.push(SerialAction::Disconnect {
+                    port: port.id.clone(),
+                });
+            } else if !port.connecting && capabilities.connect {
                 actions.push(SerialAction::Connect {
                     port: port.id.clone(),
                     settings,
@@ -674,7 +660,7 @@ impl SerialPanel {
             .width(group_width)
             .show_ui(ui, |ui| {
                 if ui
-                    .selectable_value(selected_group, "未分组".to_owned(), "未分组")
+                    .selectable_value(selected_group, UNGROUPED.to_owned(), UNGROUPED)
                     .changed()
                 {
                     metadata.groups.remove(&port.id);
@@ -692,7 +678,7 @@ impl SerialPanel {
         // Keep the model consistent when a future caller changes the initial
         // selection without going through the ComboBox callback.
         if selected_group != current_group {
-            if selected_group == "未分组" {
+            if selected_group == UNGROUPED {
                 metadata.groups.remove(&port.id);
             } else {
                 metadata
@@ -780,12 +766,8 @@ impl SerialPanel {
                 .width(combo_width)
                 .selected_text(parity_label(settings.parity))
                 .show_ui(ui, |ui| {
-                    for (parity, label) in [
-                        (SerialParity::None, "无"),
-                        (SerialParity::Odd, "奇"),
-                        (SerialParity::Even, "偶"),
-                    ] {
-                        ui.selectable_value(&mut settings.parity, parity, label);
+                    for parity in [SerialParity::None, SerialParity::Odd, SerialParity::Even] {
+                        ui.selectable_value(&mut settings.parity, parity, parity_label(parity));
                     }
                 });
         });

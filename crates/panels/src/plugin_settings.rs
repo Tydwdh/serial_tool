@@ -1,9 +1,8 @@
-//! Shared plugin settings presentation.
+//! 共用的插件设置表单。
 //!
-//! The Native and Web runtimes own different persistence and Lua update
-//! mechanisms, but the manifest-driven settings form is the same UI.  Keeping
-//! the JSON editing here prevents the browser from growing a second form
-//! renderer with subtly different defaults, ranges, and option handling.
+//! Native 与 Web 运行时在持久化和 Lua 更新机制上各不相同，但由 manifest 驱动
+//! 的设置表单是同一份 UI。JSON 的编辑逻辑留在这里，浏览器端就不会长出第二套
+//! 表单渲染器——那套渲染器总会带着略有出入的默认值、取值范围和选项处理。
 
 use egui::{ComboBox, DragValue, Slider, TextEdit};
 use serde_json::Value;
@@ -13,7 +12,7 @@ use tool_application::plugin::PluginSettingView;
 use crate::design;
 use egui_material_icons::icons::ICON_APPS;
 
-/// Mutable settings state supplied by an application composition root.
+/// 由应用组合根提供的可变设置状态。
 pub struct PluginSettingsView<'a> {
     pub plugin_id: &'a str,
     pub plugin_name: &'a str,
@@ -22,10 +21,9 @@ pub struct PluginSettingsView<'a> {
     pub values: &'a mut BTreeMap<String, Value>,
 }
 
-/// Render one manifest's settings in the same card on every platform.
+/// 在任意平台上用同一张卡片渲染一个插件的设置项。
 ///
-/// The return value is true when at least one value changed.  Persistence and
-/// runtime notification remain the responsibility of the caller.
+/// 返回值为 true 表示至少有一个值被改动过；持久化与运行期通知仍由调用方负责。
 pub fn plugin_settings_ui(ui: &mut egui::Ui, view: &mut PluginSettingsView<'_>) -> bool {
     if view.settings.is_empty() {
         return false;
@@ -38,6 +36,7 @@ pub fn plugin_settings_ui(ui: &mut egui::Ui, view: &mut PluginSettingsView<'_>) 
         ui.separator();
 
         for setting in view.settings {
+            // 先把值取出、渲染完再写回：控件要 &mut Value，而 view.settings 仍在被借用
             let mut value = view
                 .values
                 .remove(&setting.id)
@@ -54,6 +53,7 @@ pub fn plugin_settings_ui(ui: &mut egui::Ui, view: &mut PluginSettingsView<'_>) 
     changed
 }
 
+/// 按 `setting.kind` 渲染单个设置项控件；返回该项的值是否被改动。
 fn plugin_setting_field_ui(
     ui: &mut egui::Ui,
     plugin_id: &str,
@@ -203,6 +203,7 @@ fn plugin_setting_field_ui(
     }
 }
 
+/// 选项的值：对象取 `value` 字段，标量取自身。
 fn option_value(option: &Value) -> Value {
     option
         .get("value")
@@ -210,6 +211,7 @@ fn option_value(option: &Value) -> Value {
         .unwrap_or_else(|| option.clone())
 }
 
+/// 选项的显示文案：`label` > `title` > 字符串本身 > 值。
 fn option_label(option: &Value) -> String {
     if let Some(label) = option.get("label").and_then(Value::as_str) {
         return label.to_owned();

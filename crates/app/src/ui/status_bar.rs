@@ -35,36 +35,31 @@ impl WorkbenchApp {
                     } else {
                         format!("{baud_rate}")
                     };
-                    (
-                        if st.open {
-                            theme::green()
-                        } else {
-                            theme::text_secondary()
-                        },
-                        format!("{label} @ {suffix}"),
-                    )
+                    let color = if st.open {
+                        theme::green()
+                    } else {
+                        theme::text_secondary()
+                    };
+                    (color, format!("{label} @ {suffix}"))
                 }
             } else {
                 (theme::text_secondary(), "串口已关闭".to_owned())
             };
         let recording = self.workbench.query_recording();
         let recording_running = recording.stats.running;
-        let recording_label = if recording_running {
-            if recording.stats.paused {
-                format!(
-                    "已暂停 {} 条 {:.1}MB",
-                    recording.stats.events_written,
-                    recording.stats.bytes_written as f64 / 1024.0 / 1024.0
-                )
-            } else {
-                format!(
-                    "录制中 {} 条 {:.1}MB",
-                    recording.stats.events_written,
-                    recording.stats.bytes_written as f64 / 1024.0 / 1024.0
-                )
-            }
-        } else {
+        let recording_label = if !recording_running {
             "未录制".to_owned()
+        } else {
+            let state = if recording.stats.paused {
+                "已暂停"
+            } else {
+                "录制中"
+            };
+            let size_mb = recording.stats.bytes_written as f64 / 1024.0 / 1024.0;
+            format!(
+                "{state} {} 条 {size_mb:.1}MB",
+                recording.stats.events_written
+            )
         };
         let status_view = StatusBarView {
             serial_color,
@@ -139,15 +134,9 @@ impl WorkbenchApp {
                 // 状态栏只保留一条摘要，其余消息放入通知列表，避免挤压串口状态。
                 let max_show = 1;
                 let total = notifications.len();
-                let shown: Vec<_> = notifications.iter().take(max_show).collect();
-                for n in &shown {
-                    let color = match n.level {
-                        StatusLevel::Info => theme::text_secondary(),
-                        StatusLevel::Warn => theme::yellow(),
-                        StatusLevel::Error => theme::red(),
-                    };
+                for n in notifications.iter().take(max_show) {
                     let text = truncate_for_status(&n.text, 60);
-                    ui.label(egui::RichText::new(&text).color(color))
+                    ui.label(egui::RichText::new(&text).color(notification_color(n.level)))
                         .on_hover_text(&n.text);
                 }
                 if total > max_show {
@@ -181,11 +170,6 @@ impl WorkbenchApp {
                                 ui.spacing_mut().item_spacing.y = 2.0;
                                 egui::ScrollArea::vertical().show(ui, |ui| {
                                     for n in &notifications {
-                                        let color = match n.level {
-                                            StatusLevel::Info => theme::text_secondary(),
-                                            StatusLevel::Warn => theme::yellow(),
-                                            StatusLevel::Error => theme::red(),
-                                        };
                                         let level_mark = match n.level {
                                             StatusLevel::Error => ICON_ERROR.codepoint,
                                             StatusLevel::Warn => ICON_WARNING.codepoint,
@@ -193,7 +177,7 @@ impl WorkbenchApp {
                                         };
                                         ui.label(
                                             egui::RichText::new(format!("{level_mark} {}", n.text))
-                                                .color(color)
+                                                .color(notification_color(n.level))
                                                 .small(),
                                         );
                                     }
@@ -349,6 +333,15 @@ impl WorkbenchApp {
         {
             self.force_check_update();
         }
+    }
+}
+
+/// 通知级别的文字颜色（状态栏摘要与溢出通知列表共用）。
+fn notification_color(level: StatusLevel) -> egui::Color32 {
+    match level {
+        StatusLevel::Info => theme::text_secondary(),
+        StatusLevel::Warn => theme::yellow(),
+        StatusLevel::Error => theme::red(),
     }
 }
 

@@ -46,12 +46,8 @@ pub fn network_serial_form_ui(
                 ));
                 return;
             }
-            let Ok(port) = view.port.trim().parse::<u16>() else {
-                actions.push(NetworkSerialAction::Error(
-                    "网络端口格式错误（1-65535）".to_owned(),
-                ));
-                return;
-            };
+            // 解析失败按 0 处理：0 本身就是非法端口，两种情况共用一条提示。
+            let port = view.port.trim().parse::<u16>().unwrap_or(0);
             if port == 0 {
                 actions.push(NetworkSerialAction::Error(
                     "网络端口格式错误（1-65535）".to_owned(),

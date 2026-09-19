@@ -1,5 +1,7 @@
+use crate::app::WorkbenchApp;
 use crate::bootstrap::{user_data_dir, user_logs_dir};
 use crate::state::LineEnding;
+use crate::state::MAX_SEND_HISTORY;
 use std::path::{Path, PathBuf};
 use tool_application::query::NetworkPortConfig;
 #[cfg(test)]
@@ -128,12 +130,17 @@ pub(crate) enum ConfigLoadResult {
     FutureVersion { path: PathBuf, version: u32 },
 }
 
+/// 读出配置声明的 schema 版本，不解析其余字段。
+///
+/// `version` 是 `schema_version` 之前的历史键名，这里与 `parse_persisted_config`
+/// 都必须同时接受两个键，否则这类配置会被读成 v0：既可能重复执行 v0 迁移，
+/// 也可能漏掉"版本高于当前程序"的判定。
 fn declared_schema_version(text: &str) -> Option<u32> {
     let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
-    value
-        .as_object()?
+    let object = value.as_object()?;
+    object
         .get("schema_version")
-        .or_else(|| value.as_object()?.get("version"))
+        .or_else(|| object.get("version"))
         .and_then(serde_json::Value::as_u64)
         .map(|version| version as u32)
 }
@@ -182,9 +189,9 @@ pub(crate) fn load_config() -> ConfigLoadResult {
 
     // 尝试读主路径
     if let Ok(Some(bytes)) = read_native_file(&primary)
-        && let Ok(t) = String::from_utf8(bytes)
+        && let Ok(text) = String::from_utf8(bytes)
     {
-        if let Some(version) = declared_schema_version(&t)
+        if let Some(version) = declared_schema_version(&text)
             && version > CURRENT_SCHEMA_VERSION
         {
             return ConfigLoadResult::FutureVersion {
@@ -192,40 +199,37 @@ pub(crate) fn load_config() -> ConfigLoadResult {
                 version,
             };
         }
-        match parse_persisted_config(&t) {
-            Ok((cfg, migrated)) => {
-                return ConfigLoadResult::Ok {
-                    config: cfg,
-                    migrated,
-                };
-            }
+        return match parse_persisted_config(&text) {
+            Ok((config, migrated)) => ConfigLoadResult::Ok { config, migrated },
             Err(error) => {
+                // 必须先隔离损坏文件：下一行会把 `primary` 移动进返回值。
                 let backup_path = quarantine_corrupt_file(&primary).ok().flatten();
-                return ConfigLoadResult::ParseError {
+                ConfigLoadResult::ParseError {
                     path: primary,
                     error,
                     backup_path,
-                };
+                }
             }
-        }
+        };
     }
 
     // 从旧路径 (CWD/workspace.json) 迁移
     let legacy = std::env::current_dir()
         .ok()
-        .map(|d| d.join("workspace.json"));
-    if let Some(ref legacy) = legacy
-        && let Ok(t) = std::fs::read_to_string(legacy)
-        && let Ok((cfg, _)) = parse_persisted_config(&t)
+        .map(|dir| dir.join("workspace.json"));
+    if let Some(legacy) = legacy.as_ref()
+        && let Ok(text) = std::fs::read_to_string(legacy)
+        && let Ok((config, _)) = parse_persisted_config(&text)
     {
-        let _ = write_native_json(&primary, &cfg);
+        let _ = write_native_json(&primary, &config);
         return ConfigLoadResult::Ok {
-            config: cfg,
+            config,
             migrated: true,
         };
     }
     ConfigLoadResult::NotFound
 }
+
 pub(crate) fn config_path() -> PathBuf {
     // 优先使用平台配置目录，避免 CWD 变化导致配置"丢失"
     if let Some(dir) = dirs_next::config_dir() {
@@ -244,26 +248,26 @@ fn native_store_key(path: &Path) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn read_native_file(path: &Path) -> Result<Option<Vec<u8>>, String> {
+/// 配置文件在平台存储层里以"根目录 + 文件名"寻址，两者都取自路径本身。
+fn native_store_for(path: &Path) -> Result<(NativeSettingsStore, String), String> {
     let root = path
         .parent()
         .ok_or_else(|| format!("配置路径没有父目录：{}", path.display()))?;
     let key =
         native_store_key(path).ok_or_else(|| format!("无效配置文件名：{}", path.display()))?;
-    NativeSettingsStore::new(root)
-        .load_blocking(key)
-        .map_err(|error| error.to_string())
+    Ok((NativeSettingsStore::new(root), key))
+}
+
+fn read_native_file(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    let (store, key) = native_store_for(path)?;
+    store.load_blocking(key).map_err(|error| error.to_string())
 }
 
 fn write_native_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     let bytes =
         serde_json::to_vec_pretty(value).map_err(|error| format!("JSON 序列化失败：{error}"))?;
-    let root = path
-        .parent()
-        .ok_or_else(|| format!("配置路径没有父目录：{}", path.display()))?;
-    let key =
-        native_store_key(path).ok_or_else(|| format!("无效配置文件名：{}", path.display()))?;
-    NativeSettingsStore::new(root)
+    let (store, key) = native_store_for(path)?;
+    store
         .save_blocking(key, bytes)
         .map_err(|error| error.to_string())
 }
@@ -284,6 +288,7 @@ pub(crate) fn windows_open_dialog() -> Option<PathBuf> {
         .set_directory("logs")
         .pick_file()
 }
+
 pub(crate) fn pick_recorder_path(current: &str) -> Option<PathBuf> {
     let current_path = PathBuf::from(current);
 
@@ -318,6 +323,7 @@ pub(crate) fn ensure_jsonl_extension(mut path: PathBuf) -> PathBuf {
 
     path
 }
+
 pub(crate) fn default_recorder_path() -> String {
     user_logs_dir()
         .join(format!("session-{}.jsonl", now_timestamp_ms()))
@@ -340,37 +346,36 @@ pub(crate) fn resolve_recorder_path(path: &Path) -> PathBuf {
 // ── WorkbenchApp 配置持久化方法 ──
 // 从 commands.rs 迁入，集中配置快照/保存/加载职责。
 
-use crate::app::WorkbenchApp;
-use crate::state::MAX_SEND_HISTORY;
-
 impl WorkbenchApp {
     /// 构建当前配置的快照
     pub(crate) fn build_config_snapshot(&self) -> PersistedConfig {
-        let mut p = self.panels.clone();
-        p.discard_dynamic_tabs();
+        let mut panels = self.panels.clone();
+        panels.discard_dynamic_tabs();
+        let enabled_plugins: Vec<String> = self
+            .workbench
+            .query_plugins()
+            .summaries
+            .into_iter()
+            .filter(|summary| {
+                matches!(
+                    summary.state,
+                    tool_application::query::PluginStateView::Enabled
+                        | tool_application::query::PluginStateView::Running
+                )
+            })
+            .map(|summary| summary.id)
+            .collect();
+        let network_proxy_url = self.network_proxy_url.trim();
         PersistedConfig {
             schema_version: CURRENT_SCHEMA_VERSION,
-            panels: p,
+            panels,
             selected_port: self.serial.selected_port.clone(),
             baud_rate: self.serial.baud_rate.clone(),
             data_bits: self.serial.data_bits.clone(),
             stop_bits: self.serial.stop_bits.clone(),
             parity: self.serial.parity.clone(),
             recorder_path: self.recorder_path.clone(),
-            enabled_plugins: self
-                .workbench
-                .query_plugins()
-                .summaries
-                .into_iter()
-                .filter(|s| {
-                    matches!(
-                        s.state,
-                        tool_application::query::PluginStateView::Enabled
-                            | tool_application::query::PluginStateView::Running
-                    )
-                })
-                .map(|s| s.id)
-                .collect(),
+            enabled_plugins,
             port_aliases: self.serial.port_aliases.clone(),
             port_groups: self.serial.port_groups.clone(),
             send_history: self.send.send_history.iter().cloned().collect(),
@@ -391,8 +396,8 @@ impl WorkbenchApp {
             terminal_max_entries: self.terminal_panel.max_entries,
             log_max_entries: self.bottom_log_panel.max_entries,
             command_usage_order: self.command_palette.usage_order.clone(),
-            network_proxy_url: (!self.network_proxy_url.trim().is_empty())
-                .then(|| self.network_proxy_url.trim().to_owned()),
+            network_proxy_url: (!network_proxy_url.is_empty())
+                .then(|| network_proxy_url.to_owned()),
             network_ports: self.serial.network_ports.clone(),
         }
     }
@@ -403,27 +408,27 @@ impl WorkbenchApp {
         write_native_json(&path, &cfg)
     }
 
-    pub(crate) fn load_config_from_path(&mut self, path: &std::path::Path) -> Result<(), String> {
+    pub(crate) fn load_config_from_path(&mut self, path: &Path) -> Result<(), String> {
         let bytes = read_native_file(path)?
             .ok_or_else(|| format!("读取失败：文件不存在：{}", path.display()))?;
-        let t = String::from_utf8(bytes).map_err(|e| format!("读取失败：{e}"))?;
-        let (cfg, _) = parse_persisted_config(&t)?;
-        self.serial.selected_port = cfg.selected_port.clone();
-        self.serial.baud_rate = cfg.baud_rate.clone();
-        self.serial.data_bits = cfg.data_bits.clone();
-        self.serial.stop_bits = cfg.stop_bits.clone();
-        self.serial.parity = cfg.parity.clone();
-        self.recorder_path = cfg.recorder_path.clone();
-        self.serial.port_aliases = cfg.port_aliases.clone();
-        self.serial.port_groups = cfg.port_groups.clone();
-        self.serial.port_profiles = cfg.port_profiles.clone();
+        let text = String::from_utf8(bytes).map_err(|error| format!("读取失败：{error}"))?;
+        let (cfg, _) = parse_persisted_config(&text)?;
+        self.serial.selected_port = cfg.selected_port;
+        self.serial.baud_rate = cfg.baud_rate;
+        self.serial.data_bits = cfg.data_bits;
+        self.serial.stop_bits = cfg.stop_bits;
+        self.serial.parity = cfg.parity;
+        self.recorder_path = cfg.recorder_path;
+        self.serial.port_aliases = cfg.port_aliases;
+        self.serial.port_groups = cfg.port_groups;
+        self.serial.port_profiles = cfg.port_profiles;
         self.serial.auto_reconnect = cfg.auto_reconnect;
-        self.keymap = cfg.keymap.clone();
+        self.keymap = cfg.keymap;
         self.monospace_font_size = cfg.monospace_font_size.clamp(10.0, 24.0);
         self.theme_path = cfg
             .theme_path
             .as_deref()
-            .map(|path| resolve_theme_path(&self.theme_dir, path));
+            .map(|stored| resolve_theme_path(&self.theme_dir, stored));
         if let Some(path) = self.theme_path.as_deref() {
             tool_panels::theme::load_theme_file(path)?;
             self.ui_theme = tool_panels::theme::builtin_theme_for_path(path)
@@ -437,16 +442,15 @@ impl WorkbenchApp {
         self.bottom_log_panel.set_max_entries(cfg.log_max_entries);
         self.command_palette.usage_order = cfg.command_usage_order;
         self.network_proxy_url = cfg.network_proxy_url.unwrap_or_default();
-        self.serial.network_ports = cfg.network_ports.clone();
+        self.serial.network_ports = cfg.network_ports;
         self.send.send_history = cfg
             .send_history
-            .iter()
+            .into_iter()
             .filter(|item| !item.trim().is_empty())
             .take(MAX_SEND_HISTORY)
-            .cloned()
             .collect();
         self.send.line_ending = cfg.line_ending;
-        self.panels = cfg.panels.clone();
+        self.panels = cfg.panels;
         self.apply_loaded_workspace_postprocess();
         Ok(())
     }

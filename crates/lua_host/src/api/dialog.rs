@@ -68,10 +68,7 @@ pub(crate) fn create_dialog_api(
             };
 
             match result {
-                Some(path_str) => {
-                    let s = cb_lua.create_string(&path_str)?;
-                    Ok(Value::String(s))
-                }
+                Some(path_str) => Ok(Value::String(cb_lua.create_string(&path_str)?)),
                 None => Ok(Value::Nil),
             }
         })?,
@@ -80,13 +77,18 @@ pub(crate) fn create_dialog_api(
     Ok(table)
 }
 
+/// 兜底过滤器：匹配所有文件。未声明 filters 或声明得不完整时都用它。
+fn match_all_filter() -> FileFilter {
+    FileFilter {
+        name: "所有文件".to_owned(),
+        extensions: vec!["*".to_owned()],
+    }
+}
+
 pub(crate) fn parse_lua_filters(obj: &Table) -> mlua::Result<Vec<FileFilter>> {
     let filters_table: Option<Table> = obj.get("filters").ok();
     let Some(filters_table) = filters_table else {
-        return Ok(vec![FileFilter {
-            name: "所有文件".to_owned(),
-            extensions: vec!["*".to_owned()],
-        }]);
+        return Ok(vec![match_all_filter()]);
     };
 
     let mut result = Vec::new();
@@ -109,10 +111,7 @@ pub(crate) fn parse_lua_filters(obj: &Table) -> mlua::Result<Vec<FileFilter>> {
         }
     }
     if result.is_empty() {
-        result.push(FileFilter {
-            name: "所有文件".to_owned(),
-            extensions: vec!["*".to_owned()],
-        });
+        result.push(match_all_filter());
     }
     Ok(result)
 }

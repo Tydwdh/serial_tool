@@ -149,11 +149,11 @@ impl ChartPanel {
             .and_then(Value::as_f64)
             .unwrap_or(fallback_x);
 
-        for (name, value) in object {
+        for (name, field) in object {
             if matches!(name.as_str(), "t" | "time" | "timestamp") {
                 continue;
             }
-            if let Some(y) = value.as_f64() {
+            if let Some(y) = field.as_f64() {
                 self.push_sample(name, Sample { x, y });
             }
         }
@@ -273,84 +273,7 @@ impl ChartPanel {
         if let Some(hover_pos) = response.hover_pos()
             && rect.contains(hover_pos)
         {
-            // 十字线
-            painter.line_segment(
-                [
-                    Pos2::new(hover_pos.x, rect.top()),
-                    Pos2::new(hover_pos.x, rect.bottom()),
-                ],
-                Stroke::new(1.0, theme::chart_crosshair()),
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(rect.left(), hover_pos.y),
-                    Pos2::new(rect.right(), hover_pos.y),
-                ],
-                Stroke::new(1.0, theme::chart_crosshair()),
-            );
-
-            // 找到 hover X 对应的数据值
-            let (min_x, max_x, min_y, max_y) = bounds;
-            let hover_x_ratio = ((hover_pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-            let hover_x_val = min_x + hover_x_ratio as f64 * (max_x - min_x);
-            let _hover_y_val = min_y
-                + (1.0 - ((hover_pos.y - rect.top()) / rect.height()) as f64) * (max_y - min_y);
-
-            // 收集各 series 在 hover X 附近的值
-            let mut tooltip_lines = vec![format!("x: {hover_x_val:.1}")];
-            for (index, (name, values)) in samples.iter().enumerate() {
-                // 二分查找最近的样本
-                if let Some(closest) = find_closest_sample(values, hover_x_val) {
-                    tooltip_lines.push(format!("{}: {:.3}", name, closest.y));
-                    // 在数据点上画高亮圆点
-                    let point = map_point(rect, *closest, bounds);
-                    painter.circle_filled(point, 4.0, palette(index));
-                }
-            }
-
-            // 绘制 Tooltip 背景 + 文字
-            let tooltip_lines = tooltip_lines;
-            let font = egui::FontId::proportional(11.0);
-            let line_height = 14.0;
-            let tooltip_width = 100.0;
-            let tooltip_height = tooltip_lines.len() as f32 * line_height + 6.0;
-
-            // Tooltip 位置：优先右上方，溢出则左移
-            let mut tooltip_pos = Pos2::new(hover_pos.x + 8.0, hover_pos.y - tooltip_height - 4.0);
-            if tooltip_pos.x + tooltip_width > rect.right() {
-                tooltip_pos.x = hover_pos.x - tooltip_width - 8.0;
-            }
-            if tooltip_pos.y < rect.top() {
-                tooltip_pos.y = hover_pos.y + 8.0;
-            }
-
-            let tooltip_rect =
-                Rect::from_min_size(tooltip_pos, Vec2::new(tooltip_width, tooltip_height));
-            painter.rect_filled(tooltip_rect, 4.0, theme::chart_tooltip_bg());
-            painter.rect_stroke(
-                tooltip_rect,
-                4.0,
-                Stroke::new(1.0, theme::border_light()),
-                egui::StrokeKind::Inside,
-            );
-
-            for (i, line) in tooltip_lines.iter().enumerate() {
-                let color = if i == 0 {
-                    theme::text_dimmed()
-                } else {
-                    palette(i - 1)
-                };
-                painter.text(
-                    Pos2::new(
-                        tooltip_rect.left() + 4.0,
-                        tooltip_rect.top() + 3.0 + i as f32 * line_height,
-                    ),
-                    egui::Align2::LEFT_TOP,
-                    line,
-                    font.clone(),
-                    color,
-                );
-            }
+            paint_hover(&painter, rect, bounds, &samples, hover_pos);
         }
     }
 
@@ -443,18 +366,18 @@ fn map_point(rect: Rect, sample: Sample, bounds: (f64, f64, f64, f64)) -> Pos2 {
 }
 
 fn draw_grid(painter: &egui::Painter, rect: Rect) {
+    let grid = Stroke::new(1.0, theme::chart_grid());
     for index in 1..5 {
         let t = index as f32 / 5.0;
         let x = egui::lerp(rect.left()..=rect.right(), t);
         let y = egui::lerp(rect.top()..=rect.bottom(), t);
-        let stroke = Stroke::new(1.0, theme::chart_grid());
         painter.line_segment(
             [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-            stroke,
+            grid,
         );
         painter.line_segment(
             [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-            stroke,
+            grid,
         );
     }
 }
@@ -502,8 +425,93 @@ fn draw_x_axis_labels(painter: &egui::Painter, rect: Rect, bounds: (f64, f64, f6
     );
 }
 
+/// hover 落在绘图区内时的叠加层：十字线 + 各条曲线在该 x 上最近样本的取值。
+fn paint_hover(
+    painter: &egui::Painter,
+    rect: Rect,
+    bounds: (f64, f64, f64, f64),
+    samples: &[(&String, &Vec<Sample>)],
+    hover_pos: Pos2,
+) {
+    // 十字线
+    painter.line_segment(
+        [
+            Pos2::new(hover_pos.x, rect.top()),
+            Pos2::new(hover_pos.x, rect.bottom()),
+        ],
+        Stroke::new(1.0, theme::chart_crosshair()),
+    );
+    painter.line_segment(
+        [
+            Pos2::new(rect.left(), hover_pos.y),
+            Pos2::new(rect.right(), hover_pos.y),
+        ],
+        Stroke::new(1.0, theme::chart_crosshair()),
+    );
+
+    // 找到 hover X 对应的数据值
+    let (min_x, max_x, ..) = bounds;
+    let hover_x_ratio = ((hover_pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+    let hover_x_val = min_x + hover_x_ratio as f64 * (max_x - min_x);
+
+    // 收集各 series 在 hover X 附近的值
+    let mut tooltip_lines = vec![format!("x: {hover_x_val:.1}")];
+    for (index, (name, values)) in samples.iter().enumerate() {
+        // 二分查找最近的样本
+        if let Some(closest) = find_closest_sample(values, hover_x_val) {
+            tooltip_lines.push(format!("{}: {:.3}", name, closest.y));
+            // 在数据点上画高亮圆点
+            let point = map_point(rect, *closest, bounds);
+            painter.circle_filled(point, 4.0, palette(index));
+        }
+    }
+
+    // 绘制 Tooltip 背景 + 文字
+    let font = egui::FontId::proportional(11.0);
+    let line_height = 14.0;
+    let tooltip_width = 100.0;
+    let tooltip_height = tooltip_lines.len() as f32 * line_height + 6.0;
+
+    // Tooltip 位置：优先右上方，溢出则左移
+    let mut tooltip_pos = Pos2::new(hover_pos.x + 8.0, hover_pos.y - tooltip_height - 4.0);
+    if tooltip_pos.x + tooltip_width > rect.right() {
+        tooltip_pos.x = hover_pos.x - tooltip_width - 8.0;
+    }
+    if tooltip_pos.y < rect.top() {
+        tooltip_pos.y = hover_pos.y + 8.0;
+    }
+
+    let tooltip_rect = Rect::from_min_size(tooltip_pos, Vec2::new(tooltip_width, tooltip_height));
+    painter.rect_filled(tooltip_rect, 4.0, theme::chart_tooltip_bg());
+    painter.rect_stroke(
+        tooltip_rect,
+        4.0,
+        Stroke::new(1.0, theme::border_light()),
+        egui::StrokeKind::Inside,
+    );
+
+    for (i, line) in tooltip_lines.iter().enumerate() {
+        let color = if i == 0 {
+            theme::text_dimmed()
+        } else {
+            palette(i - 1)
+        };
+        painter.text(
+            Pos2::new(
+                tooltip_rect.left() + 4.0,
+                tooltip_rect.top() + 3.0 + i as f32 * line_height,
+            ),
+            egui::Align2::LEFT_TOP,
+            line,
+            font.clone(),
+            color,
+        );
+    }
+}
+
 fn palette(index: usize) -> Color32 {
-    theme::chart_colors()[index % theme::chart_colors().len()]
+    let colors = theme::chart_colors();
+    colors[index % colors.len()]
 }
 
 #[cfg(test)]

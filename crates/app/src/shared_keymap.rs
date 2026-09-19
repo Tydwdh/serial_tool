@@ -144,35 +144,24 @@ impl Keymap {
     }
 }
 
+/// 默认快捷键映射表：命令 ID → (主键, Ctrl, Shift, Alt)。
+/// 这是新建配置的默认值来源，并会随 `PersistedConfig.keymap` 一起持久化。
+const DEFAULT_KEYBINDINGS: &[(&str, &str, bool, bool, bool)] = &[
+    (CMD_REFRESH_PORTS, "R", true, false, false),
+    (CMD_OPEN_PORT, "O", true, true, false),
+    (CMD_TOGGLE_BOTTOM_PANEL, "Backtick", true, false, false),
+    (CMD_TOGGLE_RIGHT_DOCK, "B", true, false, true),
+    (CMD_SEND, "Enter", true, false, false),
+    (CMD_COMMAND_PALETTE, "K", true, false, false),
+    (CMD_CLEAR_TERMINAL, "L", true, false, false),
+];
+
 fn default_bindings() -> HashMap<String, Vec<KeyBinding>> {
-    let mut bindings = HashMap::new();
-    bindings.insert(
-        CMD_REFRESH_PORTS.to_owned(),
-        vec![KeyBinding::new("R", true, false, false)],
-    );
-    bindings.insert(
-        CMD_OPEN_PORT.to_owned(),
-        vec![KeyBinding::new("O", true, true, false)],
-    );
-    bindings.insert(
-        CMD_TOGGLE_BOTTOM_PANEL.to_owned(),
-        vec![KeyBinding::new("Backtick", true, false, false)],
-    );
-    bindings.insert(
-        CMD_TOGGLE_RIGHT_DOCK.to_owned(),
-        vec![KeyBinding::new("B", true, false, true)],
-    );
-    bindings.insert(
-        CMD_SEND.to_owned(),
-        vec![KeyBinding::new("Enter", true, false, false)],
-    );
-    bindings.insert(
-        CMD_COMMAND_PALETTE.to_owned(),
-        vec![KeyBinding::new("K", true, false, false)],
-    );
-    bindings.insert(
-        CMD_CLEAR_TERMINAL.to_owned(),
-        vec![KeyBinding::new("L", true, false, false)],
-    );
-    bindings
+    DEFAULT_KEYBINDINGS
+        .iter()
+        .map(|(id, key, ctrl, shift, alt)| {
+            let binding = KeyBinding::new(*key, *ctrl, *shift, *alt);
+            ((*id).to_owned(), vec![binding])
+        })
+        .collect()
 }
