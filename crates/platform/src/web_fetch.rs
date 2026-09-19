@@ -18,13 +18,12 @@ pub async fn fetch_text(url: &str) -> Result<String, String> {
     if !response.ok() {
         return Err(format!("请求失败：HTTP {} ({url})", response.status()));
     }
-    JsFuture::from(
-        response
-            .text()
-            .map_err(|error| format!("读取响应失败：{error:?}"))?,
-    )
-    .await
-    .map_err(|error| format!("读取响应失败：{error:?}"))?
-    .as_string()
-    .ok_or_else(|| "响应不是有效文本".to_owned())
+    let text_promise = response
+        .text()
+        .map_err(|error| format!("读取响应失败：{error:?}"))?;
+    let text = JsFuture::from(text_promise)
+        .await
+        .map_err(|error| format!("读取响应失败：{error:?}"))?;
+    text.as_string()
+        .ok_or_else(|| "响应不是有效文本".to_owned())
 }

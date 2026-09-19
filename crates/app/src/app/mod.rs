@@ -122,9 +122,8 @@ impl WorkbenchApp {
             log::warn!("initialize theme directory failed: {error}");
         }
         let default_theme = theme::AppTheme::default();
-        let default_theme_path = theme::builtin_theme_path(default_theme, &theme_dir);
         let mut loaded_theme = default_theme;
-        let mut loaded_theme_path = default_theme_path.clone();
+        let mut loaded_theme_path = theme::builtin_theme_path(default_theme, &theme_dir);
         let mut theme_recovered = false;
         if let Some(cfg) = config.as_ref() {
             if let Some(path) = cfg
@@ -158,14 +157,17 @@ impl WorkbenchApp {
             log::warn!("load default bundled theme failed: {error}");
         }
         apply_theme(&cc.egui_ctx, loaded_theme);
-        let mut rp = config
+        let mut panel_manager = config
             .as_ref()
-            .map(|c| c.panels.clone())
+            .map(|cfg| cfg.panels.clone())
             .unwrap_or_else(PanelManager::default_workspace);
-        rp.discard_dynamic_tabs();
-        rp.dock.normalize_tool_layout();
-        rp.ensure_tiles_layout();
+        panel_manager.discard_dynamic_tabs();
+        panel_manager.dock.normalize_tool_layout();
+        panel_manager.ensure_tiles_layout();
+        // 串口/发送相关 UI 状态：没有配置文件时取 `default()`，
+        // 有配置时只覆盖这些持久化字段，其余（端口列表、待重连等）仍是运行时初值。
         let mut send = SendUiState::default();
+        let mut serial = SerialUiState::default();
         if let Some(cfg) = config.as_ref() {
             send.send_history = cfg
                 .send_history
@@ -175,39 +177,47 @@ impl WorkbenchApp {
                 .cloned()
                 .collect::<VecDeque<_>>();
             send.line_ending = cfg.line_ending;
+
+            serial.selected_port = cfg.selected_port.clone();
+            serial.baud_rate = cfg.baud_rate.clone();
+            serial.data_bits = cfg.data_bits.clone();
+            serial.stop_bits = cfg.stop_bits.clone();
+            serial.parity = cfg.parity.clone();
+            serial.auto_reconnect = cfg.auto_reconnect;
+            serial.port_aliases = cfg.port_aliases.clone();
+            serial.port_groups = cfg.port_groups.clone();
+            serial.port_profiles = cfg.port_profiles.clone();
+            serial.network_ports = cfg.network_ports.clone();
         }
 
-        let workbench = {
-            let mut w = Workbench::new(bus.clone());
-            w.set_transport_repaint_waker(waker);
-            let plugin_dir = user_plugins_dir();
-            retire_old_plugin_dirs(&plugin_dir);
-            if let Some(cfg) = config.as_ref() {
-                let ac = ApplicationConfig {
-                    selected_port: cfg.selected_port.clone(),
-                    baud_rate: cfg.baud_rate.clone(),
-                    data_bits: cfg.data_bits.clone(),
-                    stop_bits: cfg.stop_bits.clone(),
-                    parity: cfg.parity.clone(),
-                    auto_reconnect: cfg.auto_reconnect,
-                    terminal_merge_window_ms: cfg.terminal_merge_window_ms,
-                    terminal_max_entries: cfg.terminal_max_entries,
-                    log_max_entries: cfg.log_max_entries,
-                    recorder_path: cfg.recorder_path.clone(),
-                    network_ports: cfg.network_ports.clone(),
-                    port_aliases: cfg.port_aliases.clone(),
-                    port_groups: cfg.port_groups.clone(),
-                    enabled_plugins: cfg.enabled_plugins.clone(),
-                    network_proxy_url: cfg.network_proxy_url.clone(),
-                };
-                w = w.with_config(ac);
-            }
-            // 初始插件扫描也走统一后台任务，避免启动阶段在 UI 线程读 manifest。
-            let _ = w.dispatch(tool_application::AppCommand::DiscoverPlugins {
-                roots: vec![plugin_dir],
-            });
-            w
-        };
+        let mut workbench = Workbench::new(bus.clone());
+        workbench.set_transport_repaint_waker(waker);
+        let plugin_dir = user_plugins_dir();
+        retire_old_plugin_dirs(&plugin_dir);
+        if let Some(cfg) = config.as_ref() {
+            let application_config = ApplicationConfig {
+                selected_port: cfg.selected_port.clone(),
+                baud_rate: cfg.baud_rate.clone(),
+                data_bits: cfg.data_bits.clone(),
+                stop_bits: cfg.stop_bits.clone(),
+                parity: cfg.parity.clone(),
+                auto_reconnect: cfg.auto_reconnect,
+                terminal_merge_window_ms: cfg.terminal_merge_window_ms,
+                terminal_max_entries: cfg.terminal_max_entries,
+                log_max_entries: cfg.log_max_entries,
+                recorder_path: cfg.recorder_path.clone(),
+                network_ports: cfg.network_ports.clone(),
+                port_aliases: cfg.port_aliases.clone(),
+                port_groups: cfg.port_groups.clone(),
+                enabled_plugins: cfg.enabled_plugins.clone(),
+                network_proxy_url: cfg.network_proxy_url.clone(),
+            };
+            workbench = workbench.with_config(application_config);
+        }
+        // 初始插件扫描也走统一后台任务，避免启动阶段在 UI 线程读 manifest。
+        let _ = workbench.dispatch(tool_application::AppCommand::DiscoverPlugins {
+            roots: vec![plugin_dir],
+        });
         let ui_events = workbench.subscribe_ui_events();
         let mut app = Self {
             workbench,
@@ -217,61 +227,17 @@ impl WorkbenchApp {
             plugins_panel: PluginsPanel::new(),
             replay_panel: ReplayPanel::new(),
             bottom_log_panel: LogPanel::new(&bus),
-            serial: SerialUiState {
-                ports: Vec::new(),
-                selected_port: config.as_ref().and_then(|c| c.selected_port.clone()),
-                baud_rate: config
-                    .as_ref()
-                    .map(|c| c.baud_rate.clone())
-                    .unwrap_or_else(|| "115200".into()),
-                data_bits: config
-                    .as_ref()
-                    .map(|c| c.data_bits.clone())
-                    .unwrap_or_else(|| "8".into()),
-                stop_bits: config
-                    .as_ref()
-                    .map(|c| c.stop_bits.clone())
-                    .unwrap_or_else(|| "1".into()),
-                parity: config
-                    .as_ref()
-                    .map(|c| c.parity.clone())
-                    .unwrap_or_else(|| "none".into()),
-                last_port_refresh: 0.0,
-                auto_reconnect: config.as_ref().map(|c| c.auto_reconnect).unwrap_or(true),
-                pending_reconnect: None,
-                manual_disconnects: std::collections::HashSet::new(),
-                pending_open_notice: None,
-                port_aliases: config
-                    .as_ref()
-                    .map(|c| c.port_aliases.clone())
-                    .unwrap_or_default(),
-                port_groups: config
-                    .as_ref()
-                    .map(|c| c.port_groups.clone())
-                    .unwrap_or_default(),
-                port_profiles: config
-                    .as_ref()
-                    .map(|c| c.port_profiles.clone())
-                    .unwrap_or_default(),
-                top_bar_serial_collapsed: false,
-                network_ports: config
-                    .as_ref()
-                    .map(|c| c.network_ports.clone())
-                    .unwrap_or_default(),
-                network_host: String::new(),
-                network_port: "7125".to_owned(),
-                network_api_key: String::new(),
-            },
+            serial,
             recorder_path: config
                 .as_ref()
-                .map(|c| c.recorder_path.clone())
+                .map(|cfg| cfg.recorder_path.clone())
                 .unwrap_or_else(default_recorder_path),
-            panels: rp.clone(),
+            panels: panel_manager,
             notifications: NotificationQueue::new(),
             toast_overlay: ToastOverlay::default(),
             recent_workspaces: config
                 .as_ref()
-                .map(|c| c.recent_workspaces.clone())
+                .map(|cfg| cfg.recent_workspaces.clone())
                 .unwrap_or_default(),
             send,
             layout_dirty: false,
@@ -281,7 +247,7 @@ impl WorkbenchApp {
             periodic_send: Default::default(),
             keymap: config
                 .as_ref()
-                .map(|c| c.keymap.clone())
+                .map(|cfg| cfg.keymap.clone())
                 .unwrap_or_default(),
             commands: crate::command_registry::CommandRegistry::builtin(),
             panel_registry: crate::panel_registry::PanelRegistry::builtin(),
@@ -293,14 +259,14 @@ impl WorkbenchApp {
             plugin_summaries_cache: std::cell::OnceCell::new(),
             monospace_font_size: config
                 .as_ref()
-                .map(|c| c.monospace_font_size.clamp(10.0, 24.0))
+                .map(|cfg| cfg.monospace_font_size.clamp(10.0, 24.0))
                 .unwrap_or(13.0),
             ui_theme: loaded_theme,
             theme_path: loaded_theme_path,
             theme_dir,
             network_proxy_url: config
                 .as_ref()
-                .and_then(|c| c.network_proxy_url.clone())
+                .and_then(|cfg| cfg.network_proxy_url.clone())
                 .unwrap_or_default(),
             marketplace: Default::default(),
             perf: crate::perf::PerfDiagnostics::default(),
@@ -310,10 +276,10 @@ impl WorkbenchApp {
         app.terminal_panel.font_size = app.monospace_font_size;
         app.bottom_log_panel.font_size = app.monospace_font_size;
         // 从配置恢复终端/日志的数据参数
-        if let Some(c) = config.as_ref() {
-            app.terminal_panel.merge_window_ms = c.terminal_merge_window_ms;
-            app.terminal_panel.set_max_entries(c.terminal_max_entries);
-            app.bottom_log_panel.set_max_entries(c.log_max_entries);
+        if let Some(cfg) = config.as_ref() {
+            app.terminal_panel.merge_window_ms = cfg.terminal_merge_window_ms;
+            app.terminal_panel.set_max_entries(cfg.terminal_max_entries);
+            app.bottom_log_panel.set_max_entries(cfg.log_max_entries);
         }
         app.refresh_ports();
         let should_persist_config = !config_write_protected
@@ -350,9 +316,9 @@ impl WorkbenchApp {
 impl Drop for WorkbenchApp {
     fn drop(&mut self) {
         // 退出前自动保存工作区
-        if let Err(e) = self.save_config() {
-            log::warn!("save_config failed: {e}")
-        };
+        if let Err(error) = self.save_config() {
+            log::warn!("save_config failed: {error}")
+        }
         let _ = self
             .workbench
             .dispatch(tool_application::AppCommand::StopRecording);

@@ -43,6 +43,10 @@ where
     })
 }
 
+fn operation_error(error: tool_transport::TransportError) -> TransportError {
+    TransportError::Operation(error.to_string())
+}
+
 fn settings_to_native(port: PortId, settings: SerialSettings) -> SerialConfig {
     SerialConfig {
         port_name: port.to_string(),
@@ -89,7 +93,7 @@ impl TransportBackend for NativeTransportBackend {
                         })
                         .collect()
                 })
-                .map_err(|error| TransportError::Operation(error.to_string()))
+                .map_err(operation_error)
         })
     }
 
@@ -112,7 +116,7 @@ impl TransportBackend for NativeTransportBackend {
         spawn_blocking(move || {
             manager
                 .open_serial(settings_to_native(port, settings))
-                .map_err(|error| TransportError::Operation(error.to_string()))
+                .map_err(operation_error)
         })
     }
 
@@ -125,7 +129,7 @@ impl TransportBackend for NativeTransportBackend {
             // the worker has really exited.
             manager
                 .close_port_blocking(port.as_str(), Duration::from_secs(3))
-                .map_err(|error| TransportError::Operation(error.to_string()))
+                .map_err(operation_error)
         })
     }
 
@@ -134,7 +138,7 @@ impl TransportBackend for NativeTransportBackend {
         spawn_blocking(move || {
             manager
                 .send_to(port.as_str(), bytes)
-                .map_err(|error| TransportError::Operation(error.to_string()))
+                .map_err(operation_error)
         })
     }
 
@@ -143,7 +147,7 @@ impl TransportBackend for NativeTransportBackend {
         spawn_blocking(move || {
             manager
                 .set_dtr_blocking(port.as_str(), value, Duration::from_secs(5))
-                .map_err(|error| TransportError::Operation(error.to_string()))
+                .map_err(operation_error)
         })
     }
 
@@ -152,7 +156,7 @@ impl TransportBackend for NativeTransportBackend {
         spawn_blocking(move || {
             manager
                 .set_rts_blocking(port.as_str(), value, Duration::from_secs(5))
-                .map_err(|error| TransportError::Operation(error.to_string()))
+                .map_err(operation_error)
         })
     }
 }

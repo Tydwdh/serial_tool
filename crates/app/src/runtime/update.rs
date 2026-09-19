@@ -36,7 +36,7 @@ impl WorkbenchApp {
 
             if let Err(e) = self.save_config() {
                 log::warn!("save_config failed: {e}")
-            };
+            }
 
             if let Err(e) = tool_updater::write_update_manifest(&version, &sha256) {
                 log::error!("write_update_manifest failed: {e}");
@@ -85,13 +85,10 @@ impl WorkbenchApp {
                             log::info!("updater: 发现新版本 v{}", result.version);
                         }
                     }
-                    Ok(Err(e)) => {
+                    Ok(Err(error)) => {
                         self.update_state.checking = false;
-                        self.update_state.error = Some(e);
-                        log::warn!(
-                            "updater: 检查更新失败：{}",
-                            self.update_state.error.as_deref().unwrap_or("")
-                        );
+                        log::warn!("updater: 检查更新失败：{error}");
+                        self.update_state.error = Some(error);
                     }
                     Err(_) => {
                         self.update_state.checking = false;
@@ -118,13 +115,10 @@ impl WorkbenchApp {
                         self.update_state.error = None;
                         log::info!("updater: 更新包下载完成");
                     }
-                    Ok(Err(e)) => {
+                    Ok(Err(error)) => {
                         self.update_state.downloading = false;
-                        self.update_state.error = Some(e);
-                        log::warn!(
-                            "updater: 下载更新失败：{}",
-                            self.update_state.error.as_deref().unwrap_or("")
-                        );
+                        log::warn!("updater: 下载更新失败：{error}");
+                        self.update_state.error = Some(error);
                     }
                     Err(_) => {
                         self.update_state.downloading = false;
@@ -218,12 +212,9 @@ impl WorkbenchApp {
 
     /// 启动后台下载更新线程。
     pub(crate) fn start_update_download(&mut self) {
-        let url = match &self.update_state.download_url {
-            Some(u) => u.clone(),
-            None => {
-                self.update_state.error = Some("无下载 URL".into());
-                return;
-            }
+        let Some(url) = self.update_state.download_url.clone() else {
+            self.update_state.error = Some("无下载 URL".into());
+            return;
         };
 
         // 下载前必须已拿到 update.json 的 pinned 摘要；缺失或非法一律拒绝，

@@ -71,7 +71,7 @@ pub(super) fn wait_until_deadline(
 }
 
 #[cfg(test)]
-fn measure_spin_precision(interval: Duration, samples: usize) -> (Duration, Duration, Duration) {
+fn measure_spin_precision(interval: Duration, samples: usize) -> Duration {
     boost_thread_priority_realtime();
 
     let start = Instant::now();
@@ -88,25 +88,19 @@ fn measure_spin_precision(interval: Duration, samples: usize) -> (Duration, Dura
     }
 
     if lates.is_empty() {
-        return (Duration::ZERO, Duration::ZERO, Duration::ZERO);
+        return Duration::ZERO;
     }
 
-    let total: Duration = lates.iter().sum();
-    let avg = total / lates.len() as u32;
     // P99：排除极端 OS 调度 spike（非实时 OS 偶尔会有 1-50ms 的调度延迟）
     let p99_index = (lates.len() * 99) / 100;
     lates.sort_unstable();
-    (
-        avg,
-        lates[p99_index.min(lates.len() - 1)],
-        lates[lates.len() - 1],
-    )
+    lates[p99_index.min(lates.len() - 1)]
 }
 
 #[test]
 #[ignore = "requires a quiet local machine; CI runners have unstable sub-millisecond scheduling"]
 fn spin_wait_100us_precision() {
-    let (_, p99, _) = measure_spin_precision(Duration::from_micros(100), 1000);
+    let p99 = measure_spin_precision(Duration::from_micros(100), 1000);
     assert!(
         p99 <= Duration::from_micros(500),
         "p99_late {}us > 500us",
@@ -117,7 +111,7 @@ fn spin_wait_100us_precision() {
 #[test]
 #[ignore = "requires a quiet local machine; CI runners have unstable sub-millisecond scheduling"]
 fn spin_wait_1ms_precision() {
-    let (_, p99, _) = measure_spin_precision(Duration::from_millis(1), 1000);
+    let p99 = measure_spin_precision(Duration::from_millis(1), 1000);
     assert!(
         p99 <= Duration::from_millis(2),
         "p99_late {}us > 2ms",
@@ -128,7 +122,7 @@ fn spin_wait_1ms_precision() {
 #[test]
 #[ignore = "requires a quiet local machine; CI runners have unstable sub-millisecond scheduling"]
 fn spin_wait_10ms_precision() {
-    let (_, p99, _) = measure_spin_precision(Duration::from_millis(10), 500);
+    let p99 = measure_spin_precision(Duration::from_millis(10), 500);
     assert!(
         p99 <= Duration::from_micros(300),
         "p99_late {}us > 300us",
@@ -139,7 +133,7 @@ fn spin_wait_10ms_precision() {
 #[test]
 #[ignore = "requires a quiet local machine; CI runners have unstable sub-millisecond scheduling"]
 fn spin_wait_100ms_precision() {
-    let (_, p99, _) = measure_spin_precision(Duration::from_millis(100), 100);
+    let p99 = measure_spin_precision(Duration::from_millis(100), 100);
     assert!(
         p99 <= Duration::from_micros(300),
         "p99_late {}us > 300us",

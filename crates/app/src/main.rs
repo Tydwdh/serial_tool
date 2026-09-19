@@ -78,11 +78,11 @@ fn main() -> eframe::Result<()> {
     }
 
     if std::env::args().any(|arg| arg == "--check-update-once") {
-        let rt = tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("failed to create tokio runtime");
-        match rt.block_on(tool_updater::update_info::fetch_update_info(
+        match runtime.block_on(tool_updater::update_info::fetch_update_info(
             tool_updater::UPDATE_JSON_URL,
         )) {
             Ok(info) => {
@@ -92,8 +92,8 @@ fn main() -> eframe::Result<()> {
                 );
                 return Ok(());
             }
-            Err(err) => {
-                eprintln!("update check failed: {err}");
+            Err(error) => {
+                eprintln!("update check failed: {error}");
                 std::process::exit(2);
             }
         }

@@ -15,7 +15,7 @@ use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{
     Event, EventTarget, Navigator, ReadableStreamDefaultReader, Serial, SerialOptions,
-    SerialOutputSignals, SerialPort, WritableStreamDefaultWriter,
+    SerialOutputSignals, SerialPort,
 };
 
 use crate::{
@@ -219,9 +219,7 @@ impl WebSerialTransport {
         if self.readers.borrow().contains_key(&id) {
             return Ok(());
         }
-        let readable = port.readable();
-        let reader_object = readable.get_reader();
-        let reader: ReadableStreamDefaultReader = reader_object.unchecked_into();
+        let reader: ReadableStreamDefaultReader = port.readable().get_reader().unchecked_into();
         self.readers.borrow_mut().insert(id.clone(), reader.clone());
         let readers = self.readers.clone();
         let active_sessions = self.active_sessions.clone();
@@ -337,10 +335,9 @@ impl TransportBackend for WebSerialTransport {
                 SerialParity::Even => web_sys::ParityType::Even,
             });
             WebSerialTransport::await_promise(port.open(&options)).await?;
-            let writer_object = port.writable().get_writer().map_err(|error| {
+            let writer = port.writable().get_writer().map_err(|error| {
                 TransportError::Operation(format!("get writer failed: {}", js_error(&error)))
             })?;
-            let writer: WritableStreamDefaultWriter = writer_object;
             let command_port = port.clone();
             let (sender, mut receiver) = mpsc::channel(1024);
             backend
@@ -440,7 +437,7 @@ impl TransportBackend for WebSerialTransport {
                     .await
                     .map_err(|_| TransportError::PortNotConnected(port_id.clone()))??;
             }
-            let reader = { backend.readers.borrow_mut().remove(&port_id) };
+            let reader = backend.readers.borrow_mut().remove(&port_id);
             if let Some(reader) = reader {
                 // A SerialPort cannot be closed while its readable stream is
                 // locked. Cancelling first also wakes the receive task so it

@@ -214,15 +214,7 @@ impl Event {
         direction: Direction,
         payload: Payload,
     ) -> Self {
-        Self {
-            id: 0,
-            timestamp_ms: now_timestamp_ms(),
-            topic: topic.into(),
-            source: source.into(),
-            direction,
-            payload,
-            metadata: json!({}),
-        }
+        Self::with_timestamp(now_timestamp_ms(), topic, source, direction, payload)
     }
 
     /// 使用指定时间戳创建事件（用于测试中冻结时间）。
@@ -300,8 +292,8 @@ impl Event {
         if !self.metadata.is_object() {
             self.metadata = json!({});
         }
-        // 安全获取 as_object_mut：因前面已确保 metadata 是 object，
-        // 但为防御性编程，仍使用 expect 给出明确错误信息。
+        // 上一步已保证 metadata 是 object；这里仍按 Option 处理而不是 expect，
+        // 是刻意防御：宁可静默跳过这一次写入，也不让打日志/回放的路径 panic。
         if let Some(obj) = self.metadata.as_object_mut() {
             obj.insert(key.to_owned(), value);
         }
@@ -462,15 +454,7 @@ pub fn topic_matches(pattern: &str, topic: &str) -> bool {
 /// 宽松模式解析 HEX：接受 `0x`/`0X` 前缀、`_`/`-` 分隔符、空白/`,`/`;` 分词，
 /// 并按兼容规则给奇数长度的长 token 左补 `0`。
 pub fn parse_hex(input: &str) -> Result<Vec<u8>, String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return Err("empty input".to_owned());
-    }
-
-    let tokens: Vec<&str> = trimmed
-        .split(|ch: char| ch.is_ascii_whitespace() || ch == ',' || ch == ';')
-        .filter(|token| !token.is_empty())
-        .collect();
+    let tokens = split_hex_tokens(input)?;
 
     // 单 token 与多 token 走同一个 parse_hex_token，保证分块/补0规则一致。
     let mut out = Vec::new();
@@ -478,6 +462,18 @@ pub fn parse_hex(input: &str) -> Result<Vec<u8>, String> {
         out.extend(parse_hex_token(token)?);
     }
     Ok(out)
+}
+
+/// HEX 输入的统一分词：空输入报 `"empty input"`，否则按空白 / `,` / `;` 切开并丢掉空串。
+fn split_hex_tokens(input: &str) -> Result<Vec<&str>, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("empty input".to_owned());
+    }
+    Ok(trimmed
+        .split(|ch: char| ch.is_ascii_whitespace() || ch == ',' || ch == ';')
+        .filter(|token| !token.is_empty())
+        .collect())
 }
 
 /// Parse HEX without the compatibility padding rules used by [`parse_hex`].
@@ -518,14 +514,7 @@ fn parse_hex_token(token: &str) -> Result<Vec<u8>, String> {
 /// 自动补0，与 hover 提示"严格模式：奇数 HEX 长度报错而非自动补0"一致）。
 /// 逐 token 校验，确保 `"0xA 0xB"` 这类单 nibble 输入报错而非静默补0。
 fn parse_hex_strict_line(line: &str) -> Result<Vec<u8>, String> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return Err("empty input".to_owned());
-    }
-    let tokens: Vec<&str> = trimmed
-        .split(|ch: char| ch.is_ascii_whitespace() || ch == ',' || ch == ';')
-        .filter(|token| !token.is_empty())
-        .collect();
+    let tokens = split_hex_tokens(line)?;
     let mut out = Vec::new();
     for token in &tokens {
         let normalized = normalize_hex_token(token);
@@ -564,9 +553,14 @@ pub fn hex_preview(input: &str) -> String {
     match parse_hex(input) {
         Ok(bytes) if !bytes.is_empty() => {
             let count = bytes.len();
-            let ascii: String = bytes
+            let shown = &bytes[..count.min(MAX_PREVIEW)];
+            let hex = shown
                 .iter()
-                .take(MAX_PREVIEW)
+                .map(|b| format!("{b:02X}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let ascii: String = shown
+                .iter()
                 .map(|&b| {
                     if b.is_ascii_graphic() || b == b' ' {
                         b as char
@@ -575,23 +569,12 @@ pub fn hex_preview(input: &str) -> String {
                     }
                 })
                 .collect();
-            let hex = if count > MAX_PREVIEW {
-                format!(
-                    "{}… (共{count}B)",
-                    bytes[..MAX_PREVIEW]
-                        .iter()
-                        .map(|b| format!("{b:02X}"))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                )
+            let truncated = if count > MAX_PREVIEW {
+                format!("… (共{count}B)")
             } else {
-                bytes
-                    .iter()
-                    .map(|b| format!("{b:02X}"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
+                String::new()
             };
-            format!("{hex}  |{ascii}|")
+            format!("{hex}{truncated}  |{ascii}|")
         }
         Ok(_) => "空".to_owned(),
         Err(_) => "解析失败".to_owned(),

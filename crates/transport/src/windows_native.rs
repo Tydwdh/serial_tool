@@ -9,13 +9,14 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 
 use crate::RepaintWaker;
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use tool_core::{Event, LogLevel};
 use tool_databus::DataBus;
 use windows_sys::Win32::Devices::Communication::{
-    CLRDTR, CLRRTS, COMMTIMEOUTS, COMSTAT, DCB, EVENPARITY, EscapeCommFunction, GetCommState,
-    NOPARITY, ODDPARITY, ONESTOPBIT, PURGE_RXABORT, PURGE_RXCLEAR, PURGE_TXABORT, PURGE_TXCLEAR,
-    PurgeComm, SETDTR, SETRTS, SetCommState, SetCommTimeouts, SetupComm, TWOSTOPBITS,
+    CLRDTR, CLRRTS, COMMTIMEOUTS, COMSTAT, ClearCommError, DCB, EVENPARITY, EscapeCommFunction,
+    GetCommState, NOPARITY, ODDPARITY, ONESTOPBIT, PURGE_RXABORT, PURGE_RXCLEAR, PURGE_TXABORT,
+    PURGE_TXCLEAR, PurgeComm, SETDTR, SETRTS, SetCommState, SetCommTimeouts, SetupComm,
+    TWOSTOPBITS,
 };
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, GetLastError, HANDLE,
@@ -45,12 +46,9 @@ unsafe impl Sync for WakeEvent {}
 impl WakeEvent {
     pub(crate) fn new() -> io::Result<Arc<Self>> {
         // Manual reset event. The worker resets it after draining queued commands.
-        let handle = unsafe { CreateEventW(null(), 1, 0, null()) };
-        if handle.is_null() {
-            Err(last_error())
-        } else {
-            Ok(Arc::new(Self { handle }))
-        }
+        Ok(Arc::new(Self {
+            handle: create_event(true)?,
+        }))
     }
 
     pub(crate) fn set(&self) {
@@ -84,12 +82,9 @@ struct EventHandle {
 
 impl EventHandle {
     fn new(manual_reset: bool) -> io::Result<Self> {
-        let handle = unsafe { CreateEventW(null(), manual_reset as i32, 0, null()) };
-        if handle.is_null() {
-            Err(last_error())
-        } else {
-            Ok(Self { handle })
-        }
+        Ok(Self {
+            handle: create_event(manual_reset)?,
+        })
     }
 
     fn raw(&self) -> HANDLE {
@@ -177,14 +172,7 @@ impl NativeWorker {
                 if !self.stop.load(Ordering::Relaxed)
                     && error.raw_os_error() != Some(ERROR_OPERATION_ABORTED as i32) =>
             {
-                self.bus.publish(Event::system_log(
-                    LogLevel::Error,
-                    "transport.serial",
-                    format!(
-                        "{} 串口错误：{error}",
-                        self.source.trim_start_matches("serial:")
-                    ),
-                ));
+                publish_port_error(&self.bus, &self.source, format_args!("串口错误：{error}"));
             }
             Err(_) => {}
         }
@@ -202,18 +190,7 @@ impl NativeWorker {
         loop {
             if self.stop.load(Ordering::Acquire) {
                 if read_pending {
-                    // MSDN 契约：CancelIoEx 返回 ≠ I/O 完成，必须经 GetOverlappedResult
-                    // 确认取消完成方可释放栈上的 OVERLAPPED，否则内核/驱动仍持有其引用。
-                    unsafe {
-                        let _ = CancelIoEx(self.port.handle, &read_overlapped);
-                        let mut transferred = 0_u32;
-                        let _ = GetOverlappedResult(
-                            self.port.handle,
-                            &read_overlapped,
-                            &mut transferred,
-                            0,
-                        );
-                    }
+                    cancel_pending_read(self.port.handle, &read_overlapped);
                 }
                 return Ok(());
             }
@@ -227,16 +204,7 @@ impl NativeWorker {
             )?;
             if self.stop.load(Ordering::Acquire) {
                 if read_pending {
-                    unsafe {
-                        let _ = CancelIoEx(self.port.handle, &read_overlapped);
-                        let mut transferred = 0_u32;
-                        let _ = GetOverlappedResult(
-                            self.port.handle,
-                            &read_overlapped,
-                            &mut transferred,
-                            0,
-                        );
-                    }
+                    cancel_pending_read(self.port.handle, &read_overlapped);
                 }
                 return Ok(());
             }
@@ -306,6 +274,34 @@ impl NativeWorker {
     }
 }
 
+/// MSDN 契约：`CancelIoEx` 返回 ≠ I/O 完成，必须经 `GetOverlappedResult` 确认取消完成
+/// 方可释放栈上的 OVERLAPPED，否则内核/驱动仍持有其引用。
+fn cancel_pending_read(handle: HANDLE, overlapped: &OVERLAPPED) {
+    unsafe {
+        let _ = CancelIoEx(handle, overlapped);
+        let mut transferred = 0_u32;
+        let _ = GetOverlappedResult(handle, overlapped, &mut transferred, 0);
+    }
+}
+
+/// 把命令的执行结果回填给等待方：成功只报 `Ok(())`，失败只带错误的 `ToString` 文案。
+/// 按值接管 `completion`，发送句柄就在本行析构 —— 与原内联写法同一个丢弃点。
+fn report_completion(completion: Option<Sender<Result<(), String>>>, result: &io::Result<()>) {
+    if let Some(completion) = completion {
+        let _ = completion.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+    }
+}
+
+/// 发布一条 `transport.serial` 系统错误日志。端口名用 `trim_start_matches`，它会去掉
+/// 连续多个 `serial:` 前缀 —— 与 `extract_port` 的单次 `strip_prefix` 口径并不相同。
+fn publish_port_error(bus: &DataBus, source: &str, detail: impl std::fmt::Display) {
+    bus.publish(Event::system_log(
+        LogLevel::Error,
+        "transport.serial",
+        format!("{} {detail}", source.trim_start_matches("serial:")),
+    ));
+}
+
 fn drain_commands(
     port: &NativeSerialPort,
     command_rx: &Receiver<SerialCommand>,
@@ -317,10 +313,7 @@ fn drain_commands(
         match command {
             SerialCommand::Write { bytes, completion } => {
                 let result = port.write_all(&bytes);
-                if let Some(completion) = completion {
-                    let _ =
-                        completion.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
-                }
+                report_completion(completion, &result);
                 result?;
                 bus.publish(serial_tx_event(source.to_owned(), bytes));
                 if let Some(w) = repaint_waker {
@@ -329,36 +322,16 @@ fn drain_commands(
             }
             SerialCommand::SetDtr { value, completion } => {
                 let result = port.set_dtr(value);
-                if let Some(completion) = completion {
-                    let _ =
-                        completion.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
-                }
+                report_completion(completion, &result);
                 if let Err(error) = result {
-                    bus.publish(Event::system_log(
-                        LogLevel::Error,
-                        "transport.serial",
-                        format!(
-                            "{} 设置 DTR 失败：{error}",
-                            source.trim_start_matches("serial:")
-                        ),
-                    ));
+                    publish_port_error(bus, source, format_args!("设置 DTR 失败：{error}"));
                 }
             }
             SerialCommand::SetRts { value, completion } => {
                 let result = port.set_rts(value);
-                if let Some(completion) = completion {
-                    let _ =
-                        completion.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
-                }
+                report_completion(completion, &result);
                 if let Err(error) = result {
-                    bus.publish(Event::system_log(
-                        LogLevel::Error,
-                        "transport.serial",
-                        format!(
-                            "{} 设置 RTS 失败：{error}",
-                            source.trim_start_matches("serial:")
-                        ),
-                    ));
+                    publish_port_error(bus, source, format_args!("设置 RTS 失败：{error}"));
                 }
             }
         }
@@ -575,13 +548,7 @@ impl NativeSerialPort {
     fn bytes_to_read(&self) -> io::Result<usize> {
         let mut errors = 0_u32;
         let mut status = COMSTAT::default();
-        cvt(unsafe {
-            windows_sys::Win32::Devices::Communication::ClearCommError(
-                self.handle,
-                &mut errors,
-                &mut status,
-            )
-        })?;
+        cvt(unsafe { ClearCommError(self.handle, &mut errors, &mut status) })?;
         Ok(status.cbInQue as usize)
     }
 
@@ -656,6 +623,15 @@ fn windows_port_path(port_name: &str) -> Vec<u16> {
 
 fn cvt(ok: i32) -> io::Result<()> {
     if ok == 0 { Err(last_error()) } else { Ok(()) }
+}
+
+/// 创建匿名事件句柄；句柄为空即失败，错误取 `GetLastError()`。
+fn create_event(manual_reset: bool) -> io::Result<HANDLE> {
+    let handle = unsafe { CreateEventW(null(), manual_reset as i32, 0, null()) };
+    if handle.is_null() {
+        return Err(last_error());
+    }
+    Ok(handle)
 }
 
 fn last_error() -> io::Error {

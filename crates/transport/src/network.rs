@@ -61,6 +61,15 @@ fn parse_gcode_response(text: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// 网络串口的错误一律以 `transport.network` 为来源、以端口名为前缀发布日志。
+fn publish_network_error(bus: &DataBus, port_name: &str, detail: impl std::fmt::Display) {
+    bus.publish(Event::system_log(
+        LogLevel::Error,
+        "transport.network",
+        format!("{port_name} {detail}"),
+    ));
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_network_worker(
     config: NetworkSerialConfig,
@@ -106,25 +115,19 @@ fn network_worker_loop(
     // 最多等待 2 秒，避免 worker 永久挂起导致端口无法关闭。
     // 所有失败分支保留具体错误原因，便于用户排障。
     let connect_failed = |reason: String| {
-        bus.publish(Event::system_log(
-            LogLevel::Error,
-            "transport.network",
-            format!("{port_name} 连接失败：{reason}"),
-        ));
+        publish_network_error(&bus, &port_name, format_args!("连接失败：{reason}"));
         connecting.store(false, Ordering::Release);
     };
-    let addr = match (config.host.as_str(), config.port).to_socket_addrs() {
-        Ok(mut addrs) => match addrs.next() {
-            Some(addr) => addr,
-            None => {
-                connect_failed(format!("无法解析主机名 {}", config.host));
-                return;
-            }
-        },
+    let mut addrs = match (config.host.as_str(), config.port).to_socket_addrs() {
+        Ok(addrs) => addrs,
         Err(error) => {
             connect_failed(format!("DNS 解析失败：{error}"));
             return;
         }
+    };
+    let Some(addr) = addrs.next() else {
+        connect_failed(format!("无法解析主机名 {}", config.host));
+        return;
     };
     let tcp = match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
         Ok(tcp) => tcp,
@@ -214,11 +217,7 @@ fn network_worker_loop(
                     if let Some(completion) = completion {
                         let _ = completion.send(Err(error.to_string()));
                     }
-                    bus.publish(Event::system_log(
-                        LogLevel::Error,
-                        "transport.network",
-                        format!("{port_name} 发送失败：{error}"),
-                    ));
+                    publish_network_error(&bus, &port_name, format_args!("发送失败：{error}"));
                     return;
                 }
             }
@@ -244,11 +243,7 @@ fn network_worker_loop(
                     std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
                 ) => {}
             Err(error) => {
-                bus.publish(Event::system_log(
-                    LogLevel::Error,
-                    "transport.network",
-                    format!("{port_name} 连接断开：{error}"),
-                ));
+                publish_network_error(&bus, &port_name, format_args!("连接断开：{error}"));
                 return;
             }
         }

@@ -1,33 +1,36 @@
 use crate::app::WorkbenchApp;
-use tool_core::{Direction, Event, Payload, topics};
+use tool_application::AppCommand;
+use tool_application::query::PluginStateView;
+use tool_core::{Direction, Event, LogLevel, Payload, topics};
 
 impl WorkbenchApp {
     /// 发布插件命令动作（模拟 UI 按钮点击）。
     pub(crate) fn publish_plugin_command_action(&mut self, plugin_id: &str, command_id: &str) {
-        // 查找该插件的 UI contribution 信息以确定是否 record_send_input
         let summaries = self.workbench.query_plugins().summaries;
-        let record_send_input = summaries
-            .iter()
-            .find(|s| s.id == plugin_id)
-            .and_then(|s| {
-                s.contributes
+        let plugin = summaries.iter().find(|summary| summary.id == plugin_id);
+
+        // 该插件的 UI contribution 若声明 record_send_input，则把当前发送框内容并入历史
+        let record_send_input = plugin
+            .and_then(|summary| {
+                summary
+                    .contributes
                     .ui
                     .iter()
-                    .find(|ui| ui.command.as_deref() == Some(command_id))
+                    .find(|contribution| contribution.command.as_deref() == Some(command_id))
             })
-            .map(|ui| ui.record_send_input)
-            .unwrap_or(false);
+            .is_some_and(|contribution| contribution.record_send_input);
 
         if record_send_input {
             self.record_send_history(self.send.input.clone());
         }
 
         // Authorize file access if plugin has fs.read.user_selected permission
-        let has_fs_permission = summaries
-            .iter()
-            .find(|s| s.id == plugin_id)
-            .map(|s| s.permissions.iter().any(|p| p == "fs.read.user_selected"))
-            .unwrap_or(false);
+        let has_fs_permission = plugin.is_some_and(|summary| {
+            summary
+                .permissions
+                .iter()
+                .any(|permission| permission == "fs.read.user_selected")
+        });
 
         if has_fs_permission {
             let input = self.send.input.trim();
@@ -104,16 +107,14 @@ impl WorkbenchApp {
         // 尝试一次，避免扫描尚未完成时把“未找到”误报成启动错误。
         let configured = self.workbench.query_enabled_plugin_ids();
         for plugin_id in configured {
-            if self.workbench.plugin_state(&plugin_id)
-                == Some(tool_application::query::PluginStateView::Discovered)
-                && let Err(error) =
-                    self.workbench
-                        .dispatch(tool_application::AppCommand::EnablePlugin {
-                            plugin_id: plugin_id.clone(),
-                        })
-            {
+            if self.workbench.plugin_state(&plugin_id) != Some(PluginStateView::Discovered) {
+                continue;
+            }
+            if let Err(error) = self.workbench.dispatch(AppCommand::EnablePlugin {
+                plugin_id: plugin_id.clone(),
+            }) {
                 self.log(
-                    tool_core::LogLevel::Warn,
+                    LogLevel::Warn,
                     format!("恢复插件 {plugin_id} 失败：{error}"),
                 );
             }
@@ -133,8 +134,9 @@ impl WorkbenchApp {
 
         for plugin_id in self.workbench.take_plugin_cleanup_requests() {
             let removed = self.dynamic_panels.remove_by_plugin(&plugin_id);
-            for id in &removed {
-                self.panels.close_tab(tool_panels::PanelId::dynamic(id));
+            for panel_id in &removed {
+                self.panels
+                    .close_tab(tool_panels::PanelId::dynamic(panel_id));
             }
             self.workbench.clear_plugin_file_authorization(&plugin_id);
             let prefix = format!("{plugin_id}:");
@@ -152,7 +154,7 @@ impl WorkbenchApp {
     /// 使用专用 topic `ui.contribution.set.value`，与动态面板的 `ui.form.set_value` 隔离。
     fn process_contribution_set_value(&mut self) {
         for event in self.ui_events.drain_contribution_set_value(64) {
-            let tool_core::Payload::Json(payload) = event.payload else {
+            let Payload::Json(payload) = event.payload else {
                 continue;
             };
             // 要求 panel_id == "__contribution__" 作为哨兵，防止误消费面板事件

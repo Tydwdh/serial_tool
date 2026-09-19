@@ -63,6 +63,8 @@ pub(crate) fn show_dock<H: DockHost>(host: &mut H, ui: &mut egui::Ui) {
     if layout.reconcile_plugin_groups() {
         host.mark_layout_dirty();
     }
+    // 渲染期间若另有逻辑整体换掉了 `tiles`，就不能用本次的旧副本把它覆盖回去：
+    // 只有 `tiles` 仍是进来时那一份时才写回。
     if host.panels().tiles.as_ref() == Some(&original_layout) {
         host.panels().tiles = Some(layout);
     }
@@ -70,6 +72,16 @@ pub(crate) fn show_dock<H: DockHost>(host: &mut H, ui: &mut egui::Ui) {
 
 struct SharedTiles<'a, H> {
     host: &'a mut H,
+}
+
+/// 1px 分隔线的统一构造：颜色全透明时退化为 `Stroke::NONE`。
+/// tab 外框与 tab 栏下划线共用这条判定。
+fn hairline(color: egui::Color32) -> egui::Stroke {
+    if color.a() == 0 {
+        egui::Stroke::NONE
+    } else {
+        egui::Stroke::new(1.0, color)
+    }
 }
 
 impl<H: DockHost> SharedTiles<'_, H> {
@@ -107,15 +119,11 @@ impl<H: DockHost> Behavior<PanelId> for SharedTiles<'_, H> {
         match tiles.get(tile_id) {
             Some(Tile::Pane(pane)) => self.tab_title_for_pane(pane),
             Some(Tile::Container(Container::Tabs(tabs))) => {
-                if let Some(Tile::Pane(pane)) = tabs
-                    .children
-                    .iter()
-                    .find_map(|child_id| tiles.get(*child_id))
-                    .filter(|_| tabs.children.len() == 1)
-                {
-                    self.tab_title_for_pane(pane)
-                } else {
-                    format!("标签组（{}）", tabs.children.len()).into()
+                // 只装了一个面板的标签组仍显示那个面板的标题；多标签才显示组名。
+                let single_child = tabs.children.first().filter(|_| tabs.children.len() == 1);
+                match single_child.and_then(|child_id| tiles.get(*child_id)) {
+                    Some(Tile::Pane(pane)) => self.tab_title_for_pane(pane),
+                    _ => format!("标签组（{}）", tabs.children.len()).into(),
                 }
             }
             Some(Tile::Container(container)) => format!("{:?}", container.kind()).into(),
@@ -157,24 +165,14 @@ impl<H: DockHost> Behavior<PanelId> for SharedTiles<'_, H> {
         state: &TabState,
     ) -> egui::Stroke {
         if state.active {
-            let color = theme::tab_active_outline();
-            if color.a() == 0 {
-                egui::Stroke::NONE
-            } else {
-                egui::Stroke::new(1.0, color)
-            }
+            hairline(theme::tab_active_outline())
         } else {
             egui::Stroke::NONE
         }
     }
 
     fn tab_bar_hline_stroke(&self, _visuals: &egui::Visuals) -> egui::Stroke {
-        let color = theme::tab_bar_outline();
-        if color.a() == 0 {
-            egui::Stroke::NONE
-        } else {
-            egui::Stroke::new(1.0, color)
-        }
+        hairline(theme::tab_bar_outline())
     }
 
     fn tab_text_color(
@@ -217,6 +215,8 @@ impl<H: DockHost> Behavior<PanelId> for SharedTiles<'_, H> {
         painter: &egui::Painter,
         preview: DragPreview,
     ) {
+        // 目标区域（有父容器时用父容器）的中心：既是拆分方向的参照点，也是徽标的位置。
+        let badge_center = preview.parent_rect.unwrap_or(preview.target_rect).center();
         let (label, color) = match preview.insertion_kind {
             ContainerKind::Tabs => {
                 let label = self
@@ -236,8 +236,7 @@ impl<H: DockHost> Behavior<PanelId> for SharedTiles<'_, H> {
                 (label, theme::purple())
             }
             ContainerKind::Horizontal => {
-                let center = preview.parent_rect.unwrap_or(preview.target_rect).center();
-                let label = if preview.preview_rect.center().x <= center.x {
+                let label = if preview.preview_rect.center().x <= badge_center.x {
                     "左侧拆分"
                 } else {
                     "右侧拆分"
@@ -245,8 +244,7 @@ impl<H: DockHost> Behavior<PanelId> for SharedTiles<'_, H> {
                 (label.to_owned(), theme::blue())
             }
             ContainerKind::Vertical => {
-                let center = preview.parent_rect.unwrap_or(preview.target_rect).center();
-                let label = if preview.preview_rect.center().y <= center.y {
+                let label = if preview.preview_rect.center().y <= badge_center.y {
                     "上方拆分"
                 } else {
                     "下方拆分"
@@ -263,7 +261,6 @@ impl<H: DockHost> Behavior<PanelId> for SharedTiles<'_, H> {
             egui::Stroke::new(2.0, color),
             egui::StrokeKind::Inside,
         );
-        let badge_center = preview.parent_rect.unwrap_or(preview.target_rect).center();
         let badge_width = (label.chars().count() as f32 * 16.0 + 32.0).clamp(132.0, 300.0);
         let badge_rect = egui::Rect::from_center_size(badge_center, egui::vec2(badge_width, 30.0));
         painter.rect(

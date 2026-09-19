@@ -5,13 +5,13 @@ use serialport as sp;
 use std::collections::HashMap;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use std::thread;
-use std::thread::JoinHandle;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use thiserror::Error;
 use tool_core::{Direction, Event, LogLevel, Payload};
+use tool_databus::DataBus;
 
 mod network;
 pub use network::NetworkSerialConfig;
@@ -40,7 +40,6 @@ pub(crate) enum SerialCommand {
         completion: Option<Sender<Result<(), String>>>,
     },
 }
-use tool_databus::DataBus;
 
 /// UI 重绘唤醒器。由 app 层注入，worker 在 publish RX/TX 事件后调用，
 /// 使 UI 立即重绘而非等待 80ms 轮询。
@@ -260,8 +259,6 @@ impl TransportStatus {
     }
 }
 
-use std::sync::atomic::AtomicU64;
-
 /// 串口生命周期管理器。
 ///
 /// # Safety / 所有权
@@ -279,7 +276,7 @@ pub struct TransportManager {
     ports: Arc<Mutex<HashMap<String, PortHandle>>>,
     closing: Arc<Mutex<Vec<ClosingHandle>>>,
     /// 上次 reap_closing 的时间戳，用于节流。
-    last_reap_time: Arc<std::sync::atomic::AtomicU64>,
+    last_reap_time: Arc<AtomicU64>,
     /// UI 重绘唤醒器，app 层注入。worker publish 串口事件后调用以立即重绘。
     /// `Arc<Mutex<Option<...>>>` 让所有 TransportManager clone 共享同一 waker（仅 app 启动时设一次）。
     repaint_waker: Arc<Mutex<Option<Arc<dyn RepaintWaker>>>>,
@@ -325,6 +322,22 @@ struct ClosingHandle {
     join: JoinHandle<()>,
 }
 
+impl PortHandle {
+    /// 请求 worker 退出并取走它的 `JoinHandle`。
+    ///
+    /// 三步顺序固定：先以 Release 置 `stop`，再唤醒 Windows 上阻塞等待的 worker，
+    /// 最后 `take` 走 join。`close_port` / `close_port_blocking` / `reap_dead_ports`
+    /// 三条关闭路径共用这一份实现，顺序也因此只有一处需要审。
+    fn request_stop(&mut self) -> Option<JoinHandle<()>> {
+        self.stop.store(true, Ordering::Release);
+        #[cfg(windows)]
+        if let Some(wake) = &self.wake {
+            wake.set();
+        }
+        self.join.take()
+    }
+}
+
 /// worker 线程退出（正常返回 **或 panic 展开**）时把 `alive` 置 false。
 ///
 /// 显式 `alive.store(false)` 只写在 `return` 路径上，panic 展开会全部跳过，
@@ -354,6 +367,41 @@ impl Drop for AliveGuard {
 fn port_is_dead(handle: &PortHandle) -> bool {
     !handle.alive.load(Ordering::Acquire)
         || handle.join.as_ref().is_some_and(|join| join.is_finished())
+}
+
+/// 单个句柄的状态快照：已死亡的句柄一律报 closed（不把僵尸端口显示为已打开），
+/// 网络模拟串口在 `connecting` 期间同样 `open = false` —— 只有真实连上服务器
+/// 之后才算打开，UI 据此区分"连接中"与"已断开"。
+fn status_for(handle: &PortHandle) -> TransportStatus {
+    if port_is_dead(handle) {
+        return TransportStatus::closed();
+    }
+    let connecting = handle.connecting.load(Ordering::Relaxed);
+    TransportStatus {
+        open: !connecting,
+        port_name: Some(handle.config.port_name.clone()),
+        baud_rate: Some(handle.config.baud_rate),
+        connecting,
+    }
+}
+
+/// 等待 worker 回投的完成通知（"命令已被执行"，而非"命令已入队"）。
+/// 超时与断连各映射到固定错误变体；`timed_out_message` 只是区分写入/控制信号
+/// 两类超时的中文文案，不改变错误类型。
+fn wait_for_completion(
+    result: crossbeam_channel::Receiver<Result<(), String>>,
+    timeout: Duration,
+    timed_out_message: &str,
+) -> TransportResult<()> {
+    result
+        .recv_timeout(timeout)
+        .map_err(|error| match error {
+            crossbeam_channel::RecvTimeoutError::Timeout => TransportError::Io(
+                std::io::Error::new(std::io::ErrorKind::TimedOut, timed_out_message),
+            ),
+            crossbeam_channel::RecvTimeoutError::Disconnected => TransportError::WorkerClosed,
+        })?
+        .map_err(|error| TransportError::Io(std::io::Error::other(error)))
 }
 
 impl TransportManager {
@@ -458,12 +506,12 @@ impl TransportManager {
     // ── 打开端口 ──
     pub fn open_serial(&self, mut config: SerialConfig) -> TransportResult<()> {
         // 大小写不敏感端口名解析（用户可能输入 "com3" 而实际是 "COM3"）
-        let available = sp::available_ports().unwrap_or_default();
-        let resolved = available
-            .iter()
+        let resolved = sp::available_ports()
+            .unwrap_or_default()
+            .into_iter()
             .find(|p| p.port_name.eq_ignore_ascii_case(&config.port_name));
         if let Some(p) = resolved {
-            config.port_name = p.port_name.clone();
+            config.port_name = p.port_name;
         }
         // 先收割已完成关闭的旧 worker
         self.reap_closing();
@@ -553,7 +601,7 @@ impl TransportManager {
             })?;
 
             thread::spawn(move || {
-                serial_worker_loop(
+                serial_worker_loop_impl(
                     port,
                     command_rx,
                     thread_stop,
@@ -781,12 +829,7 @@ impl TransportManager {
             let key = Self::resolve_open_port_name_locked(&guard, port_name)
                 .unwrap_or_else(|| port_name.to_owned());
             guard.remove(&key).map(|mut worker| {
-                worker.stop.store(true, Ordering::Release);
-                #[cfg(windows)]
-                if let Some(wake) = &worker.wake {
-                    wake.set();
-                }
-                let join = worker.join.take();
+                let join = worker.request_stop();
                 let port_name = worker.config.port_name.clone();
                 let baud_rate = worker.config.baud_rate;
                 (port_name, baud_rate, join)
@@ -814,12 +857,7 @@ impl TransportManager {
             let Some(mut worker) = guard.remove(&key) else {
                 return Ok(());
             };
-            worker.stop.store(true, Ordering::Release);
-            #[cfg(windows)]
-            if let Some(wake) = &worker.wake {
-                wake.set();
-            }
-            let join = worker.join.take();
+            let join = worker.request_stop();
             (
                 worker.config.port_name.clone(),
                 worker.config.baud_rate,
@@ -860,8 +898,7 @@ impl TransportManager {
         )
     }
 
-    /// Enqueue a write and wait until the single port worker has completed it.
-    /// This is the semantic used by the asynchronous platform backend.
+    /// 入队一次写入并等待唯一的端口 worker 真正执行完毕 —— 这是异步平台后端使用的语义。
     pub fn send_to_blocking(
         &self,
         port_name: &str,
@@ -876,15 +913,7 @@ impl TransportManager {
                 completion: Some(completion),
             },
         )?;
-        result
-            .recv_timeout(timeout)
-            .map_err(|error| match error {
-                crossbeam_channel::RecvTimeoutError::Timeout => TransportError::Io(
-                    std::io::Error::new(std::io::ErrorKind::TimedOut, "串口写入超时"),
-                ),
-                crossbeam_channel::RecvTimeoutError::Disconnected => TransportError::WorkerClosed,
-            })?
-            .map_err(|error| TransportError::Io(std::io::Error::other(error)))
+        wait_for_completion(result, timeout, "串口写入超时")
     }
 
     fn enqueue_command(&self, port_name: &str, command: SerialCommand) -> TransportResult<()> {
@@ -959,39 +988,15 @@ impl TransportManager {
         let key = Self::resolve_open_port_name_locked(&guard, port_name)
             .unwrap_or_else(|| port_name.to_owned());
         match guard.get(&key) {
-            Some(w) if !port_is_dead(w) => {
-                let connecting = w.connecting.load(Ordering::Relaxed);
-                TransportStatus {
-                    open: !connecting,
-                    port_name: Some(w.config.port_name.clone()),
-                    baud_rate: Some(w.config.baud_rate),
-                    connecting,
-                }
-            }
-            _ => TransportStatus::closed(),
+            Some(handle) => status_for(handle),
+            None => TransportStatus::closed(),
         }
     }
 
     pub fn status_all(&self) -> Vec<TransportStatus> {
         self.reap_closing();
         self.reap_dead_ports();
-        self.ports
-            .lock()
-            .values()
-            .map(|w| {
-                if port_is_dead(w) {
-                    TransportStatus::closed()
-                } else {
-                    let connecting = w.connecting.load(Ordering::Relaxed);
-                    TransportStatus {
-                        open: !connecting,
-                        port_name: Some(w.config.port_name.clone()),
-                        baud_rate: Some(w.config.baud_rate),
-                        connecting,
-                    }
-                }
-            })
-            .collect()
+        self.ports.lock().values().map(status_for).collect()
     }
 
     pub fn open_ports(&self) -> Vec<String> {
@@ -1055,31 +1060,18 @@ impl TransportManager {
     fn send_control_blocking(
         &self,
         port_name: &str,
-        command: SerialCommand,
+        mut command: SerialCommand,
         timeout: Duration,
     ) -> TransportResult<()> {
-        let (completion, result) = bounded(1);
-        let command = match command {
-            SerialCommand::SetDtr { value, .. } => SerialCommand::SetDtr {
-                value,
-                completion: Some(completion),
-            },
-            SerialCommand::SetRts { value, .. } => SerialCommand::SetRts {
-                value,
-                completion: Some(completion),
-            },
+        let (sender, result) = bounded(1);
+        match &mut command {
+            SerialCommand::SetDtr { completion, .. } | SerialCommand::SetRts { completion, .. } => {
+                *completion = Some(sender)
+            }
             SerialCommand::Write { .. } => unreachable!("control command expected"),
-        };
+        }
         self.enqueue_command(port_name, command)?;
-        result
-            .recv_timeout(timeout)
-            .map_err(|error| match error {
-                crossbeam_channel::RecvTimeoutError::Timeout => TransportError::Io(
-                    std::io::Error::new(std::io::ErrorKind::TimedOut, "串口控制信号超时"),
-                ),
-                crossbeam_channel::RecvTimeoutError::Disconnected => TransportError::WorkerClosed,
-            })?
-            .map_err(|error| TransportError::Io(std::io::Error::other(error)))
+        wait_for_completion(result, timeout, "串口控制信号超时")
     }
 
     /// 清理已退出 worker 的 stale port handle（[`port_is_dead`] 的两个信号任一成立）。
@@ -1101,13 +1093,9 @@ impl TransportManager {
                 .into_iter()
                 .filter_map(|name| {
                     let mut handle = guard.remove(&name)?;
-                    // stop 已无意义（worker 已死），但保持对称并防御性置位。
-                    handle.stop.store(true, Ordering::Release);
-                    #[cfg(windows)]
-                    if let Some(wake) = &handle.wake {
-                        wake.set();
-                    }
-                    let join = handle.join.take();
+                    // request_stop 里的 stop 已无意义（worker 已死），但保持三条关闭
+                    // 路径对称并防御性置位。
+                    let join = handle.request_stop();
                     Some((
                         handle.config.port_name.clone(),
                         handle.config.baud_rate,
@@ -1135,7 +1123,7 @@ impl TransportManager {
 
 // ── 串口 I/O trait ──
 
-/// 串口读写抽象，使 `serial_worker_loop` 可测试。
+/// 串口读写抽象，使 `serial_worker_loop_impl` 可测试。
 /// 生产实现：`Box<dyn sp::SerialPort>`（通过 blanket impl 自动满足）。
 /// 测试实现：`MockSerialPort`。
 #[cfg(any(not(windows), test))]
@@ -1165,19 +1153,6 @@ impl SerialIo for Box<dyn sp::SerialPort> {
 }
 
 // ── 串口工作线程 ──
-
-#[cfg(not(windows))]
-fn serial_worker_loop(
-    port: Box<dyn sp::SerialPort>,
-    command_rx: crossbeam_channel::Receiver<SerialCommand>,
-    stop: Arc<AtomicBool>,
-    alive: Arc<AtomicBool>,
-    bus: DataBus,
-    source: String,
-    waker: Option<Arc<dyn RepaintWaker>>,
-) {
-    serial_worker_loop_impl(port, command_rx, stop, alive, bus, source, waker)
-}
 
 #[cfg(any(not(windows), test))]
 #[allow(clippy::too_many_arguments)]
@@ -1257,6 +1232,25 @@ fn complete_command(completion: Option<Sender<Result<(), String>>>, result: &std
 }
 
 #[cfg(any(not(windows), test))]
+fn finish_signal_command(
+    bus: &DataBus,
+    port_name: &str,
+    label: &str,
+    result: std::io::Result<()>,
+    completion: Option<Sender<Result<(), String>>>,
+) -> std::io::Result<()> {
+    complete_command(completion, &result);
+    if let Err(error) = &result {
+        bus.publish(Event::system_log(
+            LogLevel::Error,
+            "transport.serial",
+            format!("{port_name} 设置 {label} 失败：{error}"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(any(not(windows), test))]
 fn execute_serial_command(
     port: &mut impl SerialIo,
     command: SerialCommand,
@@ -1285,30 +1279,21 @@ fn execute_serial_command(
                 }
             }
         }
-        SerialCommand::SetDtr { value, completion } => {
-            let result = port.write_data_terminal_ready(value);
-            complete_command(completion, &result);
-            if let Err(error) = &result {
-                bus.publish(Event::system_log(
-                    LogLevel::Error,
-                    "transport.serial",
-                    format!("{port_name} 设置 DTR 失败：{error}"),
-                ));
-            }
-            Ok(())
-        }
-        SerialCommand::SetRts { value, completion } => {
-            let result = port.write_request_to_send(value);
-            complete_command(completion, &result);
-            if let Err(error) = &result {
-                bus.publish(Event::system_log(
-                    LogLevel::Error,
-                    "transport.serial",
-                    format!("{port_name} 设置 RTS 失败：{error}"),
-                ));
-            }
-            Ok(())
-        }
+        // 与写入不同：信号线设置失败只记日志，不让 worker 退出。
+        SerialCommand::SetDtr { value, completion } => finish_signal_command(
+            bus,
+            port_name,
+            "DTR",
+            port.write_data_terminal_ready(value),
+            completion,
+        ),
+        SerialCommand::SetRts { value, completion } => finish_signal_command(
+            bus,
+            port_name,
+            "RTS",
+            port.write_request_to_send(value),
+            completion,
+        ),
     }
 }
 
@@ -1353,6 +1338,7 @@ impl From<DataBits> for sp::DataBits {
         }
     }
 }
+
 impl From<StopBits> for sp::StopBits {
     fn from(v: StopBits) -> Self {
         match v {
@@ -1361,6 +1347,7 @@ impl From<StopBits> for sp::StopBits {
         }
     }
 }
+
 impl From<Parity> for sp::Parity {
     fn from(v: Parity) -> Self {
         match v {
@@ -1391,18 +1378,18 @@ pub fn send_impl_to(
         // 事务性预校验：先解析所有行，任一行失败则不发送任何数据（避免部分发送）。
         // 判定规则在 `tool_core`（与 web 侧同一份）；这里按行调用，
         // `parse_hex_strict` 即原 `parse_hex_strict_line`，对单行输入语义不变。
+        let parse_line = if hex_strict {
+            tool_core::parse_hex_strict
+        } else {
+            tool_core::parse_hex
+        };
         let mut pending: Vec<Vec<u8>> = Vec::with_capacity(input.lines().count());
         for line in input.lines() {
-            let x = line.trim();
-            if x.is_empty() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
                 continue;
             }
-            let parsed = if hex_strict {
-                tool_core::parse_hex_strict(x)
-            } else {
-                tool_core::parse_hex(x)
-            };
-            pending.push(parsed.map_err(TransportError::InvalidHex)?);
+            pending.push(parse_line(trimmed).map_err(TransportError::InvalidHex)?);
         }
         for bytes in pending {
             t.send_to(port, bytes)?;
@@ -1444,15 +1431,18 @@ pub fn translate_error(err: &TransportError) -> String {
                 format!("串口错误：{msg}")
             }
         }
-        TransportError::Io(e) if is_permission_denied(&e.to_string().to_ascii_lowercase()) => {
-            serial_permission_message(&e.to_string())
+        TransportError::Io(e) => {
+            let message = e.to_string();
+            if is_permission_denied(&message.to_ascii_lowercase()) {
+                return serial_permission_message(&message);
+            }
+            match e.kind() {
+                std::io::ErrorKind::WouldBlock => message, // "正在关闭中" 等业务状态文案已含中文
+                std::io::ErrorKind::TimedOut => format!("操作超时：{message}"),
+                std::io::ErrorKind::InvalidData => message, // HEX 严格模式奇偶校验文案已含中文
+                _ => format!("IO 错误：{message}"),
+            }
         }
-        TransportError::Io(e) => match e.kind() {
-            std::io::ErrorKind::WouldBlock => e.to_string(), // "正在关闭中" 等业务状态文案已含中文
-            std::io::ErrorKind::TimedOut => format!("操作超时：{e}"),
-            std::io::ErrorKind::InvalidData => e.to_string(), // HEX 严格模式奇偶校验文案已含中文
-            _ => format!("IO 错误：{e}"),
-        },
     }
 }
 
@@ -1481,6 +1471,8 @@ fn serial_permission_message(detail: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex as StdMutex;
+    use tool_databus::TopicFilter;
 
     // HEX 解析用例（原 `parses_spaced_hex` … `parse_hex_strict_rejects_odd_long_token`，共 10 条）
     // 随函数一并迁入 `crates/core/src/lib.rs` 的 `mod tests`，断言逐字未改。
@@ -1533,9 +1525,6 @@ mod tests {
     }
 
     // ── MockSerialPort + worker loop 测试 ──
-
-    use std::sync::Mutex as StdMutex;
-    use tool_databus::TopicFilter;
 
     struct MockSerialPort {
         read_data: StdMutex<Vec<Vec<u8>>>,
@@ -1849,22 +1838,24 @@ mod transport_tests {
     use super::*;
     use tool_databus::TopicFilter;
 
+    /// 构造测试用 PortHandle（无真实 worker 线程，join=None）。
+    fn make_test_handle(alive: bool) -> PortHandle {
+        PortHandle {
+            config: SerialConfig::default(),
+            connecting: Arc::new(AtomicBool::new(false)),
+            writer: bounded::<SerialCommand>(1).0,
+            #[cfg(windows)]
+            wake: None,
+            stop: Arc::new(AtomicBool::new(false)),
+            alive: Arc::new(AtomicBool::new(alive)),
+            join: None,
+        }
+    }
+
     #[test]
     fn resolve_open_port_name_exact_match() {
         let mut ports = HashMap::new();
-        ports.insert(
-            "COM3".to_owned(),
-            PortHandle {
-                config: SerialConfig::default(),
-                connecting: Arc::new(AtomicBool::new(false)),
-                writer: bounded::<SerialCommand>(1).0,
-                #[cfg(windows)]
-                wake: None,
-                stop: Arc::new(AtomicBool::new(false)),
-                alive: Arc::new(AtomicBool::new(true)),
-                join: None,
-            },
-        );
+        ports.insert("COM3".to_owned(), make_test_handle(true));
         assert_eq!(
             TransportManager::resolve_open_port_name_locked(&ports, "COM3"),
             Some("COM3".to_owned())
@@ -1874,19 +1865,7 @@ mod transport_tests {
     #[test]
     fn resolve_open_port_name_case_insensitive() {
         let mut ports = HashMap::new();
-        ports.insert(
-            "COM3".to_owned(),
-            PortHandle {
-                config: SerialConfig::default(),
-                connecting: Arc::new(AtomicBool::new(false)),
-                writer: bounded::<SerialCommand>(1).0,
-                #[cfg(windows)]
-                wake: None,
-                stop: Arc::new(AtomicBool::new(false)),
-                alive: Arc::new(AtomicBool::new(true)),
-                join: None,
-            },
-        );
+        ports.insert("COM3".to_owned(), make_test_handle(true));
         assert_eq!(
             TransportManager::resolve_open_port_name_locked(&ports, "com3"),
             Some("COM3".to_owned())
@@ -1934,20 +1913,6 @@ mod transport_tests {
     }
 
     // ── #13: TransportManager 并发状态机测试 ──
-
-    /// 构造测试用 PortHandle（无真实 worker 线程，join=None）。
-    fn make_test_handle(alive: bool) -> PortHandle {
-        PortHandle {
-            config: SerialConfig::default(),
-            connecting: Arc::new(AtomicBool::new(false)),
-            writer: bounded::<SerialCommand>(1).0,
-            #[cfg(windows)]
-            wake: None,
-            stop: Arc::new(AtomicBool::new(false)),
-            alive: Arc::new(AtomicBool::new(alive)),
-            join: None,
-        }
-    }
 
     /// 自旋等待线程终止。断言对象是"线程已终止"这一事实本身，时限只是防止
     /// 测试永久卡死的兜底，**不是**通过条件（被测线程除了 panic 什么都不做）。

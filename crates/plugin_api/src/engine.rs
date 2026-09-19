@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::{PluginHostApi, PluginPermissions, PluginResult, PluginValue};
+use crate::{PluginError, PluginHostApi, PluginPermissions, PluginResult, PluginValue};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct PluginInstanceId(pub u64);
@@ -74,7 +74,7 @@ pub trait LuaEngine {
         _instance: PluginInstanceId,
         _event: PluginValue,
     ) -> PluginResult<()> {
-        Err(crate::PluginError::UnsupportedCapability(
+        Err(PluginError::UnsupportedCapability(
             "bus.subscribe".to_owned(),
         ))
     }
@@ -85,9 +85,7 @@ pub trait LuaEngine {
         _command: &str,
         _context: PluginValue,
     ) -> PluginResult<PluginCallResult> {
-        Err(crate::PluginError::UnsupportedCapability(
-            "commands".to_owned(),
-        ))
+        Err(PluginError::UnsupportedCapability("commands".to_owned()))
     }
 
     fn update_settings(
@@ -95,8 +93,6 @@ pub trait LuaEngine {
         _instance: PluginInstanceId,
         _settings: PluginValue,
     ) -> PluginResult<()> {
-        Err(crate::PluginError::UnsupportedCapability(
-            "config".to_owned(),
-        ))
+        Err(PluginError::UnsupportedCapability("config".to_owned()))
     }
 }

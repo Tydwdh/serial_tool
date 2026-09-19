@@ -186,8 +186,7 @@ pub trait PluginHostApi {
     }
 
     fn serial_devices(&self) -> PluginResult<Vec<PluginSerialDevice>> {
-        let value = self.request(PluginHostRequest::SerialDevices)?;
-        let json = value.to_json()?;
+        let json = self.request(PluginHostRequest::SerialDevices)?.to_json()?;
         serde_json::from_value(json)
             .map_err(|error| PluginError::InvalidValue(format!("serial devices: {error}")))
     }

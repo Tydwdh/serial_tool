@@ -3,10 +3,12 @@ use eframe::egui;
 use std::path::PathBuf;
 use tool_panels::theme;
 
+/// 默认窗口宽度。
 #[cfg(not(target_arch = "wasm32"))]
-pub const DEFAULT_WINDOW_WIDTH: f32 = 1280.0; //默认窗口宽度
+pub const DEFAULT_WINDOW_WIDTH: f32 = 1280.0;
+/// 默认窗口高度。
 #[cfg(not(target_arch = "wasm32"))]
-pub const DEFAULT_WINDOW_HEIGHT: f32 = 820.0; //默认窗口高度
+pub const DEFAULT_WINDOW_HEIGHT: f32 = 820.0;
 
 /// 应用所在目录（基于 exe 路径，不依赖 CWD）。
 #[cfg(not(target_arch = "wasm32"))]
@@ -116,13 +118,11 @@ pub fn setup_fonts(cc: &eframe::CreationContext<'_>) {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn load_font(fonts: &mut egui::FontDefinitions, name: &str, paths: &[PathBuf]) {
-    for path in paths {
-        if let Ok(bytes) = std::fs::read(path) {
-            fonts
-                .font_data
-                .insert(name.to_owned(), egui::FontData::from_owned(bytes).into());
-            return;
-        }
+    // 按候选顺序取第一个能读到的字体文件；全都读不到就不注册该字体。
+    if let Some(bytes) = paths.iter().find_map(|path| std::fs::read(path).ok()) {
+        fonts
+            .font_data
+            .insert(name.to_owned(), egui::FontData::from_owned(bytes).into());
     }
 }
 
@@ -141,17 +141,14 @@ fn set_family(fonts: &mut egui::FontDefinitions, family: egui::FontFamily, names
 pub fn apply_theme(ctx: &egui::Context, selected_theme: theme::AppTheme) {
     theme::set_active_theme(selected_theme);
     let is_dark = theme::active_theme_is_dark();
-    let egui_theme = if is_dark {
-        egui::Theme::Dark
+    let (egui_theme, system_theme) = if is_dark {
+        (egui::Theme::Dark, egui::SystemTheme::Dark)
     } else {
-        egui::Theme::Light
+        (egui::Theme::Light, egui::SystemTheme::Light)
     };
     ctx.set_theme(egui_theme);
-    ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(if is_dark {
-        egui::SystemTheme::Dark
-    } else {
-        egui::SystemTheme::Light
-    }));
+    ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(system_theme));
+    let is_catppuccin = theme::is_catppuccin();
     let mut s = (*ctx.global_style()).clone();
 
     // ── 间距 ──
@@ -252,7 +249,7 @@ pub fn apply_theme(ctx: &egui::Context, selected_theme: theme::AppTheme) {
 
     // catppuccin-egui 的官方映射。该 crate 目前只支持到 egui 0.33，
     // 项目使用 0.35，因此在保持当前 egui 类型一致的前提下移植其 Visuals 规则。
-    if theme::is_catppuccin() {
+    if is_catppuccin {
         v.panel_fill = theme::bg_primary();
         v.window_fill = theme::bg_primary();
         v.extreme_bg_color = theme::bg_deep();
@@ -304,7 +301,7 @@ pub fn apply_theme(ctx: &egui::Context, selected_theme: theme::AppTheme) {
     w.open.bg_stroke = egui::Stroke::new(1.0, theme::border_light());
     w.open.fg_stroke = egui::Stroke::new(1.0, theme::text_primary());
 
-    if theme::is_catppuccin() {
+    if is_catppuccin {
         let widget_stroke = egui::Stroke::new(1.0, theme::overlay1());
         let text_stroke = egui::Stroke::new(1.0, theme::text_primary());
         for widget in [

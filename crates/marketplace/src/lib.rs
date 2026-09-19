@@ -137,15 +137,15 @@ pub async fn install_plugin(
     network: &tool_updater::NetworkSettings,
     on_progress: impl Fn(u64, u64),
 ) -> Result<(), String> {
-    // 0. id 路径校验（防止恶意 registry 用 `../` 之类 id 写到 install_dir 之外）
+    // 防止恶意 registry 用 `../` 之类 id 写到 install_dir 之外。
     validate_plugin_id(&entry.id)?;
 
-    // 1. 域白名单 + https 校验
+    // 与 download_url 同一条安全路径：域白名单 + https。
     updater::validate_download_url(&entry.download_url)?;
 
     std::fs::create_dir_all(install_dir).map_err(|e| format!("创建插件目录失败：{e}"))?;
 
-    // 2. 下载到临时 zip（复用通用下载，含原子 rename + 流式 SHA256）
+    // 复用通用下载：含原子 rename + 流式 SHA256，返回实际摘要。
     let tmp_zip = install_dir.join(format!("{}.download.zip", entry.id));
     let actual_sha = updater::download_to_file_with_network_settings(
         &entry.download_url,
@@ -155,7 +155,6 @@ pub async fn install_plugin(
     )
     .await?;
 
-    // 3. SHA256 校验（大小写不敏感）
     if !actual_sha.eq_ignore_ascii_case(&entry.sha256) {
         let _ = std::fs::remove_file(&tmp_zip);
         return Err(format!(
@@ -164,9 +163,9 @@ pub async fn install_plugin(
         ));
     }
 
-    // 4. 解压到临时目录
     let extract_dir = install_dir.join(format!("{}.extract_tmp", entry.id));
     if extract_dir.exists() {
+        // 进程被强杀时下面的 TempGuard 不会跑，可能残留上次解压内容；不清空会把新旧文件混在一起。
         std::fs::remove_dir_all(&extract_dir).map_err(|e| format!("清理旧解压目录失败：{e}"))?;
     }
     std::fs::create_dir_all(&extract_dir).map_err(|e| format!("创建解压目录失败：{e}"))?;
@@ -193,7 +192,6 @@ pub async fn install_plugin(
     // 安全：解压时拒绝危险可执行扩展名（纵深防御）。
     updater::extract_zip_filtered(&tmp_zip, &extract_dir)?;
 
-    // 5. 定位 zip 内的 `<id>/` 顶层目录
     let plugin_root = find_plugin_root_in_extracted(&extract_dir, &entry.id).ok_or_else(|| {
         format!(
             "插件包结构异常：解压后未找到顶层目录 {}/（含 plugin.json）",
@@ -201,12 +199,10 @@ pub async fn install_plugin(
         )
     })?;
 
-    // 6. 原子替换 install_dir/<id>/：
-    //    若旧版本存在，先同卷 rename 到 <id>.old.<pid>/（不删，避免文件锁失败），
-    //    再把新版本 rename 到位。旧目录留待下次启动清理（retire_old_plugin_dirs）。
+    // 原子替换 install_dir/<id>/：若旧版本存在，先同卷 rename 到 <id>.old.<pid>/（不删，避免文件锁失败），
+    // 再把新版本 rename 到位。旧目录留待下次启动清理（retire_old_plugin_dirs）。
     let dest = install_dir.join(&entry.id);
-    let mut retired: Option<PathBuf> = None;
-    if dest.exists() {
+    let retired = if dest.exists() {
         let old_dir = install_dir.join(format!("{}.old.{}", entry.id, std::process::id()));
         // 若上次残留同名 .old 目录，先尝试清理（失败则换名）。
         let old_dir = ensure_unique_dir(&old_dir);
@@ -218,8 +214,10 @@ pub async fn install_plugin(
                 old_dir.display()
             )
         })?;
-        retired = Some(old_dir);
-    }
+        Some(old_dir)
+    } else {
+        None
+    };
     // 移动而非复制：插件包通常不大，且避免重复 IO。
     if let Err(e) = std::fs::rename(&plugin_root, &dest) {
         // 新版本就位失败：若已暂存旧版本，回滚——把旧目录 rename 回 dest。
@@ -297,20 +295,22 @@ pub fn retire_old_plugin_dirs(install_dir: &Path) {
 /// - 单层包裹：`<extract_dir>/<任意目录>/<id>/plugin.json`（发布脚本不应产生，但容错）
 pub fn find_plugin_root_in_extracted(extract_dir: &Path, plugin_id: &str) -> Option<PathBuf> {
     // 直接在根目录查找 <id>/plugin.json
-    let direct = extract_dir.join(plugin_id).join("plugin.json");
-    if direct.exists() {
-        return Some(extract_dir.join(plugin_id));
+    let direct = extract_dir.join(plugin_id);
+    if direct.join("plugin.json").exists() {
+        return Some(direct);
     }
     // 单层包裹容错
-    if let Ok(entries) = std::fs::read_dir(extract_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let candidate = path.join(plugin_id).join("plugin.json");
-                if candidate.exists() {
-                    return Some(path.join(plugin_id));
-                }
-            }
+    let Ok(entries) = std::fs::read_dir(extract_dir) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        let wrapped = entry.path();
+        if !wrapped.is_dir() {
+            continue;
+        }
+        let candidate = wrapped.join(plugin_id);
+        if candidate.join("plugin.json").exists() {
+            return Some(candidate);
         }
     }
     None

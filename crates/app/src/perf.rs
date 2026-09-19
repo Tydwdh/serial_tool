@@ -176,6 +176,7 @@ impl PerfDiagnostics {
             .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(5))
         {
             self.last_log_at = Some(now);
+            // `last_report` 是这里唯一的读者：日志用的就是刚存进去的这份快照。
             let report = self.last_report.as_ref().expect("report just stored");
             log::info!(
                 "perf frame p50/p95/p99={:.2}/{:.2}/{:.2}ms rx={:.0}B/s tx={:.0}B/s events={:.0}/s databus={:.3}ms term_ingest={}/{:.2}ms term_render={:.2}ms log_ingest={}/{:.2}ms log_render={:.2}ms subscriber={}/{}B drop={} recorder={}/{}B/{:.1}s write={}/s plugin={:.2}ms chart={:.2}ms",

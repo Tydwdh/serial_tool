@@ -58,13 +58,13 @@ impl WorkbenchApp {
 
         let was_playing = self.workbench.query_replay().state == ReplayStateView::Playing;
         let published = self.workbench.tick_replay();
-        let mut loop_restarted = false;
         let status = self.workbench.query_replay();
-        if self.replay_panel.loop_playback && status.state == ReplayStateView::Finished {
+        let loop_restarted =
+            self.replay_panel.loop_playback && status.state == ReplayStateView::Finished;
+        if loop_restarted {
             self.replay_panel.want_clear_on_play = true;
             let _ = self.workbench.dispatch(AppCommand::ReplayStop);
             let _ = self.workbench.dispatch(AppCommand::ReplayPlay);
-            loop_restarted = true;
         }
 
         if was_playing || published > 0 || loop_restarted {

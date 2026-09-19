@@ -26,7 +26,7 @@ pub(crate) struct Notification {
     pub(crate) id: u64,
     pub(crate) level: StatusLevel,
     pub(crate) text: String,
-    /// 过期时间戳（ms）。None 表示永不过期（Error 级别）。
+    /// 过期时间戳（ms）。`None` 表示永不过期；`push` 按级别 TTL 计算，三个级别都会给值。
     pub(crate) deadline_ms: Option<u64>,
 }
 
@@ -81,11 +81,7 @@ impl NotificationQueue {
     /// Error 级别展示时间更长。
     pub(crate) fn current(&mut self) -> Vec<Notification> {
         let now = tool_core::now_timestamp_ms();
-        // 清理头部过期的（非 Error）
-        while self.entries.front().is_some_and(|(_, n)| n.is_expired(now)) {
-            self.entries.pop_front();
-        }
-        // 也清理中间过期的（保留顺序，但保留 Error）
+        // 过期即删（含 Error，只是它的 deadline 更晚），`retain` 保持插入顺序。
         self.entries.retain(|(_, n)| !n.is_expired(now));
         self.entries.iter().map(|(_, n)| n.clone()).collect()
     }

@@ -11,16 +11,15 @@ impl WorkbenchApp {
         self.panels.dock.normalize_tool_layout();
         self.panels.ensure_tiles_layout();
         self.refresh_ports_silent();
-        self.dynamic_panels.set_ports(
-            &self
-                .serial
-                .ports
-                .iter()
-                .map(|d| tool_panels::PortItem {
-                    port_name: d.port_name.clone(),
-                })
-                .collect::<Vec<_>>(),
-        );
+        let port_items: Vec<tool_panels::PortItem> = self
+            .serial
+            .ports
+            .iter()
+            .map(|port| tool_panels::PortItem {
+                port_name: port.port_name.clone(),
+            })
+            .collect();
+        self.dynamic_panels.set_ports(&port_items);
         self.send.target_port = None;
         self.ensure_send_target_port();
     }

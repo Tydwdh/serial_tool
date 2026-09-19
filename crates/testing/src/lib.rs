@@ -225,12 +225,11 @@ impl TestReportStore {
             .find(|existing| existing.run_id == report.run_id)
         {
             *existing = report;
-            return;
-        }
-
-        self.reports.push_back(report);
-        while self.reports.len() > self.max_reports {
-            self.reports.pop_front();
+        } else {
+            self.reports.push_back(report);
+            while self.reports.len() > self.max_reports {
+                self.reports.pop_front();
+            }
         }
     }
 }

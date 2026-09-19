@@ -105,7 +105,7 @@ pub trait FileService: Clone + 'static {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native {
-    use std::path::{Path, PathBuf};
+    use std::path::{Component, Path, PathBuf};
     use std::thread;
 
     use futures_channel::oneshot;
@@ -162,12 +162,16 @@ pub mod native {
         })
     }
 
+    fn io_error(error: std::io::Error) -> StorageError {
+        StorageError::Operation(error.to_string())
+    }
+
     fn ensure_relative(root: &Path, id: &FileId) -> Result<PathBuf, StorageError> {
         let relative = Path::new(id.as_str());
         if relative.is_absolute()
             || relative
                 .components()
-                .any(|component| matches!(component, std::path::Component::ParentDir))
+                .any(|component| matches!(component, Component::ParentDir))
         {
             return Err(StorageError::Operation(
                 "file id escapes storage root".into(),
@@ -182,7 +186,7 @@ pub mod native {
             spawn_io(move || match std::fs::read(path) {
                 Ok(bytes) => Ok(Some(bytes)),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                Err(error) => Err(StorageError::Operation(error.to_string())),
+                Err(error) => Err(io_error(error)),
             })
         }
 
@@ -190,11 +194,9 @@ pub mod native {
             let path = self.path(&key);
             let root = self.root.clone();
             spawn_io(move || {
-                std::fs::create_dir_all(root)
-                    .map_err(|error| StorageError::Operation(error.to_string()))?;
+                std::fs::create_dir_all(root).map_err(io_error)?;
                 let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-                std::fs::write(&temporary, bytes)
-                    .map_err(|error| StorageError::Operation(error.to_string()))?;
+                std::fs::write(&temporary, bytes).map_err(io_error)?;
                 match std::fs::rename(&temporary, &path) {
                     Ok(()) => Ok(()),
                     Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -203,9 +205,9 @@ pub mod native {
                         // capability so callers do not need platform checks.
                         std::fs::remove_file(&path)
                             .and_then(|()| std::fs::rename(&temporary, &path))
-                            .map_err(|error| StorageError::Operation(error.to_string()))
+                            .map_err(io_error)
                     }
-                    Err(error) => Err(StorageError::Operation(error.to_string())),
+                    Err(error) => Err(io_error(error)),
                 }
             })
         }
@@ -215,7 +217,7 @@ pub mod native {
             spawn_io(move || match std::fs::remove_file(path) {
                 Ok(()) => Ok(()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(StorageError::Operation(error.to_string())),
+                Err(error) => Err(io_error(error)),
             })
         }
     }
@@ -234,10 +236,7 @@ pub mod native {
         /// escape hatch native-only; Application still performs it on a task
         /// worker and Web uses a browser FileService instead.
         pub fn write_path(&self, path: PathBuf, blob: FileBlob) -> StorageFuture<()> {
-            spawn_io(move || {
-                std::fs::write(path, blob.bytes)
-                    .map_err(|error| StorageError::Operation(error.to_string()))
-            })
+            spawn_io(move || std::fs::write(path, blob.bytes).map_err(io_error))
         }
 
         pub fn block_on_write_path(
@@ -254,8 +253,7 @@ pub mod native {
             let root = self.root.clone();
             spawn_io(move || {
                 let path = ensure_relative(&root, &id)?;
-                let bytes = std::fs::read(&path)
-                    .map_err(|error| StorageError::Operation(error.to_string()))?;
+                let bytes = std::fs::read(&path).map_err(io_error)?;
                 Ok(FileBlob {
                     name: id.as_str().to_owned(),
                     mime: "application/octet-stream".to_owned(),
@@ -269,11 +267,9 @@ pub mod native {
             spawn_io(move || {
                 let path = ensure_relative(&root, &id)?;
                 if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|error| StorageError::Operation(error.to_string()))?;
+                    std::fs::create_dir_all(parent).map_err(io_error)?;
                 }
-                std::fs::write(path, blob.bytes)
-                    .map_err(|error| StorageError::Operation(error.to_string()))
+                std::fs::write(path, blob.bytes).map_err(io_error)
             })
         }
     }
@@ -314,21 +310,20 @@ pub mod web {
         StorageError::Operation(error.as_string().unwrap_or_else(|| format!("{error:?}")))
     }
 
+    /// `save` persists settings as the JSON encoding of the byte vector, so
+    /// every read has to undo exactly that encoding.
+    fn decode_settings(text: String) -> Result<Vec<u8>, StorageError> {
+        serde_json::from_str(&text)
+            .map_err(|error| StorageError::Operation(format!("decode settings: {error}")))
+    }
+
     impl SettingsStore for WebSettingsStore {
         fn load(&self, key: String) -> StorageFuture<Option<Vec<u8>>> {
             let result = self
                 .storage
                 .get_item(&self.key(&key))
                 .map_err(js_error)
-                .and_then(|value| {
-                    value
-                        .map(|text| {
-                            serde_json::from_str::<Vec<u8>>(&text).map_err(|error| {
-                                StorageError::Operation(format!("decode settings: {error}"))
-                            })
-                        })
-                        .transpose()
-                });
+                .and_then(|value| value.map(decode_settings).transpose());
             Box::pin(async move { result })
         }
 

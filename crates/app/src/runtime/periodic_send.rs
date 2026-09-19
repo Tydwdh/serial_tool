@@ -25,18 +25,18 @@ impl Default for PeriodicSendState {
 impl WorkbenchApp {
     pub(super) fn tick_periodic_send(&mut self, _ctx: &egui::Context) {
         let ps = &mut self.periodic_send;
-        // 检查是否被外部关闭，或线程已自然结束（cancel flag 被线程设为 true）
-        if ps.cancel.is_some() && !self.send.periodic_enabled {
-            if let Some(cancel) = ps.cancel.take() {
-                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
+        // 被外部关闭：置位取消标志，交给后台线程自行退出。
+        if !self.send.periodic_enabled
+            && let Some(cancel) = ps.cancel.take()
+        {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             return;
         }
         // 线程已结束（cancel flag 为 true），清理状态并回写用户可见反馈
         if ps
             .cancel
             .as_ref()
-            .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+            .is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::Relaxed))
         {
             ps.cancel = None;
             self.send.periodic_enabled = false;
@@ -48,10 +48,8 @@ impl WorkbenchApp {
             }
             return;
         }
-        if ps.cancel.is_some() {
-            return;
-        }
-        if !self.send.periodic_enabled {
+        // 线程已在运行，或本帧未要求周期发送：不再启动新线程
+        if ps.cancel.is_some() || !self.send.periodic_enabled {
             return;
         }
 

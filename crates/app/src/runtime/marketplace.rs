@@ -3,7 +3,9 @@ use crate::bootstrap::user_plugins_dir;
 use crate::state::StatusLevel;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tool_application::AppCommand;
 use tool_application::marketplace::MarketplaceView;
+use tool_application::query::PluginStateView;
 use tool_core::LogLevel;
 use tool_marketplace::{Registry, RegistryFetch, RegistryPlugin};
 
@@ -168,16 +170,12 @@ impl WorkbenchApp {
         // 导致替换失败，也保证重装后用户重新启用才加载新代码。
         let was_active = matches!(
             self.workbench.plugin_state(&id),
-            Some(tool_application::query::PluginStateView::Running)
-                | Some(tool_application::query::PluginStateView::Enabled)
-                | Some(tool_application::query::PluginStateView::Finished)
+            Some(PluginStateView::Running | PluginStateView::Enabled | PluginStateView::Finished)
         );
         if was_active
-            && let Err(e) = self
-                .workbench
-                .dispatch(tool_application::AppCommand::DisablePlugin {
-                    plugin_id: id.clone(),
-                })
+            && let Err(e) = self.workbench.dispatch(AppCommand::DisablePlugin {
+                plugin_id: id.clone(),
+            })
         {
             log::warn!("marketplace: 重装前禁用 {id} 失败（继续安装）：{e}");
         }
@@ -224,13 +222,9 @@ impl WorkbenchApp {
 
     /// 重新扫描插件目录（安装成功后调用）。
     fn refresh_plugin_discovery(&mut self) {
-        let plugin_dir = user_plugins_dir();
-        if let Err(error) = self
-            .workbench
-            .dispatch(tool_application::AppCommand::DiscoverPlugins {
-                roots: vec![plugin_dir],
-            })
-        {
+        if let Err(error) = self.workbench.dispatch(AppCommand::DiscoverPlugins {
+            roots: vec![user_plugins_dir()],
+        }) {
             self.log(LogLevel::Warn, format!("安装后重新扫描插件失败：{error}"));
         }
     }
@@ -249,53 +243,46 @@ impl WorkbenchApp {
         // 1. 先 disable（若活跃）
         let was_active = matches!(
             self.workbench.plugin_state(plugin_id),
-            Some(tool_application::query::PluginStateView::Running)
-                | Some(tool_application::query::PluginStateView::Enabled)
-                | Some(tool_application::query::PluginStateView::Finished)
-                | Some(tool_application::query::PluginStateView::Failed)
+            Some(
+                PluginStateView::Running
+                    | PluginStateView::Enabled
+                    | PluginStateView::Finished
+                    | PluginStateView::Failed
+            )
         );
         if was_active
-            && let Err(e) = self
-                .workbench
-                .dispatch(tool_application::AppCommand::DisablePlugin {
-                    plugin_id: plugin_id.to_owned(),
-                })
+            && let Err(e) = self.workbench.dispatch(AppCommand::DisablePlugin {
+                plugin_id: plugin_id.to_owned(),
+            })
         {
             log::warn!("marketplace: 卸载前禁用 {plugin_id} 失败（继续卸载）：{e}");
         }
 
         // 2. 删除插件目录（fallback rename）
         let target = plugin_dir.join(plugin_id);
-        if target.exists() {
-            match std::fs::remove_dir_all(&target) {
-                Ok(()) => {}
-                Err(e) => {
-                    log::warn!("marketplace: 直接删除 {plugin_id} 失败（{e}），改用 rename 暂存");
-                    let old_dir =
-                        plugin_dir.join(format!("{plugin_id}.old.{}", std::process::id()));
-                    let old_dir = self.ensure_unique_dir(&old_dir);
-                    if let Err(e) = std::fs::rename(&target, &old_dir) {
-                        self.set_status(
-                            StatusLevel::Error,
-                            format!(
-                                "卸载 {plugin_id} 失败：无法删除或暂存目录（{e}）。请先禁用该插件后重试"
-                            ),
-                        );
-                        return;
-                    }
-                    // 暂存成功：尽力删，失败留待启动清理。
-                    let _ = std::fs::remove_dir_all(&old_dir);
-                }
+        if target.exists()
+            && let Err(e) = std::fs::remove_dir_all(&target)
+        {
+            log::warn!("marketplace: 直接删除 {plugin_id} 失败（{e}），改用 rename 暂存");
+            let old_dir = plugin_dir.join(format!("{plugin_id}.old.{}", std::process::id()));
+            let old_dir = self.ensure_unique_dir(&old_dir);
+            if let Err(e) = std::fs::rename(&target, &old_dir) {
+                self.set_status(
+                    StatusLevel::Error,
+                    format!(
+                        "卸载 {plugin_id} 失败：无法删除或暂存目录（{e}）。请先禁用该插件后重试"
+                    ),
+                );
+                return;
             }
+            // 暂存成功：尽力删，失败留待启动清理。
+            let _ = std::fs::remove_dir_all(&old_dir);
         }
 
         // 3. 重新扫描：refresh 会移除已不存在的插件 record
-        if let Err(error) = self
-            .workbench
-            .dispatch(tool_application::AppCommand::DiscoverPlugins {
-                roots: vec![plugin_dir],
-            })
-        {
+        if let Err(error) = self.workbench.dispatch(AppCommand::DiscoverPlugins {
+            roots: vec![plugin_dir],
+        }) {
             self.log(LogLevel::Warn, format!("卸载后重新扫描插件失败：{error}"));
         }
 

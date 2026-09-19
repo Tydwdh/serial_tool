@@ -13,22 +13,24 @@ impl WorkbenchApp {
         let keymap = self.keymap.clone();
         let mut triggered: Option<String> = None;
 
-        ctx.input(|i| {
-            for (key, bindings) in &keymap.bindings {
+        ctx.input(|input| {
+            for (command_id, bindings) in &keymap.bindings {
                 for binding in bindings {
-                    if let Some(egui_key) = parse_egui_key(&binding.key) {
-                        let mods_match = i.modifiers.ctrl == binding.ctrl
-                            && i.modifiers.shift == binding.shift
-                            && i.modifiers.alt == binding.alt;
-                        if mods_match && i.key_pressed(egui_key) {
-                            // key 即命令 ID（内置 `$` 前缀或 `plugin_id:command_id`）
-                            triggered = Some(key.clone());
-                        }
+                    if let Some(egui_key) = parse_egui_key(&binding.key)
+                        && input.modifiers.ctrl == binding.ctrl
+                        && input.modifiers.shift == binding.shift
+                        && input.modifiers.alt == binding.alt
+                        && input.key_pressed(egui_key)
+                    {
+                        // command_id 即命令 ID（内置 `$` 前缀或 `plugin_id:command_id`）
+                        triggered = Some(command_id.clone());
                     }
                 }
             }
         });
 
+        // 仅在有触发时写入：此刻 pending_command 可能还是上一帧命令面板
+        // （tick_post_ui）排入的待执行命令，无条件赋值会把它冲掉。
         if let Some(command_id) = triggered {
             self.pending_command = Some(command_id);
         }
@@ -55,11 +57,10 @@ impl WorkbenchApp {
             return;
         }
         // Escape 只取消录制，不能被保存成快捷键。
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.key_recording = None;
             return;
         }
-        // 检查是否有按键事件
         if let Some((key_name, modifiers)) = Self::capture_key_for_recording(ctx) {
             // SAFETY: tick_key_recording starts by checking key_recording.is_none() and returns
             // early, and there's no async yield point between that guard and here.
@@ -72,16 +73,16 @@ impl WorkbenchApp {
 
             self.keymap.remove_binding_everywhere(&new_binding);
             let mut bindings = self.keymap.get_bindings(&command_id);
-            bindings.retain(|b| {
-                !(b.ctrl == new_binding.ctrl
-                    && b.shift == new_binding.shift
-                    && b.alt == new_binding.alt)
+            bindings.retain(|binding| {
+                !(binding.ctrl == new_binding.ctrl
+                    && binding.shift == new_binding.shift
+                    && binding.alt == new_binding.alt)
             });
             bindings.push(new_binding);
             self.keymap.set_bindings(&command_id, bindings);
             if let Err(e) = self.save_config() {
                 log::warn!("save_config failed: {e}")
-            };
+            }
             self.set_status_force(
                 StatusLevel::Info,
                 format!("{} 快捷键已更新", self.command_label(&command_id)),
@@ -89,10 +90,10 @@ impl WorkbenchApp {
         }
     }
 
-    /// 捕获按键事件用于快捷键录制。返回按下的键名。
+    /// 捕获按键事件用于快捷键录制。返回按下键的键名与当时的修饰键状态。
     fn capture_key_for_recording(ctx: &egui::Context) -> Option<(String, egui::Modifiers)> {
-        ctx.input(|i| {
-            for event in &i.events {
+        ctx.input(|input| {
+            for event in &input.events {
                 if let egui::Event::Key {
                     key,
                     pressed: true,

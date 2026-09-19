@@ -38,14 +38,21 @@ struct WebNetworkConnection {
     on_message: Closure<dyn FnMut(MessageEvent)>,
 }
 
+/// Detaches every browser callback and then closes the socket. Callers that
+/// own the closures must keep them alive across this call: the browser may
+/// dispatch a `close` event synchronously from `close()`.
+fn close_socket(socket: &WebSocket) {
+    socket.set_onopen(None);
+    socket.set_onerror(None);
+    socket.set_onclose(None);
+    socket.set_onmessage(None);
+    let _ = socket.close();
+}
+
 impl WebNetworkConnection {
     fn close(self) {
         self.closing.set(true);
-        self.socket.set_onopen(None);
-        self.socket.set_onerror(None);
-        self.socket.set_onclose(None);
-        self.socket.set_onmessage(None);
-        let _ = self.socket.close();
+        close_socket(&self.socket);
         // Keep the callback fields in the struct until after close() has been
         // called. The browser may synchronously dispatch a close event.
         drop((self.on_open, self.on_error, self.on_close, self.on_message));
@@ -84,20 +91,20 @@ impl WebNetworkTransport {
             let opened = Rc::new(Cell::new(false));
             let closing = Rc::new(Cell::new(false));
             let (open_sender, open_receiver) = oneshot::channel::<TransportResult<()>>();
-            let open_sender = Rc::new(RefCell::new(Some(open_sender)));
+            let open_sender = Rc::new(Cell::new(Some(open_sender)));
 
             let open_sender_for_open = open_sender.clone();
             let opened_for_open = opened.clone();
             let on_open = Closure::wrap(Box::new(move |_event: Event| {
                 opened_for_open.set(true);
-                if let Some(sender) = open_sender_for_open.borrow_mut().take() {
+                if let Some(sender) = open_sender_for_open.take() {
                     let _ = sender.send(Ok(()));
                 }
             }) as Box<dyn FnMut(Event)>);
 
             let open_sender_for_error = open_sender.clone();
             let on_error = Closure::wrap(Box::new(move |_event: Event| {
-                if let Some(sender) = open_sender_for_error.borrow_mut().take() {
+                if let Some(sender) = open_sender_for_error.take() {
                     let _ = sender.send(Err(TransportError::Operation(
                         "网络串口 WebSocket 连接失败".to_owned(),
                     )));
@@ -111,7 +118,7 @@ impl WebNetworkTransport {
             let disconnect_handler = on_disconnect.clone();
             let on_close = Closure::wrap(Box::new(move |_event: CloseEvent| {
                 if !opened_for_close.get()
-                    && let Some(sender) = open_sender_for_close.borrow_mut().take()
+                    && let Some(sender) = open_sender_for_close.take()
                 {
                     let _ = sender.send(Err(TransportError::Operation(
                         "网络串口 WebSocket 在打开前关闭".to_owned(),
@@ -123,7 +130,8 @@ impl WebNetworkTransport {
 
             let receive_handler = on_receive.clone();
             let on_message = Closure::wrap(Box::new(move |event: MessageEvent| {
-                if let Some(text) = event.data().as_string() {
+                let data = event.data();
+                if let Some(text) = data.as_string() {
                     if let Some(content) = parse_gcode_response(&text) {
                         let mut bytes = content.into_bytes();
                         bytes.push(b'\n');
@@ -131,7 +139,7 @@ impl WebNetworkTransport {
                     }
                     return;
                 }
-                if let Ok(buffer) = event.data().dyn_into::<ArrayBuffer>() {
+                if let Ok(buffer) = data.dyn_into::<ArrayBuffer>() {
                     receive_handler(Uint8Array::new(&buffer).to_vec());
                 }
             }) as Box<dyn FnMut(MessageEvent)>);
@@ -148,11 +156,7 @@ impl WebNetworkTransport {
                 )),
             };
             if let Err(error) = open_result {
-                socket.set_onopen(None);
-                socket.set_onerror(None);
-                socket.set_onclose(None);
-                socket.set_onmessage(None);
-                let _ = socket.close();
+                close_socket(&socket);
                 return Err(error);
             }
 
@@ -174,11 +178,7 @@ impl WebNetworkTransport {
                 "id": 1,
             });
             if let Err(error) = socket.send_with_str(&identify.to_string()) {
-                socket.set_onopen(None);
-                socket.set_onerror(None);
-                socket.set_onclose(None);
-                socket.set_onmessage(None);
-                let _ = socket.close();
+                close_socket(&socket);
                 return Err(TransportError::Operation(js_error(&error)));
             }
 

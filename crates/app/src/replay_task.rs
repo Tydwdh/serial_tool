@@ -7,19 +7,10 @@ use crate::app::{ReplayAnalyzerJob, ReplayAnalyzerResult, WorkbenchApp};
 use crate::state::StatusLevel;
 
 /// 回放 analyzer 后台任务的运行时状态。
+#[derive(Default)]
 pub(crate) struct ReplayAnalyzerState {
     pub(crate) job: Option<ReplayAnalyzerJob>,
     pub(crate) generation: u64,
-}
-
-#[allow(clippy::derivable_impls)]
-impl Default for ReplayAnalyzerState {
-    fn default() -> Self {
-        Self {
-            job: None,
-            generation: 0,
-        }
-    }
 }
 
 impl WorkbenchApp {
@@ -27,7 +18,10 @@ impl WorkbenchApp {
         self.replay_panel.want_run_analyzers = false;
 
         if let Some(ref job) = self.replay_analyzer.job
-            && !job.handle.as_ref().map(|h| h.is_finished()).unwrap_or(true)
+            && job
+                .handle
+                .as_ref()
+                .is_some_and(|handle| !handle.is_finished())
         {
             self.set_status(StatusLevel::Warn, "回放：analyzer 正在运行中，请等待完成");
             return;
@@ -35,21 +29,19 @@ impl WorkbenchApp {
 
         let entries = self.workbench.replay_analyzer_entries();
         if entries.is_empty() {
-            self.workbench
-                .replay_set_analyzer_error("没有可用的 replay analyzer".to_owned());
-            self.replay_panel
-                .set_analyzer_error("没有可用的 replay analyzer".to_owned());
-            self.set_status(StatusLevel::Error, "回放：没有可用的 replay analyzer");
+            let message = "没有可用的 replay analyzer";
+            self.workbench.replay_set_analyzer_error(message.to_owned());
+            self.replay_panel.set_analyzer_error(message.to_owned());
+            self.set_status(StatusLevel::Error, format!("回放：{message}"));
             return;
         }
 
         let raw_events = self.workbench.replay_raw_serial_events();
         if raw_events.is_empty() {
-            self.workbench
-                .replay_set_analyzer_error("录制文件中没有原始串口事件".to_owned());
-            self.replay_panel
-                .set_analyzer_error("录制文件中没有原始串口事件".to_owned());
-            self.set_status(StatusLevel::Error, "回放：录制文件中没有原始串口事件");
+            let message = "录制文件中没有原始串口事件";
+            self.workbench.replay_set_analyzer_error(message.to_owned());
+            self.replay_panel.set_analyzer_error(message.to_owned());
+            self.set_status(StatusLevel::Error, format!("回放：{message}"));
             return;
         }
 
@@ -80,12 +72,9 @@ impl WorkbenchApp {
                     logs.push("Analyzer 已取消".to_owned());
                     break;
                 }
-                let replay_config = match &entry.manifest.replay {
-                    Some(cfg) => cfg,
-                    None => {
-                        failed += 1;
-                        continue;
-                    }
+                let Some(replay_config) = &entry.manifest.replay else {
+                    failed += 1;
+                    continue;
                 };
 
                 let script_path = entry.root.join(&replay_config.main);
@@ -134,7 +123,7 @@ impl WorkbenchApp {
                 }
             }
 
-            all_derived.sort_by_key(|e| (e.timestamp_ms, e.id));
+            all_derived.sort_by_key(|event| (event.timestamp_ms, event.id));
             ReplayAnalyzerResult {
                 total: total_entries,
                 succeeded,
@@ -157,30 +146,30 @@ impl WorkbenchApp {
         let Some(mut job) = self.replay_analyzer.job.take() else {
             return;
         };
-        if !job.handle.as_ref().map(|h| h.is_finished()).unwrap_or(true) {
+        if job
+            .handle
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished())
+        {
             self.replay_analyzer.job = Some(job);
             return;
         }
         // 取出 handle 进行 join（用 take 而非 unwrap，因 ReplayAnalyzerJob 实现了 Drop，
         // 不能 partial move；take 后 Drop 不会重复 join）。handle 理论上始终为 Some
         //（构造时置 Some，仅在此消费路径 take），None 时按 panic 兜底处理。
+        let thread_failed = |reason: &str| ReplayAnalyzerResult {
+            total: 0,
+            succeeded: 0,
+            failed: 1,
+            derived_events: Vec::new(),
+            errors: vec![reason.to_owned()],
+            logs: Vec::new(),
+        };
         let result = match job.handle.take() {
-            Some(handle) => handle.join().unwrap_or(ReplayAnalyzerResult {
-                total: 0,
-                succeeded: 0,
-                failed: 1,
-                derived_events: vec![],
-                errors: vec!["analyzer thread panicked".into()],
-                logs: vec![],
-            }),
-            None => ReplayAnalyzerResult {
-                total: 0,
-                succeeded: 0,
-                failed: 1,
-                derived_events: vec![],
-                errors: vec!["analyzer handle already consumed".into()],
-                logs: vec![],
-            },
+            Some(handle) => handle
+                .join()
+                .unwrap_or_else(|_| thread_failed("analyzer thread panicked")),
+            None => thread_failed("analyzer handle already consumed"),
         };
 
         // 忽略过期 generation 的结果（用户已重新触发）
@@ -196,17 +185,18 @@ impl WorkbenchApp {
             return;
         }
 
-        for msg in &result.logs {
-            self.log(LogLevel::Info, msg);
-            self.replay_panel.push_analyzer_log(msg.clone());
+        for message in &result.logs {
+            self.log(LogLevel::Info, message);
+            self.replay_panel.push_analyzer_log(message.clone());
         }
 
-        for err in &result.errors {
-            self.replay_panel.push_analyzer_log(format!("ERROR: {err}"));
+        for error in &result.errors {
+            self.replay_panel
+                .push_analyzer_log(format!("ERROR: {error}"));
         }
 
         if result.derived_events.is_empty() && result.succeeded == 0 {
-            let msg = if result.errors.is_empty() {
+            let message = if result.errors.is_empty() {
                 "所有 analyzer 运行完成但未生成派生事件".to_owned()
             } else {
                 format!(
@@ -215,22 +205,22 @@ impl WorkbenchApp {
                     result
                         .errors
                         .first()
-                        .map(|e| e.as_str())
+                        .map(|error| error.as_str())
                         .unwrap_or("未知错误")
                 )
             };
-            self.workbench.replay_set_analyzer_error(msg.clone());
-            self.replay_panel.set_analyzer_error(msg.clone());
-            self.set_status(StatusLevel::Error, format!("回放：{msg}"));
+            self.workbench.replay_set_analyzer_error(message.clone());
+            self.replay_panel.set_analyzer_error(message.clone());
+            self.set_status(StatusLevel::Error, format!("回放：{message}"));
         } else if result.derived_events.is_empty() && result.failed == 0 {
             // 成功运行但 0 输出：降级为 Warn
-            let msg = format!(
+            let message = format!(
                 "{} 个 analyzer 运行成功但未生成任何派生事件",
                 result.succeeded
             );
-            self.workbench.replay_set_analyzer_warning(msg.clone());
-            self.replay_panel.set_analyzer_warning(msg.clone());
-            self.set_status(StatusLevel::Warn, format!("回放：{msg}"));
+            self.workbench.replay_set_analyzer_warning(message.clone());
+            self.replay_panel.set_analyzer_warning(message.clone());
+            self.set_status(StatusLevel::Warn, format!("回放：{message}"));
         } else {
             // 先设缓存，再用 warning 显示提示（不清缓存）
             self.workbench
