@@ -561,3 +561,151 @@ pub fn record_history(history: &mut Vec<String>, text: impl Into<String>, max_hi
     history.insert(0, text);
     history.truncate(max_history);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::hex_error;
+
+    // ── 活的 HEX 门禁真值表 ───────────────────────────────────────────────
+    //
+    // `hex_error` 是**两平台发送按钮实际读到的那道门**：`render_actions` 里
+    // `can_send = target_open && !input.is_empty() && hex_error.is_none()`，
+    // native 经 `bottom_panel.rs` 的 `tool_panels::sender_ui` 走到它，web 经
+    // `crates/app/src/web.rs` 的同一个组件走到它（见 docs/ARCHITECTURE.md 的
+    // 「预检的规则来源」行）。本文件此前一条 `#[test]` 都没有：把严格档的
+    // `normalized.len() != 2` 放松成 `> 2`，全工作区 585 条用例仍然全绿 ——
+    // 也就是按钮可以在输入根本发不出去的情况下亮着，而 CI 看不见。
+    //
+    // 形状照抄 `crates/application/src/send_plan.rs` 的 `mod tests`：真值表就是
+    // 判定本身，每格同时钉严格/宽松两档。
+
+    /// 一行判定：`None` = 放行（按钮可点），`Some(片段)` = 拒绝且消息含该片段。
+    /// 起名字是为了把 `clippy::type_complexity` 消除在定义处 —— 用 `type` 别名
+    /// 而不是 `#[allow]`：放宽注解会把这条 lint 从整个测试模块上关掉。
+    type Verdict = Option<&'static str>;
+
+    const STRICT_LEN_RULE: &str = "严格 HEX 模式要求每个 token 是两位";
+    const BAD_CHAR_RULE: &str = "HEX 中包含无效字符";
+    const EMPTY_TOKEN_RULE: &str = "HEX 中包含空 token";
+    const EMPTY_INPUT_RULE: &str = "HEX 输入为空";
+
+    /// 每格 = (输入, 严格档判定, 宽松档判定)。
+    const TABLE: &[(&str, Verdict, Verdict)] = &[
+        // 规范写法：两档都收。
+        ("AB CD", None, None),
+        // 小写同样合法：门禁只看字符集与长度，不要求大写。
+        ("ab cd", None, None),
+        // 紧凑奇数长度：严格档按 normalize 后的长度判 3 → 拒；宽松档放行。
+        ("abc", Some(STRICT_LEN_RULE), None),
+        // 紧凑偶数长度：严格档仍按"每 token 恰 2 字符"判 → 拒；宽松档放行。
+        ("abcd", Some(STRICT_LEN_RULE), None),
+        // 单 nibble：严格档拒、宽松档放行（补齐成 0x0C 是发送侧的事）。
+        ("AB C", Some(STRICT_LEN_RULE), None),
+        // 4 个十六进制字符挤在一个 token 里：严格档拒。
+        ("0xAABB", Some(STRICT_LEN_RULE), None),
+        // 非 HEX 字符：两档都拒（长度先过，卡在字符集那一行）。
+        ("ZZ", Some(BAD_CHAR_RULE), Some(BAD_CHAR_RULE)),
+        // 分隔符 `,` / `;` 与空白等价：两档都收。
+        ("0A,BB", None, None),
+        ("0A;BB", None, None),
+        // 单层 `0x` 前缀：剥掉后恰是两位 → 两档都收。
+        ("0xAB", None, None),
+        // 大写 `0X` 前缀同样只剥一层。
+        ("0XAB", None, None),
+        // `_` / `-` 被 replace 掉后是 "AABBCC"（长度 6）→ 严格拒、宽松放行。
+        ("AA_BB-CC", Some(STRICT_LEN_RULE), None),
+        // 空 token：`0x` 剥完什么都不剩，两档都拒，且不是"输入为空"那条消息。
+        ("0x", Some(EMPTY_TOKEN_RULE), Some(EMPTY_TOKEN_RULE)),
+        // 全空白 / 空串：没有任何 token 也算非法，否则按钮会亮而发送侧报"empty"。
+        ("   ", Some(EMPTY_INPUT_RULE), Some(EMPTY_INPUT_RULE)),
+        ("", Some(EMPTY_INPUT_RULE), Some(EMPTY_INPUT_RULE)),
+    ];
+
+    fn check_cell(input: &str, expect: Verdict, strict: bool) {
+        let mode = if strict { "严格" } else { "宽松" };
+        let actual = hex_error(input, strict);
+        match expect {
+            None => assert!(
+                actual.is_none(),
+                "{mode}档应放行 {input:?}，实际拒绝：{actual:?}",
+            ),
+            Some(fragment) => {
+                let message =
+                    actual.unwrap_or_else(|| panic!("{mode}档应拒绝 {input:?}，实际放行"));
+                assert!(
+                    message.contains(fragment),
+                    "{mode}档拒绝 {input:?} 的消息应含 {fragment:?}，实际 {message:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gate_has_exactly_one_verdict_per_input_and_mode() {
+        for (input, strict_expect, lenient_expect) in TABLE {
+            check_cell(input, *strict_expect, true);
+            check_cell(input, *lenient_expect, false);
+        }
+    }
+
+    /// 严格档的**形状**规则：长度不等于 2 就拒 —— 包括比 2 长的情况。
+    ///
+    /// 单列一条而不是只靠表里的格子：把判定放松成 `len() > 2`（本波之前的变异探针
+    /// 就是这么打穿 585 条用例的）时，"3 字符被拒"与"6 字符被拒"两格都会红，
+    /// 这条给出第三个独立观测点，且直接点名被改坏的那个方向。
+    #[test]
+    fn strict_mode_rejects_every_length_except_two() {
+        for len in [0usize, 1, 3, 4, 5, 6, 8] {
+            if len == 2 {
+                continue;
+            }
+            let token = "a".repeat(len);
+            let actual = hex_error(&token, true);
+            assert!(
+                actual.is_some(),
+                "严格档必须拒绝长度 {len} 的 token {token:?}，实际放行 —— \
+                 `len() != 2` 被写成 `len() > 2` 就是这个形状",
+            );
+        }
+        assert!(
+            hex_error("ab", true).is_none(),
+            "长度恰为 2 时必须放行，否则严格档把合法输入也堵死了",
+        );
+    }
+
+    /// 本门禁与 `tool_core`（真正解码的那一份）**已知不一致**的那一格。
+    ///
+    /// 这是刻意的特征测试（characterization test），不是在为这个分歧背书：
+    /// `hex_error` 只剥**一层** `0x`，`tool_core::normalize_hex_token` 用
+    /// `trim_start_matches` 反复剥，于是 `"0x0xAB"` 在发送侧解得出 `AB`、
+    /// 在门禁侧两档都被拒 —— 结果是**按钮灰着而 `dispatch` 其实接受这串**
+    /// （`docs/ARCHITECTURE.md`「预检的规则来源」行记的就是它，且把它判为
+    /// 后续项而非本轮改动：改判定会移动用户可见的按钮状态）。
+    ///
+    /// 把它钉在两边各自的实际行为上，是为了让"某天有人统一了它"以红测试的
+    /// 形式出现，而不是以一行未经核实的文档结论出现。
+    #[test]
+    fn gate_and_decoder_disagree_on_repeated_0x_prefix() {
+        let decoded = tool_core::parse_hex_strict("0x0xAB");
+        assert_eq!(
+            decoded.as_deref(),
+            Ok([0xAB].as_slice()),
+            "前提：发送侧（`tool_core`）接受 \"0x0xAB\"，反复剥 `0x` 后得到 AB，got {decoded:?}",
+        );
+        assert!(
+            hex_error("0x0xAB", true).is_some(),
+            "前提：门禁（本文件）在严格档拒绝 \"0x0xAB\" —— 只剥一层 `0x` 后长度是 4",
+        );
+        assert!(
+            hex_error("0x0xAB", false).is_some(),
+            "前提：门禁在宽松档同样拒绝 \"0x0xAB\"（残留的 `x` 不是 HEX 字符）",
+        );
+        // 对照格：单层前缀两边一致放行，说明分歧只在"重复前缀"这一类输入上。
+        assert!(hex_error("0xAB", true).is_none(), "单层 `0x` 两档都应放行");
+        assert_eq!(
+            tool_core::parse_hex_strict("0xAB").as_deref(),
+            Ok([0xAB].as_slice()),
+            "对照格：`tool_core` 对单层前缀同样放行",
+        );
+    }
+}

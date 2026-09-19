@@ -74,6 +74,9 @@ struct StoppingRecorder {
     join: JoinHandle<()>,
     last_error: Arc<Mutex<Option<String>>>,
     path: PathBuf,
+    /// 与 `RecorderWorker::finished` 同一个标志：Stop 之后线程归本结构管，
+    /// 收割侧仍要能区分"走到尾部正常退出"与"panic 展开"。
+    finished: Arc<AtomicBool>,
 }
 
 struct RecorderWorker {
@@ -392,6 +395,7 @@ impl JsonlRecorder {
                 join,
                 last_error: worker.last_error,
                 path: self.current_path.take().unwrap_or_default(),
+                finished: worker.finished,
             });
         }
     }
@@ -556,6 +560,20 @@ impl JsonlRecorder {
         if let Some(s) = self.stopping.take() {
             if s.join.is_finished() {
                 let _ = s.join.join();
+                // Stop **之后**才 panic 的那一侧只能在这里兜住：`stats.running` /
+                // `stats.stopping` 的唯一其它清零点是 worker 闭包尾部（panic 展开到不了），
+                // 而 `worker_panicked()` 只看 `self.worker`，线程已被 `stop_with_reason`
+                // 搬进 `self.stopping`，那条分支结构上永远不再为它触发。两个字段是 UI
+                // 唯一的读取源，留着 true 的后果是：`commands.rs` 把 `running || stopping`
+                // 映射成 StopRecording ⇒ 本次会话再也派发不出 StartRecording，面板与
+                // 状态栏也一直冻在"正在停止"。
+                // 正常 Stop（含 `handle_fatal` 的写失败路径）会置 `finished`，那两个字段
+                // 由 worker 自己清零，这里不得代劳。
+                if !s.finished.load(Ordering::SeqCst) {
+                    let mut stats = self.stats.lock();
+                    stats.running = false;
+                    stats.stopping = false;
+                }
                 let error = s.last_error.lock().take();
                 match error {
                     Some(e) => {
@@ -1071,5 +1089,137 @@ mod tests {
             error_logs.iter().any(|text| text.contains("异常退出")),
             "必须发布 Error 级日志告知用户录制线程异常退出，got {error_logs:?}"
         );
+    }
+
+    // ── I1：Stop **之后**才 panic 的那一侧 ──
+
+    /// `attach_exited_worker` 的后继孪生：复刻 `stop_with_reason()` 已经跑完、而
+    /// worker 随后 panic 退出时的状态。
+    ///
+    /// 与上面那个 fixture 的区别就是本条缺陷的全部内容：worker 已从 `self.worker`
+    /// **搬进** `self.stopping`，于是 `worker_panicked()`（只看 `self.worker`）从此
+    /// 再也不可能为这个线程返回 true；而 `stop_with_reason` 置起 `stats.stopping`，
+    /// 这两个渲染位唯一的其它清零点在 worker 闭包尾部，panic 展开到不了。
+    /// `reap_stopping()` 虽然看得到 `join.is_finished()`，修复前却从不碰 `stats`。
+    ///
+    /// 正常 Stop 那一侧由 `reap_stopping_after_orderly_stop_leaves_rendered_flags_clear`
+    /// 用**真**线程走 start → stop → reap 覆盖：它钉的正是"worker 尾部会把这两个字段
+    /// 落回 false"，而本修复的 `!finished` 门就建立在这个性质上。
+    fn attach_stopping_worker_that_panicked(rec: &mut JsonlRecorder) {
+        // `finished` 保持 false = 线程没有走到自己的尾部。
+        let finished = Arc::new(AtomicBool::new(false));
+        {
+            // `stop_with_reason()` 之后 stats 的样子：stopping 刚被置起，
+            // running 仍归 worker 尾部去清 —— 而这一次它永远到不了。
+            let mut s = rec.stats.lock();
+            s.running = true;
+            s.stopping = true;
+        }
+        let join: JoinHandle<()> = thread::spawn(|| {
+            panic!("模拟 Stop 之后录制 worker panic 展开");
+        });
+        wait_thread_finished(&join);
+        rec.stopping = Some(StoppingRecorder {
+            join,
+            last_error: Arc::new(Mutex::new(None)),
+            path: PathBuf::from("panic-after-stop.jsonl"),
+            finished,
+        });
+    }
+
+    #[test]
+    fn reap_stopping_clears_rendered_flags_when_worker_panicked_after_stop() {
+        let mut rec = JsonlRecorder::new(DataBus::new());
+        attach_stopping_worker_that_panicked(&mut rec);
+
+        // 装配前提：本条路径上 `worker_panicked()` 结构上就是瞎的 —— 线程已经不在
+        // `self.worker` 里了。它必须保持 false，否则"修好了"其实是被别的分支修的。
+        assert!(
+            !rec.worker_panicked(),
+            "装配前提：Stop 之后 worker 已移出 `self.worker`，`worker_panicked()` 看不到它"
+        );
+        assert!(
+            rec.is_stopping(),
+            "装配前提：Stop 已把 worker 搬进 `self.stopping`"
+        );
+        let before = rec.stats();
+        assert!(
+            before.running && before.stopping,
+            "装配前提：两个渲染位在 Stop 之后必须都是 true，got {before:?}"
+        );
+
+        let reaped = rec.reap_stopping();
+        assert!(
+            reaped.is_some(),
+            "线程已终止时 `reap_stopping()` 必须收割，不能永远停在 Stopping"
+        );
+
+        let stats = rec.stats();
+        // 关键断言（本条缺陷的全部后果）：这两个字段是 UI 唯一的读取源，
+        // 留着 true 就等于把 `commands.rs` 的 StartRecording 永久锁死
+        // （它把 `running || stopping` 映射成 StopRecording），并让
+        // `device_panel.rs` / `recording.rs` / `web.rs` 一直渲染"正在停止"。
+        assert!(
+            !stats.running,
+            "Stop 之后 panic 的 worker 也必须清掉 `stats.running`，got {stats:?}"
+        );
+        assert!(
+            !stats.stopping,
+            "Stop 之后 panic 的 worker 也必须清掉 `stats.stopping`，got {stats:?}"
+        );
+    }
+
+    /// 上一条用例的**正常**孪生：真线程走完 start → stop → reap。
+    ///
+    /// 它钉的是 `reap_stopping()` 里 `!finished` 那道门的前提 —— worker 闭包尾部自己
+    /// 会把这两个渲染位落回 false。修复前没有任何用例断言过这件事：正常停止后的既有
+    /// 用例只查 `is_stopping()`，而那读的是 `stopping: Option<_>` 字段，不是 `stats`
+    /// 上的这两位。缺了这条，"收割时一律清零"这种过度修复也能全绿通过。
+    #[test]
+    fn reap_stopping_after_orderly_stop_leaves_rendered_flags_clear() {
+        let mut rec = JsonlRecorder::new(DataBus::new());
+        let path = temp_file(&format!(
+            "test-orderly-stop-{}.jsonl",
+            tool_core::now_timestamp_ms()
+        ));
+
+        rec.start(&path).unwrap();
+        let started = rec.stats();
+        assert!(
+            started.running && !started.stopping,
+            "装配前提：start() 之后 running=true、stopping=false，got {started:?}"
+        );
+
+        rec.stop();
+        let stopping = rec.stats();
+        assert!(
+            stopping.running && stopping.stopping,
+            "装配前提：Stop 之后 `stats.stopping` 置起、`running` 仍等 worker 尾部去清，got {stopping:?}"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while rec.reap_stopping().is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for recorder to stop"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let stats = rec.stats();
+        assert!(
+            !stats.running && !stats.stopping,
+            "正常 Stop 收割后两个渲染位都必须落回 false（worker 尾部自己清的），got {stats:?}"
+        );
+        assert!(
+            !stats.incomplete,
+            "正常 Stop 不得被标记为不完整，got {stats:?}"
+        );
+
+        let _ = fs::remove_file(&path);
+        let summary = path.with_extension("summary.json");
+        if summary.exists() {
+            let _ = fs::remove_file(&summary);
+        }
     }
 }

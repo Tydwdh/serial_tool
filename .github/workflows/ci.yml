@@ -222,6 +222,20 @@ jobs:
         with:
           name: hardware-workbench-linux
 
+      - name: Record digest of the zip that will be uploaded
+        id: uploaded_zip
+        # 这一步**必须**排在 Create Release 之前：它哈希的就是要被上传的那一个文件，
+        # 后面算 pinned 值的那份来自第二次 download-artifact（不同调用、不同目录），
+        # 两者一旦分叉，pin 描述的字节就不是用户拿到的字节。
+        run: |
+          $zipPath = "hardware-workbench-app.zip"
+          if (-not (Test-Path -LiteralPath $zipPath)) {
+            throw "release 产物缺失：$zipPath"
+          }
+          $uploadedSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
+          "sha256=$uploadedSha" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8NoBOM
+          Write-Host "uploaded zip sha256: $uploadedSha"
+
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
@@ -263,8 +277,47 @@ jobs:
           if (-not (Test-Path -LiteralPath $zipPath)) {
             throw "release 产物缺失：$zipPath"
           }
+          # 下限把关：`Get-FileHash -Algorithm SHA256` 对 0 字节或被截断的产物同样给出
+          # **格式完全合法**的 64 位十六进制摘要，所以旧代码那句 `$sha256.Length -ne 64`
+          # 是一条永远不会触发的恒真检查（这就是本步原来唯一的"校验"）。字节数不骗人：
+          # 一个被截断的 zip 必须先在这里红，而不是变成所有客户端的 pinned 值。
+          $minZipBytes = 1048576
+          $zipBytes = (Get-Item -LiteralPath $zipPath).Length
+          if ($zipBytes -lt $minZipBytes) {
+            throw "release 产物过小（$zipBytes < $minZipBytes 字节），拒绝用它的摘要作为 pinned 值：$zipPath"
+          }
           $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
-          if ($sha256.Length -ne 64) { throw "SHA256 计算异常：$sha256" }
+          # 形状检查**不是**防线（同上，`Get-FileHash` 恒过），留着只防"将来把来源
+          # 换成别的算法或别的文件时把畸形值静默写进 manifest"。真正兜底的是下面两次比对。
+          if ($sha256 -notmatch '^[0-9a-f]{64}$') { throw "SHA256 形状异常：$sha256" }
+          # 比对 1/2：同一份 artifact 自带的 SHA256SUMS.txt（test 作业在打包之后、
+          # 上传之前用同一个 dist/ 生成）。产物被截断、被换成别的文件、或清单与产物
+          # 不匹配，都会在这里变红；"恰好 1 行"这个计数断言同时挡住重复行与缺行。
+          $sumsPath = "release-assets/SHA256SUMS.txt"
+          if (-not (Test-Path -LiteralPath $sumsPath)) {
+            throw "artifact 内缺少 $sumsPath，无法交叉校验 pinned 摘要"
+          }
+          $declared = @(Get-Content -LiteralPath $sumsPath | ForEach-Object {
+            if ($_ -match '^\s*([0-9a-f]{64})\s+hardware-workbench-app\.zip\s*$') { $Matches[1] }
+          })
+          if ($declared.Count -ne 1) {
+            throw "SHA256SUMS.txt 里 hardware-workbench-app.zip 应有且仅有 1 行，实际 $($declared.Count) 行"
+          }
+          # `-ne` 在 PowerShell 里默认大小写无关，与客户端 `verify_stream_sha256` 的
+          # `eq_ignore_ascii_case` 一致：两侧都只认值、不认写法。
+          if ($declared[0] -ne $sha256) {
+            throw "pinned 摘要与 artifact 自带 SHA256SUMS.txt 不一致：待写 $sha256，声明 $($declared[0])"
+          }
+          # 比对 2/2：本步哈希的文件来自第二次 download-artifact，而**上传给用户**的那份
+          # 来自第一次，中间还夹了一次 checkout。分叉的后果是"pin 描述的不是用户装的东西"，
+          # 所以拿 Create Release 之前记下的摘要再对一次。
+          $uploadedSha = '${{ steps.uploaded_zip.outputs.sha256 }}'
+          if (-not $uploadedSha) {
+            throw "未取得已上传产物的摘要（uploaded_zip 步骤的输出为空），拒绝生成 update.json"
+          }
+          if ($uploadedSha -ne $sha256) {
+            throw "pinned 摘要与已上传到 Release 的 zip 不一致：上传 $uploadedSha，待写 $sha256"
+          }
           Write-Host "update.json pinned sha256: $sha256"
           $changelog = [System.Collections.Generic.List[string]]::new()
           $inVersion = $false

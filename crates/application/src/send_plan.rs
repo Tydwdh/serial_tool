@@ -55,8 +55,17 @@ impl std::error::Error for SendPlanError {}
 
 /// HEX 解码：`strict` 决定用哪一档规则，两档都在 `tool_core` 里。
 ///
-/// `plan_send`（真正发送）与两平台的 `validate_hex`（presentation 预检）共用本函数，
-/// 所以「按钮亮起 → dispatch 却报错」这类分叉不再有第二个判定来源。
+/// **单点的是"解码"这一件事**：`plan_send`（真正发送）与两平台的 `validate_hex`
+/// （presentation 预检）都走本函数，所以同一条输入不可能在发送路径与预检路径上
+/// 解出不同的字节。
+///
+/// 但**按钮的可点状态不是这里定的**，那是第二个判定来源，且是刻意容忍的：
+/// 两平台的发送按钮都读 `crates/panels/src/sender.rs` 里 `render_actions` 调用的
+/// panels 自己那份 `hex_error`（`0x` 只剥**一层**，`tool_core` 是反复剥），于是
+/// `"0x0xAB"` 这类输入会被门禁判非法、被这里判合法（按钮灰着而 `dispatch` 其实
+/// 收）。实测记录与"为何不在本轮统一"见 `docs/ARCHITECTURE.md`「发送路径的残留
+/// 差异」；两侧的实际行为由 `crates/panels/src/sender.rs` 的
+/// `gate_and_decoder_disagree_on_repeated_0x_prefix` 钉住。
 pub fn decode_hex(hex: &str, strict: bool) -> Result<Vec<u8>, String> {
     if strict {
         tool_core::parse_hex_strict(hex)

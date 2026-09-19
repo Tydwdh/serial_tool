@@ -107,11 +107,14 @@ impl WorkbenchApp {
         if let Some(handle) = self.update_state.download_handle.take() {
             if handle.is_finished() {
                 match handle.join() {
-                    Ok(Ok(actual_sha256)) => {
+                    // 线程回传的正是"下载流自算的 SHA256"：它在
+                    // `download_to_file_verified` 里已经跟 pinned 值比过了，比不过
+                    // 就走 Err 分支，因此这里没有第二个用途 —— 刻意丢弃，不存字段
+                    // （理由见 `UpdateState::expected_sha256` 的注释）。
+                    Ok(Ok(_)) => {
                         self.update_state.downloading = false;
                         self.update_state.download_progress = 1.0;
                         self.update_state.downloaded = true;
-                        self.update_state.downloaded_sha256 = Some(actual_sha256);
                         self.update_state.error = None;
                         log::info!("updater: 更新包下载完成");
                     }

@@ -988,8 +988,14 @@ enum Observed {
 /// 之类环境无关；也不猜空闲端口，不存在端口竞争。
 ///
 /// 观测结果走 channel 而非 `join()`：调用方只按 deadline 等待，绝不阻塞在一个可能
-/// 卡在 `accept()` 上的线程上。线程内部每次读都设了 socket 读超时，并用绝对 deadline
-/// 收口，所以它自己一定会退出。
+/// 卡在 `accept()` 上的线程上。
+///
+/// 反过来，**线程自己不保证会退出**：`listener.accept()` 排在读超时与绝对 deadline
+/// **之前**（两者都在它下面几行才建立），所以客户端始终没连上时，它会 parked 在
+/// `accept()` 里直到进程结束，并占着这个内核分配的端口。刻意不改成
+/// `set_nonblocking(true)` + 轮询到 deadline：走到那一步说明用例已经因为"对端没连上"
+/// 而红了，多一个 parked 线程既不影响任何断言，也不影响其它用例（端口是 `:0` 由内核
+/// 分配，不存在竞争），而轮询循环会给这个"字节级契约"的唯一观测点再加一层时序。
 fn spawn_loopback_ws_server(expected_frames: usize) -> (SocketAddr, Receiver<Observed>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("绑定 loopback 监听端口");
     let addr = listener.local_addr().expect("读取内核分配的监听地址");

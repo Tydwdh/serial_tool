@@ -1118,7 +1118,11 @@ async fn download_verified_update_package(
 /// - 原子性：先写 `dest_path + ".part"`，完成后 rename 到 `dest_path`。
 /// - 进度：`on_progress(downloaded, total)`，total 为 0 时表示未知长度。
 ///
-/// marketplace 与 updater 共用此实现，避免重复大依赖（reqwest/tokio）与代理/DNS 逻辑。
+/// 本函数只是"用默认网络设置"的便捷壳，**本工作区当前没有调用者**。真正被共用的
+/// 是它下面的 `download_to_file_verified`，两条路径各自传不传固定值：
+/// marketplace 走 `download_to_file_with_network_settings`（`expected_sha256 = None`，
+/// 它拿 registry 里的 `sha256` 自行比对），更新包走 `download_verified_update_package`
+/// （`Some(pin)`，比对发生在 rename 之前，不匹配就不留下产物）。
 pub async fn download_to_file(
     url: &str,
     dest_path: &Path,

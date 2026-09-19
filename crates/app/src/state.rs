@@ -425,10 +425,10 @@ pub(crate) struct UpdateState {
     pub(crate) download_handle: Option<std::thread::JoinHandle<Result<String, String>>>,
     /// 下载 URL（从 update.json 获取）
     pub(crate) download_url: Option<String>,
-    /// 下载流自算的 SHA256，仅用于日志/诊断：它**不能**作为校验凭据，
-    /// 校验一律用 `expected_sha256`。
-    pub(crate) downloaded_sha256: Option<String>,
     /// 本次待装包的 pinned 摘要（来自 update.json），**不是**下载自算值。
+    ///
+    /// 刻意不设"下载流自算 SHA256"那种字段：它与 pin 形状相同，迟早会被写成
+    /// `expected_sha256.or(自算值)` 的回退，而那等于"拿下载内容跟下载内容比"。
     pub(crate) expected_sha256: Option<String>,
     /// 用户点击"更新并重启"后，标记需要退出
     pub(crate) want_restart: bool,
@@ -509,7 +509,6 @@ impl Default for UpdateState {
             check_handle: None,
             download_handle: None,
             download_url: None,
-            downloaded_sha256: None,
             expected_sha256: None,
             want_restart: false,
             force_check: false,
