@@ -144,7 +144,8 @@ mod tests {
             // 重复 `0x` 前缀：`normalize_hex_token` 用 trim_start_matches 连续剥，
             // 剥完才是 "AB"。此前 web 只剥一层，"0x0xAB" 在 web 被拒。
             ("0x0xAB", Some(vec![0xAB]), Some(vec![0xAB])),
-            // `_`/`-` 分隔符：normalize 后长度 4 → 严格拒绝、宽松分块。
+            // `_`/`-` 分隔符：normalize 后是 "AABBCC"（长度 6）→ 严格按「token 恰为 2 字符」
+            // 拒绝、宽松两两分块成三字节。
             ("AA_BB-CC", None, Some(vec![0xAA, 0xBB, 0xCC])),
             // 空输入：两档都拒（宽松报 "empty input"）。
             ("   ", None, None),

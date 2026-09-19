@@ -1079,11 +1079,20 @@ impl Workbench {
         })
     }
 
+    /// 「这条命令的端口是不是已注册的网络端口」—— 结论只作为 `plan_send` 的 `is_network`
+    /// 实参，本平台不再自己决定任务种类。
+    ///
+    /// 两种形态都认：`display_name()`（`host:port`，本平台注册与 `workspace.json` 用的形态）
+    /// 与 `port_id()`（`network://host:port`，wasm 侧的键形态）。后者与 `RemoveNetworkPort`
+    /// 的匹配条件（本文件 `AppCommand::RemoveNetworkPort` 分支）对齐，否则 native 自己就不自洽：
+    /// 同一个 id 删得掉、发的时候却被当成串口。
+    /// 串口名不可能误命中：`port_id()` 恒以 `network://` 开头，而真实串口名是 `COMx` /
+    /// `/dev/tty*`；由 `headless.rs` 的 `network_port_ids_are_recognized_in_both_naming_forms`
+    /// 双向钉住（网络两形态 → `send_network`，普通串口名 → `send_serial`）。
     fn is_network_port(&self, port_name: &str) -> bool {
-        self.app_config
-            .network_ports
-            .iter()
-            .any(|config| config.display_name() == port_name)
+        self.app_config.network_ports.iter().any(|config| {
+            config.display_name() == port_name || config.port_id().to_string() == port_name
+        })
     }
 
     /// 按 `plan_send` 算出的种类与字节投递。走哪个后端由 `PlannedSend::targets_network_port()`

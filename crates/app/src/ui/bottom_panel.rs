@@ -18,6 +18,22 @@ const SEND_BOTTOM_ERROR_MAX_HEIGHT: f32 = 24.0;
 const SEND_BOTTOM_ERROR_RESERVED_HEIGHT: f32 = SEND_BOTTOM_ERROR_MAX_HEIGHT + 8.0;
 const SEND_BOTTOM_MIN_INPUT_HEIGHT: f32 = 40.0;
 
+/// HEX 预检结论的 hover 文案。
+///
+/// `Workbench::validate_hex` 返回 `AppError`，它的 `Display` 带**分类前缀**
+/// （`transport: `）—— 那是状态栏/日志用来区分错误来源的。hover 文案只该回答
+/// 「HEX 哪里不对」，所以这里取 `Transport` 变体的裸载荷，与 wasm 侧的**文案**同串
+/// （wasm 的 `WebApplication::validate_hex` 返回 `Result<_, String>`，本就无前缀）。
+/// 两平台的预检**档位**并不相同（这里恒传 `false`，web 透传 `hex_strict`），
+/// 该差异记录在 `docs/ARCHITECTURE.md` 的「发送路径残留差异」，本函数不改变它。
+/// 只有这两处 hover 走本函数：点击发送之后的红字标签与状态栏仍渲染完整 `AppError`。
+fn hex_precheck_hint(error: &tool_application::AppError) -> String {
+    match error {
+        tool_application::AppError::Transport(message) => message.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// 返回发送输入框的稳定 Id（用于读取光标状态）。
 fn response_id_for_send_input(layout: SendLayout) -> egui::Id {
     let salt = match layout {
@@ -612,14 +628,19 @@ impl WorkbenchApp {
     /// 发送 + 清空 按钮
     fn render_send_and_clear_buttons(&mut self, ui: &mut egui::Ui, send_port_open: bool) {
         // HEX 模式下实时检查输入是否可解析。判定与真正发送时同源（`Workbench::validate_hex`
-        // → `tool_core`），不再由 presentation 自己调 transport 解析。
-        // 语义与迁移前一致：这里按宽松模式预检，严格模式的拒绝仍由 dispatch 在点击后报出。
+        // → `send_plan::decode_hex` → `tool_core`），不再由 presentation 自己调 transport 解析。
+        // 档位是**刻意**的宽松：这里恒传 `false`，严格模式的拒绝仍由 dispatch 在点击后报出，
+        // 所以 `Workbench::validate_hex` 的 `strict` 形参在本平台没有 `true` 的调用者。
+        // web 侧的预检（`crates/app/src/web.rs` 的 `web_hex_error`）透传 `hex_strict`，
+        // 于是同一串输入在两端的「按钮亮不亮」上并不一致 —— 这是行为保持的收敛刻意留下的
+        // 差异，已记进 `docs/ARCHITECTURE.md` 的「发送路径残留差异」，本处不改判定。
         let input_trim = self.send.input.trim();
         let hex_error = if self.send.hex_mode && !input_trim.is_empty() {
             self.workbench
                 .validate_hex(input_trim, false)
                 .err()
-                .map(|error| error.to_string())
+                .as_ref()
+                .map(hex_precheck_hint)
         } else {
             None
         };
@@ -631,7 +652,8 @@ impl WorkbenchApp {
             })
             .inner;
         if let Some(ref err) = hex_error {
-            // `validate_hex` 已带「HEX 解析失败：」文案，与点击发送后红字标签同源同文。
+            // 判定与发送同源（`validate_hex` → `tool_core`），文案是「HEX 解析失败：<原因>」
+            // 本身；`transport: ` 这个分类前缀按 `hex_precheck_hint` 剥掉，不进 hover。
             send_btn = send_btn.on_disabled_hover_text(err.clone());
         }
         if send_btn.clicked() {
@@ -707,10 +729,11 @@ impl WorkbenchApp {
                     .small(),
             )
             .on_hover_text(if is_err {
-                // 预览报错与发送/按钮预检同一判定：`Workbench::validate_hex` → `tool_core`。
+                // 预览报错与发送/按钮预检同一判定：`Workbench::validate_hex` → `tool_core`；
+                // hover 里只放预检文案，不带 `AppError` 的分类前缀。
                 match self.workbench.validate_hex(self.send.input.trim(), false) {
                     Ok(_) => String::new(),
-                    Err(error) => error.to_string(),
+                    Err(error) => hex_precheck_hint(&error),
                 }
             } else {
                 String::new()

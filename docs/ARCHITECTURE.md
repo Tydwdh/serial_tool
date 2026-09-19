@@ -123,8 +123,9 @@ cargo tree -p tool-application | grep -i egui    # 0 行
   **当前状态（修复后）**：`cargo +1.92.0 fmt --all --check`、
   `cargo +1.92.0 clippy --workspace --all-targets -- -D warnings`、
   `cargo +1.92.0 test --workspace --all-targets` 三条均 **exit 0**，
-  test 为 **584 passed / 0 failed / 7 ignored**（22 targets；= Task 6 落 `send_plan` 前的
-  578 + `send_plan` 的 6 条单测，该模块无 `cfg` 门控所以跑在 native 测试目标里）。
+  test 为 **585 passed / 0 failed / 7 ignored**（22 targets；= Task 6 落 `send_plan` 前的
+  578 + `send_plan` 的 6 条单测，该模块无 `cfg` 门控所以跑在 native 测试目标里
+  + Task 6 复审轮的 1 条 `headless.rs` 端口命名形态用例）。
   > **计数口径（引用数字前先看这条）**：`cargo test` 打的是**测试槽位**，不是唯一断言数。
   > `crates/app/tests/manifest_deps.rs` 既是独立 test target，又被两份守卫各用 `#[path]`
   > 引一次，所以它的 13 条元测试在 **3 个 target 各跑一遍**（13 条 → 39 槽）。
@@ -343,6 +344,47 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
      | `crates/plugin_runtime/src/web_lua.rs:2508` `parse_hex` | wasm 插件 Lua API `ctx.serial.send_hex_to` 的后端，语义与 `tool_core::parse_hex` 不同（要求偶数长度、不认 `0x` 前缀），收敛即改动已发布文档（`docs/lua-plugin-api.md`）承诺的插件行为；且 `tool-plugin-runtime` 目前不依赖 `tool-core`，新增该边会改写 `Cargo.lock`（本轮约束为锁文件不变）。 |
      另：`crates/lua_host/src/codec.rs` 的 `from_hex` 是**有意**独立的 Lua 侧解析器，其归一化规则与
      `tool_core::parse_hex` 对齐，由该文件的 `#25` 用例用同一段输入双向比对钉住。
+   - **发送路径的残留差异（实测，刻意未收敛）**：`send_plan::plan_send` 收敛的是**判定**，
+     不是判定的**输入**。任务种类现在只有一个决策点，但它的唯一路由输入 `is_network: bool`
+     仍由各平台自己算：
+     | 差异 | native | web | 为什么留 / 后果 |
+     |---|---|---|---|
+     | `is_network` 的**计算规则** | `Workbench::is_network_port` 比对 `app_config.network_ports` 的字符串；本轮起同时认 `display_name()`（`host:port`）与 `port_id()`（`network://host:port`）两种形态 | `WebApplication::is_network_port` 查 `network_ports` 的键，键只在 `port_id()` 形态下写入（`crates/application/src/web.rs` 的 `RegisterNetworkPort`） | 两种形态都**被持久化**（native 的 `workspace.json` 存 `network_ports`、web 存浏览器设置），统一命名会打断已存工作区，故**不统一命名**。跨平台误分类是**响亮**的：native 形态的 id 到了 web 会走到 `WebSerialTransport::enqueue_command` → `TransportError::PortNotConnected`（`crates/platform/src/web_serial.rs:504`），字节发不出去而不是发往错误设备。native 此前**内部不自洽**（`RemoveNetworkPort` 认两种形态、`is_network_port` 只认一种），本轮闭合，由 `crates/application/tests/headless.rs::network_port_ids_are_recognized_in_both_naming_forms` 双向钉住（两形态→`send_network`，普通串口名→`send_serial`）。 |
+     | HEX **预检档位** | 底部发送面板两处（发送按钮的 disabled hover、HEX 预览 hover）恒按宽松 `false` 预检，而真正发送按 `send.hex_strict`（默认 `true`，`crates/app/src/state.rs:307`） | `web_hex_error` 透传 `serial.hex_strict`（`crates/app/src/web.rs:3249`；默认 `true`：`:186`/`:825`），共用的 `tool_panels::sender_ui` 也按 `hex_strict` 判（`crates/panels/src/sender.rs:304`） | 默认设置下同一串输入 `"abc"` 在 native 判「可发」（按钮亮着，错误要等点击后由 dispatch 报出），在 web 判「不可发」—— 即 Task 6 要杀的那类分叉**上移到了预检层**。行为保持的重构不动它：改了会改变渲染出的 UI 与用户可见的有效性反馈。**连带事实**：`Workbench::validate_hex` 的 `strict` 形参在 native 侧因此**没有任何 `true` 的调用者，也没有测试**。 |
+
+     > **错误文案（对先前记录的更正）**：Task 6 **改掉了** native 的非法 HEX 文案，此前写作
+     > 「两平台错误文案逐字未变」是错的。本轮之前 native 的 dispatch 错误是
+     > `AppError::Transport(TransportError::InvalidHex(..).to_string())`，渲染为
+     > `transport: invalid hex input: <原因>`。任务内两步各有其责：Part A（`25d2c38`）把
+     > `tool_transport::parse_hex*` 换成 `tool_core::*` 并用 `format!("HEX 解析失败：{原因}")`
+     > 重新包装（`transport: ` 前缀之外的中文串就是那时换的），Part B（`74719a6`）又把这句话
+     > 搬进 `SendPlanError: Display`。今天渲染为 `transport: HEX 解析失败：<原因>`
+     > （`transport: ` 前缀来自 `AppError`）。判定不变，变的是披露与措辞。
+     > 两个 hover 站点（`crates/app/src/ui/bottom_panel.rs` 的按钮 hover 与 HEX 预览 hover）
+     > 经 `hex_precheck_hint` 取 `AppError::Transport` 的裸载荷，**不再带 `transport: ` 分类前缀**；
+     > 点击发送后的红字标签与状态栏仍渲染完整 `AppError`。**这条修正没有测试守着**：
+     > 把前缀去掉的改动被还原后 `cargo test --workspace --all-targets` 仍 585 passed / exit 0
+     > —— 该文件的 `mod tests` 只测 egui 布局，不渲染 `WorkbenchApp`，故无观察点。
+   - **下一轮候选（把漂移的门真正关上）：`plan_send` 收类型化目标，不收裸 `bool`** ——
+     改签名为 `plan_send(cmd, SendTarget::{Serial, Network})`，由两平台**已经持有**的端口种类
+     解析：`tool_platform::PortDescriptor::kind`（`crates/platform/src/lib.rs:112`，网络端口在
+     `descriptor()` 里就带 `PortKind::Network`）与 native 侧 `SerialPortDescriptor.port_type`
+     （注册于 `crates/application/src/workbench.rs:293`）。理由：`is_network: bool` 只能表达
+     「不是网络就是串口」，于是「端口根本不存在」被折叠成「串口」；有了第三种取值才能把 unknown
+     当场拒绝，也才让上面那张表的第一行不再靠命名约定对齐。
+   - **wasm 侧发送路径的测试缺口（实测尺寸）**：Task 5 的字节契约是发送路径上唯一被**执行**的
+     守卫，而它只守 native 半区 —— `headless.rs` 按构造是 native-only（文件顶部直接
+     `use tool_application::{Workbench, AppError, ..}`），`crates/app/src/web.rs` 无 `mod tests`，
+     `crates/application/src/web.rs` 亦无（该 crate 里带测试的 src 文件只有 `send_plan.rs` /
+     `task.rs` / `transport.rs`）。所以缺口的准确尺寸是：**`plan_send` 那个纯函数之下整个 wasm
+     侧 —— application 与 presentation 两层都没有行为测试**。具体仍可全绿出厂：`is_network` 被
+     硬编码（已实测）、`WebApplication::send()` 忽略 `plan.bytes`、两个 wasm `spawn` 分支里的
+     `task_kind` 字面量被重新硬编码、`WebApplication::validate_hex` 的错误映射被翻转、
+     以及整层 wasm 呈现 —— 含 `crates/app/src/web.rs:371-375` 的 `web_hex_error` →
+     `runtime.validate_hex`（Part A 正是在这里删掉手抄副本；未来一次编辑若丢掉 `serial.hex_strict`
+     或不理会 runtime，没有任何测试会响）。成立的推论：判定逻辑已不再住在 `web.rs` 里，
+     所以缺口的**内容**是投递与呈现，不再是规则本身 —— 但每往 `web.rs` 加一条判定，就是往这个
+     零覆盖区里加一条。
    - `tool-databus`：`app/mod.rs` 的 `DataBus::new()`、`bus.publish(..)` 与四个面板的 `::new(&bus)`；
      `web.rs`、`settings_panel.rs`、`perf.rs`、`web_perf.rs` 另有引用。
      所需 application 能力：一个返回共享总线句柄的 accessor（供 presentation 订阅），

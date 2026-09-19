@@ -341,6 +341,76 @@ fn send_routing_dispatches_by_port_kind_and_rejects_invalid_hex() {
 }
 
 #[test]
+fn network_port_ids_are_recognized_in_both_naming_forms() {
+    // `plan_send` 的 `is_network` 实参在 native 侧由 `Workbench::is_network_port` 算出。
+    // native 的 `RemoveNetworkPort` 一直同时接受 `display_name()`（`host:port`）与
+    // `port_id()`（`network://host:port`）两种形态，而 `is_network_port` 此前只认前者 ——
+    // 于是同一个 id 删得掉、发的时候却被静默降级成 `send_serial`（字节交给串口后端）。
+    let bus = DataBus::new();
+    let mut wb = Workbench::new(bus);
+    let config = NetworkSerialConfig {
+        host: "127.0.0.1".to_owned(),
+        port: 9,
+        api_key: None,
+    };
+    let display = config.display_name();
+    let network_id = config.port_id().to_string();
+    expect_done(&mut wb, AppCommand::RegisterNetworkPort { config });
+
+    let display_task = expect_pending(
+        &mut wb,
+        AppCommand::SendText {
+            port: PortId::new(display.clone()),
+            text: "ping".to_owned(),
+        },
+    );
+    let network_id_task = expect_pending(
+        &mut wb,
+        AppCommand::SendText {
+            port: PortId::new(network_id.clone()),
+            text: "ping".to_owned(),
+        },
+    );
+    let serial_task = expect_pending(
+        &mut wb,
+        AppCommand::SendText {
+            port: PortId::new("COM_NOT_A_NETWORK_PORT"),
+            text: "ping".to_owned(),
+        },
+    );
+
+    assert_eq!(
+        task_kind(&wb, display_task).as_deref(),
+        Some("send_network"),
+        "display_name 形态（{display}）的发送必须走 send_network"
+    );
+    assert_eq!(
+        task_kind(&wb, network_id_task).as_deref(),
+        Some("send_network"),
+        "port_id 形态（{network_id}）的发送必须走 send_network：同一个 id 不能删得掉却发不出去"
+    );
+    assert_eq!(
+        task_kind(&wb, serial_task).as_deref(),
+        Some("send_serial"),
+        "普通串口名不得被 `network://` 形态的匹配误判成网络端口（误判=字节交给网络后端）"
+    );
+
+    // 三个端口都没打开（`network://…` 形态在 native transport 里连端口表项都不存在），
+    // 所以任务必须全部以 Failed 收尾：这条路径不会静默"发送成功"。
+    let sends = [display_task, network_id_task, serial_task];
+    let all_failed = tick_until(&mut wb, Duration::from_secs(10), |wb| {
+        sends
+            .iter()
+            .all(|task_id| task_state(wb, *task_id) == Some(TaskState::Failed))
+    });
+    assert!(
+        all_failed,
+        "端口未打开时发送任务必须以 Failed 收尾，实际: {:?}",
+        sends.map(|task_id| task_state(&wb, task_id))
+    );
+}
+
+#[test]
 fn terminal_bound_clamps_max_entries_and_pages_incrementally() {
     let bus = DataBus::new();
     let mut wb = Workbench::new(bus.clone());
