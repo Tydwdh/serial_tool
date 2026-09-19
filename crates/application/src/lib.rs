@@ -26,6 +26,9 @@ pub mod model;
 pub mod perf;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod query;
+/// 发送路由的唯一决策点：无任何 `cfg` 门控，native 与 wasm 的两个 `dispatch`
+/// 都调它，避免「同一命令在两端算出不同任务种类或不同字节」。
+pub mod send_plan;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod task;
 #[cfg(not(target_arch = "wasm32"))]

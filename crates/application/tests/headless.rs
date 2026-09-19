@@ -885,6 +885,10 @@ fn event_emission_reaches_bus_subscribers_from_all_publishers() {
 // 最后因为端口从未打开而 Failed」。把 `Workbench::send_transport_bytes` 的入参换成
 // `let bytes: Vec<u8> = Vec::new();`（每一次发送都真的投递 0 字节）后，全工作区仍会
 // 全绿 —— 用户按下发送键什么都不发，CI 看不见。下面的用例把契约钉在**对端收到的字节**上。
+//
+// Task 6 之后，字节的唯一生产点是 `crate::send_plan::plan_send`（native 与 wasm 共用），
+// 投递入参由它给出的 `PlannedSend` 承担：上述变异现在注入 `plan_send` 的 `bytes`
+// （或 `send_transport_bytes` 解构后的同名变量）都必须让下面的用例变红。
 
 /// 收满期望帧数之后，回路服务器继续观察的静默窗口：让「多投递一帧」也能被看见。
 const QUIET_WINDOW: Duration = Duration::from_millis(300);

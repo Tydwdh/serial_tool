@@ -19,6 +19,7 @@ use crate::query::{
     NetworkPortConfig, PluginView, RecordingStatusView, ReplayStatusView, TransportStatusView,
     TransportView,
 };
+use crate::send_plan::{self, PlannedSend};
 use crate::service::terminal::TerminalService;
 use crate::task::{AppEvent, TaskContext, TaskId, TaskManager, TaskResult, TaskSnapshot};
 
@@ -419,22 +420,33 @@ impl Workbench {
                 }
                 Ok(CommandOutcome::Done)
             }
+            // 三条 send 分支：路由（serial/network）与 HEX 解码都交给 `send_plan::plan_send`，
+            // wasm 侧的 `dispatch` 调的是同一个函数；本平台只负责「按已定的种类把字节投出去」。
+            //
+            // 为什么不合并成 `cmd @ (SendText { port, .. } | SendHex { port, .. }
+            // | SendRaw { port, .. })`：1.92.0 报 E0382（`port` 非 Copy，`cmd` 被部分移动），
+            // 改成 `ref cmd` 就要为 payload 多付一次克隆。三个各 4 行的分支，也胜过
+            // 一个带 `_ => String::new()` 兜底的 helper —— 发送路径上的静默错值不可接受。
             AppCommand::SendText { port, text } => {
-                let bytes = text.into_bytes();
-                self.send_transport_bytes(port.to_string(), bytes)
+                let port_name = port.to_string();
+                let command = AppCommand::SendText { port, text };
+                let plan = send_plan::plan_send(&command, self.is_network_port(&port_name))
+                    .map_err(|error| AppError::Transport(error.to_string()))?;
+                self.send_transport_bytes(port_name, plan)
             }
             AppCommand::SendHex { port, hex, strict } => {
-                // HEX 判定唯一真相在 `tool_core`（wasm 侧共用同一份），transport 只管投递。
-                let bytes = if strict {
-                    tool_core::parse_hex_strict(&hex)
-                } else {
-                    tool_core::parse_hex(&hex)
-                }
-                .map_err(|error| AppError::Transport(format!("HEX 解析失败：{error}")))?;
-                self.send_transport_bytes(port.to_string(), bytes)
+                let port_name = port.to_string();
+                let command = AppCommand::SendHex { port, hex, strict };
+                let plan = send_plan::plan_send(&command, self.is_network_port(&port_name))
+                    .map_err(|error| AppError::Transport(error.to_string()))?;
+                self.send_transport_bytes(port_name, plan)
             }
             AppCommand::SendRaw { port, bytes } => {
-                self.send_transport_bytes(port.to_string(), bytes)
+                let port_name = port.to_string();
+                let command = AppCommand::SendRaw { port, bytes };
+                let plan = send_plan::plan_send(&command, self.is_network_port(&port_name))
+                    .map_err(|error| AppError::Transport(error.to_string()))?;
+                self.send_transport_bytes(port_name, plan)
             }
             AppCommand::SetDtr { port, value } => {
                 self.set_transport_signal(port.to_string(), value, true)
@@ -1058,15 +1070,13 @@ impl Workbench {
         }
     }
 
-    /// presentation 只做输入校验，规则与真正发送时完全一致：两者共用 `tool_core`
-    /// 里唯一的 HEX 判定，所以「按钮亮起但 dispatch 报错」不再有第二个判定来源。
+    /// presentation 只做输入校验，规则与真正发送时完全一致：两者都走
+    /// `send_plan::decode_hex` → `tool_core`，所以「按钮亮起但 dispatch 报错」
+    /// 不再有第二个判定来源。
     pub fn validate_hex(&self, hex: &str, strict: bool) -> Result<Vec<u8>, AppError> {
-        let parsed = if strict {
-            tool_core::parse_hex_strict(hex)
-        } else {
-            tool_core::parse_hex(hex)
-        };
-        parsed.map_err(|error| AppError::Transport(format!("HEX 解析失败：{error}")))
+        send_plan::decode_hex(hex, strict).map_err(|error| {
+            AppError::Transport(send_plan::SendPlanError::InvalidHex(error).to_string())
+        })
     }
 
     fn is_network_port(&self, port_name: &str) -> bool {
@@ -1076,18 +1086,23 @@ impl Workbench {
             .any(|config| config.display_name() == port_name)
     }
 
+    /// 按 `plan_send` 算出的种类与字节投递。走哪个后端由 `PlannedSend::targets_network_port()`
+    /// 决定（那是 `send_plan` 里被单测钉住的判定），本平台不再比一次字符串，
+    /// 也不再对照一次端口名单。
     fn send_transport_bytes(
         &mut self,
         port_name: String,
-        bytes: Vec<u8>,
+        plan: PlannedSend,
     ) -> Result<CommandOutcome, AppError> {
-        if self.is_network_port(&port_name) {
+        let to_network = plan.targets_network_port();
+        let PlannedSend { task_kind, bytes } = plan;
+        if to_network {
             let transport = self.transport.clone();
             let task_port = port_name.clone();
             let task_bytes = bytes;
             let task_id = self.tasks.spawn_ordered(
                 format!("serial:{task_port}"),
-                "send_network",
+                task_kind,
                 move |_context| {
                     transport
                         .send_to(&task_port, task_bytes.clone())
@@ -1104,18 +1119,16 @@ impl Workbench {
         let backend = self.transport_backend.clone();
         let port = PortId::new(port_name.clone());
         let byte_count = bytes.len();
-        let task_id = self.tasks.spawn_ordered(
-            format!("serial:{port_name}"),
-            "send_serial",
-            move |_context| {
-                block_on_transport(backend.send(port.clone(), bytes))
-                    .map_err(|error| error.to_string())?;
-                Ok(TaskResult::TransportSent {
-                    port,
-                    bytes: byte_count,
-                })
-            },
-        );
+        let task_id =
+            self.tasks
+                .spawn_ordered(format!("serial:{port_name}"), task_kind, move |_context| {
+                    block_on_transport(backend.send(port.clone(), bytes))
+                        .map_err(|error| error.to_string())?;
+                    Ok(TaskResult::TransportSent {
+                        port,
+                        bytes: byte_count,
+                    })
+                });
         Ok(pending(task_id, format!("正在发送到 {port_name}")))
     }
 

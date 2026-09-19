@@ -24,6 +24,7 @@ use crate::replay::{
     ReplayBlockReasonView, ReplayBookmarkView, ReplayLoadReportView, ReplayPolicyView,
     ReplayStateView, ReplayStatusView,
 };
+use crate::send_plan::{self, PlannedSend};
 use crate::task_model::{TaskId, TaskSnapshot, TaskState};
 use crate::updater::UpdateStatusView;
 use serde::Deserialize;
@@ -2024,19 +2025,32 @@ impl WebApplication {
                     message: "正在关闭串口".to_owned(),
                 })
             }
-            AppCommand::SendText { port, text } => self.send(port, text.into_bytes()),
-            AppCommand::SendHex { port, hex, strict } => {
-                // 判定规则唯一真相在 `tool_core`，与 native 完全同一份函数：
-                // 此前这里是本文件的手抄副本，同一串输入两端判定相反。
-                let bytes = if strict {
-                    tool_core::parse_hex_strict(&hex)
-                } else {
-                    tool_core::parse_hex(&hex)
-                }
-                .map_err(|error| format!("HEX 解析失败：{error}"))?;
-                self.send(port, bytes)
+            // 三条 send 分支与 native 完全同源：路由与 HEX 解码都由 `send_plan::plan_send`
+            // 判定（此前这里是本文件的手抄副本，同一串输入两端判定相反）。
+            // 不合并成 `cmd @ (SendText { port, .. } | ..)`：1.92.0 对非 Copy 的 `port`
+            // 报 E0382；三个各 4 行的分支也好过一个会静默返回空端口名的 helper。
+            AppCommand::SendText { port, text } => {
+                let is_network = self.is_network_port(&port);
+                let task_port = port.clone();
+                let plan = send_plan::plan_send(&AppCommand::SendText { port, text }, is_network)
+                    .map_err(|error| error.to_string())?;
+                self.send(task_port, plan)
             }
-            AppCommand::SendRaw { port, bytes } => self.send(port, bytes),
+            AppCommand::SendHex { port, hex, strict } => {
+                let is_network = self.is_network_port(&port);
+                let task_port = port.clone();
+                let plan =
+                    send_plan::plan_send(&AppCommand::SendHex { port, hex, strict }, is_network)
+                        .map_err(|error| error.to_string())?;
+                self.send(task_port, plan)
+            }
+            AppCommand::SendRaw { port, bytes } => {
+                let is_network = self.is_network_port(&port);
+                let task_port = port.clone();
+                let plan = send_plan::plan_send(&AppCommand::SendRaw { port, bytes }, is_network)
+                    .map_err(|error| error.to_string())?;
+                self.send(task_port, plan)
+            }
             AppCommand::SetDtr { port, value } => {
                 let transport = self.serial_transport()?;
                 let task_port = port.clone();
@@ -2077,27 +2091,34 @@ impl WebApplication {
         }
     }
 
-    /// presentation 只做输入校验，规则与真正发送时完全一致：与 native 共用
-    /// `tool_core` 里唯一的 HEX 判定（本 crate 的 wasm 侧错误类型是 `String`，
+    /// presentation 只做输入校验，规则与真正发送时完全一致：两者都走
+    /// `send_plan::decode_hex` → `tool_core`（本 crate 的 wasm 侧错误类型是 `String`，
     /// 因为 `AppError` 整体受 `cfg(not(target_arch = "wasm32"))` 门控）。
     pub fn validate_hex(&self, hex: &str, strict: bool) -> Result<Vec<u8>, String> {
-        let parsed = if strict {
-            tool_core::parse_hex_strict(hex)
-        } else {
-            tool_core::parse_hex(hex)
-        };
-        parsed.map_err(|error| format!("HEX 解析失败：{error}"))
+        send_plan::decode_hex(hex, strict)
+            .map_err(|error| send_plan::SendPlanError::InvalidHex(error).to_string())
     }
 
-    fn send(&self, port: PortId, bytes: Vec<u8>) -> Result<CommandOutcome, String> {
+    /// 本平台的「是不是网络端口」判定：名单是 `network_ports`（native 侧对应
+    /// `app_config.network_ports`）。结论只交给 `send_plan::plan_send` 决定任务种类。
+    fn is_network_port(&self, port: &PortId) -> bool {
+        self.network_ports.borrow().contains_key(port.as_str())
+    }
+
+    /// 按 `plan_send` 算出的种类与字节投递：走哪个后端由 `PlannedSend::targets_network_port()`
+    /// 决定（那是 `send_plan` 里被单测钉住的判定，不在本平台再比一次字符串）。
+    /// 投递方式、`serial_tx_event` 发布与提示文案都保持本平台的既有行为。
+    fn send(&self, port: PortId, plan: PlannedSend) -> Result<CommandOutcome, String> {
+        let to_network = plan.targets_network_port();
+        let PlannedSend { task_kind, bytes } = plan;
         self.set_transport_status(format!("正在发送到 {port}"));
-        if self.network_ports.borrow().contains_key(port.as_str()) {
+        if to_network {
             let network = self.network_transport.clone();
             let task_port = port.clone();
             let bus = self.bus.clone();
             let byte_count = bytes.len();
             let task_id = self.spawn(
-                "send_network",
+                task_kind,
                 async move {
                     network.send(port.clone(), bytes.clone()).await?;
                     bus.publish(serial_tx_event(&port, bytes));
@@ -2119,7 +2140,7 @@ impl WebApplication {
         let bus = self.bus.clone();
         let byte_count = bytes.len();
         let task_id = self.spawn(
-            "send_serial",
+            task_kind,
             async move {
                 transport.send(port.clone(), bytes.clone()).await?;
                 bus.publish(serial_tx_event(&port, bytes));
@@ -2305,8 +2326,8 @@ fn should_record_event(event: &Event, mode: tool_recorder::RecordMode) -> bool {
 // 这里曾有 `parse_hex` / `parse_hex_strict` 两份手抄副本：它们只剥一层 `0x` 前缀，
 // 且严格模式仅按空白分词，于是 `"0x0xAB"`、`"0A,BB"` 这类输入在 web 被判非法、
 // 在 native 被判合法。判定规则的唯一真相现在在 `tool_core::{parse_hex, parse_hex_strict}`，
-// 由 `WebApplication::validate_hex`（presentation 预检）与本文件的 `dispatch`
-// （真正发送）共同调用，native 走的是同一对函数。
+// 由 `WebApplication::validate_hex`（presentation 预检）与 `crate::send_plan::plan_send`
+// （真正发送的路由）共同调用，native 走的是同一对函数。
 
 fn wake_handle(handle: &Rc<RefCell<Option<RepaintWaker>>>) {
     let waker = handle.borrow().clone();
