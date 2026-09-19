@@ -265,6 +265,15 @@ fn send_routing_dispatches_by_port_kind_and_rejects_invalid_hex() {
         matches!(strict_error, AppError::Transport(_)),
         "strict hex 错误类型应为 AppError::Transport，实际: {strict_error:?}"
     );
+    // 这句话是 `docs/ARCHITECTURE.md`「发送路径的残留差异 → 错误文案」一栏作为证据发布的
+    // 原文，所以在这里钉住它：改 `SendPlanError::Display`、改 `AppError::Transport` 的
+    // `transport: ` 分类前缀、或改 `tool_core` 严格模式的文案，都会让本断言变红，
+    // 而不是留下一份与代码无关的文档句子。
+    assert_eq!(
+        strict_error.to_string(),
+        "transport: HEX 解析失败：严格模式: \"C\" 规范化后为 1 个字符，必须恰为 2（偶数 hex 长度），请补0或关闭严格模式",
+        "native 非法 HEX 的渲染句串与 docs/ARCHITECTURE.md 发布的证据不一致（文档在说谎）"
+    );
     let garbage_error = wb
         .dispatch(AppCommand::SendHex {
             port: serial.clone(),

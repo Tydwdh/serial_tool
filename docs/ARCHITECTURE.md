@@ -350,7 +350,7 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
      | 差异 | native | web | 为什么留 / 后果 |
      |---|---|---|---|
      | `is_network` 的**计算规则** | `Workbench::is_network_port` 比对 `app_config.network_ports` 的字符串；本轮起同时认 `display_name()`（`host:port`）与 `port_id()`（`network://host:port`）两种形态 | `WebApplication::is_network_port` 查 `network_ports` 的键，键只在 `port_id()` 形态下写入（`crates/application/src/web.rs` 的 `RegisterNetworkPort`） | 两种形态都**被持久化**（native 的 `workspace.json` 存 `network_ports`、web 存浏览器设置），统一命名会打断已存工作区，故**不统一命名**。跨平台误分类是**响亮**的：native 形态的 id 到了 web 会走到 `WebSerialTransport::enqueue_command` → `TransportError::PortNotConnected`（`crates/platform/src/web_serial.rs:504`），字节发不出去而不是发往错误设备。native 此前**内部不自洽**（`RemoveNetworkPort` 认两种形态、`is_network_port` 只认一种），本轮闭合，由 `crates/application/tests/headless.rs::network_port_ids_are_recognized_in_both_naming_forms` 双向钉住（两形态→`send_network`，普通串口名→`send_serial`）。 |
-     | HEX **预检档位** | 底部发送面板两处（发送按钮的 disabled hover、HEX 预览 hover）恒按宽松 `false` 预检，而真正发送按 `send.hex_strict`（默认 `true`，`crates/app/src/state.rs:307`） | `web_hex_error` 透传 `serial.hex_strict`（`crates/app/src/web.rs:3249`；默认 `true`：`:186`/`:825`），共用的 `tool_panels::sender_ui` 也按 `hex_strict` 判（`crates/panels/src/sender.rs:304`） | 默认设置下同一串输入 `"abc"` 在 native 判「可发」（按钮亮着，错误要等点击后由 dispatch 报出），在 web 判「不可发」—— 即 Task 6 要杀的那类分叉**上移到了预检层**。行为保持的重构不动它：改了会改变渲染出的 UI 与用户可见的有效性反馈。**连带事实**：`Workbench::validate_hex` 的 `strict` 形参在 native 侧因此**没有任何 `true` 的调用者，也没有测试**。 |
+     | HEX **预检的规则来源**（round-1 把这一行记成「预检档位」的两端分歧，**那个分歧不成立** —— 依据的站点是死代码，见本行末与下方更正） | **活着的**按钮门禁是共享面板 `crates/panels/src/sender.rs:304-309`：它传 `*view.hex_strict`（默认 `true`，`crates/app/src/state.rs:307`），「严格」勾选框也是活的（`sender.rs:183-185`）。本平台自己的 `Workbench::validate_hex` **没有任何活调用点** —— 仅存的两个（`bottom_panel.rs:658`、`:752`，都传 `false`）在 `legacy_send_panel_body` 的死子树里（`bottom_panel.rs:279-340`，本文件第 8 条已记它全工作区 0 调用） | 按钮门禁是**同一个** `sender.rs:304-309`（`crates/app/src/web.rs:4947` 也调 `tool_panels::sender_ui`）；`web_hex_error` → `WebApplication::validate_hex` → `tool_core` 只出现在**键位发送**路径上（`crates/app/src/web.rs:3249`，由 `CMD_SEND` 的 `send_web_current` 调用） | 「`"abc"` 在 native 判可发（按钮亮着）、在 web 判不可发」这句 round-1 的结论是**错的**：两端按钮都由 panels 那份校验器按 `hex_strict` 判，默认严格档下 `"abc"` 在**两端都被拒**（`sender.rs:507`：规范化长度 3 ≠ 2）。真正的残留是**规则来源**、不是档位：活的门禁用 `crates/panels/src/sender.rs:491` 那第三份 `hex_error`（只剥**一层** `0x`），而发送与 web 键位预检用 `tool_core`（`normalize_hex_token` 的 `trim_start_matches` 反复剥），于是默认严格档下 `"0x0xAB"` 一边判非法（规范化后 `0xAB`，长度 4 ≠ 2）、一边判合法（`AB`）：**两端**都会把这串的发送按钮灰掉，而 `dispatch` 其实接受它 —— 且这条路**用户能走到**：native 的 Ctrl+Enter 走 `crates/app/src/commands.rs:212` 的 `cmd_send_if_ready`（只查「端口已打开 + 输入非空」，**不做 HEX 预检**）→ `do_send` → `dispatch`，web 的键位走 `send_web_current`（预检用 `tool_core`，同样放行），两边都会把这串真发出去。行为保持的收敛不动它（改了会改变渲染出的 UI）。**连带事实（按可达性归因）**：`Workbench::validate_hex` 的 `strict` 形参在 native 既没有 `true` 的调用者、也没有活的调用者，更没有测试 —— 因为那两个调用点整体不可达。 |
 
      > **错误文案（对先前记录的更正）**：Task 6 **改掉了** native 的非法 HEX 文案，此前写作
      > 「两平台错误文案逐字未变」是错的。本轮之前 native 的 dispatch 错误是
@@ -360,11 +360,26 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
      > 重新包装（`transport: ` 前缀之外的中文串就是那时换的），Part B（`74719a6`）又把这句话
      > 搬进 `SendPlanError: Display`。今天渲染为 `transport: HEX 解析失败：<原因>`
      > （`transport: ` 前缀来自 `AppError`）。判定不变，变的是披露与措辞。
-     > 两个 hover 站点（`crates/app/src/ui/bottom_panel.rs` 的按钮 hover 与 HEX 预览 hover）
-     > 经 `hex_precheck_hint` 取 `AppError::Transport` 的裸载荷，**不再带 `transport: ` 分类前缀**；
-     > 点击发送后的红字标签与状态栏仍渲染完整 `AppError`。**这条修正没有测试守着**：
-     > 把前缀去掉的改动被还原后 `cargo test --workspace --all-targets` 仍 585 passed / exit 0
-     > —— 该文件的 `mod tests` 只测 egui 布局，不渲染 `WorkbenchApp`，故无观察点。
+     > **这句渲染现在有测试钉着**：`crates/application/tests/headless.rs::
+     > send_routing_dispatches_by_port_kind_and_rejects_invalid_hex` 除断言变体外，还断言
+     > `strict_error.to_string()` 逐字等于上面那句 —— 改 `SendPlanError` 的 `Display`、
+     > 改 `AppError::Transport` 的 `#[error("transport: {0}")]` 前缀、或改 `tool_core`
+     > 严格模式的文案，都会让该用例变红。
+     > round-1 给两处 hover 加的 `hex_precheck_hint`（应用点 `crates/app/src/ui/bottom_panel.rs:661`、
+     > `:754`）**位于不可达的子树**：那两个站点属于 `legacy_send_panel_body`（`:279-340`，
+     > `#[allow(dead_code)]`，全工作区 **0 调用**，见本文件第 8 条）。所以 round-1 写成
+     > 「用户在看板里读到带前缀的句子」的那半条 **UX 回归从未到达过用户** —— `1a96efb` 起
+     > 这两个函数就没有调用者，Task 6 只是换了死代码里的文案写法。**活的**用户可见改动是
+     > 红字标签与状态栏：`bottom_panel.rs:219`、`:234`、`:843` 三处 `e.to_string()` 渲染完整
+     > `AppError`，按设计**仍带 `transport: ` 分类前缀**。仍然没有测试守着的是那两处 hover
+     > 字符串本身：把 `hex_precheck_hint` 还原成 `error.to_string()` 后四门全绿
+     > （585 passed / exit 0）—— 该文件的 `mod tests` 只测 egui 布局、从不渲染
+     > `WorkbenchApp`，站点又不可达，故没有观察点。
+     > 可达性核对（本轮实测，非继承自上轮结论）：
+     > ```bash
+     > grep -rn 'legacy_send_panel_body' crates/      # 只命中定义处 1 行
+     > grep -rn 'self\.render_send_actions' crates/ # 只命中 legacy_send_panel_body 体内 1 行
+     > ```
    - **下一轮候选（把漂移的门真正关上）：`plan_send` 收类型化目标，不收裸 `bool`** ——
      改签名为 `plan_send(cmd, SendTarget::{Serial, Network})`，由两平台**已经持有**的端口种类
      解析：`tool_platform::PortDescriptor::kind`（`crates/platform/src/lib.rs:112`，网络端口在
@@ -373,10 +388,17 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
      「不是网络就是串口」，于是「端口根本不存在」被折叠成「串口」；有了第三种取值才能把 unknown
      当场拒绝，也才让上面那张表的第一行不再靠命名约定对齐。
    - **wasm 侧发送路径的测试缺口（实测尺寸）**：Task 5 的字节契约是发送路径上唯一被**执行**的
-     守卫，而它只守 native 半区 —— `headless.rs` 按构造是 native-only（文件顶部直接
+     **端到端投递**守卫，而它只守 native 半区 —— `headless.rs` 按构造是 native-only（文件顶部直接
      `use tool_application::{Workbench, AppError, ..}`），`crates/app/src/web.rs` 无 `mod tests`，
-     `crates/application/src/web.rs` 亦无（该 crate 里带测试的 src 文件只有 `send_plan.rs` /
-     `task.rs` / `transport.rs`）。所以缺口的准确尺寸是：**`plan_send` 那个纯函数之下整个 wasm
+     `crates/application/src/web.rs` 亦无。**注意别把它读成「发送路径上只有这一条守卫」**：
+     规则层另有 `send_plan.rs` 的 **6 条**单测在 native 测试目标里执行（M1 那次的零字节变异下
+     红了其中 3 条），本轮又给 `headless.rs` 的非法 HEX 用例加了渲染句串断言 —— 被执行的守卫
+     不止一条，只是**端到端投递**这一层仅一条。带测试的 `src` 文件也**不止三个**：
+     `send_plan.rs` / `task.rs` / `transport.rs` / **`service/terminal_store.rs`**，核对：
+     ```bash
+     grep -rn '#\[test\]' crates/application/src/ | sed 's/:[0-9]*:.*//' | sort -u
+     ```
+     所以缺口的准确尺寸是：**`plan_send` 那个纯函数之下整个 wasm
      侧 —— application 与 presentation 两层都没有行为测试**。具体仍可全绿出厂：`is_network` 被
      硬编码（已实测）、`WebApplication::send()` 忽略 `plan.bytes`、两个 wasm `spawn` 分支里的
      `task_kind` 字面量被重新硬编码、`WebApplication::validate_hex` 的错误映射被翻转、
@@ -392,12 +414,23 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
 7. **`crates/panels` 内部仍自持 `DataBus` 订阅**（`Terminal/Log/Chart/Attitude/Gauge/Dynamic/data_table`
    各自 `subscribe_*`）。这属更大的 Presentation 数据流重构，本轮不动。
 8. **`crates/app` 存在死代码子树（实测，未删）**：
-   `crates/app/src/ui/bottom_panel.rs:249-310` 的 `legacy_send_panel_body` 带 `#[allow(dead_code)]`，
-   全工作区 **0 调用**，块长 **62 行**（含 `#[allow]` 行，249..310；早期估为"约 350 行"，已按实测更正）。
-   核对：
+   `crates/app/src/ui/bottom_panel.rs:279-340` 的 `legacy_send_panel_body` 带
+   `#[allow(dead_code)]`（`:279`），全工作区 **0 调用**，块长 **62 行**（含 `#[allow]` 行，
+   279..340；早期估为"约 350 行"，已按实测更正。行号会随上方插入漂移：`249-310` →
+   round-1 加 `hex_precheck_hint` 后 `265-326` → round-2 加注释后 `279-340`；**本文件的行号按
+   本轮提交实测**，符号名才是稳定锚点）。
+   **它把三个渲染函数一起拖成不可达**：`render_send_actions`（`:576-622`）唯一的调用点是
+   `:327`（体在内），而 `render_send_and_clear_buttons`（`:643`）与 `render_hex_preview`（`:735`）
+   只被 `render_send_actions` 调用（`:589`/`:611` 与 `:604`/`:620`）—— **native 的
+   `Workbench::validate_hex` 仅有的两个调用点（`:658`、`:752`）就在这一族里**，所以那个函数
+   在本平台没有任何活的调用点。核对（本轮实测）：
    ```bash
-   grep -rn 'legacy_send_panel_body' crates/   # 只应命中定义处 1 行
+   grep -rn 'legacy_send_panel_body' crates/        # 只命中定义处 1 行
+   grep -rn 'self\.render_send_actions' crates/   # 只命中 legacy_send_panel_body 体内 1 行
+   grep -rn 'validate_hex(' crates/app/src/       # 恰好 3 行：native 两处（都在死子树）+ wasm 的 :373
    ```
+   删除它是**真**改进（连带清掉两份 `hex_precheck_hint` 调用点），但属另一个任务的裁决，
+   Task 6 按约束**不删**。
 9. **`crates/panels` 有一组已被 application DTO 取代、但仍导出的死符号（实测，未删）**：
    `replay_view.rs` 的 `ReplayView`（`:7`，含 `:55 impl From<&ReplayStatusView> for ReplayView`）
    与 `plugin_view.rs` 的 `InstalledPluginRow`（`:6`）/ `PluginViewState`（`:14`）/

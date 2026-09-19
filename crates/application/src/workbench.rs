@@ -1071,8 +1071,15 @@ impl Workbench {
     }
 
     /// presentation 只做输入校验，规则与真正发送时完全一致：两者都走
-    /// `send_plan::decode_hex` → `tool_core`，所以「按钮亮起但 dispatch 报错」
-    /// 不再有第二个判定来源。
+    /// `send_plan::decode_hex` → `tool_core`。
+    ///
+    /// 但别把这句读成「native 的按钮门禁与本函数同源」——**本函数在本平台没有活的调用点**：
+    /// 仅存的两个调用点在 `crates/app/src/ui/bottom_panel.rs` 的 `legacy_send_panel_body`
+    /// 子树里（`#[allow(dead_code)]`，全工作区 0 调用），且都传 `strict = false`。
+    /// **活着**的门禁是两平台共用的 `crates/panels/src/sender.rs` 的 `render_actions` →
+    /// 该 crate 自己的 `hex_error`（第三份规则实现，`0x` 只剥一层），所以
+    /// 「不再有第二个判定来源」只对 `dispatch`/发送路径成立，对按钮门禁不成立；
+    /// 差异的实测记录见 `docs/ARCHITECTURE.md`「发送路径的残留差异」。
     pub fn validate_hex(&self, hex: &str, strict: bool) -> Result<Vec<u8>, AppError> {
         send_plan::decode_hex(hex, strict).map_err(|error| {
             AppError::Transport(send_plan::SendPlanError::InvalidHex(error).to_string())

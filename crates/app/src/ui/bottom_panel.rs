@@ -21,12 +21,18 @@ const SEND_BOTTOM_MIN_INPUT_HEIGHT: f32 = 40.0;
 /// HEX 预检结论的 hover 文案。
 ///
 /// `Workbench::validate_hex` 返回 `AppError`，它的 `Display` 带**分类前缀**
-/// （`transport: `）—— 那是状态栏/日志用来区分错误来源的。hover 文案只该回答
-/// 「HEX 哪里不对」，所以这里取 `Transport` 变体的裸载荷，与 wasm 侧的**文案**同串
-/// （wasm 的 `WebApplication::validate_hex` 返回 `Result<_, String>`，本就无前缀）。
-/// 两平台的预检**档位**并不相同（这里恒传 `false`，web 透传 `hex_strict`），
-/// 该差异记录在 `docs/ARCHITECTURE.md` 的「发送路径残留差异」，本函数不改变它。
-/// 只有这两处 hover 走本函数：点击发送之后的红字标签与状态栏仍渲染完整 `AppError`。
+/// （`transport: `）—— 那是红字标签/状态栏用来区分错误来源的，本文件里那些站点
+/// 仍渲染完整 `AppError`。hover 文案只该回答「HEX 哪里不对」，所以这里取
+/// `Transport` 变体的裸载荷，与 wasm 侧的**文案**同串（wasm 的
+/// `WebApplication::validate_hex` 返回 `Result<_, String>`，本就无前缀）。
+///
+/// **可达性（round-2 实测，更正 round-1 写在这里的说法）**：本函数只有两个调用点
+/// （`:661` 按钮 hover、`:754` HEX 预览 hover），两者都在 `legacy_send_panel_body`
+/// 的不可达子树里（`:279-340`，`#[allow(dead_code)]`，全工作区 0 调用）。
+/// 所以本函数**没有**改变任何用户看得见的界面；native 活着的那道 HEX 门禁用的是
+/// `crates/panels/src/sender.rs:304-309`（两平台共用，按 `hex_strict` 判）。
+/// 「native 恒宽松、web 严格」这条两端分歧**不存在** —— round-1 把死代码读成了实况，
+/// 已按实测改写进 `docs/ARCHITECTURE.md` 的「发送路径残留差异」。
 fn hex_precheck_hint(error: &tool_application::AppError) -> String {
     match error {
         tool_application::AppError::Transport(message) => message.clone(),
@@ -262,6 +268,14 @@ impl WorkbenchApp {
         self.ui_contribution_non_button_slot(ui, "send.toolbar");
     }
 
+    /// 【不可达子树的根 · round-2 实测】`render_send_actions` 与它调用的
+    /// `render_send_and_clear_buttons` / `render_hex_preview` 只被本函数用到，
+    /// 而本函数全工作区 0 调用（核对：`grep -rn 'legacy_send_panel_body' crates/`
+    /// 只命中定义处、`grep -rn 'self\.render_send_actions' crates/` 只命中本函数体内 1 行）。
+    /// `Workbench::validate_hex` 在本平台仅有的两个调用点就在那一族里 —— 即那个函数
+    /// 在本平台没有任何活的调用点。活的 HEX 门禁住在 `tool_panels::sender_ui`
+    /// （`crates/panels/src/sender.rs` 的 `render_actions`），两平台共用。
+    /// 删除这一族是真改进，但属独立的清理裁决；Task 6 只更正文档，不删代码。
     #[allow(dead_code)]
     fn legacy_send_panel_body(&mut self, ui: &mut egui::Ui, layout: SendLayout) {
         self.ensure_send_target_port();
@@ -627,13 +641,17 @@ impl WorkbenchApp {
 
     /// 发送 + 清空 按钮
     fn render_send_and_clear_buttons(&mut self, ui: &mut egui::Ui, send_port_open: bool) {
-        // HEX 模式下实时检查输入是否可解析。判定与真正发送时同源（`Workbench::validate_hex`
-        // → `send_plan::decode_hex` → `tool_core`），不再由 presentation 自己调 transport 解析。
-        // 档位是**刻意**的宽松：这里恒传 `false`，严格模式的拒绝仍由 dispatch 在点击后报出，
-        // 所以 `Workbench::validate_hex` 的 `strict` 形参在本平台没有 `true` 的调用者。
-        // web 侧的预检（`crates/app/src/web.rs` 的 `web_hex_error`）透传 `hex_strict`，
-        // 于是同一串输入在两端的「按钮亮不亮」上并不一致 —— 这是行为保持的收敛刻意留下的
-        // 差异，已记进 `docs/ARCHITECTURE.md` 的「发送路径残留差异」，本处不改判定。
+        // 【本子树不可达，见 `legacy_send_panel_body` 的注释】
+        // HEX 模式下实时检查输入是否可解析。判定与真正发送同源（`Workbench::validate_hex`
+        // → `send_plan::decode_hex` → `tool_core`），不由 presentation 自己调 transport 解析。
+        // 这里恒传 `false`，所以 `Workbench::validate_hex` 的 `strict` 形参在本平台
+        // **没有任何传 `true` 的调用者（活的或死的）、也没有测试** —— 这是死代码可达性的
+        // 推论，不是「native 的按钮恒按宽松档判」。**活的**门禁在
+        // `crates/panels/src/sender.rs` 的 `render_actions`：它按 `hex_strict`（默认 `true`）
+        // 判，且用的是 panels 自己那第三份 `hex_error`（只剥**一层** `0x`），与 `tool_core`
+        // （反复剥）在 `"0x0xAB"` 这类输入上结论相反 —— 两端都会把它的按钮灰掉，而
+        // `dispatch` 其实接受。该残留按实测记在 `docs/ARCHITECTURE.md`「发送路径残留差异」，
+        // 本处不改判定。
         let input_trim = self.send.input.trim();
         let hex_error = if self.send.hex_mode && !input_trim.is_empty() {
             self.workbench

@@ -230,8 +230,14 @@ mod tests {
         );
     }
 
-    /// `SendPlanError` 是两平台错误文案的同一来源：native 把它包进 `AppError::Transport`、
-    /// wasm 直接 `to_string()`，所以这句话就是用户在两侧看到的同一行字。
+    /// `SendPlanError` 的 `Display` 是两平台错误句串的**共同来源**，但它**不是**用户在两侧
+    /// 看到的同一行字：native 把它包进 `AppError::Transport`，后者的
+    /// `#[error("transport: {0}")]` 会再加一层 `transport: ` 分类前缀（活的红字标签与状态栏
+    /// 渲染的就是带前缀的那句，见 `docs/ARCHITECTURE.md`「发送路径的残留差异 → 错误文案」），
+    /// wasm 侧 `to_string()` 出来的才是不带前缀的本句。
+    /// 本用例钉的是**不带前缀**的那句；带 `transport: ` 的原文由
+    /// `tests/headless.rs::send_routing_dispatches_by_port_kind_and_rejects_invalid_hex`
+    /// 的句串断言钉住。
     #[test]
     fn hex_error_display_is_shared_by_both_platforms() {
         let error = plan_send(&hex("AB C", true), false).expect_err("严格模式必须拒绝单 nibble");
