@@ -595,3 +595,42 @@ impl<Pane: PartialEq> Tiles<Pane> {
             .map(|(tile_id, _)| *tile_id)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A side panel is a `Tabs` tile, so dropping something onto its bottom
+    /// edge has to wrap the panel itself in a fresh vertical container.
+    #[test]
+    fn inserting_below_a_tab_tile_splits_it_downward() {
+        let mut tiles = Tiles::default();
+        let first = tiles.insert_pane(());
+        let second = tiles.insert_pane(());
+        let tabs = tiles.insert_tab_tile(vec![first, second]);
+        let dragged = tiles.insert_pane(());
+
+        tiles.insert_at(
+            InsertionPoint::new(tabs, ContainerInsertion::Vertical(usize::MAX)),
+            dragged,
+        );
+
+        let Some(Tile::Container(Container::Linear(linear))) = tiles.get(tabs) else {
+            panic!(
+                "dropping below a tab tile must make it a vertical container, got {:?}",
+                tiles.get(tabs)
+            );
+        };
+        assert_eq!(linear.dir, LinearDir::Vertical);
+        assert_eq!(linear.children.len(), 2);
+        assert_eq!(
+            linear.children[1], dragged,
+            "the dropped tile must land below the panel, not above it"
+        );
+        assert_eq!(
+            tiles.get(linear.children[0]).map(Tile::kind),
+            Some(Some(ContainerKind::Tabs)),
+            "the panel that was there must survive the split"
+        );
+    }
+}

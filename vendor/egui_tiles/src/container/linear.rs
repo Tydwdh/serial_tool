@@ -488,7 +488,7 @@ fn linear_drop_zones<Pane>(
     dir: LinearDir,
     add_drop_drect: impl FnMut(Rect, usize),
 ) {
-    let preview_thickness = 12.0;
+    let preview_thickness = crate::DROP_ZONE_THICKNESS;
     let dragged_index = children
         .iter()
         .position(|&child| is_being_dragged(egui_ctx, tree.id, child));

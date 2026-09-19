@@ -321,6 +321,9 @@ struct DropContext {
     preview_rect: Option<Rect>,
 }
 
+/// Thickness of the strip a tile offers to be split apart along.
+pub(crate) const DROP_ZONE_THICKNESS: f32 = 12.0;
+
 impl DropContext {
     fn on_tile<Pane>(
         &mut self,
@@ -350,13 +353,17 @@ impl DropContext {
         if behavior.is_container_kind_allowed(ContainerKind::Vertical)
             && tile.kind() != Some(ContainerKind::Vertical)
         {
+            // Edge strips rather than half the tile: a half-height target sits
+            // right where the tab-group target is, so it got hit by accident.
             self.suggest_rect(
                 InsertionPoint::new(parent_id, ContainerInsertion::Vertical(0)),
-                rect.split_top_bottom_at_fraction(0.5).0,
+                rect.split_top_bottom_at_y(rect.top() + DROP_ZONE_THICKNESS)
+                    .0,
             );
             self.suggest_rect(
                 InsertionPoint::new(parent_id, ContainerInsertion::Vertical(usize::MAX)),
-                rect.split_top_bottom_at_fraction(0.5).1,
+                rect.split_top_bottom_at_y(rect.bottom() - DROP_ZONE_THICKNESS)
+                    .1,
             );
         }
 
@@ -382,5 +389,92 @@ impl DropContext {
                 self.preview_rect = Some(preview_rect);
             }
         }
+    }
+}
+
+// ----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A [`Tabs`] tile hanging off a horizontal container, i.e. the shape of a
+    /// side panel. It has no linear container of its own, so the only drop
+    /// zones it can ever get are the ones proposed by [`DropContext::on_tile`].
+    fn drop_zone_under(mouse_pos: Pos2) -> (Option<InsertionPoint>, Option<Rect>) {
+        struct PlainBehavior;
+
+        impl Behavior<()> for PlainBehavior {
+            fn pane_ui(
+                &mut self,
+                _ui: &mut egui::Ui,
+                _tile_id: TileId,
+                _pane: &mut (),
+            ) -> UiResponse {
+                UiResponse::None
+            }
+
+            fn tab_title_for_pane(&mut self, _pane: &()) -> egui::WidgetText {
+                "pane".into()
+            }
+        }
+
+        let dragged_tile = TileId(2);
+        let mut drop_context = DropContext {
+            enabled: true,
+            dragged_tile_id: Some(dragged_tile),
+            mouse_pos: Some(mouse_pos),
+            best_dist_sq: f32::INFINITY,
+            best_insertion: None,
+            preview_rect: None,
+        };
+        drop_context.on_tile(
+            &PlainBehavior,
+            &egui::Style::default(),
+            TileId(1),
+            Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 300.0)),
+            &Tile::Container(Container::Tabs(Tabs::new(vec![dragged_tile]))),
+        );
+        (drop_context.best_insertion, drop_context.preview_rect)
+    }
+
+    #[test]
+    fn vertical_drop_zones_are_thin_edge_strips() {
+        for (mouse_pos, expected_index) in [
+            (egui::pos2(200.0, 6.0), 0),
+            (egui::pos2(200.0, 294.0), usize::MAX),
+        ] {
+            let (insertion, preview_rect) = drop_zone_under(mouse_pos);
+            let Some(InsertionPoint {
+                parent_id,
+                insertion: ContainerInsertion::Vertical(index),
+            }) = insertion
+            else {
+                panic!("expected a vertical drop zone at {mouse_pos:?}, got {insertion:?}");
+            };
+            assert_eq!(parent_id, TileId(1));
+            assert_eq!(index, expected_index);
+
+            let strip = preview_rect.expect("vertical drop zone should propose a rect");
+            assert_eq!(
+                strip.height(),
+                12.0,
+                "the vertical drop zone at {mouse_pos:?} is {:?} tall, so it is not \
+                 the same thin edge strip a linear container offers",
+                strip.height()
+            );
+        }
+    }
+
+    #[test]
+    fn tile_halves_are_not_vertical_drop_targets() {
+        let (insertion, _) = drop_zone_under(egui::pos2(200.0, 210.0));
+        assert!(
+            !matches!(
+                insertion.map(|point| point.insertion),
+                Some(ContainerInsertion::Vertical(_))
+            ),
+            "the lower middle of a tile must stay a tab-group target, got {insertion:?}"
+        );
     }
 }

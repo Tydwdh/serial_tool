@@ -286,10 +286,6 @@ impl<H: DockHost> Behavior<PanelId> for SharedTiles<'_, H> {
         120.0
     }
 
-    fn is_container_kind_allowed(&self, kind: ContainerKind) -> bool {
-        kind != ContainerKind::Vertical
-    }
-
     fn simplification_options(&self) -> SimplificationOptions {
         SimplificationOptions {
             all_panes_must_have_tabs: true,
