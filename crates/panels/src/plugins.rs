@@ -494,11 +494,14 @@ impl PluginsPanel {
                     theme::text_secondary(),
                     18.0,
                 ));
+                let fell_back = crate::search::SearchQuery::new(&self.market_search, false)
+                    .used_invalid_regex_fallback();
                 ui.add(
                     TextEdit::singleline(&mut self.market_search)
                         .desired_width(240.0)
                         .hint_text("搜索名称、ID、描述或作者"),
-                );
+                )
+                .on_hover_text(crate::search::SearchQuery::hover_hint(fell_back));
                 let categories: BTreeSet<String> = self
                     .market
                     .registry

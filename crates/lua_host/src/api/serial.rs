@@ -388,7 +388,7 @@ pub(crate) fn create_serial_api(
                             return None;
                         }
                         let text = event.payload.text_lossy();
-                        if text.contains(&pattern) {
+                        if match_pat(&text, &pattern) {
                             Some(text)
                         } else {
                             None
@@ -421,7 +421,7 @@ pub(crate) fn create_serial_api(
             let deadline = Instant::now() + Duration::from_millis(timeout_ms);
             let result = poll_until_match(&subscription, &expect_stop, deadline, |event| {
                 let text = event.payload.text_lossy();
-                if text.contains(&pattern) {
+                if match_pat(&text, &pattern) {
                     Some(text)
                 } else {
                     None
@@ -463,7 +463,7 @@ pub(crate) fn create_serial_api(
                     return None;
                 }
                 let text = event.payload.text_lossy();
-                if text.contains(&expect) {
+                if match_pat(&text, &expect) {
                     Some(text)
                 } else {
                     None

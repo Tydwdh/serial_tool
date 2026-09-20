@@ -151,7 +151,7 @@ pub(crate) fn process_tasks(
                         // 逐行消费到命中为止：不匹配的行属于本次 expect 的无关输出
                         let mut matched: Option<String> = None;
                         while let Some(line) = buffer.next_line() {
-                            if line.contains(&pattern) {
+                            if match_pat(&line, &pattern) {
                                 matched = Some(line);
                                 break;
                             }

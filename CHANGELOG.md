@@ -19,7 +19,9 @@
 - Lua 插件的运行环境收回了三个可直接读盘的全局函数：`dofile`、`loadfile`、`load` 现在在插件里为 `nil`，`require` 也不再按 `package.path` 去加载磁盘上的 `.lua`（只能用宿主预置的模块，如 `require("hw.codec")`，这部分不变）。插件 main.lua 自身与它被允许的模块照常加载；此前靠 `dofile` 互引的插件写法需要改为 `require` 预置模块。
 - CI 的 `test` job 增加压力门禁（`tool-panels`/`tool-databus` 的结构性断言），`crates/app` 中依赖安静调度的计时测试继续保持 `#[ignore]`。
 - 文档明确 macOS 不受支持（无专用代码、CI 与发布包），`RELEASE.md` 的 crate 结构说明同步到当前 15 个 crate。
-- 删除 `crates/app/src/ui/bottom_panel.rs` 中已被共享实现取代的旧发送器路径：`legacy_send_panel_body` 及其 12 个辅助函数、旧历史弹窗与重复的本地 `SendLayout` 枚举（该文件 1429 → 257 行），并为其补上针对共享 `sender_ui` 的布局测试。
+- 删除 `crates/app/src/ui/bottom_panel.rs` 中已被共享实现取代的旧发送器路径：`legacy_send_panel_body` 及其 12 个辅助函数、旧历史弹窗与重复的本地 `SendLayout` 枚举（本树实测该文件 1467 → 242 行），并为其补上针对共享 `sender_ui` 的布局测试。
+- 设备响应匹配统一：`ctx.serial.expect`、`expect_from` 与 `request` 的 `expect` 选项现在走 `write_line_and_expect` 的 patterns 那一套三形态规则（`re:<regex>`、`^行首锚定`、无前缀子串）。**行为变化**：这三条路径此前是纯子串比较，`expect("^ok")` 会去字面量找 `^ok` 这三个字符、几乎必然超时；现在它表示行首锚定（并同样先跳过行首可选的 `(数字)` 时间戳前缀）。**不含 `re:`/`^` 前缀的普通子串模式行为一字未变**。两端也由此对齐：浏览器侧本来就只有一条共享扫描，此前是桌面侧的异类。
+- 搜索框的 `re:` 提示补齐到每个入口（插件市场、命令面板此前没有；终端/日志/表格一直有），并且**非法正则回退现在会直接说明**：`re:` 后面写法不合法时按字面量搜索，鼠标悬停会看到"正则表达式非法，已按字面量搜索"，不再只记一条用户看不见的 warning。**仍按字面量工作的入口**：发送器的历史过滤框不走这套规则，那里 `re:` 没有特殊含义。
 
 ### 修复
 

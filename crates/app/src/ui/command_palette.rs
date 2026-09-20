@@ -157,6 +157,11 @@ impl WorkbenchApp {
                                 .desired_width(f32::INFINITY)
                                 .frame(egui::Frame::NONE),
                         )
+                        .on_hover_text(
+                            tool_panels::SearchQuery::hover_hint(
+                                query.used_invalid_regex_fallback(),
+                            ),
+                        )
                     })
                     .inner;
                 if !response.has_focus() {

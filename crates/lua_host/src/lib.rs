@@ -1664,6 +1664,173 @@ assert(task.finished == false)
         .unwrap();
     }
 
+    // ── expect / expect_from 的三种模式形态 ────────────────────────────────
+    //
+    // `write_line_and_expect` 的 patterns 早就能用 `re:` 与 `^`（见
+    // `docs/lua-plugin-api.md`「patterns 匹配规则」），但 `expect`/`expect_from`
+    // 的匹配点当时是裸 `contains`，同一个 `"re:^ok"` 在这里被当成字面量子串。
+    // 下面每个用例只钉一种形态 × 一条路径：阻塞路径与 task yield 路径是**不同的
+    // 匹配点**，少任一处都不会被另一处发现。
+
+    #[test]
+    fn blocking_expect_honours_regex_prefix() {
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+        let publisher = bus.clone();
+
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(25));
+            publisher.publish(serial_rx_event("test", b"READY\r\n".to_vec()));
+        });
+
+        run_script_for_test(
+            "local line = ctx.serial.expect('re:^READY', 500)\n\
+             assert(line == 'READY\\r\\n', 'expect(re:) 应命中，实得 ' .. tostring(line))",
+            bus,
+            transport,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn blocking_expect_from_honours_caret_anchor_over_paren_prefix() {
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+        let publisher = bus.clone();
+
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(25));
+            publisher.publish(serial_rx_event("test", b"(0.00000)ok\r\n".to_vec()));
+        });
+
+        run_script_for_test(
+            "local line = ctx.serial.expect_from('test', '^ok', 500)\n\
+             assert(line == '(0.00000)ok\\r\\n', 'expect_from(^) 应跳过行首 (…) 后锚定，实得 ' .. tostring(line))",
+            bus,
+            transport,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn blocking_expect_caret_anchor_stays_anchored() {
+        // 反面：锚定必须真的是锚定。`^ok` 不该命中 "rookie"，否则说明改动只是
+        // 把模式串里的 `^` 去掉、退化成宽松子串。
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+        let publisher = bus.clone();
+
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(25));
+            publisher.publish(serial_rx_event("test", b"rookie\r\n".to_vec()));
+        });
+
+        run_script_for_test(
+            "local line = ctx.serial.expect('^ok', 500)\n\
+             assert(line == nil, '^ok 不该命中 rookie，实得 ' .. tostring(line))",
+            bus,
+            transport,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn blocking_request_honours_regex_prefix() {
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+        // 端口必须先开着，`request` 的发送那一支才不会报错；句柄要活着持有。
+        let _virtual_port = transport
+            .open_virtual_serial("COM9")
+            .expect("open virtual serial");
+        let publisher = bus.clone();
+
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(25));
+            publisher.publish(serial_rx_event("COM9", b"READY\r\n".to_vec()));
+        });
+
+        run_script_for_test(
+            "local line = ctx.serial.request({ port = 'COM9', tx = 'M105', expect = 're:^READY', timeout_ms = 500 })\n\
+             assert(line == 'READY\\r\\n', 'request(re:) 应命中，实得 ' .. tostring(line))",
+            bus,
+            transport,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn blocking_request_caret_anchor_stays_anchored() {
+        let bus = DataBus::new();
+        let transport = TransportManager::new(bus.clone());
+        let _virtual_port = transport
+            .open_virtual_serial("COM9")
+            .expect("open virtual serial");
+        let publisher = bus.clone();
+
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(25));
+            publisher.publish(serial_rx_event("COM9", b"not ready at all\r\n".to_vec()));
+        });
+
+        run_script_for_test(
+            "local line = ctx.serial.request({ port = 'COM9', tx = 'M105', expect = '^ready', timeout_ms = 500 })\n\
+             assert(line == nil, '^ready 不该命中行中出现的 ready，实得 ' .. tostring(line))",
+            bus,
+            transport,
+        )
+        .unwrap();
+    }
+    #[test]
+    fn task_yield_expect_from_honours_regex_prefix() {
+        // 与 `serial_expect_yields_in_task_and_receives_response` 同一条路径，
+        // 只是模式换成 `re:`：这条走 process_tasks 的 YIELD_EXPECT 分支。
+        let bus = DataBus::new();
+        let logs = bus.subscribe(TopicFilter::prefix("log."));
+        let transport = TransportManager::new(bus.clone());
+        let virtual_port = transport
+            .open_virtual_serial("COM2")
+            .expect("open virtual serial");
+        let host_services = test_host_services_with_line_buffers("expect-regex-plugin");
+
+        let _runtime = run_plugin(
+            r#"
+ctx.task.start({ id = "waiter" }, function()
+    local line = ctx.serial.expect_from("COM2", "re:~ READY", 1000)
+    if line then
+        ctx.log.info("got:" .. tostring(line))
+    else
+        ctx.log.error("timeout")
+    end
+end)
+ctx.log.info("waiter-ready")
+"#
+            .to_owned(),
+            LuaRunConfig {
+                script_name: "expect-yield-regex.lua".to_owned(),
+                timeout_ms: 5_000,
+                source: "plugin:expect-regex-plugin".to_owned(),
+                context: json!({}),
+                permissions: vec!["serial".to_owned(), "task".to_owned(), "log".to_owned()],
+            },
+            bus.clone(),
+            transport,
+            host_services,
+        )
+        .unwrap();
+
+        // 必须先确认协程已挂起，否则 inject_rx 早于 yield，YIELD_EXPECT 分支跑不到。
+        let saw_ready = wait_for_log(&logs, &["waiter-ready"]);
+        assert!(saw_ready.is_some(), "plugin did not start expect task");
+
+        virtual_port.inject_rx(b"~ READY ~\n".to_vec());
+
+        let result = wait_for_log(&logs, &["got:", "timeout"]);
+        assert!(
+            result.as_deref() == Some("got:~ READY ~"),
+            "yield 路径的 expect_from 应按 re: 命中，实得 {result:?}"
+        );
+    }
+
     #[test]
     fn lua_ui_create_chart_publishes_panel_event() {
         let bus = DataBus::new();

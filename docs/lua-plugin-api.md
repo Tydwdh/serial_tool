@@ -184,7 +184,10 @@ local ports = ctx.serial.open_ports()     -- 当前已打开的端口名列表
 
 ### expect(pattern, timeout_ms)
 
-等待 RX 文本中出现指定片段。返回匹配到的文本，超时返回 `nil`。
+等待 RX 文本命中 `pattern`。返回匹配到的文本，超时返回 `nil`。
+
+`pattern` 支持三种形态（`re:<regex>` / `^行首锚定` / 无前缀子串），与下面
+「响应模式匹配规则」一节完全一致；`expect_from`、`request` 的 `expect` 选项同。
 
 ```lua
 local line = ctx.serial.expect("READY", 1000)
@@ -267,7 +270,10 @@ end
 `continue_resets_timeout` 默认为 `false`。启用后，匹配到
 `action = "continue"` 的响应会把等待截止时间延后一个 `timeout_ms`，取消任务仍会立即结束等待。
 
-### patterns 匹配规则
+### 响应模式匹配规则
+
+适用于 `expect` / `expect_from` / `request` 的 `expect` 选项，以及
+`write_line_and_expect` 的 `patterns` 表：同一个模式串在这些路径上含义完全相同。
 
 每条 pattern 支持三种形态（与设备响应匹配）：
 
