@@ -344,7 +344,7 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
      | 位置 | 为什么留 |
      |---|---|
      | `crates/panels/src/sender.rs:517` `hex_preview` | 与 `tool_core::hex_preview` **渲染不同**：空输入返回 `""` 而非 `"—"`、无 `|ASCII|` 列、无 32 字节截断、报错带具体原因。二者谁都不该被悄悄替换 —— 那会改变界面输出。 |
-     | `crates/panels/src/sender.rs:491` `hex_error` | 同上：它只判「能不能发」并渲染红色标签文案（`"HEX 中包含无效字符：{token}"`），文案本身是渲染结果。它是**校验器**而非解码器，不被 `grep parse_hex` 命中，容易被漏数。**测试覆盖是本轮补的**：此前该文件 `#[test]` 数为 0，把严格档的 `len() != 2` 放松成 `len() > 2` 全套 585 条仍全绿；现在 `sender.rs` 的 `mod tests` 钉着整张真值表（`gate_has_exactly_one_verdict_per_input_and_mode`、`strict_mode_rejects_every_length_except_two`）与那个分裂格（`gate_and_decoder_disagree_on_repeated_0x_prefix`），上述变异实测打红 2 条。 |
+     | `crates/panels/src/sender.rs:518` `hex_error` | 同上：它只判「能不能发」并渲染红色标签文案（`"HEX 中包含无效字符：{token}"`），文案本身是渲染结果。它是**校验器**而非解码器，不被 `grep parse_hex` 命中，容易被漏数。**测试覆盖是本轮补的**：此前该文件 `#[test]` 数为 0，把严格档的 `len() != 2` 放松成 `len() > 2` 全套 585 条仍全绿；现在 `sender.rs` 的 `mod tests` 钉着整张真值表（`gate_has_exactly_one_verdict_per_input_and_mode`、`strict_mode_rejects_every_length_except_two`）与那个分裂格（`gate_and_decoder_disagree_on_repeated_0x_prefix`），上述变异实测打红 2 条。 |
      | `crates/plugin_runtime/src/web_lua.rs:2508` `parse_hex` | wasm 插件 Lua API `ctx.serial.send_hex_to` 的后端，语义与 `tool_core::parse_hex` 不同（要求偶数长度、不认 `0x` 前缀），收敛即改动已发布文档（`docs/lua-plugin-api.md`）承诺的插件行为；且 `tool-plugin-runtime` 目前不依赖 `tool-core`，新增该边会改写 `Cargo.lock`（本轮约束为锁文件不变）。 |
      另：`crates/lua_host/src/codec.rs` 的 `from_hex` 是**有意**独立的 Lua 侧解析器，其归一化规则与
      `tool_core::parse_hex` 对齐，由该文件的 `#25` 用例用同一段输入双向比对钉住。
@@ -354,7 +354,7 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
      | 差异 | native | web | 为什么留 / 后果 |
      |---|---|---|---|
      | `is_network` 的**计算规则** | `Workbench::is_network_port` 比对 `app_config.network_ports` 的字符串；本轮起同时认 `display_name()`（`host:port`）与 `port_id()`（`network://host:port`）两种形态 | `WebApplication::is_network_port` 查 `network_ports` 的键，键只在 `port_id()` 形态下写入（`crates/application/src/web.rs` 的 `RegisterNetworkPort`） | 两种形态都**被持久化**（native 的 `workspace.json` 存 `network_ports`、web 存浏览器设置），统一命名会打断已存工作区，故**不统一命名**。跨平台误分类是**响亮**的：native 形态的 id 到了 web 会走到 `WebSerialTransport::enqueue_command` → `TransportError::PortNotConnected`（`crates/platform/src/web_serial.rs:504`），字节发不出去而不是发往错误设备。native 此前**内部不自洽**（`RemoveNetworkPort` 认两种形态、`is_network_port` 只认一种），本轮闭合，由 `crates/application/tests/headless.rs::network_port_ids_are_recognized_in_both_naming_forms` 双向钉住（两形态→`send_network`，普通串口名→`send_serial`）。 |
-     | HEX **预检的规则来源**（round-1 把这一行记成「预检档位」的两端分歧，**那个分歧不成立** —— 依据的站点是死代码，见本行末与下方更正） | **活着的**按钮门禁是共享面板 `crates/panels/src/sender.rs:304-309`：它传 `*view.hex_strict`（默认 `true`，`crates/app/src/state.rs:307`），「严格」勾选框也是活的（`sender.rs:183-185`）。本平台自己的 `Workbench::validate_hex` **没有任何活调用点** —— 仅存的两个（`bottom_panel.rs:658`、`:752`，都传 `false`）在 `legacy_send_panel_body` 的死子树里（`bottom_panel.rs:279-340`，本文件第 8 条已记它全工作区 0 调用） | 按钮门禁是**同一个** `sender.rs:304-309`（`crates/app/src/web.rs:4947` 也调 `tool_panels::sender_ui`）；`web_hex_error` → `WebApplication::validate_hex` → `tool_core` 只出现在 `send_web_current`（定义 `crates/app/src/web.rs:3231`，预检站点 `:3249`）这一条路上，而它的**可达手势是命令面板、不是键位**：web 的键位处理器在 `:3136-3138` 就把 `CMD_SEND` 拦下直接 `return`（注释称"发送键位由面板自己处理"，可 `crates/panels` 内 `Key::Enter` 的发送处理是 **0 处**，面板提示却写着「Ctrl+Enter 发送」（`sender.rs:226`）—— 这条 web 键位疑似死绑定先于本分支，未在本轮改动），于是 `execute_web_command` 的 `CMD_SEND` 分支（`:3144`）只由命令面板的确认路径到达（`:4063`） | 「`"abc"` 在 native 判可发（按钮亮着）、在 web 判不可发」这句 round-1 的结论是**错的**：两端按钮都由 panels 那份校验器按 `hex_strict` 判，默认严格档下 `"abc"` 在**两端都被拒**（`sender.rs:507`：规范化长度 3 ≠ 2）。真正的残留是**规则来源**、不是档位：活的门禁用 `crates/panels/src/sender.rs:491` 那第三份 `hex_error`（只剥**一层** `0x`），而发送与 web 那条面板外发送路（`send_web_current`）的预检用 `tool_core`（`normalize_hex_token` 的 `trim_start_matches` 反复剥），于是默认严格档下 `"0x0xAB"` 一边判非法（规范化后 `0xAB`，长度 4 ≠ 2）、一边判合法（`AB`）：**两端**都会把这串的发送按钮灰掉，而 `dispatch` 其实接受它 —— 且这条路**用户能走到**：native 的 Ctrl+Enter 走 `crates/app/src/commands.rs:212` 的 `cmd_send_if_ready`（只查「端口已打开 + 输入非空」，**不做 HEX 预检**）→ `do_send` → `dispatch`，web 走 `send_web_current`（命令面板确认那条路，预检用 `tool_core`，同样放行），两边都会把这串真发出去。行为保持的收敛不动它（改了会改变渲染出的 UI）。**本波已把这个分裂两侧的实际行为都变成机器断言**：门禁侧 `crates/panels/src/sender.rs::gate_and_decoder_disagree_on_repeated_0x_prefix`（连同该文件新增的真值表），解码侧 `crates/application/src/send_plan.rs::strict_and_lenient_have_exactly_one_verdict_each` 的 `"0x0xAB"` 一格 —— 今后任何人统一它，会先看到红测试，而不是只看到这张表。**连带事实（按可达性归因）**：`Workbench::validate_hex` 的 `strict` 形参在 native 既没有 `true` 的调用者、也没有活的调用者，更没有测试 —— 因为那两个调用点整体不可达。 |
+     | HEX **预检的规则来源**（round-1 把这一行记成「预检档位」的两端分歧，**那个分歧不成立** —— 依据的站点是死代码，见本行末与下方更正） | **活着的**按钮门禁是共享面板 `crates/panels/src/sender.rs:325-330`：它传 `*view.hex_strict`（默认 `true`，`crates/app/src/state.rs:301`），「严格」勾选框也是活的（`sender.rs:209-210`）。本平台自己的 `Workbench::validate_hex` **在本平台连调用点都不存在** —— 原有的两个（曾传 `strict = false`）位于 `legacy_send_panel_body` 的死子树内，已随该子树一起删除（见本文件第 8 条） | 按钮门禁是**同一个** `sender.rs:325-330`（`crates/app/src/web.rs:4723` 的 `shared_sender_ui`（`:54` 处把 `tool_panels::sender_ui` 起此别名）也调它）；`web_hex_error` → `WebApplication::validate_hex` → `tool_core` 只出现在 `send_web_current`（定义 `crates/app/src/web.rs:3156`，预检站点 `:3174`）这一条路上，而它的**可达手势是命令面板、不是键位**：web 的键位处理器在 `:3061-3063` 就把 `CMD_SEND` 拦下直接 `return`（注释称"发送键位由面板自己处理"，可 `crates/panels` 内 `Key::Enter` 的发送处理是 **0 处**，面板提示却写着「Ctrl+Enter 发送」（`sender.rs:247`）—— 这条 web 键位疑似死绑定先于本分支，未在本轮改动），于是 `execute_web_command`（def `:3067`）的 `CMD_SEND` 分支（`:3069`）只由命令面板的确认路径到达 | 「`"abc"` 在 native 判可发（按钮亮着）、在 web 判不可发」这句 round-1 的结论是**错的**：两端按钮都由 panels 那份校验器按 `hex_strict` 判，默认严格档下 `"abc"` 在**两端都被拒**（`sender.rs:528`：规范化长度 3 ≠ 2）。真正的残留是**规则来源**、不是档位：活的门禁用 `crates/panels/src/sender.rs:518` 那第三份 `hex_error`（只剥**一层** `0x`），而发送与 web 那条面板外发送路（`send_web_current`）的预检用 `tool_core`（`normalize_hex_token` 的 `trim_start_matches` 反复剥），于是默认严格档下 `"0x0xAB"` 一边判非法（规范化后 `0xAB`，长度 4 ≠ 2）、一边判合法（`AB`）：**两端**都会把这串的发送按钮灰掉，而 `dispatch` 其实接受它 —— 且这条路**用户能走到**：native 的 Ctrl+Enter 走 `crates/app/src/commands.rs:210` 的 `cmd_send_if_ready`（只查「端口已打开 + 输入非空」，**不做 HEX 预检**）→ `do_send` → `dispatch`，web 走 `send_web_current`（命令面板确认那条路，预检用 `tool_core`，同样放行），两边都会把这串真发出去。行为保持的收敛不动它（改了会改变渲染出的 UI）。**本波已把这个分裂两侧的实际行为都变成机器断言**：门禁侧 `crates/panels/src/sender.rs::gate_and_decoder_disagree_on_repeated_0x_prefix`（连同该文件新增的真值表），解码侧 `crates/application/src/send_plan.rs::strict_and_lenient_have_exactly_one_verdict_each` 的 `"0x0xAB"` 一格 —— 今后任何人统一它，会先看到红测试，而不是只看到这张表。**连带事实（按可达性归因）**：`Workbench::validate_hex` 在 native 已经**没有任何调用者**，它的 `strict` 形参既没有 `true` 的调用者也没有测试 —— 原先那两个调用点整体不可达，现已随死子树删除而彻底不存在。 |
 
      > **错误文案（对先前记录的更正）**：Task 6 **改掉了** native 的非法 HEX 文案，此前写作
      > 「两平台错误文案逐字未变」是错的。本轮之前 native 的 dispatch 错误是
@@ -371,37 +371,25 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
      > 该输入的 `strict_error.to_string()` 逐字等于上面这整行 —— 改 `SendPlanError` 的
      > `Display`、改 `AppError::Transport` 的 `#[error("transport: {0}")]` 前缀、或改
      > `tool_core` 严格模式的文案，都会让该用例变红（两条变异均实测过，见 task-6 报告 M7/M7b）。
-     > round-1 给两处 hover 加的 `hex_precheck_hint`（应用点 `crates/app/src/ui/bottom_panel.rs:661`、
-     > `:754`）**位于不可达的子树**：那两个站点属于 `legacy_send_panel_body`（`:279-340`，
-     > `#[allow(dead_code)]`，全工作区 **0 调用**，见本文件第 8 条）。所以 round-1 写成
-     > 「用户在看板里读到带前缀的句子」的那半条 **UX 回归从未到达过用户** —— `1a96efb` 起
-     > 这两个函数就没有调用者，Task 6 只是换了死代码里的文案写法。**活的**用户可见改动是
-     > **红字标签**（不是状态栏）：`bottom_panel.rs:219`、`:234`、`:843` 三处 `.to_string()`
-     > 都写进 `self.send.error`，它经 `SendView.error`（`bottom_panel.rs:170` 处装配）由
-     > `crates/panels/src/sender.rs` 的 `ui.colored_label(theme::red(), error)` 渲染成红字，
+     > **本节原有的两处 hover 文案（`hex_precheck_hint`）已随死子树一起删除**：它当时
+     > 仅有的两个应用点就在 `legacy_send_panel_body` 内（详见本文件第 8 条），所以 round-1
+     > 记录的「用户在看板里读到带前缀的句子」那半条 UX 回归**从未到达过用户**，如今连
+     > 载体都不存在了。留下的教训仍然成立：一个改动若只落在不可达站点上，四门全绿
+     > 也证明不了它被用户看见过 —— 判可达性要用调用点形式核对，别用裸符号计数。
+     > **仍然活着的**用户可见前缀站点只剩**红字标签**（不是状态栏）：`bottom_panel.rs:175`
+     > 把 `dispatch` 的错误 `.to_string()` 写进 `self.send.error`（另两处 `:186`、`:191` 是
+     > 本文件自己造的定长文案，不含 `AppError` 前缀），它经 `SendView.error` 由
+     > `crates/panels/src/sender.rs:156` 的 `ui.colored_label(theme::red(), error)` 渲染，
      > 按设计**仍带 `transport: ` 分类前缀**（`#[error("transport: {0}")]`）。
-     > **状态栏与 HEX 无关**（round-2 把两者并列是错的）：该文件里活着的状态栏错误站点是
-     > `:245`、`:256`（panels 的 `SendAction::SetDtr` / `SetRts`）与 `:791`、`:807`
-     > （`send_signal_controls` 的 DTR/RTS 复选框），四条全是 DTR/RTS，没有一条来自 HEX。仍然没有测试守着的是那两处 hover
-     > 字符串本身：把 `hex_precheck_hint` 还原成 `error.to_string()` 后四门全绿
-     > （585 passed / exit 0）—— 该文件的 `mod tests` 只测 egui 布局、从不渲染
-     > `WorkbenchApp`，站点又不可达，故没有观察点。
-     > 可达性核对（本轮在当前树上重跑，非继承自上轮结论）：
-     > ```bash
-     > grep -rn 'legacy_send_panel_body' crates/
-     > # **6** 处命中（本轮重测；上版本记的 5 已被本轮扩写的注释自己推翻，正好演示了
-     > # 这个数为什么不能当证据）：函数体定义 1 处 + `crates/` 内提及 5 处。
-     > # 它每被 `crates/` 里任何一处注释提到就 +1，所以只能当"某次测量"的快照读。
-     > # —— 上一版把期望输出写成"只命中定义处 1 行"是**错的**（错在把"提及"当"调用"）。
-     > # 这条字符串计数因此**不能**用来判可达性，判可达性看下面这条：
-     > grep -rn 'self\.render_send_actions' crates/
-     > # 1 处命中：`bottom_panel.rs:327`，位于 legacy 体内（即唯一调用点整体不可达）
-     > ```
+     > **状态栏与 HEX 无关**（round-2 把两者并列是错的）：活着的状态栏错误站点全是
+     > DTR/RTS —— `sender.rs:417`、`:425` 产出 `SendAction::SetDtr` / `SetRts`，由
+     > `bottom_panel.rs:140`、`:152` 消费后写状态栏，没有一条来自 HEX。本条目里原先记的
+     > 另外两处（`send_signal_controls` 的 DTR/RTS 复选框）也在死子树里，已一并删除。
    - **下一轮候选（把漂移的门真正关上）：`plan_send` 收类型化目标，不收裸 `bool`** ——
      改签名为 `plan_send(cmd, SendTarget::{Serial, Network})`，由两平台**已经持有**的端口种类
      解析：`tool_platform::PortDescriptor::kind`（`crates/platform/src/lib.rs:112`，网络端口在
      `descriptor()` 里就带 `PortKind::Network`）与 native 侧 `SerialPortDescriptor.port_type`
-     （注册于 `crates/application/src/workbench.rs:293`）。理由：`is_network: bool` 只能表达
+     （注册于 `crates/application/src/workbench.rs:276`）。理由：`is_network: bool` 只能表达
      「不是网络就是串口」，于是「端口根本不存在」被折叠成「串口」；有了第三种取值才能把 unknown
      当场拒绝，也才让上面那张表的第一行不再靠命名约定对齐。
    - **wasm 侧发送路径的测试缺口（实测尺寸）**：Task 5 的字节契约是发送路径上唯一被**执行**的
@@ -451,47 +439,26 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
      否则 app 无法构造面板订阅。
 7. **`crates/panels` 内部仍自持 `DataBus` 订阅**（`Terminal/Log/Chart/Attitude/Gauge/Dynamic/data_table`
    各自 `subscribe_*`）。这属更大的 Presentation 数据流重构，本轮不动。
-8. **`crates/app` 存在死代码子树（实测，未删）**：
-   `crates/app/src/ui/bottom_panel.rs:279-340` 的 `legacy_send_panel_body` 带
-   `#[allow(dead_code)]`（`:279`），全工作区 **0 调用**，块长 **62 行**（含 `#[allow]` 行，
-   279..340；早期估为"约 350 行"，已按实测更正。行号会随上方插入漂移：`249-310` →
-   round-1 加 `hex_precheck_hint` 后 `265-326` → round-2 加注释后 `279-340`；**本文件的行号按
-   本轮提交实测**，符号名才是稳定锚点）。
-   **它把整族渲染函数拖成不可达 —— 实测 14 个方法 + 2 个自由函数**（此前写"三个"，终审建议
-   写"四个"，都仍低估；漏的是 `send_target_port_combo`、`hex_precheck_hint`、
-   `response_id_for_send_input`。下面是本轮在当前树上逐条实测的闭包，符号名为准）：
-   死体 `legacy_send_panel_body`（def `:280`）直接调 `render_send_options`（`:286`）、
-   `render_send_input`（`:324`）、`render_send_actions`（`:327`）、`render_send_error`（`:328`）；
-   `render_send_actions`（`:576-622`）调 `render_send_and_clear_buttons`（`:589`/`:611`）、
-   `send_history_combo`（`:590`/`:612`）、`render_periodic_controls`（`:601`/`:617`）、
-   `send_signal_controls`（`:603`/`:619`）、`render_hex_preview`（`:604`/`:620`）；
-   `render_send_options`（def `:344`）调 `render_send_target_options`（`:346`），
-   后者（def `:349`）调 `render_send_target_options_row`（`:362`/`:372`），
-   再后者（def `:382`）调 `send_target_port_combo`（`:390`）、`render_hex_toggle`（`:392`）、
-   `render_line_ending_combo`（`:393`）—— **注意这两条边的父节点此前写错成了
-   `render_send_options`，且 `render_line_ending_combo` 不调用任何东西**。
-   两个自由函数走同一条路：`render_send_input`（def `:435`）调 `response_id_for_send_input`
-   （def `:44`，唯一调用点 `:470`），`render_hex_preview`（def `:735`）调 `hex_precheck_hint`
-   （def `:36`，唯一调用点 `:754`）。
-   这 16 项的**每一个**调用点都落在族内，族外 0 引用（核对命令见下）；
-   唯一的例外是 `do_send`（`:678` 虽在死族里调它，但 `crates/app/src/commands.rs:214`
-   的 Ctrl+Enter 路径活着，故 `do_send` 本身可达）。
-   编译侧只报 `legacy_send_panel_body` 一处 —— **但不要把"没报警"读成"可达"**：
-   这一族的可达性只由上面的调用图决定，与 rustc 报几条无关（报警条数的传播机制本轮未复现，
-   故不在此断言）。
-   连带后果：**native 的 `Workbench::validate_hex` 仅有的两个调用点（`:658`、`:752`）就在这一族里**，
-   所以那个函数在本平台没有任何活的调用点。核对（本轮在当前树上重跑）：
+8. **`crates/app` 的死代码子树：已删除（本条原为「实测，未删」）**：
+   `crates/app/src/ui/bottom_panel.rs` 的 `legacy_send_panel_body`（曾带 `#[allow(dead_code)]`、
+   全工作区 0 调用）与被它拖成不可达的整族渲染函数（实测闭包 **14 个方法 + 2 个自由函数**；
+   早期写"三个"、终审建议写"四个"，都低估），已随 `fix/panel-layout-and-dock-drag`
+   （提交 `9b5e230`，自 `D:\game\serial_tool` 合入）**实际删除**：本文件 1467 → 242 行，
+   发送器界面改由两平台共享的 `sender_ui` 渲染，并补了针对它的布局测试。
+   `hex_precheck_hint`、`response_id_for_send_input`、旧历史弹窗、重复的本地 `SendLayout`
+   枚举，以及 native 侧那两个 `Workbench::validate_hex` 调用点一并消失。
+   （他们分支上的 CHANGELOG 记的是 1429 → 257：那是相对**他们**基线的数，本树以 1467 → 242 为准。）
+   **连带事实（本树实测）**：native 的 `Workbench::validate_hex`（def
+   `crates/application/src/workbench.rs:1048`）现在**一个调用点都没有**；全仓唯一的
+   `.validate_hex(` 调用点是 `crates/app/src/web.rs:404`，而 `WebRuntime` 只是
+   `WebApplication` 的别名（`crates/application/src/web.rs:37`），故它走 wasm 那份实现。
+   **本条留下的方法论（这才是它值钱的部分）**：可达性只能用**调用点形式**核对，
    ```bash
-   grep -rn 'legacy_send_panel_body' crates/
-   # ↑ 这条串的命中数**不是证据**：它随"提到这个符号的次数"增长，改一次注释就变一次
-   # （本轮把下面这段注释扩写后，它已从实测的 5 变成 6）。可达性只看下面三条调用点形式：
-   grep -rn 'self\.legacy_send_panel_body' crates/   # **0 命中 = 不可达**，且不随提及次数变化
-   grep -rn 'self\.render_send_actions' crates/   # 1 处命中：`bottom_panel.rs:327`，在死体内
-   grep -rn 'self\.render_send_error' crates/     # 1 处命中：`bottom_panel.rs:328`，在死体内
-   grep -rn 'validate_hex(' crates/app/src/       # 恰好 3 行：native 两处（都在死子树）+ wasm 的 :373
+   grep -rn '\.validate_hex(' crates/          # 唯一调用点 + 两份定义（native/wasm）
+   grep -rn 'legacy_send_panel_body' crates/   # 0 命中：符号随代码一起没了
    ```
-   删除它是**真**改进（连带清掉两份 `hex_precheck_hint` 调用点），但属另一个任务的裁决，
-   Task 6 按约束**不删**。
+   裸符号计数**不是证据**：它随"提到这个符号的次数"增长，改一次注释就变一次 ——
+   本条此前的版本曾把自己写的计数当成实测值。
 9. **`crates/panels` 有一组已被 application DTO 取代、但仍导出的死符号（实测，未删）**：
    `replay_view.rs` 的 `ReplayView`（`:7`，含 `:55 impl From<&ReplayStatusView> for ReplayView`）
    与 `plugin_view.rs` 的 `InstalledPluginRow`（`:6`）/ `PluginViewState`（`:14`）/

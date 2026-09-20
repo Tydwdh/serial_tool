@@ -1037,9 +1037,10 @@ impl Workbench {
     /// presentation 只做输入校验，规则与真正发送时完全一致：两者都走
     /// `send_plan::decode_hex` → `tool_core`。
     ///
-    /// 但别把这句读成「native 的按钮门禁与本函数同源」——**本函数在本平台没有活的调用点**：
-    /// 仅存的两个调用点在 `crates/app/src/ui/bottom_panel.rs` 的 `legacy_send_panel_body`
-    /// 子树里（`#[allow(dead_code)]`，全工作区 0 调用），且都传 `strict = false`。
+    /// 但别把这句读成「native 的按钮门禁与本函数同源」——**本函数在本平台没有任何调用点**：
+    /// 原有的两个调用点在 `crates/app/src/ui/bottom_panel.rs` 的 `legacy_send_panel_body`
+    /// 死子树里（全工作区 0 调用，且都传 `strict = false`），已随该子树一并被删除；
+    /// 全仓唯一活着的调用点在 wasm 侧，走的是 `WebApplication::validate_hex`。
     /// **活着**的门禁是两平台共用的 `crates/panels/src/sender.rs` 的 `render_actions` →
     /// 该 crate 自己的 `hex_error`（第三份规则实现，`0x` 只剥一层），所以
     /// 「不再有第二个判定来源」只对 `dispatch`/发送路径成立，对按钮门禁不成立；
