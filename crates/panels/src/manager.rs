@@ -258,6 +258,50 @@ pub struct DockLayout {
     pub right: DockStack,
 }
 
+/// 底部/右侧这两个"命名区域"。
+///
+/// 它们各自只是一个标签容器。用户可以把区域里的面板全部拖走，容器被
+/// `prune_empty_tabs` 剪掉后 `bottom_tabs`/`right_tabs` 就悬空了；这个枚举把
+/// "重建该区域"需要的默认成员、挂载方向和份额集中在一处。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegionSlot {
+    Bottom,
+    Right,
+}
+
+impl RegionSlot {
+    /// 没有记住任何成员时的默认面板。
+    fn default_panes(self) -> Vec<PanelId> {
+        match self {
+            Self::Bottom => vec![
+                PanelId::builtin(PANEL_TERMINAL),
+                PanelId::builtin(PANEL_LOGS),
+                PanelId::builtin(PANEL_SENDER),
+            ],
+            Self::Right => vec![
+                PanelId::builtin(PANEL_LOGS),
+                PanelId::builtin(PANEL_TERMINAL),
+            ],
+        }
+    }
+
+    /// 挂到已有根容器上时，根容器需要具备的方向。
+    fn root_linear_dir(self) -> LinearDir {
+        match self {
+            Self::Bottom => LinearDir::Vertical,
+            Self::Right => LinearDir::Horizontal,
+        }
+    }
+
+    /// 重建时给新容器的份额（相对于相邻区域，用户仍可拖动调整）。
+    fn restored_share(self) -> f32 {
+        match self {
+            Self::Bottom => 0.35,
+            Self::Right => 0.5,
+        }
+    }
+}
+
 /// egui_tiles 的持久化布局。额外保存三个默认 tab 容器的 id，
 /// 使顶部工具栏和快捷键仍能快速显示/隐藏底部、右侧区域。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -272,6 +316,16 @@ pub struct TilesLayout {
     /// 一个插件有多个动态面板时，对应的父标签容器。
     #[serde(default)]
     pub plugin_groups: BTreeMap<String, TileId>,
+    /// 底部区域最近容纳过的面板。
+    ///
+    /// 区域里的面板被拖空后，egui_tiles 的 `prune_empty_tabs` 会删掉整个容器，
+    /// 于是 `bottom_tabs` 悬空、`set_bottom_visible(true)` 变成空操作。记住这些
+    /// 成员，用户再次要求显示该区域时就能原样重建。
+    #[serde(default)]
+    pub bottom_panes: Vec<PanelId>,
+    /// 右侧区域最近容纳过的面板，作用同 [`Self::bottom_panes`]。
+    #[serde(default)]
+    pub right_panes: Vec<PanelId>,
 }
 
 impl TilesLayout {
@@ -343,6 +397,8 @@ impl TilesLayout {
             right_tabs,
             plugin_panel_owners: BTreeMap::new(),
             plugin_groups: BTreeMap::new(),
+            bottom_panes: bottom,
+            right_panes: dock.right.tabs.clone(),
         }
     }
 
@@ -406,12 +462,26 @@ impl TilesLayout {
             right_tabs,
             plugin_panel_owners: BTreeMap::new(),
             plugin_groups: BTreeMap::new(),
+            bottom_panes: vec![PanelId::builtin(PANEL_SENDER)],
+            right_panes: vec![
+                PanelId::builtin(PANEL_LOGS),
+                PanelId::builtin(PANEL_TERMINAL),
+            ],
         }
     }
 
     pub fn set_bottom_visible(&mut self, visible: bool) {
         if self.tree.tiles.get(self.bottom_tabs).is_some() {
             self.tree.set_visible(self.bottom_tabs, visible);
+            return;
+        }
+        if visible {
+            let panes = self.bottom_panes.clone();
+            if let Some(container) = self.restore_region(&panes, RegionSlot::Bottom) {
+                self.bottom_tabs = container;
+                self.tree.set_visible(container, true);
+                self.remember_region_panes();
+            }
         }
     }
 
@@ -422,11 +492,168 @@ impl TilesLayout {
     pub fn set_right_visible(&mut self, visible: bool) {
         if self.tree.tiles.get(self.right_tabs).is_some() {
             self.tree.set_visible(self.right_tabs, visible);
+            return;
+        }
+        if visible {
+            let panes = self.right_panes.clone();
+            if let Some(container) = self.restore_region(&panes, RegionSlot::Right) {
+                self.right_tabs = container;
+                self.tree.set_visible(container, true);
+                self.remember_region_panes();
+            }
         }
     }
 
     pub fn right_visible(&self) -> bool {
         self.tree.tiles.get(self.right_tabs).is_some() && self.tree.is_visible(self.right_tabs)
+    }
+
+    /// 记住底部/右侧区域当前容纳的面板，供区域容器被剪掉后重建。
+    ///
+    /// 在每帧 dock 渲染之后调用（`show_dock`），这样用户往区域里拖面板也会被记下来。
+    pub fn remember_region_panes(&mut self) {
+        if let Some(panes) = Self::region_panes(&self.tree.tiles, self.bottom_tabs) {
+            self.bottom_panes = panes;
+        }
+        if let Some(panes) = Self::region_panes(&self.tree.tiles, self.right_tabs) {
+            self.right_panes = panes;
+        }
+    }
+
+    /// 布局是否可用：根容器必须仍然存在。悬空的根会让 Dock 渲染成空白。
+    pub fn is_usable(&self) -> bool {
+        self.tree
+            .root
+            .is_some_and(|root| self.tree.tiles.get(root).is_some())
+    }
+
+    fn region_panes(tiles: &Tiles<PanelId>, container: TileId) -> Option<Vec<PanelId>> {
+        let Some(Tile::Container(Container::Tabs(tabs))) = tiles.get(container) else {
+            return None;
+        };
+        Some(
+            tabs.children
+                .iter()
+                .filter_map(|child| match tiles.get(*child) {
+                    Some(Tile::Pane(pane)) => Some(pane.clone()),
+                    _ => None,
+                })
+                .collect(),
+        )
+    }
+
+    /// 重建被拖空后剪掉的区域容器，并把该区域原本的面板搬回去。
+    ///
+    /// 面板来源：记住的原成员，不足时补该区域的默认成员。用户显式要求"显示这个
+    /// 区域"，所以这些面板会从当前所在位置移动过去；一个都找不到时不重建。
+    fn restore_region(&mut self, remembered: &[PanelId], slot: RegionSlot) -> Option<TileId> {
+        // 用户可能已经把面板并成一个大标签组，连 main_tabs 都悬空了（默认布局的
+        // 三个容器 id 全都不存在）。先修好主标签区，否则重建时会把不存在的 tile
+        // 塞进树里，渲染出一块空白。
+        self.main_tabs = self.ensure_main_tabs();
+
+        let mut panes: Vec<TileId> = Vec::new();
+        let mut candidates: Vec<PanelId> = remembered.to_vec();
+        for fallback in slot.default_panes() {
+            if !candidates.contains(&fallback) {
+                candidates.push(fallback);
+            }
+        }
+        for pane in candidates {
+            if let Some(id) = self.tree.tiles.find_pane(&pane)
+                && !panes.contains(&id)
+            {
+                panes.push(id);
+            }
+        }
+        if panes.is_empty() {
+            return None;
+        }
+
+        // 先摘出原父容器，再挂到新容器上；直接把已挂在别处的 tile 塞进新容器会
+        // 让它在两棵树里同时存在。
+        for pane in &panes {
+            if let Some(parent_id) = self.tree.tiles.parent_of(*pane)
+                && let Some(Tile::Container(parent)) = self.tree.tiles.get_mut(parent_id)
+            {
+                parent.remove_child(*pane);
+            }
+        }
+
+        let container = self.tree.tiles.insert_tab_tile(panes.clone());
+        let share = slot.restored_share();
+        let attached = self
+            .tree
+            .root
+            .is_some_and(|root| self.attach_region_to_root(root, container, slot, share));
+        if !attached {
+            match self.tree.root {
+                Some(root) => {
+                    // 根容器方向不合适：把整棵树包进一个新的线性容器。
+                    let wrapped = match slot {
+                        RegionSlot::Bottom => {
+                            self.tree.tiles.insert_vertical_tile(vec![root, container])
+                        }
+                        RegionSlot::Right => self
+                            .tree
+                            .tiles
+                            .insert_horizontal_tile(vec![root, container]),
+                    };
+                    self.set_linear_share(wrapped, container, share);
+                    self.tree.root = Some(wrapped);
+                }
+                None => self.tree.root = Some(container),
+            }
+        }
+
+        for pane in panes {
+            self.tree.set_visible(pane, true);
+        }
+        Some(container)
+    }
+
+    /// 把区域容器挂到现有的根线性容器里。方向不匹配时返回 `false`。
+    fn attach_region_to_root(
+        &mut self,
+        root: TileId,
+        container: TileId,
+        slot: RegionSlot,
+        share: f32,
+    ) -> bool {
+        let Some(Tile::Container(Container::Linear(linear))) = self.tree.tiles.get_mut(root) else {
+            return false;
+        };
+        if linear.dir != slot.root_linear_dir() {
+            return false;
+        }
+        match slot {
+            // 底部区域插在主标签区之后，右侧区域放到最右。
+            RegionSlot::Bottom => {
+                let Some(index) = linear.children.iter().position(|c| *c == self.main_tabs) else {
+                    return false;
+                };
+                linear.children.insert(index + 1, container);
+            }
+            RegionSlot::Right => linear.children.push(container),
+        }
+        self.tree
+            .tiles
+            .get_mut(root)
+            .and_then(|tile| match tile {
+                Tile::Container(Container::Linear(linear)) => Some(&mut linear.shares),
+                _ => None,
+            })
+            .expect("root linear container")
+            .set_share(container, share);
+        true
+    }
+
+    fn set_linear_share(&mut self, container_id: TileId, child: TileId, share: f32) {
+        if let Some(Tile::Container(Container::Linear(linear))) =
+            self.tree.tiles.get_mut(container_id)
+        {
+            linear.shares.set_share(child, share);
+        }
     }
 
     pub fn select_pane(&mut self, kind: &PanelId) -> bool {
@@ -868,8 +1095,18 @@ impl Default for PanelManager {
 }
 
 impl PanelManager {
-    /// 确保当前管理器拥有 tiles 布局；旧版配置会在首次调用时自动转换。
+    /// 确保当前管理器拥有 tiles 布局；旧版配置会在首次转换，损坏的布局回退到默认。
     pub fn ensure_tiles_layout(&mut self) -> &mut TilesLayout {
+        if self
+            .tiles
+            .as_ref()
+            .is_some_and(|layout| !layout.is_usable())
+        {
+            // 根 tile 已经不在了（配置被写坏，或插件把面板全删光导致容器被剪掉）。
+            // 继续用下去只会渲染出一个空白 Dock，这里直接回退到默认布局。
+            log::warn!("tiles 布局的根容器已不存在，改用默认布局");
+            self.tiles = Some(TilesLayout::current_default());
+        }
         if self.tiles.is_none() {
             self.dock.normalize_tool_layout();
             self.tiles = Some(TilesLayout::from_legacy(&self.dock));
@@ -1083,6 +1320,239 @@ impl PanelManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 把某个面板从它当前所在的容器里摘出来，再挂到目标标签容器上
+    /// （等价于用户把它拖到另一组标签里）。
+    fn drag_pane_into(layout: &mut TilesLayout, pane: &PanelId, destination: TileId) {
+        let pane_id = layout
+            .tree
+            .tiles
+            .find_pane(pane)
+            .unwrap_or_else(|| panic!("{pane} 应当存在于布局中"));
+        layout
+            .tree
+            .move_tile_to_container(pane_id, destination, 0, false);
+        layout.tree.simplify(&simplification_options());
+    }
+
+    fn simplification_options() -> egui_tiles::SimplificationOptions {
+        // 与 `crates/app/src/shared_shell.rs` 的 SharedTiles 保持一致。
+        egui_tiles::SimplificationOptions {
+            all_panes_must_have_tabs: true,
+            prune_empty_tabs: true,
+            prune_empty_containers: true,
+            prune_single_child_tabs: false,
+            ..Default::default()
+        }
+    }
+
+    /// 布局里当前存在的面板集合。
+    fn pane_set(layout: &TilesLayout) -> std::collections::BTreeSet<PanelId> {
+        layout
+            .tree
+            .tiles
+            .iter()
+            .filter_map(|(_, tile)| match tile {
+                Tile::Pane(pane) => Some(pane.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assert_same_panes(before: &std::collections::BTreeSet<PanelId>, after: &TilesLayout) {
+        assert_eq!(
+            pane_set(after),
+            *before,
+            "移动/重建区域不应丢失或凭空多出面板"
+        );
+    }
+
+    #[test]
+    fn moving_the_last_bottom_pane_away_prunes_the_region() {
+        let mut layout = TilesLayout::current_default();
+        layout.remember_region_panes();
+        let before = pane_set(&layout);
+        let main_tabs = layout.main_tabs;
+        drag_pane_into(&mut layout, &PanelId::builtin(PANEL_SENDER), main_tabs);
+
+        assert!(
+            layout.tree.tiles.get(layout.bottom_tabs).is_none(),
+            "底部容器被拖空后应当被剪掉"
+        );
+        assert!(!layout.bottom_visible());
+        assert_same_panes(&before, &layout);
+    }
+
+    #[test]
+    fn showing_the_bottom_region_rebuilds_it_with_its_previous_panes() {
+        let mut layout = TilesLayout::current_default();
+        layout.remember_region_panes();
+        let before = pane_set(&layout);
+        let main_tabs = layout.main_tabs;
+        drag_pane_into(&mut layout, &PanelId::builtin(PANEL_SENDER), main_tabs);
+
+        layout.set_bottom_visible(true);
+
+        assert!(layout.bottom_visible(), "显式要求显示底部区域后应当可见");
+        let sender = layout
+            .tree
+            .tiles
+            .find_pane(&PanelId::builtin(PANEL_SENDER))
+            .expect("发送器仍然存在");
+        assert_eq!(
+            layout.tree.tiles.parent_of(sender),
+            Some(layout.bottom_tabs),
+            "重建后的底部区域应当接纳它原来的面板"
+        );
+        assert_same_panes(&before, &layout);
+    }
+
+    #[test]
+    fn showing_the_right_region_rebuilds_it_with_its_previous_panes() {
+        let mut layout = TilesLayout::current_default();
+        layout.remember_region_panes();
+        let before = pane_set(&layout);
+        let main_tabs = layout.main_tabs;
+        for pane in [PANEL_LOGS, PANEL_TERMINAL] {
+            drag_pane_into(&mut layout, &PanelId::builtin(pane), main_tabs);
+        }
+        assert!(layout.tree.tiles.get(layout.right_tabs).is_none());
+
+        layout.set_right_visible(true);
+
+        assert!(layout.right_visible(), "显式要求显示右侧区域后应当可见");
+        for pane in [PANEL_LOGS, PANEL_TERMINAL] {
+            let id = layout
+                .tree
+                .tiles
+                .find_pane(&PanelId::builtin(pane))
+                .expect("面板仍然存在");
+            assert_eq!(
+                layout.tree.tiles.parent_of(id),
+                Some(layout.right_tabs),
+                "{pane} 应当回到重建后的右侧区域"
+            );
+        }
+        assert_same_panes(&before, &layout);
+    }
+
+    #[test]
+    fn hiding_a_region_keeps_it_reopenable() {
+        let mut layout = TilesLayout::current_default();
+        layout.remember_region_panes();
+        layout.set_bottom_visible(false);
+        assert!(!layout.bottom_visible());
+
+        layout.set_bottom_visible(true);
+        assert!(layout.bottom_visible(), "隐藏不应破坏容器，之后还能再打开");
+        let sender = layout
+            .tree
+            .tiles
+            .find_pane(&PanelId::builtin(PANEL_SENDER))
+            .expect("发送器仍然存在");
+        assert_eq!(
+            layout.tree.tiles.parent_of(sender),
+            Some(layout.bottom_tabs)
+        );
+    }
+
+    /// 树里引用的每个 child 都必须真实存在：把悬空的 TileId 塞进树会让 Dock
+    /// 渲染出一块空白（"MISSING TILE"），而且用户无法用拖拽修回来。
+    fn assert_no_dangling_children(layout: &TilesLayout) {
+        fn walk(layout: &TilesLayout, id: TileId) {
+            let Some(tile) = layout.tree.tiles.get(id) else {
+                panic!("#{id:?} 被引用但不存在");
+            };
+            if let Tile::Container(container) = tile {
+                for child in container.children() {
+                    walk(layout, *child);
+                }
+            }
+        }
+        if let Some(root) = layout.tree.root {
+            walk(layout, root);
+        }
+    }
+
+    /// 复现用户那种"所有面板挤进一个标签组"的状态：三个命名区域容器全都不存在。
+    fn layout_without_named_regions() -> TilesLayout {
+        let mut tiles = Tiles::default();
+        let panes = PANEL_BUILTIN
+            .iter()
+            .map(|id| tiles.insert_pane(PanelId::builtin(id)))
+            .collect::<Vec<_>>();
+        let group = tiles.insert_tab_tile(panes);
+        let tree = Tree::new("hardware-workbench-layout", group, tiles);
+        TilesLayout {
+            tree,
+            main_tabs: TileId::from_u64(9_000),
+            bottom_tabs: TileId::from_u64(9_001),
+            right_tabs: TileId::from_u64(9_002),
+            plugin_panel_owners: BTreeMap::new(),
+            plugin_groups: BTreeMap::new(),
+            bottom_panes: Vec::new(),
+            right_panes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn rebuilding_regions_works_even_when_the_named_containers_are_gone() {
+        let mut layout = layout_without_named_regions();
+        let before = pane_set(&layout);
+        layout.remember_region_panes();
+
+        layout.set_bottom_visible(true);
+        assert!(
+            layout.bottom_visible(),
+            "区域应当在没有任何命名容器时也能重建"
+        );
+        assert_no_dangling_children(&layout);
+        assert_same_panes(&before, &layout);
+
+        layout.set_right_visible(true);
+        assert!(layout.right_visible());
+        assert_no_dangling_children(&layout);
+        assert_same_panes(&before, &layout);
+
+        // 重建后的底部/右侧确实拿到了默认成员。
+        for pane in [PANEL_TERMINAL, PANEL_LOGS, PANEL_SENDER] {
+            let id = layout
+                .tree
+                .tiles
+                .find_pane(&PanelId::builtin(pane))
+                .expect("面板存在");
+            assert!(
+                layout.tree.tiles.parent_of(id).is_some(),
+                "{pane} 不应游离在树外"
+            );
+        }
+    }
+
+    #[test]
+    fn corrupt_layout_falls_back_to_the_default() {
+        let mut layout = TilesLayout::current_default();
+        // 根容器被删掉（配置被写坏）：继续用会渲染成空白 Dock。
+        let root = layout.tree.root.expect("root");
+        layout.tree.root = Some(TileId::from_u64(9_999));
+        assert!(!layout.is_usable());
+        let _ = root;
+
+        let mut manager = PanelManager {
+            tiles: Some(layout),
+            ..PanelManager::default()
+        };
+        let repaired = manager.ensure_tiles_layout();
+        assert!(repaired.is_usable(), "损坏的布局应当回退到可用的默认布局");
+        assert_no_dangling_children(repaired);
+        assert!(
+            repaired
+                .tree
+                .tiles
+                .find_pane(&PanelId::builtin(PANEL_TERMINAL))
+                .is_some(),
+            "默认布局应当包含接收面板"
+        );
+    }
 
     #[test]
     fn select_center_panel_switches_active() {

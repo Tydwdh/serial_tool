@@ -446,6 +446,12 @@ impl<Pane> Tree<Pane> {
         let (Some(mouse_pos), Some(dragged_tile_id)) =
             (drop_context.mouse_pos, drop_context.dragged_tile_id)
         else {
+            // 拖拽已经结束（松手或 Esc 取消）。按 Esc 时 `dragged_id` 会立刻变成
+            // None，走不到下面的 `any_released` 分支，于是动画状态没人清理；下一次
+            // 拖同一个 tile 会从上一次残留的矩形开始插值，看起来是位置跳动。
+            for tile_id in self.tiles.tile_ids() {
+                clear_smooth_preview_rect(ui, tile_id);
+            }
             return;
         };
 

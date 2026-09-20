@@ -307,6 +307,9 @@ fn cover_tile_if_dragged<Pane>(
 
 // ----------------------------------------------------------------------------
 
+/// 光标离候选落点区域超过这个距离（点）就不再接受该候选，等价于放弃移动。
+const MAX_DROP_DISTANCE: f32 = 16.0;
+
 /// Context used for drag-and-dropping of tiles.
 ///
 /// This is passed down during the `ui` pass.
@@ -380,15 +383,125 @@ impl DropContext {
         if !self.enabled {
             return;
         }
-        let target_point = preview_rect.center();
-        if let Some(mouse_pos) = self.mouse_pos {
-            let dist_sq = mouse_pos.distance_sq(target_point);
-            if dist_sq < self.best_dist_sq {
-                self.best_dist_sq = dist_sq;
-                self.best_insertion = Some(insertion);
-                self.preview_rect = Some(preview_rect);
-            }
+        let Some(mouse_pos) = self.mouse_pos else {
+            return;
+        };
+        // 只接受光标贴着的候选区域。
+        //
+        // 上游只用 `best_dist_sq` 挑"最近的那个"，没有上限：光标落在顶栏、状态栏
+        // 或中央留白上松手时，仍然会把被拖拽的面板移动到离它最近的位置，于是没有
+        // "拖到空白处就放弃"的出口。加上距离上限后，远离任何候选区域就等价于取消。
+        if preview_rect.distance_to_pos(mouse_pos) > MAX_DROP_DISTANCE {
+            return;
         }
+        let target_point = preview_rect.center();
+        let dist_sq = mouse_pos.distance_sq(target_point);
+        if dist_sq < self.best_dist_sq {
+            self.best_dist_sq = dist_sq;
+            self.best_insertion = Some(insertion);
+            self.preview_rect = Some(preview_rect);
+        }
+    }
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+    use egui::{pos2, vec2};
+
+    fn context_with_cursor(mouse: Pos2) -> DropContext {
+        DropContext {
+            enabled: true,
+            dragged_tile_id: Some(TileId::from_u64(1)),
+            mouse_pos: Some(mouse),
+            best_insertion: None,
+            best_dist_sq: f32::INFINITY,
+            preview_rect: None,
+        }
+    }
+
+    fn insertion() -> InsertionPoint {
+        InsertionPoint::new(TileId::from_u64(7), ContainerInsertion::Horizontal(0))
+    }
+
+    fn target_rect() -> Rect {
+        Rect::from_min_size(pos2(100.0, 100.0), vec2(200.0, 100.0))
+    }
+
+    struct TestBehavior;
+
+    impl Behavior<&'static str> for TestBehavior {
+        fn pane_ui(
+            &mut self,
+            _ui: &mut egui::Ui,
+            _tile_id: TileId,
+            _pane: &mut &'static str,
+        ) -> UiResponse {
+            UiResponse::None
+        }
+
+        fn tab_title_for_pane(&mut self, pane: &&'static str) -> egui::WidgetText {
+            (*pane).into()
+        }
+    }
+
+    #[test]
+    fn vertical_drop_candidates_only_appear_near_the_edges() {
+        let behavior = TestBehavior;
+        let style = egui::Style::default();
+        let pane_rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 400.0));
+        let tile = Tile::Pane("日志");
+        let tile_id = TileId::from_u64(1);
+
+        // 面板偏上位置（旧实现里"上半区"会在这里胜出 → 一拖就上下拆分）。
+        // 现在应当落在"合并为标签组"上。
+        let mut upper_middle = context_with_cursor(pos2(200.0, 150.0));
+        upper_middle.on_tile(&behavior, &style, tile_id, pane_rect, &tile);
+        assert!(
+            matches!(
+                upper_middle.best_insertion.map(|point| point.insertion),
+                Some(ContainerInsertion::Tabs(_))
+            ),
+            "面板中部不应出现上下拆分候选：{:?}",
+            upper_middle.best_insertion.map(|point| point.insertion)
+        );
+
+        // 贴近下边缘：应当给出"下方拆分"，这样默认布局那种上下结构才拖得出来。
+        let mut near_bottom = context_with_cursor(pos2(200.0, 396.0));
+        near_bottom.on_tile(&behavior, &style, tile_id, pane_rect, &tile);
+        assert!(
+            matches!(
+                near_bottom.best_insertion.map(|point| point.insertion),
+                Some(ContainerInsertion::Vertical(_))
+            ),
+            "贴下边缘应当给出下方拆分候选：{:?}",
+            near_bottom.best_insertion.map(|point| point.insertion)
+        );
+    }
+
+    #[test]
+    fn drop_candidate_requires_the_cursor_to_stay_close() {
+        // 光标停在远处的空白处（例如顶栏）时不应产生落点，否则松手就等于移动面板。
+        let mut far_away = context_with_cursor(pos2(100.0, 0.0));
+        far_away.suggest_rect(insertion(), target_rect());
+        assert!(
+            far_away.best_insertion.is_none(),
+            "距离候选区域 100px 时不应接受落点"
+        );
+
+        // 光标落在候选区域内部：接受。
+        let mut inside = context_with_cursor(target_rect().center());
+        inside.suggest_rect(insertion(), target_rect());
+        assert!(inside.best_insertion.is_some());
+        assert_eq!(inside.preview_rect, Some(target_rect()));
+
+        // 刚好在距离上限内：仍然接受（贴边放置）。
+        let mut boundary = context_with_cursor(pos2(100.0, 100.0 - MAX_DROP_DISTANCE + 1.0));
+        boundary.suggest_rect(insertion(), target_rect());
+        assert!(
+            boundary.best_insertion.is_some(),
+            "距离上限以内应当保持可用"
+        );
     }
 }
 

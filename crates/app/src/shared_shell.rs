@@ -60,6 +60,9 @@ pub(crate) fn show_dock<H: DockHost>(host: &mut H, ui: &mut egui::Ui) {
         let mut behavior = SharedTiles { host };
         layout.tree.ui(&mut behavior, ui);
     }
+    // 记住底部/右侧区域当前容纳的面板：区域被拖空后容器会被剪掉，这份记录是
+    // 「显示底部/右侧面板」重建该区域的依据。
+    layout.remember_region_panes();
     if layout.reconcile_plugin_groups() {
         host.mark_layout_dirty();
     }
@@ -126,7 +129,14 @@ impl<H: DockHost> Behavior<PanelId> for SharedTiles<'_, H> {
                     _ => format!("标签组（{}）", tabs.children.len()).into(),
                 }
             }
-            Some(Tile::Container(container)) => format!("{:?}", container.kind()).into(),
+            Some(Tile::Container(container)) => match container.kind() {
+                // 容器被当成标签显示时（拖拽产生的嵌套容器），给出可读的中文名，
+                // 而不是 `ContainerKind` 的 Debug 输出（"Horizontal"/"Vertical"）。
+                ContainerKind::Horizontal => "左右拆分".into(),
+                ContainerKind::Vertical => "上下拆分".into(),
+                ContainerKind::Tabs => "标签组".into(),
+                ContainerKind::Grid => "网格".into(),
+            },
             None => "MISSING TILE".into(),
         }
     }

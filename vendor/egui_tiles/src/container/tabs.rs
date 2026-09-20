@@ -312,14 +312,14 @@ impl Tabs {
                                 next_active = Some(child_id);
                             }
 
-                            if let Some(mouse_pos) = drop_context.mouse_pos
-                                && drop_context.dragged_tile_id.is_some()
-                                && response.rect.contains(mouse_pos)
-                            {
-                                // Expand this tab - maybe the user wants to drop something into it!
-                                behavior.on_edit(EditAction::TabSelected);
-                                next_active = Some(child_id);
-                            }
+                            // 拖拽经过标签栏时**不**切换该组的激活页。
+                            //
+                            // 上游在光标落在某个标签上时会把该标签设为 active（注释是
+                            // "Expand this tab - maybe the user wants to drop something into
+                            // it!"），但那是最终状态而不是预览：拖动一个面板横穿窗口时，
+                            // 途经的每个标签组都会翻到光标下那一页，而且这个改动会被持久化。
+                            // 落点判定与 active 无关（见下面的 drop zones），因此这里不需要
+                            // 任何替代逻辑，"把面板丢进标签组"依然可用。
 
                             button_rects.insert(child_id, response.rect);
                             if is_being_dragged {
