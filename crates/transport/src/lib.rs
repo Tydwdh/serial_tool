@@ -1156,9 +1156,9 @@ impl SerialIo for Box<dyn sp::SerialPort> {
 
 // 入参即串口线程的全部运行环境（端口、命令通道、停止/存活标志、总线、waker），
 // 且与 `network.rs` 的 worker loop 签名刻意保持一致；包一层上下文结构体只会把
-// 同一批值换个类型再搬一次，故保留本豁免（不要扩大到模块级）。
+// 同一批值换个类型再搬一次。7 个参数正好在 clippy 的阈值上，因此这里**不需要**豁免；
+// 将来若再加参数，请改签名而不是把 `too_many_arguments` 豁免加回模块级。
 #[cfg(any(not(windows), test))]
-#[allow(clippy::too_many_arguments)]
 fn serial_worker_loop_impl(
     mut port: impl SerialIo,
     command_rx: crossbeam_channel::Receiver<SerialCommand>,

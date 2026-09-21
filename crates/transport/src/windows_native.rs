@@ -122,8 +122,8 @@ impl Drop for NativeSerialPort {
 
 // 参数即工作线程的整套运行环境，函数体第一行就把它们原样搬进 `NativeWorker`。
 // 再包一层 worker 上下文结构体只会多出一个只为跨 spawn 边界搬运同一批值而存在
-// 的载体类型，可读性反而更差，故保留本豁免（不要扩大到模块级）。
-#[allow(clippy::too_many_arguments)]
+// 的载体类型，可读性反而更差。7 个参数正好在 clippy 的阈值上，因此这里**不需要**
+// 豁免；将来若再加参数，请改签名而不是把豁免加回模块级。
 pub(crate) fn spawn_native_serial_worker(
     config: &SerialConfig,
     command_rx: Receiver<SerialCommand>,
