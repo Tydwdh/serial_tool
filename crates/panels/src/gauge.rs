@@ -520,6 +520,8 @@ mod tests {
 
     #[test]
     fn parse_zones_basic() {
+        // 区域颜色在 parse_zones 里就解析完了，断言时读的是**当时**的调色板。
+        let _theme = crate::theme::lock_theme_globals();
         let json = serde_json::json!([
             {"from": 0, "to": 60, "color": "green"},
             {"from": 60, "to": 80, "color": "yellow"},
@@ -572,6 +574,7 @@ mod tests {
 
     #[test]
     fn value_color_uses_endmost_zone_outside_range() {
+        let _theme = crate::theme::lock_theme_globals();
         // zones 未覆盖到 max：超限时取端点 zone 颜色，而非突变蓝色
         let zones = parse_zones(Some(&serde_json::json!([
             {"from": 0, "to": 2.5, "color": "red"},

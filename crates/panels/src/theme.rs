@@ -483,6 +483,27 @@ pub fn set_active_theme(theme: AppTheme) {
     ACTIVE_THEME.store(theme.index(), Ordering::Relaxed);
 }
 
+/// 测试专用：调色板是**进程级全局**（`ACTIVE_THEME` + `CUSTOM_THEME`），而 cargo 在同一个
+/// 测试二进制里默认多线程跑用例。于是"先算出颜色、之后再和 `theme::*()` 比对"的用例
+/// （gauge 的 `parse_zones_basic`、`value_color`）会和"切换主题"的用例互相踩。
+///
+/// 这不是理论风险，量过：同一个测试二进制以 `--test-threads=16` 连跑 40 次，
+/// 加锁前红 **6** 次（`catppuccin_variants_use_the_official_egui_surface_hierarchy`
+/// 断言到 `#21252B`，那是 one_dark_pro 的表面色，不是它自己刚设的 Mocha `#1C2026`），
+/// 加锁后 **0** 次。空闲机器上单跑整套很难碰到（15 次里 0 次），所以这条守卫的
+/// 依据是上面那组带负载的对照，不是"跑了几遍都绿"。
+/// CI 的 `Test & Lint` 在同一批代码上红过一次、七分钟后重跑又绿，就是同一件事。
+/// 碰主题状态的用例一律先取这把锁。
+#[cfg(test)]
+pub(crate) static THEME_GLOBAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn lock_theme_globals() -> std::sync::MutexGuard<'static, ()> {
+    THEME_GLOBAL_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn colors() -> ThemeColors {
     if let Ok(custom) = custom_theme_store().read()
         && let Some(custom) = custom.as_ref()
@@ -912,6 +933,7 @@ mod tests {
 
     #[test]
     fn active_theme_selects_the_expected_palette_colors() {
+        let _theme = lock_theme_globals();
         let saved = active_theme();
 
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes");
@@ -953,6 +975,7 @@ mod tests {
 
     #[test]
     fn every_bundled_theme_file_loads() {
+        let _theme = lock_theme_globals();
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes");
         for theme in AppTheme::ALL {
             load_builtin_theme(theme, &root).expect("bundled theme should parse");
@@ -966,6 +989,7 @@ mod tests {
 
     #[test]
     fn catppuccin_variants_use_the_official_egui_surface_hierarchy() {
+        let _theme = lock_theme_globals();
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/themes");
         for theme in [
             AppTheme::Latte,
