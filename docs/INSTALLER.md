@@ -166,6 +166,9 @@ git push origin v1.1.2
 - `%APPDATA%\HardwareWorkbench\workspace.json`。
 - `%APPDATA%\HardwareWorkbench\workspace.json.backup`。
 - `%APPDATA%\HardwareWorkbench\*.corrupt-*.backup`（解析失败被隔离的配置副本）。
+- `%APPDATA%\HardwareWorkbench\themes\` 与 `workspace-iced.json(+.backup)`：早期版本写在漫游目录下的遗留。
+  现在的 `user_themes_dir()` 在安装目录里，所以这三条纯粹是历史债 —— 但**少了它们，卸载后那里仍剩
+  12 个文件，目录非空，`dirifempty` 就不会生效**。这两处是读代码没读出来、实跑一轮才现形的。
 - `%APPDATA%\HardwareWorkbench\plugin-config\`。
 - `%APPDATA%\HardwareWorkbench\update\`（更新下载残留）。
 - `%APPDATA%\HardwareWorkbench\updater\`（更新 helper 日志）。
@@ -179,7 +182,13 @@ git push origin v1.1.2
   复制进来，这些新增文件不在安装日志里。
 
 这份清单由 `crates/app/tests/installer_uninstall_scope.rs` 钉住：它从 `main.rs` 读出
-`app_id` 再去 `.iss` 里找对应条目，所以改了 `with_app_id` 而忘了同步清单会直接变红。
+`app_id` 再去 `.iss` 里找对应条目，所以改了 `with_app_id` 而忘了同步清单会直接变红；
+`dirifempty` 必须排在清理各条之后也有断言，因为目录非空时它就不生效。
+
+清单本身在真机上跑完整周期验过：静默安装 → 启动一次程序（让 eframe 的 `app.ron` 与
+`plugins`/`themes` 等目录真实产生）→ 伪造更新器残留（`.exe.bak`、`.hw_update_probe_*`、
+更新包新增的 assets/docs）→ 静默卸载。结果：安装目录、`%APPDATA%\HardwareWorkbench`、
+`%APPDATA%\hardware-workbench` 与 HKCU 卸载项全部消失。
 
 两处需要知道的后果：
 

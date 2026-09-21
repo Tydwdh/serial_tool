@@ -61,6 +61,12 @@ Type: files; Name: "{userappdata}\HardwareWorkbench\*.corrupt-*.backup"
 Type: filesandordirs; Name: "{userappdata}\HardwareWorkbench\plugin-config"
 Type: filesandordirs; Name: "{userappdata}\HardwareWorkbench\update"
 Type: filesandordirs; Name: "{userappdata}\HardwareWorkbench\updater"
+; 实机卸载验证发现：早期版本把主题与另一份布局写在漫游目录下（现在的
+; `user_themes_dir()` 在安装目录里），这些遗留不删就让目录非空、dirifempty 失效
+; —— 加这三条之前，卸载后该目录仍剩 12 个文件。
+Type: filesandordirs; Name: "{userappdata}\HardwareWorkbench\themes"
+Type: files; Name: "{userappdata}\HardwareWorkbench\workspace-iced.json"
+Type: files; Name: "{userappdata}\HardwareWorkbench\workspace-iced.json.backup"
 Type: dirifempty; Name: "{userappdata}\HardwareWorkbench"
 ; eframe 的窗口位置与 egui memory 持久化：目录名取自 main.rs 的
 ; `ViewportBuilder::with_app_id("hardware-workbench")`（小写，且多一层 data\），

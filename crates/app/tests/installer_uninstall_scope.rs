@@ -131,6 +131,35 @@ fn catch_all_app_removal_is_the_last_entry() {
 }
 
 #[test]
+fn uninstaller_covers_roaming_leftovers_found_by_a_real_uninstall_run() {
+    // 实机跑过一次"装→运行→卸载"之后才发现的：早期版本把主题与另一份布局直接写在
+    // %APPDATA%\HardwareWorkbench 下，卸载后那里仍剩 12 个文件，dirifempty 因此失效。
+    // 现在的代码把主题放在安装目录（`user_themes_dir()`），所以这几条纯粹是历史债。
+    let section = uninstall_delete_section();
+    for wanted in [
+        r#"Name: "{userappdata}\HardwareWorkbench\themes""#,
+        r#"Name: "{userappdata}\HardwareWorkbench\workspace-iced.json""#,
+        r#"Name: "{userappdata}\HardwareWorkbench\workspace-iced.json.backup""#,
+    ] {
+        assert!(
+            section.contains(wanted),
+            "卸载清单缺少 `{wanted}`：实机验证过，少它就让 %APPDATA%\\HardwareWorkbench \
+             非空、dirifempty 不生效，整个目录留在用户机器上"
+        );
+    }
+    // 顺序也是语义：dirifempty 必须排在上面这些之后，否则目录还不空就被跳过。
+    let empty_at = section
+        .find(r#"Type: dirifempty; Name: "{userappdata}\HardwareWorkbench""#)
+        .expect("必须有一条 dirifempty 收尾 roaming 目录");
+    let themes_at = section
+        .find(r#"Name: "{userappdata}\HardwareWorkbench\themes""#)
+        .expect("themes 遗留项必须在清单里");
+    assert!(
+        themes_at < empty_at,
+        "dirifempty 必须排在清理各条之后，否则它面对的还是非空目录"
+    );
+}
+#[test]
 fn guard_is_not_vacuous() {
     // 反向自检：往一个不存在的模式上断言必须失败，否则说明 `contains` 的比法本身有问题。
     let section = uninstall_delete_section();
