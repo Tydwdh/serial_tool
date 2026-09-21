@@ -165,9 +165,29 @@ git push origin v1.1.2
 - 安装目录中的用户插件与自定义主题。
 - `%APPDATA%\HardwareWorkbench\workspace.json`。
 - `%APPDATA%\HardwareWorkbench\workspace.json.backup`。
+- `%APPDATA%\HardwareWorkbench\*.corrupt-*.backup`（解析失败被隔离的配置副本）。
 - `%APPDATA%\HardwareWorkbench\plugin-config\`。
 - `%APPDATA%\HardwareWorkbench\update\`（更新下载残留）。
 - `%APPDATA%\HardwareWorkbench\updater\`（更新 helper 日志）。
+- `%APPDATA%\hardware-workbench\`（eframe 的窗口位置与 egui memory 持久化，目录名取自
+  `main.rs` 的 `with_app_id`，**与上面的 `HardwareWorkbench` 是两个不同目录**）。
 - 安装目录中旧版残留的 `workspace.json` 和 `plugin-config\`。
+- 更新器写在安装目录内的残留：`*.exe.bak`（替换失败时只回滚不删）与
+  `.hw_update_probe_*`（进程被强杀时的写权限探测文件）。
+- 最后兜底删除整个安装目录：Inno 只删它自己记录过的文件、且只在目录已空时才移除它，
+  而 `copy_updated_resources` 会把更新包里的 `assets`/`docs`/`licenses`/`examples`
+  复制进来，这些新增文件不在安装日志里。
 
-这符合“卸载不残留配置”的目标，但也意味着用户插件配置不会保留。
+这份清单由 `crates/app/tests/installer_uninstall_scope.rs` 钉住：它从 `main.rs` 读出
+`app_id` 再去 `.iss` 里找对应条目，所以改了 `with_app_id` 而忘了同步清单会直接变红。
+
+两处需要知道的后果：
+
+- Windows 的用户数据目录就是安装目录，因此卸载会连带删掉 `logs\` 里的
+  `session-*.jsonl` 录制文件。
+- Ubuntu 的 `.deb` 不含 `prerm`/`postrm`/`conffiles`，`dpkg -r` 与 `dpkg -P` 都**不会**
+  删除 `~/.config/HardwareWorkbench`、`~/.local/share/HardwareWorkbench` 与 eframe 的
+  `~/.local/share/hardware-workbench`（后者由 `~/.local/share` 下的 XDG 数据目录规则决定，
+  同 Windows 一样是"另一个小写目录"）。
+
+本节开头的清单即"卸载不残留配置"这一目标的实现：它确实不残留配置，但也意味着用户插件配置不会保留。
