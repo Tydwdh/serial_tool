@@ -86,8 +86,6 @@ struct RecorderWorker {
     finished: Arc<AtomicBool>,
     last_error: Arc<Mutex<Option<String>>>,
     join: Option<JoinHandle<()>>,
-    #[allow(dead_code)]
-    stats: Arc<Mutex<RecorderStats>>,
 }
 
 /// 记账一条已写入的事件：条数、字节数与平均吞吐。
@@ -188,7 +186,6 @@ impl JsonlRecorder {
 
         let bus = self.bus.clone();
         let stats_thread = Arc::clone(&self.stats);
-        let stats_thread_for_worker = Arc::clone(&self.stats);
 
         {
             let mut s = stats_thread.lock();
@@ -331,7 +328,6 @@ impl JsonlRecorder {
             finished,
             last_error,
             join: Some(join),
-            stats: stats_thread_for_worker,
         });
         self.current_path = Some(path.clone());
         self.bus.publish(Event::system_log(
@@ -938,7 +934,6 @@ mod tests {
             finished,
             last_error: Arc::new(Mutex::new(None)),
             join: Some(join),
-            stats,
         });
     }
 

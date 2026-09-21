@@ -285,7 +285,8 @@ impl RegionSlot {
         }
     }
 
-    /// 挂到已有根容器上时，根容器需要具备的方向。
+    /// 该区域所在的线性容器方向：挂到已有根上时要求根是这个方向，
+    /// 方向不合适而新包一层容器时也用它作方向。
     fn root_linear_dir(self) -> LinearDir {
         match self {
             Self::Bottom => LinearDir::Vertical,
@@ -475,13 +476,14 @@ impl TilesLayout {
             self.tree.set_visible(self.bottom_tabs, visible);
             return;
         }
-        if visible {
-            let panes = self.bottom_panes.clone();
-            if let Some(container) = self.restore_region(&panes, RegionSlot::Bottom) {
-                self.bottom_tabs = container;
-                self.tree.set_visible(container, true);
-                self.remember_region_panes();
-            }
+        if !visible {
+            return;
+        }
+        let panes = self.bottom_panes.clone();
+        if let Some(container) = self.restore_region(&panes, RegionSlot::Bottom) {
+            self.bottom_tabs = container;
+            self.tree.set_visible(container, true);
+            self.remember_region_panes();
         }
     }
 
@@ -494,13 +496,14 @@ impl TilesLayout {
             self.tree.set_visible(self.right_tabs, visible);
             return;
         }
-        if visible {
-            let panes = self.right_panes.clone();
-            if let Some(container) = self.restore_region(&panes, RegionSlot::Right) {
-                self.right_tabs = container;
-                self.tree.set_visible(container, true);
-                self.remember_region_panes();
-            }
+        if !visible {
+            return;
+        }
+        let panes = self.right_panes.clone();
+        if let Some(container) = self.restore_region(&panes, RegionSlot::Right) {
+            self.right_tabs = container;
+            self.tree.set_visible(container, true);
+            self.remember_region_panes();
         }
     }
 
@@ -552,13 +555,13 @@ impl TilesLayout {
         // 塞进树里，渲染出一块空白。
         self.main_tabs = self.ensure_main_tabs();
 
-        let mut panes: Vec<TileId> = Vec::new();
         let mut candidates: Vec<PanelId> = remembered.to_vec();
         for fallback in slot.default_panes() {
             if !candidates.contains(&fallback) {
                 candidates.push(fallback);
             }
         }
+        let mut panes: Vec<TileId> = Vec::new();
         for pane in candidates {
             if let Some(id) = self.tree.tiles.find_pane(&pane)
                 && !panes.contains(&id)
@@ -581,25 +584,17 @@ impl TilesLayout {
         }
 
         let container = self.tree.tiles.insert_tab_tile(panes.clone());
-        let share = slot.restored_share();
         let attached = self
             .tree
             .root
-            .is_some_and(|root| self.attach_region_to_root(root, container, slot, share));
+            .is_some_and(|root| self.attach_region_to_root(root, container, slot));
         if !attached {
             match self.tree.root {
                 Some(root) => {
                     // 根容器方向不合适：把整棵树包进一个新的线性容器。
-                    let wrapped = match slot {
-                        RegionSlot::Bottom => {
-                            self.tree.tiles.insert_vertical_tile(vec![root, container])
-                        }
-                        RegionSlot::Right => self
-                            .tree
-                            .tiles
-                            .insert_horizontal_tile(vec![root, container]),
-                    };
-                    self.set_linear_share(wrapped, container, share);
+                    let mut wrapper = Linear::new(slot.root_linear_dir(), vec![root, container]);
+                    wrapper.shares.set_share(container, slot.restored_share());
+                    let wrapped = self.tree.tiles.insert_container(wrapper);
                     self.tree.root = Some(wrapped);
                 }
                 None => self.tree.root = Some(container),
@@ -613,47 +608,27 @@ impl TilesLayout {
     }
 
     /// 把区域容器挂到现有的根线性容器里。方向不匹配时返回 `false`。
-    fn attach_region_to_root(
-        &mut self,
-        root: TileId,
-        container: TileId,
-        slot: RegionSlot,
-        share: f32,
-    ) -> bool {
+    fn attach_region_to_root(&mut self, root: TileId, container: TileId, slot: RegionSlot) -> bool {
         let Some(Tile::Container(Container::Linear(linear))) = self.tree.tiles.get_mut(root) else {
             return false;
         };
         if linear.dir != slot.root_linear_dir() {
             return false;
         }
-        match slot {
-            // 底部区域插在主标签区之后，右侧区域放到最右。
+        // 底部区域插在主标签区之后，右侧区域放到最右。
+        let insert_at = match slot {
             RegionSlot::Bottom => {
-                let Some(index) = linear.children.iter().position(|c| *c == self.main_tabs) else {
+                let Some(main_index) = linear.children.iter().position(|c| *c == self.main_tabs)
+                else {
                     return false;
                 };
-                linear.children.insert(index + 1, container);
+                main_index + 1
             }
-            RegionSlot::Right => linear.children.push(container),
-        }
-        self.tree
-            .tiles
-            .get_mut(root)
-            .and_then(|tile| match tile {
-                Tile::Container(Container::Linear(linear)) => Some(&mut linear.shares),
-                _ => None,
-            })
-            .expect("root linear container")
-            .set_share(container, share);
+            RegionSlot::Right => linear.children.len(),
+        };
+        linear.children.insert(insert_at, container);
+        linear.shares.set_share(container, slot.restored_share());
         true
-    }
-
-    fn set_linear_share(&mut self, container_id: TileId, child: TileId, share: f32) {
-        if let Some(Tile::Container(Container::Linear(linear))) =
-            self.tree.tiles.get_mut(container_id)
-        {
-            linear.shares.set_share(child, share);
-        }
     }
 
     pub fn select_pane(&mut self, kind: &PanelId) -> bool {
@@ -1532,10 +1507,9 @@ mod tests {
     fn corrupt_layout_falls_back_to_the_default() {
         let mut layout = TilesLayout::current_default();
         // 根容器被删掉（配置被写坏）：继续用会渲染成空白 Dock。
-        let root = layout.tree.root.expect("root");
+        assert!(layout.tree.root.is_some(), "默认布局本应有根容器");
         layout.tree.root = Some(TileId::from_u64(9_999));
         assert!(!layout.is_usable());
-        let _ = root;
 
         let mut manager = PanelManager {
             tiles: Some(layout),

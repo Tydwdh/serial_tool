@@ -87,6 +87,10 @@ impl NotificationQueue {
     }
 
     /// 手动移除一个通知（按 source）。用于用户交互关闭。
+    ///
+    /// 尚未接线：Toast 的关闭按钮只翻自己那份 UI 侧副本（`ui/toast.rs` 的
+    /// `dismissing`），而 `current()` 不把 source 交给渲染层，所以按 source 回写队列
+    /// 得先让 Toast 携带 source。删掉本方法就等于放弃这条关闭路径。
     #[allow(dead_code)]
     pub(crate) fn dismiss(&mut self, source: &str) {
         self.entries.retain(|(s, _)| s != source);

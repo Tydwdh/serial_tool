@@ -133,7 +133,7 @@ impl TwoStepConfirm {
     /// 处理一次点击。返回 `true` 表示这次点击应当真正执行动作。
     pub fn click(&mut self, now_ms: u64) -> bool {
         if self.is_armed(now_ms) {
-            self.armed_at_ms = None;
+            self.disarm();
             true
         } else {
             self.arm(now_ms);
@@ -146,8 +146,7 @@ impl TwoStepConfirm {
 ///
 /// 标签必须与 [`confirm_click`] 中渲染的按钮使用同一个 `id_salt`。
 pub fn confirm_armed(ui: &egui::Ui, id_salt: &str) -> bool {
-    let state = read_confirm_state(ui, id_salt);
-    state.is_armed(now_ms(ui))
+    read_confirm_state(ui, id_salt).is_armed(now_ms(ui))
 }
 
 /// 提交两步确认按钮本帧的交互，返回是否应当执行动作。
@@ -171,13 +170,11 @@ pub fn confirm_click(ui: &egui::Ui, id_salt: &str, clicked: bool) -> bool {
     // 这里只看 `any_click()`（按下并抬起）而不是 `any_pressed()`：确认态的第二次
     // 点击在按下帧还没有产生 `clicked()`，若把按下也算作「点击别处」，就会在
     // 用户确认的瞬间先解除、再被抬起帧重新武装。
-    if state.is_armed(now) {
-        let dismissed =
-            ui.input(|input| input.pointer.any_click() || input.key_pressed(egui::Key::Escape));
-        if dismissed {
-            state.disarm();
-            write_confirm_state(ui, id_salt, state);
-        }
+    let dismissed = state.is_armed(now)
+        && ui.input(|input| input.pointer.any_click() || input.key_pressed(egui::Key::Escape));
+    if dismissed {
+        state.disarm();
+        write_confirm_state(ui, id_salt, state);
     }
     false
 }
@@ -493,7 +490,10 @@ mod tests {
 
         harness.get_by_label_contains("清空").click();
         harness.run();
-        assert!(harness.query_by_label_contains("确认").is_some());
+        assert!(
+            harness.query_by_label_contains("确认").is_some(),
+            "Esc 解除后再次点击应重新进入确认态"
+        );
 
         harness.get_by_label_contains("别处").click();
         harness.run();

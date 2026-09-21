@@ -8,6 +8,7 @@
 //! and replay analysis.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use tool_plugin_api::{
@@ -22,7 +23,7 @@ use tool_plugin_runtime::WebLuaEngine;
 struct RecordingHost {
     logs: RefCell<Vec<String>>,
     published: RefCell<Vec<(String, PluginValue)>>,
-    storage: RefCell<std::collections::BTreeMap<String, PluginValue>>,
+    storage: RefCell<BTreeMap<String, PluginValue>>,
 }
 
 impl RecordingHost {
@@ -148,7 +149,7 @@ fn shared_engine_boundary_loads_and_dispatches_lua() {
         )
         .expect("registered command should be dispatchable");
 
-    assert_eq!(host.logs(), vec!["Info:hello".to_owned()]);
+    assert_eq!(host.logs(), ["Info:hello"]);
 
     let PluginValue::Object(fields) = completed(result) else {
         panic!("command should return a table");
@@ -168,7 +169,7 @@ fn top_level_plugin_body_runs_on_load() {
         &[PluginCapability::Log],
     );
 
-    assert_eq!(host.logs(), vec!["Info:started test.plugin".to_owned()]);
+    assert_eq!(host.logs(), ["Info:started test.plugin"]);
 }
 
 #[test]
@@ -187,7 +188,7 @@ fn disabling_the_instance_runs_on_disable_once() {
     );
 
     engine.stop(instance).expect("stop should run on_disable");
-    assert_eq!(host.logs(), vec!["Info:stopped".to_owned()]);
+    assert_eq!(host.logs(), ["Info:stopped"]);
 
     // 实例已移除：再次 stop 必须报错而不是静默成功。
     assert!(engine.stop(instance).is_err());
@@ -223,7 +224,7 @@ fn bus_events_reach_the_matching_handler_only() {
 
     assert_eq!(
         host.logs(),
-        vec!["Info:serial transport.serial.default.rx".to_owned()],
+        ["Info:serial transport.serial.default.rx"],
         "only the matching topic pattern may run"
     );
 }
@@ -266,10 +267,7 @@ fn session_storage_round_trips_through_the_host() {
         &[PluginCapability::Storage, PluginCapability::Log],
     );
 
-    assert_eq!(
-        host.logs(),
-        vec!["Info:read fast".to_owned(), "Info:missing unset".to_owned()]
-    );
+    assert_eq!(host.logs(), ["Info:read fast", "Info:missing unset"]);
     assert_eq!(
         host.storage.borrow().get("mode"),
         Some(&PluginValue::String("fast".to_owned()))

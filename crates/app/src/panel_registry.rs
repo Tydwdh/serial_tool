@@ -19,7 +19,6 @@ use tool_panels::{
     PANEL_SETTINGS, PANEL_TERMINAL, PanelId,
 };
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuiltinPanel {
     Devices,

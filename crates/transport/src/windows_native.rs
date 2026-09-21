@@ -120,6 +120,9 @@ impl Drop for NativeSerialPort {
     }
 }
 
+// 参数即工作线程的整套运行环境，函数体第一行就把它们原样搬进 `NativeWorker`。
+// 再包一层 worker 上下文结构体只会多出一个只为跨 spawn 边界搬运同一批值而存在
+// 的载体类型，可读性反而更差，故保留本豁免（不要扩大到模块级）。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_native_serial_worker(
     config: &SerialConfig,

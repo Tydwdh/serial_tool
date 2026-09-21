@@ -186,18 +186,6 @@ impl WorkbenchApp {
         self.notifications.push("general", level, text);
     }
 
-    /// 来自特定 source 的通知（如 "terminal", "log", "replay" 等）。
-    /// 同 source 的新消息替换旧消息。
-    #[allow(dead_code)]
-    pub(crate) fn set_status_source(
-        &mut self,
-        source: &str,
-        level: StatusLevel,
-        text: impl Into<String>,
-    ) {
-        self.notifications.push(source, level, text);
-    }
-
     /// 用户主动操作：总是更新状态（不被旧错误阻塞）。
     /// 等价于 set_status，因为通知队列不会阻塞。
     pub(crate) fn set_status_force(&mut self, level: StatusLevel, text: impl Into<String>) {

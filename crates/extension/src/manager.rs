@@ -48,7 +48,6 @@ struct PluginRecord {
 pub struct PluginManager {
     bus: DataBus,
     transport: TransportManager,
-    permission_manager: PermissionManager,
     records: BTreeMap<String, PluginRecord>,
     lua_runtimes: HashMap<String, LuaPluginRuntime>,
     stopping_plugins: Vec<(String, LuaPluginRuntime)>,
@@ -80,7 +79,6 @@ impl PluginManager {
         Self {
             bus,
             transport,
-            permission_manager: PermissionManager::default(),
             records: BTreeMap::new(),
             lua_runtimes: HashMap::new(),
             stopping_plugins: Vec::new(),
@@ -146,172 +144,6 @@ impl PluginManager {
         let roots = self.roots.clone();
         let scan = Self::scan_roots(&roots)?;
         Ok(self.apply_scan(scan))
-    }
-
-    pub fn discover_root(&mut self, root: &Path) -> ExtensionResult<usize> {
-        if !root.exists() {
-            return Ok(0);
-        }
-
-        let mut count = 0;
-
-        for entry in fs::read_dir(root)? {
-            let entry = entry?;
-            let path = entry.path();
-
-            if !path.is_dir() {
-                continue;
-            }
-
-            let manifest_path = path.join("plugin.json");
-
-            if !manifest_path.exists() {
-                continue;
-            }
-
-            let manifest = match load_manifest(&manifest_path) {
-                Ok(m) => m,
-                Err(e) => {
-                    self.push_diagnostic(
-                        PluginDiagnosticSeverity::Error,
-                        "manifest_parse_error",
-                        None,
-                        path.clone(),
-                        format!("manifest 解析失败: {e}"),
-                    );
-                    self.bus.publish(Event::system_log(
-                        LogLevel::Warn,
-                        "extension",
-                        format!("跳过损坏插件 {}: {e}", path.display()),
-                    ));
-                    continue;
-                }
-            };
-
-            if !manifest.api_version_supported() {
-                self.push_diagnostic(
-                    PluginDiagnosticSeverity::Warning,
-                    "unsupported_api_version",
-                    Some(manifest.id.clone()),
-                    path.clone(),
-                    format!(
-                        "api_version '{}' 不受支持，当前支持 {}",
-                        manifest.api_version,
-                        SUPPORTED_PLUGIN_API_VERSIONS.join(", ")
-                    ),
-                );
-                self.bus.publish(Event::system_log(
-                    LogLevel::Warn,
-                    "extension",
-                    format!(
-                        "跳过不兼容插件 {} ({}) : api_version '{}' 不受支持，当前支持 {}",
-                        manifest.id,
-                        path.display(),
-                        manifest.api_version,
-                        SUPPORTED_PLUGIN_API_VERSIONS.join(", ")
-                    ),
-                ));
-                continue;
-            }
-
-            if let Err(errors) = manifest.validate() {
-                self.push_diagnostic(
-                    PluginDiagnosticSeverity::Error,
-                    "manifest_validation_error",
-                    Some(manifest.id.clone()),
-                    path.clone(),
-                    errors.join("; "),
-                );
-                self.bus.publish(Event::system_log(
-                    LogLevel::Warn,
-                    "extension",
-                    format!(
-                        "跳过无效插件 {} ({}) : {}",
-                        manifest.id,
-                        path.display(),
-                        errors.join("; ")
-                    ),
-                ));
-                continue;
-            }
-
-            if let Err(e) = self.permission_manager.check(&manifest) {
-                self.push_diagnostic(
-                    PluginDiagnosticSeverity::Error,
-                    "permission_denied",
-                    Some(manifest.id.clone()),
-                    path.clone(),
-                    e.to_string(),
-                );
-                self.bus.publish(Event::system_log(
-                    LogLevel::Warn,
-                    "extension",
-                    format!("跳过无权限插件 {} ({}) : {e}", manifest.id, path.display()),
-                ));
-                continue;
-            }
-
-            let id = manifest.id.clone();
-
-            // 重复 ID 检测：非同一目录时处理
-            if let Some(existing) = self.records.get(&id)
-                && existing.root != path
-            {
-                let is_running =
-                    matches!(existing.state, PluginState::Running | PluginState::Enabled);
-                self.bus.publish(Event::system_log(
-                    LogLevel::Warn,
-                    "extension",
-                    format!(
-                        "插件 ID 冲突: '{id}' 同时存在于 {} 和 {}",
-                        existing.root.display(),
-                        path.display()
-                    ),
-                ));
-                if is_running {
-                    self.push_diagnostic(
-                        PluginDiagnosticSeverity::Warning,
-                        "duplicate_plugin_id",
-                        Some(id.clone()),
-                        path.clone(),
-                        format!(
-                            "插件 ID 冲突，{} 已在运行，跳过 {}",
-                            existing.root.display(),
-                            path.display()
-                        ),
-                    );
-                    self.bus.publish(Event::system_log(
-                        LogLevel::Warn,
-                        "extension",
-                        format!(
-                            "插件 '{id}' 已有实例在运行中，跳过 {} 的覆盖",
-                            path.display()
-                        ),
-                    ));
-                    continue;
-                }
-            }
-
-            let existing_state = self
-                .records
-                .get(&id)
-                .map(|record| record.state)
-                .unwrap_or(PluginState::Discovered);
-
-            self.records.insert(
-                id,
-                PluginRecord {
-                    manifest,
-                    root: path,
-                    state: existing_state,
-                    last_error: None,
-                },
-            );
-
-            count += 1;
-        }
-
-        Ok(count)
     }
 
     /// 只扫描文件系统和 manifest，不接触插件运行时，可放到 worker 线程。

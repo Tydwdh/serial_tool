@@ -393,6 +393,116 @@ fn web_reconnect_state(port: PortId, descriptor: Option<PortDescriptor>) -> WebR
     }
 }
 
+/// 端口刷新：先让上一帧的瞬时状态退场，再按新列表收敛选中项。
+fn apply_web_refreshed_ports(serial: &mut WebSerialState, ports: Vec<PortDescriptor>) {
+    serial.status.clear();
+    serial.ports = ports;
+    if serial
+        .selected_port
+        .as_ref()
+        .is_some_and(|selected| !serial.ports.iter().any(|port| &port.id == selected))
+    {
+        select_web_port_state(serial, None);
+    }
+}
+
+/// 设备重新插上：同 id 的旧条目让位给最新描述符；待重连记录若指向同一台物理设备，
+/// 跟着改名并把下一次尝试提前到立刻。
+fn accept_web_attached_port(serial: &mut WebSerialState, port: PortDescriptor) {
+    serial.ports.retain(|item| item.id != port.id);
+    if serial
+        .reconnect
+        .as_ref()
+        .is_some_and(|pending| pending.matches(&port))
+        && let Some(pending) = serial.reconnect.as_mut()
+    {
+        pending.port = port.id.clone();
+        pending.vendor_id = port.vendor_id;
+        pending.product_id = port.product_id;
+        pending.next_attempt_at = 0.0;
+    }
+    serial.ports.push(port);
+    serial.status = "检测到已授权设备".to_owned();
+}
+
+/// 设备拔出：先记住拔出前的描述符，自动重连才能在端口改名后仍认出同一台设备。
+fn forget_web_detached_port(serial: &mut WebSerialState, port: PortId) {
+    let descriptor = serial.ports.iter().find(|item| item.id == port).cloned();
+    serial.ports.retain(|item| item.id != port);
+    if serial.connected.as_ref() == Some(&port) {
+        serial.connected = None;
+        serial.status = "设备已拔出".to_owned();
+        if serial.auto_reconnect {
+            serial.reconnect = Some(web_reconnect_state(port.clone(), descriptor));
+        }
+    }
+    if serial.selected_port.as_ref() == Some(&port) {
+        select_web_port_state(serial, None);
+    }
+}
+
+/// 网络端点移除：列表、选中与连接三处状态一起收，最后落一条状态文案。
+fn forget_web_network_port(serial: &mut WebSerialState, port: PortId) {
+    serial.ports.retain(|item| item.id != port);
+    if serial.selected_port.as_ref() == Some(&port) {
+        select_web_port_state(serial, None);
+    }
+    if serial.connected.as_ref() == Some(&port) {
+        serial.connected = None;
+    }
+    serial.status = "网络串口已移除".to_owned();
+}
+
+/// 挂起的自动重连任务失败：记一次尝试并安排下一次，满 10 次就放弃。
+/// 返回 false 表示这条失败与重连无关，由调用方回落到通用文案。
+fn handle_web_reconnect_task_failed(
+    serial: &mut WebSerialState,
+    task_id: TaskId,
+    error: &str,
+) -> bool {
+    let owns_this_task = serial
+        .reconnect
+        .as_ref()
+        .is_some_and(|pending| pending.task_id == Some(task_id));
+    if !owns_this_task {
+        return false;
+    }
+    let mut stop = false;
+    if let Some(pending) = serial.reconnect.as_mut() {
+        pending.task_id = None;
+        pending.attempts = pending.attempts.saturating_add(1);
+        if pending.attempts >= 10 {
+            stop = true;
+        } else {
+            pending.next_attempt_at = web_now_seconds() + web_reconnect_delay(pending.attempts);
+        }
+    }
+    if stop {
+        serial.reconnect = None;
+        serial.status = format!("自动重连失败（已尝试 10 次）：{error}");
+    } else {
+        serial.status = format!("自动重连失败，将稍后重试：{error}");
+    }
+    true
+}
+
+/// 挂起的自动重连任务被取消：同样记一次尝试并稍后再试。
+/// 返回 false 表示这条取消与重连无关，由调用方回落到通用文案。
+fn handle_web_reconnect_task_cancelled(serial: &mut WebSerialState, task_id: TaskId) -> bool {
+    let Some(pending) = serial
+        .reconnect
+        .as_mut()
+        .filter(|pending| pending.task_id == Some(task_id))
+    else {
+        return false;
+    };
+    pending.task_id = None;
+    pending.attempts = pending.attempts.saturating_add(1);
+    pending.next_attempt_at = web_now_seconds() + web_reconnect_delay(pending.attempts);
+    serial.status = "自动重连任务已取消，将稍后重试".to_owned();
+    true
+}
+
 /// wasm 侧的 HEX 预检：判定与真正发送时**同源**——`WebApplication::validate_hex` 调的
 /// 就是 native `dispatch` 用的 `tool_core::{parse_hex, parse_hex_strict}`。
 ///
@@ -453,6 +563,34 @@ fn fail_lua_host_request(host: &WebPluginHost, request_id: &str, error: &str) {
         request_id: request_id.to_owned(),
         result: Err(error.to_owned()),
     });
+}
+
+/// 浏览器能兑现的能力只有下面这十项：插件声明超出这份白名单时，
+/// 直接给出拒绝加载的错误文案，而不是悄悄少给一项权限。
+fn web_missing_capability_error(permissions: &PluginPermissions) -> Option<String> {
+    let missing = permissions.missing_from([
+        tool_plugin_api::PluginCapability::Bus,
+        tool_plugin_api::PluginCapability::Config,
+        tool_plugin_api::PluginCapability::Dialog,
+        tool_plugin_api::PluginCapability::Filesystem,
+        tool_plugin_api::PluginCapability::Log,
+        tool_plugin_api::PluginCapability::Serial,
+        tool_plugin_api::PluginCapability::Storage,
+        tool_plugin_api::PluginCapability::Task,
+        tool_plugin_api::PluginCapability::Timer,
+        tool_plugin_api::PluginCapability::Ui,
+    ]);
+    if missing.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "插件声明了当前浏览器不支持的权限：{}",
+        missing
+            .iter()
+            .map(|capability| capability.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -765,15 +903,6 @@ impl WebPluginState {
             .iter()
             .map(|record| {
                 let manifest = &record.persisted.manifest;
-                let state = if record.error.is_some() {
-                    PluginStateView::Failed
-                } else if record.persisted.enabled && record.lua_instance.is_some() {
-                    PluginStateView::Running
-                } else if record.persisted.enabled {
-                    PluginStateView::Enabled
-                } else {
-                    PluginStateView::Disabled
-                };
                 let contributes = PluginContributesView {
                     commands: manifest
                         .contributes
@@ -788,57 +917,13 @@ impl WebPluginState {
                         .contributes
                         .ui
                         .iter()
-                        .map(|contribution| PluginUiContributionView {
-                            id: contribution.id.clone(),
-                            slot: contribution.slot.clone(),
-                            kind: contribution.kind.clone(),
-                            title: contribution.title.clone(),
-                            command: contribution.command.clone(),
-                            tooltip: contribution.tooltip.clone(),
-                            order: contribution.order,
-                            enabled: contribution.enabled,
-                            visible: contribution.visible,
-                            record_send_input: contribution.record_send_input,
-                            default: contribution
-                                .default
-                                .clone()
-                                .unwrap_or(serde_json::Value::Null),
-                        })
+                        .map(web_plugin_ui_contribution_view)
                         .collect(),
                     panels: manifest
                         .contributes
                         .panels
                         .iter()
-                        .filter_map(|panel| {
-                            let object = panel.as_object()?;
-                            let id = object.get("id")?.as_str()?.to_owned();
-                            let title = object
-                                .get("title")
-                                .and_then(serde_json::Value::as_str)
-                                .unwrap_or(&id)
-                                .to_owned();
-                            let kind = object
-                                .get("kind")
-                                .and_then(serde_json::Value::as_str)
-                                .unwrap_or("dynamic")
-                                .to_owned();
-                            let config = object
-                                .get("config")
-                                .and_then(serde_json::Value::as_object)
-                                .map(|config| {
-                                    config
-                                        .iter()
-                                        .map(|(key, value)| (key.clone(), value.clone()))
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            Some(PluginPanelContributionView {
-                                id,
-                                title,
-                                kind,
-                                config,
-                            })
-                        })
+                        .filter_map(web_plugin_panel_contribution_view)
                         .collect(),
                     settings: manifest
                         .contributes
@@ -853,7 +938,7 @@ impl WebPluginState {
                     version: manifest.version.clone(),
                     api_version: manifest.api_version.clone(),
                     runtime: manifest.runtime.clone(),
-                    state,
+                    state: web_plugin_record_state(record),
                     permissions: manifest.live_permissions().to_vec(),
                     contributes,
                     path: format!("browser://plugin/{}", manifest.id),
@@ -1228,6 +1313,49 @@ impl WorkbenchApp {
         let now = web_now_seconds();
         self.web_notifications.retain(|item| item.expires_at > now);
         self.web_notifications.clone()
+    }
+
+    /// 状态栏每帧检查一次：缓冲满导致的丢事件是持续性故障，只推送一条短通知，
+    /// 并把面板自己的截断标志复位，避免同一次截断反复刷屏。
+    fn push_web_overflow_notifications(&mut self) {
+        let terminal_dropped = self.terminal_panel.take_dropped_events();
+        if terminal_dropped > 0 {
+            self.push_web_notification(
+                "terminal-data-loss",
+                WebNotificationLevel::Error,
+                format!("接收区缓冲已满，丢失 {terminal_dropped} 条最旧事件"),
+            );
+        }
+        let log_dropped = self.bottom_log_panel.take_dropped_events();
+        if log_dropped > 0 {
+            self.push_web_notification(
+                "log-data-loss",
+                WebNotificationLevel::Warn,
+                format!("日志缓冲已满，丢失 {log_dropped} 条最旧事件"),
+            );
+        }
+        if self.terminal_panel.truncated {
+            self.push_web_notification(
+                "terminal",
+                WebNotificationLevel::Warn,
+                format!(
+                    "终端已截断，仅保留最近 {} 条",
+                    self.terminal_panel.max_entries
+                ),
+            );
+            self.terminal_panel.truncated = false;
+        }
+        if self.bottom_log_panel.truncated {
+            self.push_web_notification(
+                "log",
+                WebNotificationLevel::Warn,
+                format!(
+                    "日志已截断，仅保留最近 {} 条",
+                    self.bottom_log_panel.max_entries
+                ),
+            );
+            self.bottom_log_panel.truncated = false;
+        }
     }
 
     fn start_web_recording(&mut self) {
@@ -1855,27 +1983,7 @@ impl WorkbenchApp {
                     profiles: BTreeMap::new(),
                 });
             let permission_set = PluginPermissions::from_permission_names(permissions);
-            let missing = permission_set.missing_from([
-                tool_plugin_api::PluginCapability::Bus,
-                tool_plugin_api::PluginCapability::Config,
-                tool_plugin_api::PluginCapability::Dialog,
-                tool_plugin_api::PluginCapability::Filesystem,
-                tool_plugin_api::PluginCapability::Log,
-                tool_plugin_api::PluginCapability::Serial,
-                tool_plugin_api::PluginCapability::Storage,
-                tool_plugin_api::PluginCapability::Task,
-                tool_plugin_api::PluginCapability::Timer,
-                tool_plugin_api::PluginCapability::Ui,
-            ]);
-            if !missing.is_empty() {
-                let error = format!(
-                    "插件声明了当前浏览器不支持的权限：{}",
-                    missing
-                        .iter()
-                        .map(|capability| capability.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
+            if let Some(error) = web_missing_capability_error(&permission_set) {
                 record.loading = false;
                 record.error = Some(error.clone());
                 if let Some(task_id) = record.load_task.take() {
@@ -2320,6 +2428,34 @@ impl WorkbenchApp {
         }
     }
 
+    /// 用户取消自动重连：先丢掉待重连状态；端口已知时让运行时撤掉仍挂着的连接任务，
+    /// 否则只回写一条状态文案。
+    fn cancel_web_reconnect(&mut self, port: Option<PortId>, ctx: &egui::Context) {
+        self.serial.borrow_mut().reconnect = None;
+        if let Some(port) = port {
+            self.dispatch_serial(AppCommand::CancelReconnect { port }, ctx);
+        } else {
+            self.serial.borrow_mut().status = "已取消自动重连".to_owned();
+        }
+    }
+
+    /// 浏览器导入的 JSON 主题落地：只有解析成功才替换 `theme_source`，
+    /// 失败时保留原主题，仅回写一条状态文案。
+    fn apply_web_theme_import(&mut self, source: String, ctx: &egui::Context) {
+        match theme::load_theme_text(&source, "浏览器自定义主题") {
+            Ok(name) => {
+                self.theme_source = Some(source);
+                self.ui_theme = theme::AppTheme::Custom;
+                apply_web_theme(ctx, self.ui_theme);
+                self.persist_settings();
+                self.serial.borrow_mut().status = format!("已应用自定义主题：{name}");
+            }
+            Err(error) => {
+                self.serial.borrow_mut().status = format!("主题加载失败：{error}");
+            }
+        }
+    }
+
     fn poll_web_events(&mut self, ctx: &egui::Context) {
         let Some(runtime) = self.runtime.clone() else {
             return;
@@ -2417,13 +2553,7 @@ impl WorkbenchApp {
                     serial.status = format!("异步任务完成：{kind}");
                 }
                 WebAppEvent::PortsRefreshed(ports) => {
-                    serial.status.clear();
-                    serial.ports = ports;
-                    if serial.selected_port.as_ref().is_some_and(|selected| {
-                        !serial.ports.iter().any(|port| &port.id == selected)
-                    }) {
-                        select_web_port_state(&mut serial, None);
-                    }
+                    apply_web_refreshed_ports(&mut serial, ports);
                 }
                 WebAppEvent::PortRequested { id, port } => {
                     plugin_lua_serial_resolution =
@@ -2432,48 +2562,17 @@ impl WorkbenchApp {
                     serial.status = "设备已授权，可连接".to_owned();
                 }
                 WebAppEvent::PortAttached(port) => {
-                    serial.ports.retain(|item| item.id != port.id);
-                    if serial
-                        .reconnect
-                        .as_ref()
-                        .is_some_and(|pending| pending.matches(&port))
-                        && let Some(pending) = serial.reconnect.as_mut()
-                    {
-                        pending.port = port.id.clone();
-                        pending.vendor_id = port.vendor_id;
-                        pending.product_id = port.product_id;
-                        pending.next_attempt_at = 0.0;
-                    }
-                    serial.ports.push(port);
-                    serial.status = "检测到已授权设备".to_owned();
+                    accept_web_attached_port(&mut serial, port);
                 }
                 WebAppEvent::PortDetached(port) => {
-                    let descriptor = serial.ports.iter().find(|item| item.id == port).cloned();
-                    serial.ports.retain(|item| item.id != port);
-                    if serial.connected.as_ref() == Some(&port) {
-                        serial.connected = None;
-                        serial.status = "设备已拔出".to_owned();
-                        if serial.auto_reconnect {
-                            serial.reconnect = Some(web_reconnect_state(port.clone(), descriptor));
-                        }
-                    }
-                    if serial.selected_port.as_ref() == Some(&port) {
-                        select_web_port_state(&mut serial, None);
-                    }
+                    forget_web_detached_port(&mut serial, port);
                 }
                 WebAppEvent::NetworkPortAdded(port) => {
                     select_authorized_port(&mut serial, port);
                     serial.status = "网络串口已添加，可连接".to_owned();
                 }
                 WebAppEvent::NetworkPortRemoved(port) => {
-                    serial.ports.retain(|item| item.id != port);
-                    if serial.selected_port.as_ref() == Some(&port) {
-                        select_web_port_state(&mut serial, None);
-                    }
-                    if serial.connected.as_ref() == Some(&port) {
-                        serial.connected = None;
-                    }
-                    serial.status = "网络串口已移除".to_owned();
+                    forget_web_network_port(&mut serial, port);
                 }
                 WebAppEvent::Connected { port } => {
                     serial.reconnect = None;
@@ -2526,29 +2625,7 @@ impl WorkbenchApp {
                     {
                         plugin_lua_serial_resolution = Some((id, Err(error.clone())));
                     }
-                    if serial
-                        .reconnect
-                        .as_ref()
-                        .is_some_and(|pending| pending.task_id == Some(id))
-                    {
-                        let mut stop = false;
-                        if let Some(pending) = serial.reconnect.as_mut() {
-                            pending.task_id = None;
-                            pending.attempts = pending.attempts.saturating_add(1);
-                            if pending.attempts >= 10 {
-                                stop = true;
-                            } else {
-                                pending.next_attempt_at =
-                                    web_now_seconds() + web_reconnect_delay(pending.attempts);
-                            }
-                        }
-                        if stop {
-                            serial.reconnect = None;
-                            serial.status = format!("自动重连失败（已尝试 10 次）：{error}");
-                        } else {
-                            serial.status = format!("自动重连失败，将稍后重试：{error}");
-                        }
-                    } else {
+                    if !handle_web_reconnect_task_failed(&mut serial, id, &error) {
                         serial.status = format!("操作失败：{error}");
                     }
                 }
@@ -2571,35 +2648,14 @@ impl WorkbenchApp {
                         plugin_lua_serial_resolution =
                             Some((id, Err("Lua 插件串口授权已取消".to_owned())));
                     }
-                    if let Some(pending) = serial
-                        .reconnect
-                        .as_mut()
-                        .filter(|pending| pending.task_id == Some(id))
-                    {
-                        pending.task_id = None;
-                        pending.attempts = pending.attempts.saturating_add(1);
-                        pending.next_attempt_at =
-                            web_now_seconds() + web_reconnect_delay(pending.attempts);
-                        serial.status = "自动重连任务已取消，将稍后重试".to_owned();
-                    } else {
+                    if !handle_web_reconnect_task_cancelled(&mut serial, id) {
                         serial.status = "操作已取消".to_owned();
                     }
                 }
             }
             drop(serial);
             if let Some((_name, source)) = theme_import {
-                match theme::load_theme_text(&source, "浏览器自定义主题") {
-                    Ok(name) => {
-                        self.theme_source = Some(source);
-                        self.ui_theme = theme::AppTheme::Custom;
-                        apply_web_theme(ctx, self.ui_theme);
-                        self.persist_settings();
-                        self.serial.borrow_mut().status = format!("已应用自定义主题：{name}");
-                    }
-                    Err(error) => {
-                        self.serial.borrow_mut().status = format!("主题加载失败：{error}");
-                    }
-                }
+                self.apply_web_theme_import(source, ctx);
             }
             if let Some(files) = plugin_files {
                 self.apply_web_plugin_files(files);
@@ -3332,28 +3388,16 @@ impl AppShellHost for WorkbenchApp {
         };
         let selected_id = selected.as_ref().map(ToString::to_string);
         let connected_id = connected.as_ref().map(ToString::to_string);
-        let serial_ports: Vec<SerialPortItem> = ports
-            .iter()
-            .map(|port| SerialPortItem {
-                id: port.id.to_string(),
-                label: port.label.clone(),
-                kind: match port.kind {
-                    PortKind::Serial => "Serial",
-                    PortKind::Network => "网络",
-                    PortKind::Unknown => "",
-                }
-                .to_owned(),
-                open: connected_id.as_deref() == Some(port.id.as_str()),
-                connecting: connecting && selected.as_ref() == Some(&port.id),
-                pending_reconnect: reconnect
-                    .as_ref()
-                    .is_some_and(|(pending_port, _, _)| pending_port == port.id.as_str()),
-            })
-            .collect();
+        let serial_ports = web_top_bar_port_items(
+            &ports,
+            connected_id.as_deref(),
+            connecting,
+            selected.as_ref(),
+            reconnect.as_ref().map(|(port, _, _)| port.as_str()),
+        );
         let mut selected_port = selected_id;
         let mut collapsed_state = collapsed;
         let mut serial_actions = Vec::new();
-        let mut command = None;
         let mut cancel_reconnect = false;
         let reconnect_port = reconnect
             .as_ref()
@@ -3374,21 +3418,10 @@ impl AppShellHost for WorkbenchApp {
             };
             serial_actions = SerialPanel::top_bar_contents_ui(ui, &mut view);
 
-            if let Some((port, attempts, next_attempt_at)) = reconnect {
-                let remaining = (next_attempt_at - web_now_seconds()).max(0.0);
-                let label = format!(
-                    "{} 重连中 {} {:.1}s ({}/{})",
-                    ICON_REFRESH.codepoint,
-                    port,
-                    remaining,
-                    attempts + 1,
-                    10
-                );
-                ui.label(egui::RichText::new(label).color(theme::yellow()))
-                    .on_hover_text("点击取消自动重连");
-                if design::icon_button(ui, ICON_CANCEL, "取消重连").clicked() {
-                    cancel_reconnect = true;
-                }
+            if let Some((port, attempts, next_attempt_at)) = reconnect
+                && web_reconnect_chip_ui(ui, &port, attempts, next_attempt_at)
+            {
+                cancel_reconnect = true;
             }
             ui.separator();
             self.web_ui_contribution_slot(ui, "top_bar.left");
@@ -3418,33 +3451,16 @@ impl AppShellHost for WorkbenchApp {
             self.persist_settings();
         }
         if cancel_reconnect {
-            self.serial.borrow_mut().reconnect = None;
-            if let Some(port) = reconnect_port {
-                self.dispatch_serial(AppCommand::CancelReconnect { port }, ui.ctx());
-            } else {
-                self.serial.borrow_mut().status = "已取消自动重连".to_owned();
-            }
+            self.cancel_web_reconnect(reconnect_port, ui.ctx());
         }
         if selected_port.as_deref() != selected.as_ref().map(PortId::as_str) {
             self.select_web_port(selected_port.clone().map(PortId::new));
         }
-        if let Some(action) = serial_actions.into_iter().next() {
-            command = Some(match action {
-                SerialTopBarAction::Refresh => AppCommand::RefreshPorts,
-                SerialTopBarAction::RequestPort => AppCommand::RequestPort,
-                SerialTopBarAction::Connect { port } => AppCommand::Connect {
-                    port: PortId::new(port),
-                    settings,
-                },
-                SerialTopBarAction::Disconnect { port } => AppCommand::Disconnect {
-                    port: PortId::new(port),
-                },
-                SerialTopBarAction::Reconnect { port } => AppCommand::Reconnect {
-                    port: PortId::new(port),
-                },
-            });
-        }
-        if let Some(command) = command {
+        if let Some(command) = serial_actions
+            .into_iter()
+            .next()
+            .map(|action| web_top_bar_serial_command(action, settings))
+        {
             self.dispatch_serial(command, ui.ctx());
         }
     }
@@ -3513,52 +3529,8 @@ impl AppShellHost for WorkbenchApp {
             .and_then(|id| ports.iter().find(|port| &port.id == id))
             .map(|port| web_port_display_name(port, &port_aliases))
             .unwrap_or_else(|| "串口已关闭".to_owned());
-        let terminal_dropped = self.terminal_panel.take_dropped_events();
-        if terminal_dropped > 0 {
-            self.push_web_notification(
-                "terminal-data-loss",
-                WebNotificationLevel::Error,
-                format!("接收区缓冲已满，丢失 {terminal_dropped} 条最旧事件"),
-            );
-        }
-        let log_dropped = self.bottom_log_panel.take_dropped_events();
-        if log_dropped > 0 {
-            self.push_web_notification(
-                "log-data-loss",
-                WebNotificationLevel::Warn,
-                format!("日志缓冲已满，丢失 {log_dropped} 条最旧事件"),
-            );
-        }
-        if self.terminal_panel.truncated {
-            self.push_web_notification(
-                "terminal",
-                WebNotificationLevel::Warn,
-                format!(
-                    "终端已截断，仅保留最近 {} 条",
-                    self.terminal_panel.max_entries
-                ),
-            );
-            self.terminal_panel.truncated = false;
-        }
-        if self.bottom_log_panel.truncated {
-            self.push_web_notification(
-                "log",
-                WebNotificationLevel::Warn,
-                format!(
-                    "日志已截断，仅保留最近 {} 条",
-                    self.bottom_log_panel.max_entries
-                ),
-            );
-            self.bottom_log_panel.truncated = false;
-        }
+        self.push_web_overflow_notifications();
         let notifications = self.current_web_notifications();
-        let serial_status_label = if connecting {
-            format!("{} 连接中", port_label)
-        } else if connected.is_some() {
-            format!("{} @ {}", port_label, settings_label(settings))
-        } else {
-            port_label
-        };
         let status_view = StatusBarView {
             serial_color: if connecting {
                 theme::yellow()
@@ -3567,97 +3539,26 @@ impl AppShellHost for WorkbenchApp {
             } else {
                 theme::text_secondary()
             },
-            serial_label: serial_status_label,
+            serial_label: web_serial_status_label(
+                &port_label,
+                connecting,
+                connected.is_some(),
+                settings,
+            ),
             recording_color: if recording {
                 theme::red()
             } else {
                 theme::text_dimmed()
             },
-            recording_label: if recording {
-                if paused {
-                    format!(
-                        "录制已暂停 {events} 条 {:.1}MB",
-                        bytes as f64 / 1024.0 / 1024.0
-                    )
-                } else {
-                    format!("录制中 {events} 条 {:.1}MB", bytes as f64 / 1024.0 / 1024.0)
-                }
-            } else {
-                "未录制".to_owned()
-            },
+            recording_label: web_recording_status_label(recording, paused, events, bytes),
             signals: connected.is_some().then_some(StatusSignalView { dtr, rts }),
         };
         let mut signal_action = None;
         ui.horizontal(|ui| {
             signal_action = status_bar_contents_ui(ui, &status_view).into_iter().next();
             self.web_ui_contribution_slot(ui, "status_bar.left");
-            if let Some(notification) = notifications.first() {
-                ui.separator();
-                ui.label(
-                    egui::RichText::new(notification.text.clone())
-                        .color(notification.level.color()),
-                )
-                .on_hover_text(&notification.text);
-                if notifications.len() > 1 {
-                    let overflow_id = ui.id().with("web_notification_overflow");
-                    let overflow_response =
-                        ui.small_button(format!("通知 {} 条", notifications.len()));
-                    let mut overflow_open = ui.ctx().memory_mut(|memory| {
-                        memory
-                            .data
-                            .get_persisted::<bool>(overflow_id)
-                            .unwrap_or(false)
-                    });
-                    if overflow_response.clicked() {
-                        overflow_open = !overflow_open;
-                        ui.ctx().memory_mut(|memory| {
-                            memory.data.insert_persisted(overflow_id, overflow_open);
-                        });
-                    }
-                    if overflow_open {
-                        egui::Window::new("通知列表")
-                            .id(overflow_id)
-                            .collapsible(false)
-                            .resizable(false)
-                            .anchor(egui::Align2::CENTER_CENTER, [0.0, 100.0])
-                            .auto_sized()
-                            .show(ui.ctx(), |ui| {
-                                ui.set_min_width(320.0);
-                                ui.set_max_height(300.0);
-                                egui::ScrollArea::vertical().show(ui, |ui| {
-                                    for item in &notifications {
-                                        ui.label(
-                                            egui::RichText::new(&item.text)
-                                                .color(item.level.color())
-                                                .small(),
-                                        );
-                                    }
-                                });
-                            });
-                    }
-                }
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if update_status.checking {
-                    ui.spinner();
-                    ui.small("检查更新…");
-                } else if let Some(info) = update_status.info.as_ref()
-                    && web_version_is_newer(&info.version, env!("CARGO_PKG_VERSION"))
-                {
-                    if ui.small_button(format!("更新 v{}", info.version)).clicked() {
-                        open_web_url(&info.download_url);
-                    }
-                } else if let Some(error) = update_status.error.as_deref() {
-                    ui.colored_label(theme::yellow(), "更新检查失败")
-                        .on_hover_text(error);
-                }
-                self.web_ui_contribution_slot(ui, "status_bar.right");
-                ui.label(status);
-                if let Some(error) = recorder_error.as_deref() {
-                    ui.colored_label(theme::red(), "录制错误")
-                        .on_hover_text(error);
-                }
-            });
+            web_notification_status_ui(ui, &notifications);
+            self.web_status_bar_right_ui(ui, &update_status, &status, recorder_error.as_deref());
         });
         if let Some(action) = signal_action
             && let Some(port) = connected
@@ -3832,6 +3733,46 @@ impl WorkbenchApp {
         commands
     }
 
+    /// 面板里可见的命令条目：先按标题过滤查询词，再按最近使用顺序排序。
+    fn web_palette_entries(&self, query: &str) -> Vec<WebPaletteCommand> {
+        let mut entries = self
+            .web_palette_commands()
+            .into_iter()
+            .filter(|command| query.is_empty() || command.title.to_lowercase().contains(query))
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|command| {
+            self.command_usage_order
+                .iter()
+                .position(|id| id == &command.id)
+                .unwrap_or(usize::MAX)
+        });
+        entries
+    }
+
+    /// 让选中项与当前条目数对齐，并处理上下键；`count` 为 0 时不碰键盘，
+    /// 避免对空列表取模。
+    fn sync_web_palette_selection(&mut self, ctx: &egui::Context, count: usize) {
+        if count == 0 {
+            self.command_palette_selected = None;
+            return;
+        }
+        if self
+            .command_palette_selected
+            .is_none_or(|index| index >= count)
+        {
+            self.command_palette_selected = Some(0);
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::ArrowDown)) {
+            let current = self.command_palette_selected.unwrap_or(0);
+            self.command_palette_selected = Some((current + 1) % count);
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::ArrowUp)) {
+            let current = self.command_palette_selected.unwrap_or(0);
+            self.command_palette_selected =
+                Some(if current == 0 { count - 1 } else { current - 1 });
+        }
+    }
+
     fn web_command_palette_ui(&mut self, ctx: &egui::Context) {
         if !self.command_palette_open {
             return;
@@ -3842,40 +3783,8 @@ impl WorkbenchApp {
         }
 
         let query = self.command_palette_query.trim().to_lowercase();
-        let mut entries = self
-            .web_palette_commands()
-            .into_iter()
-            .filter(|command| query.is_empty() || command.title.to_lowercase().contains(&query))
-            .collect::<Vec<_>>();
-        entries.sort_by_key(|command| {
-            self.command_usage_order
-                .iter()
-                .position(|id| id == &command.id)
-                .unwrap_or(usize::MAX)
-        });
-
-        if entries.is_empty() {
-            self.command_palette_selected = None;
-        } else if self
-            .command_palette_selected
-            .is_none_or(|index| index >= entries.len())
-        {
-            self.command_palette_selected = Some(0);
-        }
-        if !entries.is_empty() {
-            if ctx.input(|input| input.key_pressed(egui::Key::ArrowDown)) {
-                let current = self.command_palette_selected.unwrap_or(0);
-                self.command_palette_selected = Some((current + 1) % entries.len());
-            }
-            if ctx.input(|input| input.key_pressed(egui::Key::ArrowUp)) {
-                let current = self.command_palette_selected.unwrap_or(0);
-                self.command_palette_selected = Some(if current == 0 {
-                    entries.len() - 1
-                } else {
-                    current - 1
-                });
-            }
-        }
+        let entries = self.web_palette_entries(&query);
+        self.sync_web_palette_selection(ctx, entries.len());
 
         let mut open = true;
         let mut selected_command = None;
@@ -4019,6 +3928,37 @@ impl WorkbenchApp {
         }
     }
 
+    /// 状态栏右半区（右对齐）：更新提示、右侧贡献点、运行状态文本与录制错误。
+    fn web_status_bar_right_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        update_status: &tool_application::updater::UpdateStatusView,
+        status: &str,
+        recorder_error: Option<&str>,
+    ) {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if update_status.checking {
+                ui.spinner();
+                ui.small("检查更新…");
+            } else if let Some(info) = update_status.info.as_ref()
+                && web_version_is_newer(&info.version, env!("CARGO_PKG_VERSION"))
+            {
+                if ui.small_button(format!("更新 v{}", info.version)).clicked() {
+                    open_web_url(&info.download_url);
+                }
+            } else if let Some(error) = update_status.error.as_deref() {
+                ui.colored_label(theme::yellow(), "更新检查失败")
+                    .on_hover_text(error);
+            }
+            self.web_ui_contribution_slot(ui, "status_bar.right");
+            ui.label(status);
+            if let Some(error) = recorder_error {
+                ui.colored_label(theme::red(), "录制错误")
+                    .on_hover_text(error);
+            }
+        });
+    }
+
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         let nav_id = ui.id().with("settings_category");
         let mut category = ui
@@ -4040,96 +3980,8 @@ impl WorkbenchApp {
         ui.add_space(8.0);
 
         if category == 0 {
-            design::card().show(ui, |ui| {
-                web_card_header(ui, ICON_FOLDER, "工作区");
-                ui.label("布局、主题和数据偏好会保存在当前浏览器的本地存储中。");
-                ui.label("浏览器构建使用内嵌字体，不依赖本地文件系统。");
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("工作区布局");
-                    if ui
-                        .button("恢复默认布局")
-                        .on_hover_text("仅重置面板位置，不修改主题、串口和插件状态")
-                        .clicked()
-                    {
-                        self.panels.reset_tiles_layout();
-                        self.layout_dirty = true;
-                    }
-                });
-            });
-
-            ui.add_space(8.0);
-            design::card().show(ui, |ui| {
-                web_card_header(ui, ICON_PALETTE, "外观");
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("界面主题");
-                    egui::ComboBox::from_id_salt("app-theme")
-                        .selected_text(self.ui_theme.label())
-                        .show_ui(ui, |ui| {
-                            for candidate in theme::AppTheme::ALL {
-                                if ui
-                                    .selectable_label(self.ui_theme == candidate, candidate.label())
-                                    .clicked()
-                                {
-                                    self.ui_theme = candidate;
-                                    self.theme_source = None;
-                                    apply_web_theme(ui.ctx(), candidate);
-                                    self.persist_settings();
-                                }
-                            }
-                            if self.theme_source.is_some()
-                                && ui
-                                    .selectable_label(
-                                        self.ui_theme == theme::AppTheme::Custom,
-                                        theme::AppTheme::Custom.label(),
-                                    )
-                                    .clicked()
-                            {
-                                self.ui_theme = theme::AppTheme::Custom;
-                                apply_web_theme(ui.ctx(), self.ui_theme);
-                                self.persist_settings();
-                            }
-                        });
-                });
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("导入 JSON 主题").clicked() {
-                        self.request_web_theme_file(ui.ctx());
-                    }
-                    if self.theme_source.is_some()
-                        && ui
-                            .small_button("清除自定义主题")
-                            .on_hover_text("切换回内置主题并删除浏览器中保存的主题文本")
-                            .clicked()
-                    {
-                        self.theme_source = None;
-                        self.ui_theme = theme::AppTheme::default();
-                        apply_web_theme(ui.ctx(), self.ui_theme);
-                        self.persist_settings();
-                    }
-                    if self.ui_theme == theme::AppTheme::Custom {
-                        ui.small("当前主题来自浏览器导入的 JSON 文件");
-                    }
-                });
-                let mut font_size = self.terminal_panel.font_size;
-                if ui
-                    .add(
-                        egui::Slider::new(&mut font_size, 10.0..=24.0)
-                            .step_by(1.0)
-                            .text("等宽字体大小")
-                            .suffix("px"),
-                    )
-                    .changed()
-                {
-                    self.terminal_panel.font_size = font_size;
-                    self.bottom_log_panel.font_size = font_size;
-                    self.persist_settings();
-                }
-                ui.add_space(4.0);
-                let mut bottom_visible = self.panels.bottom_visible();
-                if ui.checkbox(&mut bottom_visible, "显示底部面板").changed() {
-                    self.panels.set_bottom_visible(bottom_visible);
-                    self.persist_settings();
-                }
-            });
+            self.render_workspace_settings_card(ui);
+            self.render_appearance_settings_card(ui);
         }
 
         if category == 1 {
@@ -4139,69 +3991,11 @@ impl WorkbenchApp {
                 ui.label("浏览器网络请求遵循当前浏览器的代理和安全策略。");
                 ui.label("串口权限与自动重连在“串口”面板中配置。");
             });
-            ui.add_space(8.0);
-            design::card().show(ui, |ui| {
-                web_card_header(ui, ICON_TUNE, "数据");
-                let (changed, terminal_max_entries, log_max_entries) = {
-                    let mut view = DataSettingsView {
-                        merge_window_ms: &mut self.terminal_panel.merge_window_ms,
-                        terminal_max_entries: &mut self.terminal_panel.max_entries,
-                        log_max_entries: &mut self.bottom_log_panel.max_entries,
-                    };
-                    let changed = data_settings_ui(ui, &mut view);
-                    (changed, *view.terminal_max_entries, *view.log_max_entries)
-                };
-                if changed {
-                    self.terminal_panel.set_max_entries(terminal_max_entries);
-                    self.bottom_log_panel.set_max_entries(log_max_entries);
-                    self.dispatch_without_status(AppCommand::SetTerminalMergeWindow {
-                        ms: self.terminal_panel.merge_window_ms,
-                    });
-                    self.dispatch_without_status(AppCommand::SetTerminalMaxEntries {
-                        max: terminal_max_entries,
-                    });
-                    self.persist_settings();
-                }
-            });
+            self.render_data_settings_card(ui);
         }
 
         if category == 2 {
-            ui.add_space(8.0);
-            design::card().show(ui, |ui| {
-                web_card_header(ui, ICON_KEYBOARD, "快捷键");
-                let commands = self.web_keymap_commands();
-                let entries = commands
-                    .iter()
-                    .map(|command| KeymapEntry {
-                        id: command.id.clone(),
-                        title: command.title.clone(),
-                        bindings: self
-                            .keymap
-                            .get_bindings(&command.id)
-                            .iter()
-                            .map(KeyBinding::display)
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        recording: self.key_recording.as_deref() == Some(command.id.as_str()),
-                    })
-                    .collect::<Vec<_>>();
-                for action in keymap_ui(ui, &entries) {
-                    match action {
-                        KeymapAction::Record(command_id) => {
-                            self.key_recording = Some(command_id);
-                        }
-                        KeymapAction::Clear(command_id) => {
-                            self.keymap.set_bindings(&command_id, Vec::new());
-                            self.persist_settings();
-                        }
-                        KeymapAction::RestoreDefaults => {
-                            self.keymap = Keymap::default();
-                            self.key_recording = None;
-                            self.persist_settings();
-                        }
-                    }
-                }
-            });
+            self.render_keymap_editor(ui);
         }
 
         if category == 3 {
@@ -4216,64 +4010,237 @@ impl WorkbenchApp {
                 .map(WebRuntime::query_update)
                 .unwrap_or_default();
             ui.add_space(8.0);
-            ui.horizontal_wrapped(|ui| {
-                if design::button(
-                    ui,
-                    ICON_RESTART_ALT,
-                    "恢复所有默认设置",
-                    design::ButtonKind::Danger,
-                )
-                .clicked()
-                {
-                    self.reset_web_settings(ui.ctx());
-                }
-            });
-            ui.add_space(8.0);
-            design::card().show(ui, |ui| {
-                web_card_header(ui, ICON_INFO, "关于");
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(format!("硬件调试工作台 v{}", env!("CARGO_PKG_VERSION")));
-                    ui.hyperlink_to(REPOSITORY_URL, REPOSITORY_URL)
-                        .on_hover_text("打开项目仓库");
-                    if ui.small_button("复制版本号").clicked() {
-                        copy_text_with_feedback(
-                            ui,
-                            format!("v{}", env!("CARGO_PKG_VERSION")),
-                            format!("已复制 v{}", env!("CARGO_PKG_VERSION")),
-                        );
-                    }
-                });
-                ui.label("浏览器版本使用 Web Serial、localStorage 和 Blob 下载能力。");
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .add_enabled(!update_status.checking, egui::Button::new("检查 Web 更新"))
-                        .clicked()
-                    {
-                        self.request_web_update_check(ui.ctx());
-                    }
-                    if update_status.checking {
-                        ui.label("正在检查…");
-                    }
-                });
-                if let Some(error) = &update_status.error {
-                    ui.colored_label(theme::red(), error);
-                }
-                if let Some(info) = &update_status.info {
-                    let current = env!("CARGO_PKG_VERSION");
-                    if web_version_is_newer(&info.version, current) {
-                        ui.label(format!("发现新版本 v{}（{}）", info.version, info.date));
-                        if ui.button("打开下载页").clicked() {
-                            open_web_url(&info.download_url);
-                        }
-                        for item in &info.changelog {
-                            ui.small(format!("• {item}"));
-                        }
-                    } else {
-                        ui.label(format!("已是最新版本（v{current}）"));
-                    }
-                }
-            });
+            self.render_restore_defaults_row(ui);
+            self.render_about_settings_card(ui, &update_status);
         }
+    }
+
+    fn render_workspace_settings_card(&mut self, ui: &mut egui::Ui) {
+        design::card().show(ui, |ui| {
+            web_card_header(ui, ICON_FOLDER, "工作区");
+            ui.label("布局、主题和数据偏好会保存在当前浏览器的本地存储中。");
+            ui.label("浏览器构建使用内嵌字体，不依赖本地文件系统。");
+            ui.horizontal_wrapped(|ui| {
+                ui.label("工作区布局");
+                if ui
+                    .button("恢复默认布局")
+                    .on_hover_text("仅重置面板位置，不修改主题、串口和插件状态")
+                    .clicked()
+                {
+                    self.panels.reset_tiles_layout();
+                    self.layout_dirty = true;
+                }
+            });
+        });
+    }
+
+    fn render_appearance_settings_card(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
+        design::card().show(ui, |ui| {
+            web_card_header(ui, ICON_PALETTE, "外观");
+            ui.horizontal_wrapped(|ui| {
+                ui.label("界面主题");
+                egui::ComboBox::from_id_salt("app-theme")
+                    .selected_text(self.ui_theme.label())
+                    .show_ui(ui, |ui| {
+                        for candidate in theme::AppTheme::ALL {
+                            if ui
+                                .selectable_label(self.ui_theme == candidate, candidate.label())
+                                .clicked()
+                            {
+                                self.ui_theme = candidate;
+                                self.theme_source = None;
+                                apply_web_theme(ui.ctx(), candidate);
+                                self.persist_settings();
+                            }
+                        }
+                        if self.theme_source.is_some()
+                            && ui
+                                .selectable_label(
+                                    self.ui_theme == theme::AppTheme::Custom,
+                                    theme::AppTheme::Custom.label(),
+                                )
+                                .clicked()
+                        {
+                            self.ui_theme = theme::AppTheme::Custom;
+                            apply_web_theme(ui.ctx(), self.ui_theme);
+                            self.persist_settings();
+                        }
+                    });
+            });
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("导入 JSON 主题").clicked() {
+                    self.request_web_theme_file(ui.ctx());
+                }
+                if self.theme_source.is_some()
+                    && ui
+                        .small_button("清除自定义主题")
+                        .on_hover_text("切换回内置主题并删除浏览器中保存的主题文本")
+                        .clicked()
+                {
+                    self.theme_source = None;
+                    self.ui_theme = theme::AppTheme::default();
+                    apply_web_theme(ui.ctx(), self.ui_theme);
+                    self.persist_settings();
+                }
+                if self.ui_theme == theme::AppTheme::Custom {
+                    ui.small("当前主题来自浏览器导入的 JSON 文件");
+                }
+            });
+            let mut font_size = self.terminal_panel.font_size;
+            if ui
+                .add(
+                    egui::Slider::new(&mut font_size, 10.0..=24.0)
+                        .step_by(1.0)
+                        .text("等宽字体大小")
+                        .suffix("px"),
+                )
+                .changed()
+            {
+                self.terminal_panel.font_size = font_size;
+                self.bottom_log_panel.font_size = font_size;
+                self.persist_settings();
+            }
+            ui.add_space(4.0);
+            let mut bottom_visible = self.panels.bottom_visible();
+            if ui.checkbox(&mut bottom_visible, "显示底部面板").changed() {
+                self.panels.set_bottom_visible(bottom_visible);
+                self.persist_settings();
+            }
+        });
+    }
+
+    fn render_data_settings_card(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
+        design::card().show(ui, |ui| {
+            web_card_header(ui, ICON_TUNE, "数据");
+            let (changed, terminal_max_entries, log_max_entries) = {
+                let mut view = DataSettingsView {
+                    merge_window_ms: &mut self.terminal_panel.merge_window_ms,
+                    terminal_max_entries: &mut self.terminal_panel.max_entries,
+                    log_max_entries: &mut self.bottom_log_panel.max_entries,
+                };
+                let changed = data_settings_ui(ui, &mut view);
+                (changed, *view.terminal_max_entries, *view.log_max_entries)
+            };
+            if changed {
+                self.terminal_panel.set_max_entries(terminal_max_entries);
+                self.bottom_log_panel.set_max_entries(log_max_entries);
+                self.dispatch_without_status(AppCommand::SetTerminalMergeWindow {
+                    ms: self.terminal_panel.merge_window_ms,
+                });
+                self.dispatch_without_status(AppCommand::SetTerminalMaxEntries {
+                    max: terminal_max_entries,
+                });
+                self.persist_settings();
+            }
+        });
+    }
+
+    fn render_keymap_editor(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
+        design::card().show(ui, |ui| {
+            web_card_header(ui, ICON_KEYBOARD, "快捷键");
+            let commands = self.web_keymap_commands();
+            let entries = commands
+                .iter()
+                .map(|command| KeymapEntry {
+                    id: command.id.clone(),
+                    title: command.title.clone(),
+                    bindings: self
+                        .keymap
+                        .get_bindings(&command.id)
+                        .iter()
+                        .map(KeyBinding::display)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    recording: self.key_recording.as_deref() == Some(command.id.as_str()),
+                })
+                .collect::<Vec<_>>();
+            for action in keymap_ui(ui, &entries) {
+                match action {
+                    KeymapAction::Record(command_id) => {
+                        self.key_recording = Some(command_id);
+                    }
+                    KeymapAction::Clear(command_id) => {
+                        self.keymap.set_bindings(&command_id, Vec::new());
+                        self.persist_settings();
+                    }
+                    KeymapAction::RestoreDefaults => {
+                        self.keymap = Keymap::default();
+                        self.key_recording = None;
+                        self.persist_settings();
+                    }
+                }
+            }
+        });
+    }
+
+    fn render_restore_defaults_row(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            if design::button(
+                ui,
+                ICON_RESTART_ALT,
+                "恢复所有默认设置",
+                design::ButtonKind::Danger,
+            )
+            .clicked()
+            {
+                self.reset_web_settings(ui.ctx());
+            }
+        });
+        ui.add_space(8.0);
+    }
+
+    fn render_about_settings_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        update_status: &tool_application::updater::UpdateStatusView,
+    ) {
+        design::card().show(ui, |ui| {
+            web_card_header(ui, ICON_INFO, "关于");
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("硬件调试工作台 v{}", env!("CARGO_PKG_VERSION")));
+                ui.hyperlink_to(REPOSITORY_URL, REPOSITORY_URL)
+                    .on_hover_text("打开项目仓库");
+                if ui.small_button("复制版本号").clicked() {
+                    copy_text_with_feedback(
+                        ui,
+                        format!("v{}", env!("CARGO_PKG_VERSION")),
+                        format!("已复制 v{}", env!("CARGO_PKG_VERSION")),
+                    );
+                }
+            });
+            ui.label("浏览器版本使用 Web Serial、localStorage 和 Blob 下载能力。");
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(!update_status.checking, egui::Button::new("检查 Web 更新"))
+                    .clicked()
+                {
+                    self.request_web_update_check(ui.ctx());
+                }
+                if update_status.checking {
+                    ui.label("正在检查…");
+                }
+            });
+            if let Some(error) = &update_status.error {
+                ui.colored_label(theme::red(), error);
+            }
+            if let Some(info) = &update_status.info {
+                let current = env!("CARGO_PKG_VERSION");
+                if web_version_is_newer(&info.version, current) {
+                    ui.label(format!("发现新版本 v{}（{}）", info.version, info.date));
+                    if ui.button("打开下载页").clicked() {
+                        open_web_url(&info.download_url);
+                    }
+                    for item in &info.changelog {
+                        ui.small(format!("• {item}"));
+                    }
+                } else {
+                    ui.label(format!("已是最新版本（v{current}）"));
+                }
+            }
+        });
     }
 
     fn reset_web_settings(&mut self, ctx: &egui::Context) {
@@ -4484,26 +4451,7 @@ impl WorkbenchApp {
         };
 
         if let Some(config) = network_to_add {
-            let port = config.port_id();
-            {
-                let mut serial = self.serial.borrow_mut();
-                if !serial
-                    .network_ports
-                    .iter()
-                    .any(|item| item.port_id() == port)
-                {
-                    serial.network_ports.push(config.clone());
-                }
-            }
-            self.select_web_port(Some(port.clone()));
-            if let Some(runtime) = self.runtime.as_ref() {
-                let _ = runtime.dispatch(AppCommand::RegisterNetworkPort {
-                    config: config.clone(),
-                });
-                let settings = self.serial.borrow().settings;
-                self.dispatch_serial(AppCommand::Connect { port, settings }, &ctx);
-            }
-            self.persist_settings();
+            self.add_web_network_port(config, &ctx);
         }
 
         if settings_changed || auto_reconnect_changed || metadata_changed {
@@ -4522,55 +4470,84 @@ impl WorkbenchApp {
             self.persist_settings();
         }
         for action in actions {
-            let command = match action {
-                SerialAction::Refresh => AppCommand::RefreshPorts,
-                SerialAction::RequestPort => AppCommand::RequestPort,
-                SerialAction::Connect { port, .. } => {
-                    let port = PortId::new(port);
-                    self.select_web_port(Some(port.clone()));
-                    let settings = self.serial.borrow().settings;
-                    AppCommand::Connect { port, settings }
-                }
-                SerialAction::Disconnect { port } => AppCommand::Disconnect {
-                    port: PortId::new(port),
-                },
-                SerialAction::SendText { port, text } => AppCommand::SendText {
-                    port: PortId::new(port),
-                    text,
-                },
-                SerialAction::SendHex { port, hex } => AppCommand::SendHex {
-                    port: PortId::new(port),
-                    hex,
-                    strict: self.serial.borrow().hex_strict,
-                },
-                SerialAction::SetDtr { port, value } => AppCommand::SetDtr {
-                    port: PortId::new(port),
-                    value,
-                },
-                SerialAction::SetRts { port, value } => AppCommand::SetRts {
-                    port: PortId::new(port),
-                    value,
-                },
-                SerialAction::CancelReconnect { port } => AppCommand::CancelReconnect {
-                    port: PortId::new(port),
-                },
-                SerialAction::RemoveNetwork { port } => {
-                    let port = PortId::new(port);
-                    {
-                        let mut serial = self.serial.borrow_mut();
-                        serial
-                            .network_ports
-                            .retain(|config| config.port_id() != port);
-                        if serial.selected_port.as_ref() == Some(&port) {
-                            serial.selected_port = None;
-                        }
-                    }
-                    self.persist_settings();
-                    AppCommand::RemoveNetworkPort { port }
-                }
-            };
-            self.dispatch_serial(command, &ctx);
+            self.dispatch_serial_action(action, &ctx);
         }
+    }
+
+    /// 登记网络串口并立刻连接：已登记过的端点不再重复写入 `network_ports`。
+    fn add_web_network_port(&mut self, config: NetworkSerialConfig, ctx: &egui::Context) {
+        let port = config.port_id();
+        {
+            let mut serial = self.serial.borrow_mut();
+            if !serial
+                .network_ports
+                .iter()
+                .any(|item| item.port_id() == port)
+            {
+                serial.network_ports.push(config.clone());
+            }
+        }
+        self.select_web_port(Some(port.clone()));
+        if let Some(runtime) = self.runtime.as_ref() {
+            let _ = runtime.dispatch(AppCommand::RegisterNetworkPort {
+                config: config.clone(),
+            });
+            let settings = self.serial.borrow().settings;
+            self.dispatch_serial(AppCommand::Connect { port, settings }, ctx);
+        }
+        self.persist_settings();
+    }
+
+    /// 串口面板的一条动作落到命令上；连接与移除网络串口还会就地更新浏览器状态。
+    fn dispatch_serial_action(&mut self, action: SerialAction, ctx: &egui::Context) {
+        let command = match action {
+            SerialAction::Refresh => AppCommand::RefreshPorts,
+            SerialAction::RequestPort => AppCommand::RequestPort,
+            SerialAction::Connect { port, .. } => {
+                let port = PortId::new(port);
+                self.select_web_port(Some(port.clone()));
+                let settings = self.serial.borrow().settings;
+                AppCommand::Connect { port, settings }
+            }
+            SerialAction::Disconnect { port } => AppCommand::Disconnect {
+                port: PortId::new(port),
+            },
+            SerialAction::SendText { port, text } => AppCommand::SendText {
+                port: PortId::new(port),
+                text,
+            },
+            SerialAction::SendHex { port, hex } => AppCommand::SendHex {
+                port: PortId::new(port),
+                hex,
+                strict: self.serial.borrow().hex_strict,
+            },
+            SerialAction::SetDtr { port, value } => AppCommand::SetDtr {
+                port: PortId::new(port),
+                value,
+            },
+            SerialAction::SetRts { port, value } => AppCommand::SetRts {
+                port: PortId::new(port),
+                value,
+            },
+            SerialAction::CancelReconnect { port } => AppCommand::CancelReconnect {
+                port: PortId::new(port),
+            },
+            SerialAction::RemoveNetwork { port } => {
+                let port = PortId::new(port);
+                {
+                    let mut serial = self.serial.borrow_mut();
+                    serial
+                        .network_ports
+                        .retain(|config| config.port_id() != port);
+                    if serial.selected_port.as_ref() == Some(&port) {
+                        serial.selected_port = None;
+                    }
+                }
+                self.persist_settings();
+                AppCommand::RemoveNetworkPort { port }
+            }
+        };
+        self.dispatch_serial(command, ctx);
     }
 
     fn serial_ui(&mut self, ui: &mut egui::Ui) {
@@ -4816,54 +4793,60 @@ impl WorkbenchApp {
         }
 
         for action in actions {
-            match action {
-                SendAction::SendText { port, text } => {
-                    self.send_web_with_history(
-                        AppCommand::SendText {
-                            port: PortId::new(port),
-                            text,
-                        },
-                        &ctx,
-                    );
-                }
-                SendAction::SendHex { port, hex, strict } => {
-                    self.send_web_with_history(
-                        AppCommand::SendHex {
-                            port: PortId::new(port),
-                            hex,
-                            strict,
-                        },
-                        &ctx,
-                    );
-                }
-                SendAction::SetDtr { port, value } => {
-                    self.dispatch_serial(
-                        AppCommand::SetDtr {
-                            port: PortId::new(port),
-                            value,
-                        },
-                        &ctx,
-                    );
-                }
-                SendAction::SetRts { port, value } => {
-                    self.dispatch_serial(
-                        AppCommand::SetRts {
-                            port: PortId::new(port),
-                            value,
-                        },
-                        &ctx,
-                    );
-                }
-                SendAction::ActivateToolbar {
-                    plugin_id,
-                    contribution_id,
-                } => {
-                    self.activate_web_send_toolbar_button(&plugin_id, &contribution_id);
-                }
-            }
+            self.dispatch_send_action(action, &ctx);
         }
         self.web_ui_contribution_slot(ui, "send.toolbar");
         self.persist_settings();
+    }
+
+    /// 发送面板的一条动作落到命令上：文本/HEX 走带历史的发送入口，
+    /// 流控信号直接派发，工具栏按钮交给贡献点激活。
+    fn dispatch_send_action(&mut self, action: SendAction, ctx: &egui::Context) {
+        match action {
+            SendAction::SendText { port, text } => {
+                self.send_web_with_history(
+                    AppCommand::SendText {
+                        port: PortId::new(port),
+                        text,
+                    },
+                    ctx,
+                );
+            }
+            SendAction::SendHex { port, hex, strict } => {
+                self.send_web_with_history(
+                    AppCommand::SendHex {
+                        port: PortId::new(port),
+                        hex,
+                        strict,
+                    },
+                    ctx,
+                );
+            }
+            SendAction::SetDtr { port, value } => {
+                self.dispatch_serial(
+                    AppCommand::SetDtr {
+                        port: PortId::new(port),
+                        value,
+                    },
+                    ctx,
+                );
+            }
+            SendAction::SetRts { port, value } => {
+                self.dispatch_serial(
+                    AppCommand::SetRts {
+                        port: PortId::new(port),
+                        value,
+                    },
+                    ctx,
+                );
+            }
+            SendAction::ActivateToolbar {
+                plugin_id,
+                contribution_id,
+            } => {
+                self.activate_web_send_toolbar_button(&plugin_id, &contribution_id);
+            }
+        }
     }
 
     fn web_recording_ui(&mut self, ui: &mut egui::Ui) {
@@ -5191,10 +5174,9 @@ impl WorkbenchApp {
         context
     }
 
-    /// Render the same chrome contribution slots that Native exposes. Lua
-    /// contribution state stays in the browser composition root; the visible
-    /// contract (slot, ordering, labels and command dispatch) remains identical.
-    fn web_ui_contribution_slot(&mut self, ui: &mut egui::Ui, slot: &str) {
+    /// 槽位上可见的贡献点：只取运行中插件，按 order 再按展示名排序——
+    /// 排序与渲染必须同源，`send.toolbar` 的按钮由 `shared_sender_ui` 自己画。
+    fn web_ui_contributions_for_slot(&self, slot: &str) -> Vec<(String, PluginUiContributionView)> {
         let mut items = self
             .plugins
             .summaries()
@@ -5223,9 +5205,15 @@ impl WorkbenchApp {
                 .cmp(&right.order)
                 .then_with(|| contribution_title(left).cmp(contribution_title(right)))
         });
+        items
+    }
 
+    /// Render the same chrome contribution slots that Native exposes. Lua
+    /// contribution state stays in the browser composition root; the visible
+    /// contract (slot, ordering, labels and command dispatch) remains identical.
+    fn web_ui_contribution_slot(&mut self, ui: &mut egui::Ui, slot: &str) {
         let mut commands = Vec::new();
-        for (plugin_id, item) in items {
+        for (plugin_id, item) in self.web_ui_contributions_for_slot(slot) {
             let PluginUiContributionView {
                 id: contribution_id,
                 kind,
@@ -5438,6 +5426,75 @@ fn web_recording_mode_view(mode: WebRecordMode) -> tool_application::recording::
     }
 }
 
+/// UI 贡献点 → 共享 DTO；`default` 缺失时按 JSON null 交给 Lua 侧读。
+fn web_plugin_ui_contribution_view(
+    contribution: &WebPluginUiContribution,
+) -> PluginUiContributionView {
+    PluginUiContributionView {
+        id: contribution.id.clone(),
+        slot: contribution.slot.clone(),
+        kind: contribution.kind.clone(),
+        title: contribution.title.clone(),
+        command: contribution.command.clone(),
+        tooltip: contribution.tooltip.clone(),
+        order: contribution.order,
+        enabled: contribution.enabled,
+        visible: contribution.visible,
+        record_send_input: contribution.record_send_input,
+        default: contribution
+            .default
+            .clone()
+            .unwrap_or(serde_json::Value::Null),
+    }
+}
+
+/// 面板贡献是自由 JSON：只认带 `id` 的对象，其余条目整条跳过。
+fn web_plugin_panel_contribution_view(
+    panel: &serde_json::Value,
+) -> Option<PluginPanelContributionView> {
+    let object = panel.as_object()?;
+    let id = object.get("id")?.as_str()?.to_owned();
+    let title = object
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(&id)
+        .to_owned();
+    let kind = object
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("dynamic")
+        .to_owned();
+    let config = object
+        .get("config")
+        .and_then(serde_json::Value::as_object)
+        .map(|config| {
+            config
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(PluginPanelContributionView {
+        id,
+        title,
+        kind,
+        config,
+    })
+}
+
+/// 插件在浏览器侧看到的状态：错误优先，其次才是启用开关与 Lua 实例是否已在。
+fn web_plugin_record_state(record: &WebPluginRecord) -> PluginStateView {
+    if record.error.is_some() {
+        PluginStateView::Failed
+    } else if record.persisted.enabled && record.lua_instance.is_some() {
+        PluginStateView::Running
+    } else if record.persisted.enabled {
+        PluginStateView::Enabled
+    } else {
+        PluginStateView::Disabled
+    }
+}
+
 /// 浏览器清单里的设置项 → 共享 DTO。缺省值缺失时按 JSON null 处理，
 /// 与 Native 插件设置面板读到的是同一个形状。
 fn plugin_setting_view(setting: &WebPluginSetting) -> PluginSettingView {
@@ -5497,6 +5554,151 @@ fn web_keymap_title(command_id: &str) -> &'static str {
 /// 贡献点的展示名：标题缺省时回落到 id。排序与渲染必须用同一个名字。
 fn contribution_title(item: &PluginUiContributionView) -> &str {
     item.title.as_deref().unwrap_or(&item.id)
+}
+
+/// 顶栏端口条目的三个标记：`open` 来自运行时看到的已连接端口，`connecting`
+/// 只在「正在连接的就是这一项」时点亮，`pending_reconnect` 来自待重连的端口名。
+fn web_top_bar_port_items(
+    ports: &[PortDescriptor],
+    connected_id: Option<&str>,
+    connecting: bool,
+    selected: Option<&PortId>,
+    pending_reconnect: Option<&str>,
+) -> Vec<SerialPortItem> {
+    ports
+        .iter()
+        .map(|port| SerialPortItem {
+            id: port.id.to_string(),
+            label: port.label.clone(),
+            kind: match port.kind {
+                PortKind::Serial => "Serial",
+                PortKind::Network => "网络",
+                PortKind::Unknown => "",
+            }
+            .to_owned(),
+            open: connected_id == Some(port.id.as_str()),
+            connecting: connecting && selected == Some(&port.id),
+            pending_reconnect: pending_reconnect == Some(port.id.as_str()),
+        })
+        .collect()
+}
+
+/// 顶栏的自动重连小票：显示距下一次尝试的剩余秒数与「第 N 次/10」，
+/// 返回用户是否点击了取消。
+fn web_reconnect_chip_ui(
+    ui: &mut egui::Ui,
+    port: &str,
+    attempts: u32,
+    next_attempt_at: f64,
+) -> bool {
+    let remaining = (next_attempt_at - web_now_seconds()).max(0.0);
+    let label = format!(
+        "{} 重连中 {} {:.1}s ({}/{})",
+        ICON_REFRESH.codepoint,
+        port,
+        remaining,
+        attempts + 1,
+        10
+    );
+    ui.label(egui::RichText::new(label).color(theme::yellow()))
+        .on_hover_text("点击取消自动重连");
+    design::icon_button(ui, ICON_CANCEL, "取消重连").clicked()
+}
+
+/// 顶栏串口动作落到命令上；`Connect` 用的是这一帧看到的串口参数快照。
+fn web_top_bar_serial_command(action: SerialTopBarAction, settings: SerialSettings) -> AppCommand {
+    match action {
+        SerialTopBarAction::Refresh => AppCommand::RefreshPorts,
+        SerialTopBarAction::RequestPort => AppCommand::RequestPort,
+        SerialTopBarAction::Connect { port } => AppCommand::Connect {
+            port: PortId::new(port),
+            settings,
+        },
+        SerialTopBarAction::Disconnect { port } => AppCommand::Disconnect {
+            port: PortId::new(port),
+        },
+        SerialTopBarAction::Reconnect { port } => AppCommand::Reconnect {
+            port: PortId::new(port),
+        },
+    }
+}
+
+/// 状态栏串口标签的三态：连接中 > 已连接（带串口参数）> 只显示端口名。
+fn web_serial_status_label(
+    port_label: &str,
+    connecting: bool,
+    connected: bool,
+    settings: SerialSettings,
+) -> String {
+    if connecting {
+        format!("{port_label} 连接中")
+    } else if connected {
+        format!("{port_label} @ {}", settings_label(settings))
+    } else {
+        port_label.to_owned()
+    }
+}
+
+/// 状态栏录制标签：MB 按 1024 进制换算，与录制面板的统计口径一致。
+fn web_recording_status_label(recording: bool, paused: bool, events: u64, bytes: u64) -> String {
+    if !recording {
+        return "未录制".to_owned();
+    }
+    let megabytes = bytes as f64 / 1024.0 / 1024.0;
+    if paused {
+        format!("录制已暂停 {events} 条 {megabytes:.1}MB")
+    } else {
+        format!("录制中 {events} 条 {megabytes:.1}MB")
+    }
+}
+
+/// 状态栏的通知区：最新一条直接内联显示，多于一条时再给一个可折叠的「通知 N 条」
+/// 列表窗口，展开状态持久化在 egui memory 里，跨帧保留用户的开合选择。
+fn web_notification_status_ui(ui: &mut egui::Ui, notifications: &[WebNotification]) {
+    let Some(notification) = notifications.first() else {
+        return;
+    };
+    ui.separator();
+    ui.label(egui::RichText::new(notification.text.clone()).color(notification.level.color()))
+        .on_hover_text(&notification.text);
+    if notifications.len() <= 1 {
+        return;
+    }
+    let overflow_id = ui.id().with("web_notification_overflow");
+    let overflow_response = ui.small_button(format!("通知 {} 条", notifications.len()));
+    let mut overflow_open = ui.ctx().memory_mut(|memory| {
+        memory
+            .data
+            .get_persisted::<bool>(overflow_id)
+            .unwrap_or(false)
+    });
+    if overflow_response.clicked() {
+        overflow_open = !overflow_open;
+        ui.ctx().memory_mut(|memory| {
+            memory.data.insert_persisted(overflow_id, overflow_open);
+        });
+    }
+    if overflow_open {
+        egui::Window::new("通知列表")
+            .id(overflow_id)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 100.0])
+            .auto_sized()
+            .show(ui.ctx(), |ui| {
+                ui.set_min_width(320.0);
+                ui.set_max_height(300.0);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for item in notifications {
+                        ui.label(
+                            egui::RichText::new(&item.text)
+                                .color(item.level.color())
+                                .small(),
+                        );
+                    }
+                });
+            });
+    }
 }
 
 /// 卡片开头的公共三段：撑满可用宽度、分节头、分隔线——与 Native 设置页同形。

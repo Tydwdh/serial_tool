@@ -477,5 +477,7 @@ impl PluginHostApi for WebPluginHost {
     }
 }
 
+// 编译期见证：`FileHandle` 在 web 宿主侧可按值接收（平台中性，不绑原生路径句柄）。
+// 本函数按设计永不执行——它存在的意义就是被编译。
 #[allow(dead_code)]
 fn _opaque_file_handle_is_platform_neutral(_file: FileHandle) {}

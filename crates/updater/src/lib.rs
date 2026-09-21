@@ -229,14 +229,6 @@ fn is_allowed_download_host(host: &str) -> bool {
     DOWNLOAD_HOST_WHITELIST.contains(&host)
 }
 
-pub async fn send_update_get(url: &str) -> Result<reqwest::Response, String> {
-    Ok(
-        send_update_get_with_network_settings(url, &NetworkSettings::default())
-            .await?
-            .response,
-    )
-}
-
 /// 按 `settings` 与目标 URL 决定的代理路径，用 native TLS 与 Rustls TLS 依次尝试请求。
 ///
 /// 代理是**逐 URL** 决定的：回环/字面 IP 目标直连，不吃环境代理

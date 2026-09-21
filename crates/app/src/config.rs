@@ -111,6 +111,8 @@ fn default_line_ending() -> LineEnding {
 
 /// 配置加载结果：区分"无配置文件"和"配置损坏"两种情况。
 #[derive(Debug)]
+// `Ok` 带的是整份 `PersistedConfig`：它只在启动时读一次，随后就被拆给各子系统持有。
+// 装箱换来的只是每处 match 多一次解引用，对一次性加载路径没有收益，故保留本豁免。
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum ConfigLoadResult {
     /// 成功加载

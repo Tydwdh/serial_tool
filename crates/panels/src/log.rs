@@ -565,16 +565,15 @@ impl LogPanel {
             // 确认态只换等宽标签，不插入「取消」按钮，窄面板下工具栏不会重新换行；
             // 取消交给 3 秒超时 / Esc / 点击别处。
             let clear_armed = design::confirm_armed(ui, LOG_CLEAR_CONFIRM_ID);
-            let clear_btn = egui::Button::new(
-                egui::RichText::new(if clear_armed { "确认" } else { "清空" }).color(
-                    if clear_armed {
-                        crate::theme::red()
-                    } else {
-                        crate::theme::text_primary()
-                    },
-                ),
-            );
-            let clear_response = ui.add(clear_btn);
+            let clear_label = if clear_armed { "确认" } else { "清空" };
+            let clear_color = if clear_armed {
+                theme::red()
+            } else {
+                theme::text_primary()
+            };
+            let clear_response = ui.add(egui::Button::new(
+                RichText::new(clear_label).color(clear_color),
+            ));
             let clear_clicked = clear_response.clicked();
             if clear_armed {
                 clear_response.on_hover_text("再次点击清空，3 秒内有效（Esc 或点击别处取消）");

@@ -458,6 +458,8 @@ fn fail_startup(
     alive.store(false, Ordering::Relaxed);
 }
 
+// 入参就是插件事件线程的整套环境，各自被循环按不同方式借用；收进一个结构体只会
+// 把这些借用变成对同一个大结构的字段借用，故保留本豁免（只贴函数，不扩到模块级）。
 #[allow(clippy::too_many_arguments)]
 fn plugin_event_loop(
     source: String,

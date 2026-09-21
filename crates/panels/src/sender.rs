@@ -138,9 +138,8 @@ pub fn sender_ui(ui: &mut Ui, view: &mut SendView<'_>) -> Vec<SendAction> {
     // 操作行一律换行（见 render_actions），插件按钮多时会多占一行。预留高度取
     // 「上一帧量到的操作区高度」与常数中的较大值，这样宽度变小、按钮换行后不会
     // 把最后一行挤出面板；首帧用常数，最多差一帧。
-    let measured = ui
-        .ctx()
-        .data_mut(|data| data.get_temp::<f32>(actions_height_id(view.layout)));
+    let height_id = actions_height_id(view.layout);
+    let measured = ui.ctx().data_mut(|data| data.get_temp::<f32>(height_id));
     let reserved = match view.layout {
         SendLayout::Horizontal => 92.0_f32,
         SendLayout::Vertical => 150.0_f32,
@@ -157,7 +156,7 @@ pub fn sender_ui(ui: &mut Ui, view: &mut SendView<'_>) -> Vec<SendAction> {
     }
     let actions_height = (ui.cursor().min.y - actions_top).max(0.0);
     ui.ctx()
-        .data_mut(|data| data.insert_temp(actions_height_id(view.layout), actions_height));
+        .data_mut(|data| data.insert_temp(height_id, actions_height));
     ui.take_available_space();
 
     if response.changed() {
@@ -223,7 +222,9 @@ fn render_options(ui: &mut Ui, view: &mut SendView<'_>) {
         });
     };
 
-    // 选项行一律换行：宽面板下插件按钮也不会被横向裁出视野，也不会多出滚动条。
+    // 选项行一律换行（原先 Horizontal 档走横向 ScrollArea）：控件总宽可以超过面板
+    // —— Vertical 档的窄面板，或 HEX 档多出一个「严格」勾选框 —— 横向滚动会把溢出
+    // 的控件藏到视野外，换行则始终可见，也不多出滚动条。
     ui.horizontal_wrapped(|ui| row(ui, view));
 }
 
@@ -572,6 +573,9 @@ pub fn record_history(history: &mut Vec<String>, text: impl Into<String>, max_hi
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use egui_kittest::{Harness, kittest::Queryable as _};
+    use std::{cell::RefCell, rc::Rc};
 
     // ── 活的 HEX 门禁真值表 ───────────────────────────────────────────────
     //
@@ -715,10 +719,11 @@ mod tests {
             "对照格：`tool_core` 对单层前缀同样放行",
         );
     }
-    use super::*;
-    use egui_kittest::{Harness, kittest::Queryable as _};
-    use std::cell::RefCell;
-    use std::rc::Rc;
+
+    // ── 操作区的渲染与布局（egui_kittest）─────────────────────────────────
+    //
+    // 下面的用例都跑真 `sender_ui`：操作行一律换行之后，按钮是否还在面板里、
+    // 输入区是否压住操作行，只能靠实际布局量出来。
 
     /// 发送器的全部可变状态，测试里持有它并在每帧构造 [`SendView`]。
     struct SenderFixture {
@@ -775,7 +780,7 @@ mod tests {
                 .iter()
                 .map(|title| SendToolbarButton {
                     plugin_id: "test.plugin".to_owned(),
-                    contribution_id: title.to_string(),
+                    contribution_id: (*title).to_owned(),
                     title: (*title).to_owned(),
                     tooltip: None,
                     order: 0,
@@ -811,7 +816,7 @@ mod tests {
         }
     }
 
-    /// 渲染发送器，并返回 (harness, 面板矩形)。
+    /// 渲染一帧发送器：面板矩形写进 `panel_rect`，返回跑过这一帧的 harness。
     fn sender_harness<'a>(
         fixture: &'a Rc<RefCell<SenderFixture>>,
         panel_rect: &'a Rc<RefCell<Option<egui::Rect>>>,
@@ -819,13 +824,14 @@ mod tests {
     ) -> Harness<'a> {
         let mut harness = Harness::builder().with_size(size).build_ui(move |ui| {
             *panel_rect.borrow_mut() = Some(ui.max_rect());
-            let mut fixture = fixture.borrow_mut();
-            let _ = sender_ui(ui, &mut fixture.view());
+            let mut state = fixture.borrow_mut();
+            let _ = sender_ui(ui, &mut state.view());
         });
         harness.run();
         harness
     }
 
+    /// 操作行换行后的共同底线：每个 label 对应的按钮都必须完整落在面板矩形里。
     fn assert_buttons_inside_panel(harness: &Harness<'_>, panel: egui::Rect, labels: &[&str]) {
         for label in labels {
             let rect = harness.get_by_label(label).rect();
@@ -944,7 +950,7 @@ mod tests {
         let panel_rect = Rc::new(RefCell::new(None));
         let harness = sender_harness(&fixture, &panel_rect, egui::vec2(640.0, 320.0));
 
-        // 发送按钮left边与面板左边对齐：若外层是横向 ScrollArea，会有内容内边距。
+        // 发送按钮左边与面板左边对齐：若外层是横向 ScrollArea，会有内容内边距。
         let panel = panel_rect.borrow().expect("panel rect");
         let send = harness.get_by_label("发送").rect();
         assert!(
@@ -955,8 +961,8 @@ mod tests {
         );
     }
 
-    /// 第二次点击不能把输入区顶到操作行之上（原 `send_layout_input_does_not_overlap_actions`
-    /// 的语义，改为针对真实实现断言）。
+    /// 输入区不能压到操作行之上：单帧渲染后，输入框底边必须仍在「发送」那一行上面
+    /// （沿用原 `send_layout_input_does_not_overlap_actions` 的语义，改为针对真实实现断言）。
     #[test]
     fn send_input_stays_above_the_action_row() {
         let fixture = Rc::new(RefCell::new(SenderFixture::new(SendLayout::Horizontal)));

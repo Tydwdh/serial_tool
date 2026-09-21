@@ -822,16 +822,13 @@ impl TerminalPanel {
             // 按钮——否则工具栏会变宽，窄面板下整组确认控件会被折到下一行。
             // 取消交给 3 秒超时 / Esc / 点击别处（见 design::confirm_click）。
             let clear_armed = design::confirm_armed(ui, CLEAR_CONFIRM_ID);
-            let clear_response = design::button(
-                ui,
-                ICON_DELETE_SWEEP,
-                if clear_armed { "确认" } else { "清空" },
-                if clear_armed {
-                    ButtonKind::Danger
-                } else {
-                    ButtonKind::Ghost
-                },
-            );
+            let clear_label = if clear_armed { "确认" } else { "清空" };
+            let clear_kind = if clear_armed {
+                ButtonKind::Danger
+            } else {
+                ButtonKind::Ghost
+            };
+            let clear_response = design::button(ui, ICON_DELETE_SWEEP, clear_label, clear_kind);
             let clear_clicked = clear_response.clicked();
             if clear_armed {
                 clear_response.on_hover_text("再次点击清空，3 秒内有效（Esc 或点击别处取消）");
@@ -2268,7 +2265,8 @@ mod tests {
         let mut harness = egui_kittest::Harness::builder()
             .with_size(size)
             .build_ui(move |ui| {
-                if !registered.replace(true) {
+                if !registered.get() {
+                    registered.set(true);
                     egui_material_icons::initialize(ui.ctx());
                     return;
                 }
@@ -2308,7 +2306,14 @@ mod tests {
             harness.query_by_label_contains("取消").is_none(),
             "确认态不得插入额外控件"
         );
-        assert!(armed.rect().width() <= idle.width() + 4.0);
+        // 测试环境没有中日韩字体，两个全角字走回退字形时会有几像素差异，
+        // 因此只允许极小抖动——关键仍然是「不变宽」。
+        assert!(
+            armed.rect().width() <= idle.width() + 4.0,
+            "确认态不得让按钮变宽：idle={} armed={}",
+            idle.width(),
+            armed.rect().width()
+        );
     }
 
     #[test]

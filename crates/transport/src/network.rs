@@ -70,6 +70,8 @@ fn publish_network_error(bus: &DataBus, port_name: &str, detail: impl std::fmt::
     ));
 }
 
+// 刻意与 `network_worker_loop` 同形：本函数只负责把这批值原样搬上新线程，收拢成
+// 上下文结构体得同时改两侧和 `lib.rs` 的调用点，换来的只是多一个载体类型。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_network_worker(
     config: NetworkSerialConfig,
@@ -89,6 +91,8 @@ pub(crate) fn spawn_network_worker(
     Ok(join)
 }
 
+// 入参即网络线程的整套运行环境：stop/alive/connecting 各被不同的退出与兜底分支按
+// 不同方式借用，收进结构体只会把这些借用变成一个大结构的字段借用。
 #[allow(clippy::too_many_arguments)]
 fn network_worker_loop(
     config: NetworkSerialConfig,
