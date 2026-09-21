@@ -863,25 +863,7 @@ fn render_log_rows(
     let label_to_msg_gap = LABEL_TO_MSG_GAP * scale;
 
     if rows.is_empty() {
-        let scroll_output = ScrollArea::vertical()
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
-            .auto_shrink([false, false])
-            .id_salt(LOG_SCROLL_ID)
-            .show(ui, |ui| {
-                let hint = if has_any_entries {
-                    "无匹配日志 · 试着清除搜索或来源过滤"
-                } else {
-                    "应用日志会显示在这里"
-                };
-                ui.label(RichText::new(hint).color(theme::text_secondary()));
-            });
-
-        return LogRenderOutcome {
-            inner_rect: scroll_output.inner_rect,
-            content_height: scroll_output.content_size.y,
-            offset_y: scroll_output.state.offset.y,
-            pending_navigate_to_id: None,
-        };
+        return render_empty_log_rows(ui, has_any_entries);
     }
 
     let scroll_output = ScrollArea::vertical()
@@ -908,21 +890,15 @@ fn render_log_rows(
             let text_padding = 4.0;
             let galley_width = (message_width - text_padding).max(0.0).floor();
 
-            let width_key = galley_width.max(0.0).round() as u64;
-            let layout_key = width_key
-                ^ ((font_size * 1000.0).round() as u64).rotate_left(17)
-                ^ visible_rows_generation.rotate_left(31);
-            if !virtual_rows.matches_layout(layout_key, rows.len()) {
-                let row_ids: Vec<u64> = rows.iter().map(|entry| entry.id).collect();
-                let estimated_heights: Vec<f32> = rows
-                    .iter()
-                    .map(|entry| {
-                        estimated_log_row_height(entry, base_row_height, galley_width, glyph_width)
-                    })
-                    .collect();
-                virtual_rows.sync_rows(&row_ids, &estimated_heights, layout_key);
-            }
-            let total_height = virtual_rows.total_height().max(base_row_height);
+            let layout_key = log_layout_key(galley_width, font_size, visible_rows_generation);
+            let total_height = sync_log_virtual_rows(
+                rows,
+                virtual_rows,
+                layout_key,
+                base_row_height,
+                galley_width,
+                glyph_width,
+            );
 
             // 分配总区域
             let (full_rect, _alloc_response) =
@@ -970,65 +946,29 @@ fn render_log_rows(
                 .input(|input| input.pointer.hover_pos())
                 .filter(|position| label_rect.contains(*position))
                 .and_then(|position| virtual_rows.index_at_offset(position.y - label_rect.top()));
-            let message_pressed = ui.input(|input| {
-                input.pointer.button_pressed(egui::PointerButton::Primary)
-                    && input
-                        .pointer
-                        .hover_pos()
-                        .is_some_and(|pos| message_rect.contains(pos))
-            }) && ui.rect_contains_pointer(message_rect);
-            let blank_pressed = blank_rect.is_some_and(|rect| {
-                ui.input(|input| {
-                    input.pointer.button_pressed(egui::PointerButton::Primary)
-                        && input
-                            .pointer
-                            .hover_pos()
-                            .is_some_and(|pos| rect.contains(pos))
-                }) && ui.rect_contains_pointer(rect)
-            });
+            let message_pressed = log_primary_pressed_in_rect(ui, Some(message_rect));
+            let blank_pressed = log_primary_pressed_in_rect(ui, blank_rect);
             if message_pressed || blank_pressed {
                 selection.clear();
             }
             let primary_down =
                 ui.input(|input| input.pointer.button_down(egui::PointerButton::Primary));
-            let owns_text_selection = owns_copy_focus(ui, COPY_OWNER);
-            let has_text_selection = owns_text_selection
-                && ui
-                    .ctx()
-                    .plugin::<LabelSelectionState>()
-                    .lock()
-                    .has_selection();
-            if !owns_text_selection || (!primary_down && !has_text_selection) {
-                text_selection_rows.clear();
-            }
-            if message_pressed
-                && let Some(index) = hovered_idx
-                && let Some(entry) = rows.get(index)
-            {
-                text_selection_rows.begin(entry.id);
-            }
-            if primary_down
-                && text_selection_rows.is_active()
-                && let Some(index) = hovered_idx
-                && let Some(entry) = rows.get(index)
-            {
-                text_selection_rows.update(entry.id);
-            }
-            let mut scroll_delta: f32 = 0.0;
-            let row_selection_started = selection.handle_input(
+            let has_text_selection = refresh_log_text_selection(
+                ui,
+                rows,
+                hovered_idx,
+                message_pressed,
+                primary_down,
+                text_selection_rows,
+            );
+            let scroll_delta = handle_log_row_selection_input(
                 ui,
                 label_rect,
-                ui.clip_rect().intersect(label_rect),
                 hovered_idx,
-                &mut scroll_delta,
+                blank_pressed,
+                selection,
+                text_selection_rows,
             );
-            if row_selection_started || blank_pressed || selection.is_dragging() {
-                text_selection_rows.clear();
-                ui.ctx()
-                    .plugin::<LabelSelectionState>()
-                    .lock()
-                    .clear_selection();
-            }
 
             let viewport_rect = ui.clip_rect();
             let scroll_offset = (viewport_rect.top() - label_rect.top()).max(0.0);
@@ -1065,15 +1005,14 @@ fn render_log_rows(
                     || (current_y + estimated_height >= viewport_rect.top() - estimated_height
                         && current_y <= viewport_rect.bottom() + estimated_height);
                 let (message_galley, entry_height) = if in_viewport {
-                    let mut layout_job = egui::text::LayoutJob::simple(
-                        entry.message.clone(),
-                        font_id.clone(),
+                    let (galley, height) = layout_log_message_galley(
+                        ui,
+                        entry,
+                        &font_id,
                         text_color,
                         galley_width,
+                        base_row_height,
                     );
-                    layout_job.halign = egui::Align::LEFT;
-                    let galley = ui.fonts_mut(|f| f.layout_job(layout_job));
-                    let height = galley.size().y.max(base_row_height).round();
                     row_heights_changed |= virtual_rows.set_height(row_idx, height);
                     (Some(galley), height)
                 } else {
@@ -1098,28 +1037,14 @@ fn render_log_rows(
                 }
 
                 // 跳转目标行高亮（叠在 selection/hover 之上，按剩余时间淡出）
-                if let Some((target_id, start)) = navigate_highlight
-                    && entry.id == target_id
-                {
-                    let now = ui.ctx().input(|i| i.time);
-                    let elapsed = now - start;
-                    if elapsed < NAV_HIGHLIGHT_DURATION {
-                        let alpha = if elapsed > NAV_HIGHLIGHT_DURATION - NAV_FADE {
-                            ((NAV_HIGHLIGHT_DURATION - elapsed) / NAV_FADE).clamp(0.0, 1.0)
-                        } else {
-                            1.0
-                        };
-                        ui.painter_at(full_rect).rect_filled(
-                            egui::Rect::from_min_size(
-                                egui::pos2(full_rect.left(), current_y),
-                                egui::vec2(full_rect.width(), entry_height),
-                            ),
-                            0.0,
-                            theme::nav_highlight().gamma_multiply(alpha as f32),
-                        );
-                        ui.ctx().request_repaint();
-                    }
-                }
+                paint_log_navigate_highlight(
+                    ui,
+                    full_rect,
+                    entry,
+                    navigate_highlight,
+                    current_y,
+                    entry_height,
+                );
 
                 // --- 标签列 ---
                 let mut x = label_rect.left() + row_left_padding;
@@ -1168,157 +1093,66 @@ fn render_log_rows(
                 if let Some(message_galley) = message_galley
                     && message_width > 0.0
                 {
-                    // galley 从行顶开始绘制（和终端面板一致）
-                    let galley_pos = egui::pos2(message_rect.left() + text_padding, current_y);
-                    // row_text_rect 只覆盖 galley 实际文本区域。点击文本 → egui 字符级拖选；
-                    // 点击文本外的空白 → 整行选中。
-                    let galley_size = message_galley.size();
-                    let row_text_rect = egui::Rect::from_min_size(galley_pos, galley_size);
                     let msg_row_rect = egui::Rect::from_min_size(
                         egui::pos2(message_rect.left(), current_y),
                         egui::vec2(message_width, entry_height),
                     );
-                    // 先构造 response：文本外空白分支（按下即选）与文本内 clicked 分支
-                    // （松开判定）都要用到它。
-                    let row_id = ui.make_persistent_id(("log-msg", entry.id));
-                    // 字符拖选已经开始后，将命中区扩展到整条消息行。这样从面板外
-                    // 移回来时，即使当前行较短、指针落在文字右侧，egui 也能把
-                    // 内部 cursor 从旧端点迁移到当前行。
-                    let text_interact_rect = if has_text_selection && primary_down {
-                        msg_row_rect
-                    } else {
-                        row_text_rect
-                    };
-                    let response = ui.interact(text_interact_rect, row_id, Sense::click_and_drag());
-
-                    let (primary_pressed, ctrl, shift) = ui.input(|i| {
-                        (
-                            i.pointer.button_pressed(egui::PointerButton::Primary),
-                            i.modifiers.ctrl || i.modifiers.command,
-                            i.modifiers.shift,
-                        )
-                    });
-                    // 文本外空白处按下 → 整行选中（即时反馈）。
-                    if primary_pressed
-                        && ui.rect_contains_pointer(msg_row_rect)
-                        && !ui.rect_contains_pointer(row_text_rect)
-                    {
-                        text_selection_rows.clear();
-                        selection.begin_pointer(row_idx, ctrl, shift);
-                        ui.ctx()
-                            .plugin::<LabelSelectionState>()
-                            .lock()
-                            .clear_selection();
-                    }
-                    // 文本内：松开且未拖动 → 整行选中。
-                    // response.clicked() 只有"按下→原地松开、未拖动"才为 true
-                    // （拖动超过阈值后松开走 drag，clicked 为 false，字符选区正常）。
-                    if response.clicked() && ui.rect_contains_pointer(row_text_rect) {
-                        text_selection_rows.clear();
-                        selection.begin_pointer(row_idx, ctrl, shift);
-                        ui.ctx()
-                            .plugin::<LabelSelectionState>()
-                            .lock()
-                            .clear_selection();
-                    }
+                    let (response, galley_pos, row_text_rect) = interact_log_message_row(
+                        ui,
+                        entry,
+                        &message_galley,
+                        msg_row_rect,
+                        text_padding,
+                        has_text_selection,
+                        primary_down,
+                    );
+                    handle_log_message_row_click(
+                        ui,
+                        &response,
+                        row_text_rect,
+                        msg_row_rect,
+                        row_idx,
+                        selection,
+                        text_selection_rows,
+                    );
                     text_drag_response = Some(match text_drag_response.take() {
                         Some(accumulated) => accumulated | response.clone(),
                         None => response.clone(),
                     });
                     ctx_response |= response.clone();
-
-                    if selection.is_dragging() {
-                        ui.painter().add(egui::epaint::TextShape::new(
-                            galley_pos,
-                            message_galley.clone(),
-                            text_color,
-                        ));
-                    } else {
-                        LabelSelectionState::label_text_selection(
-                            ui,
-                            &response,
-                            galley_pos,
-                            message_galley.clone(),
-                            text_color,
-                            Stroke::NONE,
-                        );
-                    }
+                    paint_log_message_text(
+                        ui,
+                        &response,
+                        galley_pos,
+                        &message_galley,
+                        text_color,
+                        selection.is_dragging(),
+                    );
                 }
             }
 
-            let actual_total = virtual_rows.total_height().round();
-            if row_heights_changed {
-                ui.ctx().request_repaint();
-            }
-            if actual_total > total_height + 0.5 {
-                ui.allocate_space(egui::vec2(0.0, actual_total - total_height));
-            }
+            finish_log_row_heights(ui, virtual_rows, total_height, row_heights_changed);
 
-            let text_selection_dragging = text_drag_response
-                .as_ref()
-                .is_some_and(|response| response.dragged_by(egui::PointerButton::Primary));
-            if text_selection_dragging
-                && let Some(pointer_y) =
-                    ui.input(|input| input.pointer.hover_pos().map(|pos| pos.y))
-            {
-                scroll_delta += edge_scroll_delta(pointer_y, viewport_rect.intersect(message_rect));
-            }
-
-            // egui 在左键拖选期间会阻止 ScrollArea 读取滚轮；这里仅在选择拖拽
-            // 确实生效时补回滚轮量，普通滚动仍由 ScrollArea 自己处理，避免重复。
-            scroll_delta += wheel_scroll_during_selection(
-                text_selection_dragging || selection.is_dragging(),
-                wheel_scroll_delta_y,
-            );
-
-            // 边缘滚动 / 拖选时滚轮滚动
-            if scroll_delta != 0.0 {
-                ui.scroll_with_delta(egui::vec2(0.0, scroll_delta));
-                ui.ctx().request_repaint();
-            }
-
-            let frozen_row_idx = hl.resolve_click(
+            apply_log_selection_scroll(
                 ui,
-                &ctx_response,
-                ui.make_persistent_id(("log-frozen-row", LOG_SCROLL_ID)),
+                &text_drag_response,
+                selection,
+                message_rect,
+                viewport_rect,
+                wheel_scroll_delta_y,
+                scroll_delta,
             );
-            if ctx_response.clicked_by(egui::PointerButton::Secondary)
-                && let Some(index) = frozen_row_idx
-                && !selection.is_selected(index)
-            {
-                selection.select_only(index);
-            }
-            // 双击任意位置（文字或空白）→ 离开搜索进入上下文。
-            // 用全局 button_double_clicked + 整行 rect 命中，不再依赖只覆盖文本列的 ctx_response。
-            let double_clicked = ui.input(|i| {
-                i.pointer
-                    .button_double_clicked(egui::PointerButton::Primary)
-            }) && ui.rect_contains_pointer(full_rect);
-            if double_clicked
-                && let Some(idx) = frozen_row_idx.or_else(|| hl.hover_index(ui))
-                && let Some(entry) = rows.get(idx)
-            {
-                pending_navigate = Some(entry.id);
-            }
-            // 跳转到目标行
-            if let Some(target_row) = scroll_to_row
-                && let Some((y_top, _)) = hl.row_y_range(target_row)
-            {
-                let target_rect =
-                    egui::Rect::from_min_size(egui::pos2(0.0, y_top), egui::vec2(1.0, 1.0));
-                ui.scroll_to_rect(target_rect, Some(egui::Align::Center));
-            }
-            let hovered_row = if ctx_response.context_menu_opened()
-                || ctx_response.clicked_by(egui::PointerButton::Secondary)
-            {
-                frozen_row_idx
-            } else {
-                hl.hover_index(ui)
-            }
-            .and_then(|idx| {
-                rows.get(idx)
-                    .map(|entry| (log_display_line(entry), entry.message.clone()))
-            });
+
+            let (navigate_target, hovered_row) = resolve_log_row_clicks(
+                ui,
+                &mut hl,
+                &ctx_response,
+                rows,
+                selection,
+                full_rect,
+                scroll_to_row,
+            );
+            pending_navigate = navigate_target;
 
             // 框选范围文本（移入 context_menu 闭包内按需构造，避免菜单未打开时每帧构造）
             let selected_indices: Vec<usize> = if selection.has_selection() {
@@ -1327,160 +1161,10 @@ fn render_log_rows(
                 Vec::new()
             };
 
-            // Ctrl+A 全选：无 TextEdit 聚焦时选中所有可见行。
-            // 用 consume_key 消费事件，阻止 egui 的 LabelSelectionState 再对当前 galley
-            // 做字符级 Ctrl+A 全选（会与整行多选冲突）。
-            if owns_copy_focus(ui, COPY_OWNER)
-                && !ui.ctx().text_edit_focused()
-                && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::A))
-            {
-                selection.select_all();
-            }
-
-            // Ctrl+C 复制选中行：有选中、收到 Event::Copy、且无 TextEdit 聚焦时触发。
-            // 复制 full（含时间戳/级别/来源前缀），与右键菜单"复制选中行"一致。
-            // egui 0.35 把 Ctrl+C 转成 Event::Copy 事件，用 text_edit_focused 判断 TextEdit 聚焦。
-            let copy_requested =
-                ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
-            if !selected_indices.is_empty()
-                && copy_requested
-                && owns_copy_focus(ui, COPY_OWNER)
-                && !ui.ctx().text_edit_focused()
-                && let Some(full) = build_selected_log_full_text(rows, &selected_indices)
-            {
-                copy_text_with_feedback(
-                    ui,
-                    full,
-                    format!(
-                        "已复制 {} 行日志（含时间、级别和来源）",
-                        selected_indices.len()
-                    ),
-                );
-            }
-            if selected_indices.is_empty()
-                && copy_requested
-                && owns_copy_focus(ui, COPY_OWNER)
-                && !ui.ctx().text_edit_focused()
-                && ui
-                    .ctx()
-                    .plugin::<LabelSelectionState>()
-                    .lock()
-                    .has_selection()
-            {
-                report_copy_feedback(ui, "已复制所选文本");
-            }
+            handle_log_copy_shortcuts(ui, rows, selection, &selected_indices);
 
             ctx_response.context_menu(move |ctx_ui| {
-                let selected_count = selected_indices.len();
-                let target_count = if selected_count > 0 {
-                    selected_count
-                } else {
-                    usize::from(hovered_row.is_some())
-                };
-                let full_label = if selected_count > 0 {
-                    format!("复制选中 {selected_count} 行（含元数据）")
-                } else {
-                    "复制此行（含元数据）".to_owned()
-                };
-                if bulk_copy_button(ctx_ui, "log-selected-full", full_label, target_count) {
-                    let text = if selected_count > 0 {
-                        build_selected_log_full_text(rows, &selected_indices)
-                    } else {
-                        hovered_row.as_ref().map(|(full, _)| full.clone())
-                    };
-                    if let Some(text) = text {
-                        copy_text_with_feedback(
-                            ctx_ui,
-                            text,
-                            format!("已复制 {target_count} 行日志（含时间、级别和来源）"),
-                        );
-                    }
-                    ctx_ui.close();
-                }
-
-                let message_label = if selected_count > 0 {
-                    format!("复制选中 {selected_count} 行消息")
-                } else {
-                    "复制此行消息".to_owned()
-                };
-                if bulk_copy_button(ctx_ui, "log-selected-message", message_label, target_count) {
-                    let text = if selected_count > 0 {
-                        build_selected_log_message_text(rows, &selected_indices)
-                    } else {
-                        hovered_row.as_ref().map(|(_, message)| message.clone())
-                    };
-                    if let Some(text) = text {
-                        copy_text_with_feedback(
-                            ctx_ui,
-                            text,
-                            format!("已复制 {target_count} 行日志消息"),
-                        );
-                    }
-                    ctx_ui.close();
-                }
-                if target_count > 0 {
-                    ctx_ui.separator();
-                }
-
-                if bulk_copy_button(
-                    ctx_ui,
-                    "log-all-content",
-                    format!("复制全部可见内容（{} 行）", rows.len()),
-                    rows.len(),
-                ) {
-                    let combined_text: String = rows
-                        .iter()
-                        .map(log_display_line)
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    copy_text_with_feedback(
-                        ctx_ui,
-                        combined_text,
-                        format!("已复制全部可见日志（{} 行）", rows.len()),
-                    );
-                    ctx_ui.close();
-                }
-
-                if bulk_copy_button(ctx_ui, "log-all-csv", "复制全部可见为 CSV", rows.len())
-                {
-                    let mut csv = String::from("time,level,source,message\n");
-                    for entry in rows {
-                        // 与导出文件的 CSV 唯一差别：把消息里的换行压成空格，保证一行一条记录。
-                        csv.push_str(
-                            &[
-                                csv_cell(&entry.timestamp_label),
-                                csv_cell(entry.level.as_str()),
-                                csv_cell(&entry.source),
-                                csv_cell(&entry.message.replace('\n', " ")),
-                            ]
-                            .join(","),
-                        );
-                        csv.push('\n');
-                    }
-                    copy_text_with_feedback(
-                        ctx_ui,
-                        csv,
-                        format!("已复制日志 CSV（{} 行）", rows.len()),
-                    );
-                    ctx_ui.close();
-                }
-
-                if bulk_copy_button(ctx_ui, "log-all-jsonl", "复制全部可见为 JSONL", rows.len())
-                {
-                    let mut jsonl = String::new();
-                    for entry in rows {
-                        if let Ok(line) = serde_json::to_string(&log_json_value(entry)) {
-                            jsonl.push_str(&line);
-                            jsonl.push('\n');
-                        }
-                    }
-                    copy_text_with_feedback(
-                        ctx_ui,
-                        jsonl,
-                        format!("已复制日志 JSONL（{} 行）", rows.len()),
-                    );
-                    ctx_ui.close();
-                }
+                show_log_context_menu(ctx_ui, rows, &selected_indices, &hovered_row);
             });
 
             if force_scroll_to_bottom {
@@ -1496,6 +1180,575 @@ fn render_log_rows(
         offset_y: scroll_output.state.offset.y,
         pending_navigate_to_id: pending_navigate,
     }
+}
+
+/// 空列表视图：无日志与无匹配共用同一条滚动路径，返回的几何与其它分支一致。
+fn render_empty_log_rows(ui: &mut egui::Ui, has_any_entries: bool) -> LogRenderOutcome {
+    let scroll_output = ScrollArea::vertical()
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+        .auto_shrink([false, false])
+        .id_salt(LOG_SCROLL_ID)
+        .show(ui, |ui| {
+            let hint = if has_any_entries {
+                "无匹配日志 · 试着清除搜索或来源过滤"
+            } else {
+                "应用日志会显示在这里"
+            };
+            ui.label(RichText::new(hint).color(theme::text_secondary()));
+        });
+
+    LogRenderOutcome {
+        inner_rect: scroll_output.inner_rect,
+        content_height: scroll_output.content_size.y,
+        offset_y: scroll_output.state.offset.y,
+        pending_navigate_to_id: None,
+    }
+}
+
+/// 虚拟列表的布局键：换行宽度、字号、可见行代次任一变化都要重建估算高度。
+fn log_layout_key(galley_width: f32, font_size: f32, visible_rows_generation: u64) -> u64 {
+    let width_key = galley_width.max(0.0).round() as u64;
+    width_key
+        ^ ((font_size * 1000.0).round() as u64).rotate_left(17)
+        ^ visible_rows_generation.rotate_left(31)
+}
+
+/// 估算高度只在布局键或行数变化时重建，返回本帧占位用的总高度。
+fn sync_log_virtual_rows(
+    rows: &VecDeque<LogEntry>,
+    virtual_rows: &mut VirtualRowIndex,
+    layout_key: u64,
+    base_row_height: f32,
+    galley_width: f32,
+    glyph_width: f32,
+) -> f32 {
+    if !virtual_rows.matches_layout(layout_key, rows.len()) {
+        let row_ids: Vec<u64> = rows.iter().map(|entry| entry.id).collect();
+        let estimated_heights: Vec<f32> = rows
+            .iter()
+            .map(|entry| {
+                estimated_log_row_height(entry, base_row_height, galley_width, glyph_width)
+            })
+            .collect();
+        virtual_rows.sync_rows(&row_ids, &estimated_heights, layout_key);
+    }
+    virtual_rows.total_height().max(base_row_height)
+}
+
+/// 主键落在 `rect` 内按下（`None` 表示下方没有空白区，直接判定为未按下）。
+fn log_primary_pressed_in_rect(ui: &mut egui::Ui, rect: Option<egui::Rect>) -> bool {
+    rect.is_some_and(|rect| {
+        ui.input(|input| {
+            input.pointer.button_pressed(egui::PointerButton::Primary)
+                && input
+                    .pointer
+                    .hover_pos()
+                    .is_some_and(|pos| rect.contains(pos))
+        }) && ui.rect_contains_pointer(rect)
+    })
+}
+
+/// 维护字符级拖选的行端点，返回本帧是否已有字符选区（决定消息行命中区是否扩到整行）。
+fn refresh_log_text_selection(
+    ui: &mut egui::Ui,
+    rows: &VecDeque<LogEntry>,
+    hovered_idx: Option<usize>,
+    message_pressed: bool,
+    primary_down: bool,
+    text_selection_rows: &mut TextSelectionRows,
+) -> bool {
+    let owns_text_selection = owns_copy_focus(ui, COPY_OWNER);
+    let has_text_selection = owns_text_selection
+        && ui
+            .ctx()
+            .plugin::<LabelSelectionState>()
+            .lock()
+            .has_selection();
+    if !owns_text_selection || (!primary_down && !has_text_selection) {
+        text_selection_rows.clear();
+    }
+    if message_pressed
+        && let Some(index) = hovered_idx
+        && let Some(entry) = rows.get(index)
+    {
+        text_selection_rows.begin(entry.id);
+    }
+    if primary_down
+        && text_selection_rows.is_active()
+        && let Some(index) = hovered_idx
+        && let Some(entry) = rows.get(index)
+    {
+        text_selection_rows.update(entry.id);
+    }
+    has_text_selection
+}
+
+/// 标签列的整行框选输入：返回本帧累加到的滚动量，框选开始时清掉字符选区。
+fn handle_log_row_selection_input(
+    ui: &mut egui::Ui,
+    label_rect: egui::Rect,
+    hovered_idx: Option<usize>,
+    blank_pressed: bool,
+    selection: &mut RowSelection,
+    text_selection_rows: &mut TextSelectionRows,
+) -> f32 {
+    let mut scroll_delta: f32 = 0.0;
+    let row_selection_started = selection.handle_input(
+        ui,
+        label_rect,
+        ui.clip_rect().intersect(label_rect),
+        hovered_idx,
+        &mut scroll_delta,
+    );
+    if row_selection_started || blank_pressed || selection.is_dragging() {
+        text_selection_rows.clear();
+        ui.ctx()
+            .plugin::<LabelSelectionState>()
+            .lock()
+            .clear_selection();
+    }
+    scroll_delta
+}
+
+/// 排版一条消息的 galley，返回 galley 与实测行高（不小于基准行高）。
+fn layout_log_message_galley(
+    ui: &mut egui::Ui,
+    entry: &LogEntry,
+    font_id: &egui::FontId,
+    text_color: egui::Color32,
+    galley_width: f32,
+    base_row_height: f32,
+) -> (std::sync::Arc<egui::Galley>, f32) {
+    let mut layout_job = egui::text::LayoutJob::simple(
+        entry.message.clone(),
+        font_id.clone(),
+        text_color,
+        galley_width,
+    );
+    layout_job.halign = egui::Align::LEFT;
+    let galley = ui.fonts_mut(|f| f.layout_job(layout_job));
+    let height = galley.size().y.max(base_row_height).round();
+    (galley, height)
+}
+
+/// 跳转目标行高亮：剩余时长末段淡出，计时未结束时请求下一帧继续画。
+fn paint_log_navigate_highlight(
+    ui: &mut egui::Ui,
+    full_rect: egui::Rect,
+    entry: &LogEntry,
+    navigate_highlight: Option<(u64, f64)>,
+    current_y: f32,
+    entry_height: f32,
+) {
+    if let Some((target_id, start)) = navigate_highlight
+        && entry.id == target_id
+    {
+        let now = ui.ctx().input(|i| i.time);
+        let elapsed = now - start;
+        if elapsed < NAV_HIGHLIGHT_DURATION {
+            let alpha = if elapsed > NAV_HIGHLIGHT_DURATION - NAV_FADE {
+                ((NAV_HIGHLIGHT_DURATION - elapsed) / NAV_FADE).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            ui.painter_at(full_rect).rect_filled(
+                egui::Rect::from_min_size(
+                    egui::pos2(full_rect.left(), current_y),
+                    egui::vec2(full_rect.width(), entry_height),
+                ),
+                0.0,
+                theme::nav_highlight().gamma_multiply(alpha as f32),
+            );
+            ui.ctx().request_repaint();
+        }
+    }
+}
+
+/// 构造消息行的命中区与 `Response`，同时返回 galley 绘制位置与实际文本区域。
+fn interact_log_message_row(
+    ui: &mut egui::Ui,
+    entry: &LogEntry,
+    galley: &std::sync::Arc<egui::Galley>,
+    msg_row_rect: egui::Rect,
+    text_padding: f32,
+    has_text_selection: bool,
+    primary_down: bool,
+) -> (egui::Response, egui::Pos2, egui::Rect) {
+    // galley 从行顶开始绘制（和终端面板一致）
+    let galley_pos = egui::pos2(msg_row_rect.left() + text_padding, msg_row_rect.top());
+    // row_text_rect 只覆盖 galley 实际文本区域。点击文本 → egui 字符级拖选；
+    // 点击文本外的空白 → 整行选中。
+    let galley_size = galley.size();
+    let row_text_rect = egui::Rect::from_min_size(galley_pos, galley_size);
+    // 先构造 response：文本外空白分支（按下即选）与文本内 clicked 分支
+    // （松开判定）都要用到它。
+    let row_id = ui.make_persistent_id(("log-msg", entry.id));
+    // 字符拖选已经开始后，将命中区扩展到整条消息行。这样从面板外
+    // 移回来时，即使当前行较短、指针落在文字右侧，egui 也能把
+    // 内部 cursor 从旧端点迁移到当前行。
+    let text_interact_rect = if has_text_selection && primary_down {
+        msg_row_rect
+    } else {
+        row_text_rect
+    };
+    let response = ui.interact(text_interact_rect, row_id, Sense::click_and_drag());
+    (response, galley_pos, row_text_rect)
+}
+
+/// 整行选中（含 ctrl/shift 扩选），并清掉字符级选区，避免两套选区叠加。
+fn select_log_whole_row(
+    ui: &mut egui::Ui,
+    row_idx: usize,
+    ctrl: bool,
+    shift: bool,
+    selection: &mut RowSelection,
+    text_selection_rows: &mut TextSelectionRows,
+) {
+    text_selection_rows.clear();
+    selection.begin_pointer(row_idx, ctrl, shift);
+    ui.ctx()
+        .plugin::<LabelSelectionState>()
+        .lock()
+        .clear_selection();
+}
+
+/// 消息列上的按下/单击判定：文本外空白即时整行选中，文本内单击（未拖动）同样整行选中。
+fn handle_log_message_row_click(
+    ui: &mut egui::Ui,
+    response: &egui::Response,
+    row_text_rect: egui::Rect,
+    msg_row_rect: egui::Rect,
+    row_idx: usize,
+    selection: &mut RowSelection,
+    text_selection_rows: &mut TextSelectionRows,
+) {
+    let (primary_pressed, ctrl, shift) = ui.input(|i| {
+        (
+            i.pointer.button_pressed(egui::PointerButton::Primary),
+            i.modifiers.ctrl || i.modifiers.command,
+            i.modifiers.shift,
+        )
+    });
+    // 文本外空白处按下 → 整行选中（即时反馈）。
+    if primary_pressed
+        && ui.rect_contains_pointer(msg_row_rect)
+        && !ui.rect_contains_pointer(row_text_rect)
+    {
+        select_log_whole_row(ui, row_idx, ctrl, shift, selection, text_selection_rows);
+    }
+    // 文本内：松开且未拖动 → 整行选中。
+    // response.clicked() 只有"按下→原地松开、未拖动"才为 true
+    // （拖动超过阈值后松开走 drag，clicked 为 false，字符选区正常）。
+    if response.clicked() && ui.rect_contains_pointer(row_text_rect) {
+        select_log_whole_row(ui, row_idx, ctrl, shift, selection, text_selection_rows);
+    }
+}
+
+/// 绘制消息文本：整行框选拖拽中直接画 galley，否则交给 egui 做字符级选区绘制。
+fn paint_log_message_text(
+    ui: &mut egui::Ui,
+    response: &egui::Response,
+    galley_pos: egui::Pos2,
+    galley: &std::sync::Arc<egui::Galley>,
+    text_color: egui::Color32,
+    row_dragging: bool,
+) {
+    if row_dragging {
+        ui.painter().add(egui::epaint::TextShape::new(
+            galley_pos,
+            galley.clone(),
+            text_color,
+        ));
+    } else {
+        LabelSelectionState::label_text_selection(
+            ui,
+            response,
+            galley_pos,
+            galley.clone(),
+            text_color,
+            Stroke::NONE,
+        );
+    }
+}
+
+/// 实测行高超过估算值时补齐占位高度，并在行高变化时请求下一帧。
+fn finish_log_row_heights(
+    ui: &mut egui::Ui,
+    virtual_rows: &mut VirtualRowIndex,
+    total_height: f32,
+    row_heights_changed: bool,
+) {
+    let actual_total = virtual_rows.total_height().round();
+    if row_heights_changed {
+        ui.ctx().request_repaint();
+    }
+    if actual_total > total_height + 0.5 {
+        ui.allocate_space(egui::vec2(0.0, actual_total - total_height));
+    }
+}
+
+/// 拖选期间的边缘滚动与滚轮滚动，与普通滚动互不重复。
+fn apply_log_selection_scroll(
+    ui: &mut egui::Ui,
+    text_drag_response: &Option<egui::Response>,
+    selection: &RowSelection,
+    message_rect: egui::Rect,
+    viewport_rect: egui::Rect,
+    wheel_scroll_delta_y: f32,
+    mut scroll_delta: f32,
+) {
+    let text_selection_dragging = text_drag_response
+        .as_ref()
+        .is_some_and(|response| response.dragged_by(egui::PointerButton::Primary));
+    if text_selection_dragging
+        && let Some(pointer_y) = ui.input(|input| input.pointer.hover_pos().map(|pos| pos.y))
+    {
+        scroll_delta += edge_scroll_delta(pointer_y, viewport_rect.intersect(message_rect));
+    }
+
+    // egui 在左键拖选期间会阻止 ScrollArea 读取滚轮；这里仅在选择拖拽
+    // 确实生效时补回滚轮量，普通滚动仍由 ScrollArea 自己处理，避免重复。
+    scroll_delta += wheel_scroll_during_selection(
+        text_selection_dragging || selection.is_dragging(),
+        wheel_scroll_delta_y,
+    );
+
+    // 边缘滚动 / 拖选时滚轮滚动
+    if scroll_delta != 0.0 {
+        ui.scroll_with_delta(egui::vec2(0.0, scroll_delta));
+        ui.ctx().request_repaint();
+    }
+}
+
+/// 循环结束后统一解析本帧的行交互：冻结高亮行、右键单选、双击跳转与悬停行文本。
+/// 返回 `(双击跳转目标, 悬停行的整行文本与纯消息文本)`。
+fn resolve_log_row_clicks(
+    ui: &mut egui::Ui,
+    hl: &mut RowHighlight,
+    ctx_response: &egui::Response,
+    rows: &VecDeque<LogEntry>,
+    selection: &mut RowSelection,
+    full_rect: egui::Rect,
+    scroll_to_row: Option<usize>,
+) -> (Option<u64>, Option<(String, String)>) {
+    let mut navigate_target: Option<u64> = None;
+    let frozen_row_idx = hl.resolve_click(
+        ui,
+        ctx_response,
+        ui.make_persistent_id(("log-frozen-row", LOG_SCROLL_ID)),
+    );
+    if ctx_response.clicked_by(egui::PointerButton::Secondary)
+        && let Some(index) = frozen_row_idx
+        && !selection.is_selected(index)
+    {
+        selection.select_only(index);
+    }
+    // 双击任意位置（文字或空白）→ 离开搜索进入上下文。
+    // 用全局 button_double_clicked + 整行 rect 命中，不再依赖只覆盖文本列的 ctx_response。
+    let double_clicked = ui.input(|i| {
+        i.pointer
+            .button_double_clicked(egui::PointerButton::Primary)
+    }) && ui.rect_contains_pointer(full_rect);
+    if double_clicked
+        && let Some(idx) = frozen_row_idx.or_else(|| hl.hover_index(ui))
+        && let Some(entry) = rows.get(idx)
+    {
+        navigate_target = Some(entry.id);
+    }
+    // 跳转到目标行
+    if let Some(target_row) = scroll_to_row
+        && let Some((y_top, _)) = hl.row_y_range(target_row)
+    {
+        let target_rect = egui::Rect::from_min_size(egui::pos2(0.0, y_top), egui::vec2(1.0, 1.0));
+        ui.scroll_to_rect(target_rect, Some(egui::Align::Center));
+    }
+    let hovered_row = if ctx_response.context_menu_opened()
+        || ctx_response.clicked_by(egui::PointerButton::Secondary)
+    {
+        frozen_row_idx
+    } else {
+        hl.hover_index(ui)
+    }
+    .and_then(|idx| {
+        rows.get(idx)
+            .map(|entry| (log_display_line(entry), entry.message.clone()))
+    });
+    (navigate_target, hovered_row)
+}
+
+/// Ctrl+A 整行全选与 Ctrl+C 复制：两者都只在面板持有复制焦点且无 TextEdit 聚焦时生效。
+fn handle_log_copy_shortcuts(
+    ui: &mut egui::Ui,
+    rows: &VecDeque<LogEntry>,
+    selection: &mut RowSelection,
+    selected_indices: &[usize],
+) {
+    // Ctrl+A 全选：无 TextEdit 聚焦时选中所有可见行。
+    // 用 consume_key 消费事件，阻止 egui 的 LabelSelectionState 再对当前 galley
+    // 做字符级 Ctrl+A 全选（会与整行多选冲突）。
+    if owns_copy_focus(ui, COPY_OWNER)
+        && !ui.ctx().text_edit_focused()
+        && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::A))
+    {
+        selection.select_all();
+    }
+
+    // Ctrl+C 复制选中行：有选中、收到 Event::Copy、且无 TextEdit 聚焦时触发。
+    // 复制 full（含时间戳/级别/来源前缀），与右键菜单"复制选中行"一致。
+    // egui 0.35 把 Ctrl+C 转成 Event::Copy 事件，用 text_edit_focused 判断 TextEdit 聚焦。
+    let copy_requested = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+    if !selected_indices.is_empty()
+        && copy_requested
+        && owns_copy_focus(ui, COPY_OWNER)
+        && !ui.ctx().text_edit_focused()
+        && let Some(full) = build_selected_log_full_text(rows, selected_indices)
+    {
+        copy_text_with_feedback(
+            ui,
+            full,
+            format!(
+                "已复制 {} 行日志（含时间、级别和来源）",
+                selected_indices.len()
+            ),
+        );
+    }
+    if selected_indices.is_empty()
+        && copy_requested
+        && owns_copy_focus(ui, COPY_OWNER)
+        && !ui.ctx().text_edit_focused()
+        && ui
+            .ctx()
+            .plugin::<LabelSelectionState>()
+            .lock()
+            .has_selection()
+    {
+        report_copy_feedback(ui, "已复制所选文本");
+    }
+}
+
+/// 右键菜单：选中行/悬停行/全部可见内容的复制项，文本按需构造。
+fn show_log_context_menu(
+    ctx_ui: &mut egui::Ui,
+    rows: &VecDeque<LogEntry>,
+    selected_indices: &[usize],
+    hovered_row: &Option<(String, String)>,
+) {
+    let selected_count = selected_indices.len();
+    let target_count = if selected_count > 0 {
+        selected_count
+    } else {
+        usize::from(hovered_row.is_some())
+    };
+    let full_label = if selected_count > 0 {
+        format!("复制选中 {selected_count} 行（含元数据）")
+    } else {
+        "复制此行（含元数据）".to_owned()
+    };
+    if bulk_copy_button(ctx_ui, "log-selected-full", full_label, target_count) {
+        let text = if selected_count > 0 {
+            build_selected_log_full_text(rows, selected_indices)
+        } else {
+            hovered_row.as_ref().map(|(full, _)| full.clone())
+        };
+        if let Some(text) = text {
+            copy_text_with_feedback(
+                ctx_ui,
+                text,
+                format!("已复制 {target_count} 行日志（含时间、级别和来源）"),
+            );
+        }
+        ctx_ui.close();
+    }
+
+    let message_label = if selected_count > 0 {
+        format!("复制选中 {selected_count} 行消息")
+    } else {
+        "复制此行消息".to_owned()
+    };
+    if bulk_copy_button(ctx_ui, "log-selected-message", message_label, target_count) {
+        let text = if selected_count > 0 {
+            build_selected_log_message_text(rows, selected_indices)
+        } else {
+            hovered_row.as_ref().map(|(_, message)| message.clone())
+        };
+        if let Some(text) = text {
+            copy_text_with_feedback(ctx_ui, text, format!("已复制 {target_count} 行日志消息"));
+        }
+        ctx_ui.close();
+    }
+    if target_count > 0 {
+        ctx_ui.separator();
+    }
+
+    if bulk_copy_button(
+        ctx_ui,
+        "log-all-content",
+        format!("复制全部可见内容（{} 行）", rows.len()),
+        rows.len(),
+    ) {
+        let combined_text = build_log_all_visible_text(rows);
+        copy_text_with_feedback(
+            ctx_ui,
+            combined_text,
+            format!("已复制全部可见日志（{} 行）", rows.len()),
+        );
+        ctx_ui.close();
+    }
+
+    if bulk_copy_button(ctx_ui, "log-all-csv", "复制全部可见为 CSV", rows.len()) {
+        let csv = build_log_all_visible_csv(rows);
+        copy_text_with_feedback(ctx_ui, csv, format!("已复制日志 CSV（{} 行）", rows.len()));
+        ctx_ui.close();
+    }
+
+    if bulk_copy_button(ctx_ui, "log-all-jsonl", "复制全部可见为 JSONL", rows.len()) {
+        let jsonl = build_log_all_visible_jsonl(rows);
+        copy_text_with_feedback(
+            ctx_ui,
+            jsonl,
+            format!("已复制日志 JSONL（{} 行）", rows.len()),
+        );
+        ctx_ui.close();
+    }
+}
+
+/// 全部可见行的整行文本（含时间、级别和来源），用于「复制全部可见内容」。
+fn build_log_all_visible_text(rows: &VecDeque<LogEntry>) -> String {
+    rows.iter()
+        .map(log_display_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 全部可见行的剪贴板 CSV，用于「复制全部可见为 CSV」。
+fn build_log_all_visible_csv(rows: &VecDeque<LogEntry>) -> String {
+    let mut csv = String::from("time,level,source,message\n");
+    for entry in rows {
+        // 与导出文件的 CSV 唯一差别：把消息里的换行压成空格，保证一行一条记录。
+        csv.push_str(
+            &[
+                csv_cell(&entry.timestamp_label),
+                csv_cell(entry.level.as_str()),
+                csv_cell(&entry.source),
+                csv_cell(&entry.message.replace('\n', " ")),
+            ]
+            .join(","),
+        );
+        csv.push('\n');
+    }
+    csv
+}
+
+/// 全部可见行的剪贴板 JSONL（每行一条紧凑记录），用于「复制全部可见为 JSONL」。
+fn build_log_all_visible_jsonl(rows: &VecDeque<LogEntry>) -> String {
+    let mut jsonl = String::new();
+    for entry in rows {
+        if let Ok(line) = serde_json::to_string(&log_json_value(entry)) {
+            jsonl.push_str(&line);
+            jsonl.push('\n');
+        }
+    }
+    jsonl
 }
 
 /// 构造选中日志行的完整文本（含时间、级别和来源）。

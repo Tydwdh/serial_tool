@@ -264,150 +264,27 @@ impl Workbench {
     pub fn dispatch(&mut self, command: AppCommand) -> Result<CommandOutcome, AppError> {
         match command {
             AppCommand::RegisterNetworkPort { config } => {
-                let name = config.display_name();
-                if let Some(existing) = self
-                    .app_config
-                    .network_ports
-                    .iter_mut()
-                    .find(|existing| existing.display_name() == name)
-                {
-                    *existing = config;
-                } else {
-                    self.app_config.network_ports.push(config);
-                }
-                if !self.ports.iter().any(|port| port.port_name == name) {
-                    self.ports.push(SerialPortDescriptor {
-                        port_name: name,
-                        port_type: tool_transport::PortType::Network,
-                    });
-                }
+                self.register_network_port(config);
                 Ok(CommandOutcome::Done)
             }
             AppCommand::RemoveNetworkPort { port } => {
-                let port = port.to_string();
-                self.app_config.network_ports.retain(|config| {
-                    config.display_name() != port && config.port_id().to_string() != port
-                });
-                self.ports.retain(|descriptor| {
-                    descriptor.port_type != tool_transport::PortType::Network
-                        || self
-                            .app_config
-                            .network_ports
-                            .iter()
-                            .any(|config| config.display_name() == descriptor.port_name)
-                });
+                self.remove_network_port(port);
                 Ok(CommandOutcome::Done)
             }
-            AppCommand::RefreshPorts => {
-                if let Some(task_id) = self.tasks.active_task_id("refresh_ports") {
-                    return Ok(pending(task_id, "正在刷新串口列表"));
-                }
-                let backend = self.transport_backend.clone();
-                let task_id = self.tasks.spawn("refresh_ports", move |_context| {
-                    block_on_transport(backend.list_known_ports())
-                        .map(TaskResult::PlatformPortsRefreshed)
-                        .map_err(|error| error.to_string())
-                });
-                Ok(pending(task_id, "正在刷新串口列表"))
-            }
-            AppCommand::RequestPort => {
-                // Native has no browser permission prompt. Returning the first
-                // known port keeps the command portable while preserving the
-                // user-driven request semantics on Web.
-                if let Some(task_id) = self.tasks.active_task_id("request_port") {
-                    return Ok(pending(task_id, "正在获取串口"));
-                }
-                let backend = self.transport_backend.clone();
-                let task_id = self.tasks.spawn("request_port", move |_context| {
-                    block_on_transport(backend.request_port())
-                        .map(|port| TaskResult::PlatformPortsRefreshed(vec![port]))
-                        .map_err(|error| error.to_string())
-                });
-                Ok(pending(task_id, "正在获取串口"))
-            }
+            AppCommand::RefreshPorts => Ok(self.spawn_refresh_ports()),
+            AppCommand::RequestPort => Ok(self.spawn_request_port()),
             AppCommand::Connect { port, settings } => self.connect(port.as_str(), settings),
             AppCommand::SetSerialSettings { settings } => {
-                self.app_config.baud_rate = settings.baud_rate.to_string();
-                self.app_config.data_bits = settings.data_bits.to_string();
-                self.app_config.stop_bits = settings.stop_bits.to_string();
-                self.app_config.parity = match settings.parity {
-                    SerialParity::None => "none",
-                    SerialParity::Odd => "odd",
-                    SerialParity::Even => "even",
-                }
-                .to_owned();
+                self.apply_serial_settings(settings);
                 Ok(CommandOutcome::Done)
             }
-            AppCommand::Disconnect { port } => {
-                let port_name = port.to_string();
-                let task_port = port_name.clone();
-                let is_network = self
-                    .app_config
-                    .network_ports
-                    .iter()
-                    .any(|config| config.display_name() == port_name);
-                let task_id = if is_network {
-                    let transport = self.transport.clone();
-                    self.tasks.spawn_ordered(
-                        format!("serial:{task_port}"),
-                        "disconnect",
-                        move |_context| {
-                            transport
-                                .close_port_blocking(&task_port, std::time::Duration::from_secs(3))
-                                .map_err(|error| error.to_string())?;
-                            Ok(TaskResult::Disconnected {
-                                port_name: task_port,
-                            })
-                        },
-                    )
-                } else {
-                    let backend = self.transport_backend.clone();
-                    let port = PortId::new(task_port.clone());
-                    self.tasks.spawn_ordered(
-                        format!("serial:{task_port}"),
-                        "disconnect",
-                        move |_context| {
-                            block_on_transport(backend.disconnect(port.clone()))
-                                .map_err(|error| error.to_string())?;
-                            Ok(TaskResult::TransportDisconnected { port })
-                        },
-                    )
-                };
-                Ok(pending(task_id, format!("正在关闭 {port_name}")))
-            }
+            AppCommand::Disconnect { port } => Ok(self.disconnect_port(port.to_string())),
             AppCommand::Reconnect { port } => self.start_reconnect(port.to_string()),
             AppCommand::CancelReconnect { port } => {
-                let port_name = port.to_string();
-                if let Some(task_id) = self.reconnect_tasks.remove(&port_name) {
-                    self.tasks.cancel(task_id);
-                }
-                // 网络连接中也通过统一任务模型关闭，避免 CancelReconnect 在 UI 线程
-                // 直接触碰 transport 生命周期。
-                if self.transport.status_port(&port_name).connecting {
-                    let transport = self.transport.clone();
-                    let task_port = port_name.clone();
-                    self.tasks.spawn_ordered(
-                        format!("serial:{task_port}"),
-                        "cancel_reconnect",
-                        move |_context| {
-                            transport.close_port(&task_port);
-                            Ok(TaskResult::Disconnected {
-                                port_name: task_port,
-                            })
-                        },
-                    );
-                }
+                self.cancel_reconnect(port.to_string());
                 Ok(CommandOutcome::Done)
             }
-            AppCommand::CancelTask { task_id } => {
-                if !self.tasks.cancel(task_id) {
-                    return Err(AppError::InvalidState(format!(
-                        "后台任务 {:?} 不存在或已经结束",
-                        task_id
-                    )));
-                }
-                Ok(CommandOutcome::Done)
-            }
+            AppCommand::CancelTask { task_id } => self.dispatch_cancel_task(task_id),
             // 三条 send 分支：路由（serial/network）与 HEX 解码都交给 `send_plan::plan_send`，
             // wasm 侧的 `dispatch` 调的是同一个函数；本平台只负责「按已定的种类把字节投出去」。
             //
@@ -434,17 +311,7 @@ impl Workbench {
             AppCommand::SetRts { port, value } => {
                 self.set_transport_signal(port.to_string(), value, false)
             }
-            AppCommand::StartRecording { file, mode } => {
-                let path = file
-                    .native_path()
-                    .ok_or_else(|| AppError::Recording("Native 录制需要路径型文件句柄".to_owned()))?
-                    .to_path_buf();
-                self.recorder.set_mode(mode.into());
-                self.recorder
-                    .start(path)
-                    .map(|()| CommandOutcome::Done)
-                    .map_err(|e| AppError::Recording(e.to_string()))
-            }
+            AppCommand::StartRecording { file, mode } => self.dispatch_start_recording(file, mode),
             AppCommand::SetRecordingMode { mode } => {
                 self.recorder.set_mode(mode.into());
                 Ok(CommandOutcome::Done)
@@ -469,18 +336,7 @@ impl Workbench {
                 self.replay.add_bookmark(name);
                 Ok(CommandOutcome::Done)
             }
-            AppCommand::LoadReplay { file } => {
-                let path = file
-                    .native_path()
-                    .ok_or_else(|| AppError::Replay("Native 回放需要路径型文件句柄".to_owned()))?
-                    .to_path_buf();
-                let task_id = self.tasks.spawn("load_replay", move |_context| {
-                    ReplayManager::prepare_load(&path)
-                        .map(TaskResult::ReplayLoaded)
-                        .map_err(|error| error.to_string())
-                });
-                Ok(pending(task_id, "正在加载回放文件"))
-            }
+            AppCommand::LoadReplay { file } => self.dispatch_load_replay(file),
             AppCommand::ReplayPlay => {
                 let _ = self.replay.play();
                 Ok(CommandOutcome::Done)
@@ -498,25 +354,11 @@ impl Workbench {
                 Ok(CommandOutcome::Done)
             }
             AppCommand::ReplaySeekBy { delta_ms } => {
-                let cur = self.replay.status().position_ms;
-                let next = if delta_ms < 0 {
-                    cur.saturating_sub((-delta_ms) as u64)
-                } else {
-                    cur.saturating_add(delta_ms as u64)
-                };
-                self.replay.seek_ms(next);
+                self.replay_seek_by(delta_ms);
                 Ok(CommandOutcome::Done)
             }
             AppCommand::ReplayStep { delta } => {
-                if delta > 0 {
-                    for _ in 0..delta {
-                        let _ = self.replay.step_forward();
-                    }
-                } else {
-                    for _ in 0..(-delta) {
-                        self.replay.step_backward();
-                    }
-                }
+                self.replay_step(delta);
                 Ok(CommandOutcome::Done)
             }
             AppCommand::SetReplaySpeed { speed } => {
@@ -541,43 +383,17 @@ impl Workbench {
                 .disable(&plugin_id)
                 .map(|()| CommandOutcome::Done)
                 .map_err(|e| AppError::Plugin(e.to_string())),
-            AppCommand::ReloadPlugins => {
-                let roots = self.plugin_manager.roots();
-                let task_id = self.tasks.spawn("reload_plugins", move |_context| {
-                    tool_extension::PluginManager::scan_roots(&roots)
-                        .map(TaskResult::PluginsDiscovered)
-                        .map_err(|error| error.to_string())
-                });
-                Ok(pending(task_id, "正在扫描插件"))
-            }
+            AppCommand::ReloadPlugins => Ok(self.spawn_reload_plugins()),
             AppCommand::RefreshMarketplace { .. } | AppCommand::CheckForUpdate => Err(
                 AppError::InvalidCommand("市场和更新由桌面组合根负责".to_owned()),
             ),
-            AppCommand::DiscoverPlugins { roots } => {
-                let task_id = self.tasks.spawn("discover_plugins", move |_context| {
-                    tool_extension::PluginManager::scan_roots(&roots)
-                        .map(TaskResult::PluginsDiscovered)
-                        .map_err(|error| error.to_string())
-                });
-                Ok(pending(task_id, "正在扫描插件"))
-            }
+            AppCommand::DiscoverPlugins { roots } => Ok(self.spawn_discover_plugins(roots)),
             AppCommand::ExecutePluginCommand {
                 plugin_id,
                 command_id,
                 context,
             } => {
-                let mut payload = context;
-                if let Some(obj) = payload.as_object_mut() {
-                    obj.insert("plugin_id".to_owned(), serde_json::json!(plugin_id));
-                    obj.insert("command".to_owned(), serde_json::json!(command_id));
-                    obj.insert("origin".to_owned(), serde_json::json!("host.command"));
-                }
-                self.bus.publish(tool_core::Event::new(
-                    tool_core::topics::PLUGIN_COMMAND_EXECUTE,
-                    "plugin.command",
-                    tool_core::Direction::Internal,
-                    tool_core::Payload::Json(payload),
-                ));
+                self.publish_plugin_command(plugin_id, command_id, context);
                 Ok(CommandOutcome::Done)
             }
             AppCommand::ClearTerminal => {
@@ -595,18 +411,7 @@ impl Workbench {
                 Ok(CommandOutcome::Done)
             }
             AppCommand::ExportTerminal { format, file } => {
-                let export_job = self.terminal.export_job();
-                let task_path = file
-                    .native_path()
-                    .ok_or_else(|| AppError::Storage("Native 导出需要路径型文件句柄".to_owned()))?
-                    .to_path_buf();
-                let file_service = self.file_service.clone();
-                let task_id = self.tasks.spawn("export_terminal", move |_context| {
-                    let content = export_job.render(&format);
-                    write_exported_content(&file_service, &task_path, &file, &format, content)?;
-                    Ok(TaskResult::FileExported { file })
-                });
-                Ok(pending(task_id, "正在导出终端数据"))
+                self.dispatch_export_terminal(format, file)
             }
             AppCommand::ExportLog { format: _, file: _ } => {
                 // 日志导出仍由 LogPanel 负责（Presentation），此处占位避免 UI 直接触及 recorder
@@ -932,6 +737,275 @@ impl Workbench {
         limit: usize,
     ) -> crate::model::terminal::TerminalDelta {
         self.terminal.entries_since(since_seq, limit)
+    }
+
+    // —— 以下是 `dispatch` 各命令分支的实现：只搬位置、不改判定，顺序与 dispatch 里的
+    //    match 分支一致，便于与 wasm 侧 `WebApplication::dispatch` 逐条对照。
+
+    /// 注册（或按 `display_name()` 就地覆盖）一个网络端口配置，并补上对应的端口描述符
+    /// 表项：配置表是 `is_network_port` 的判定输入，描述符列表决定端口选择器里能看到谁。
+    fn register_network_port(&mut self, config: NetworkPortConfig) {
+        let name = config.display_name();
+        if let Some(existing) = self
+            .app_config
+            .network_ports
+            .iter_mut()
+            .find(|existing| existing.display_name() == name)
+        {
+            *existing = config;
+        } else {
+            self.app_config.network_ports.push(config);
+        }
+        if !self.ports.iter().any(|port| port.port_name == name) {
+            self.ports.push(SerialPortDescriptor {
+                port_name: name,
+                port_type: tool_transport::PortType::Network,
+            });
+        }
+    }
+
+    /// 注销网络端口。`display_name()` 与 `port_id()` 两种形态都认（与 `is_network_port`
+    /// 对齐），之后再按剩余配置回收 Network 类型的描述符，避免留下无人认领的端口表项。
+    fn remove_network_port(&mut self, port: PortId) {
+        let port = port.to_string();
+        self.app_config
+            .network_ports
+            .retain(|config| config.display_name() != port && config.port_id().to_string() != port);
+        self.ports.retain(|descriptor| {
+            descriptor.port_type != tool_transport::PortType::Network
+                || self
+                    .app_config
+                    .network_ports
+                    .iter()
+                    .any(|config| config.display_name() == descriptor.port_name)
+        });
+    }
+
+    /// 刷新串口列表。同一时刻只允许一个 `refresh_ports` 任务：重复提交复用已在跑的那个，
+    /// 而不是再起一份互相覆盖结果的扫描。
+    fn spawn_refresh_ports(&mut self) -> CommandOutcome {
+        if let Some(task_id) = self.tasks.active_task_id("refresh_ports") {
+            return pending(task_id, "正在刷新串口列表");
+        }
+        let backend = self.transport_backend.clone();
+        let task_id = self.tasks.spawn("refresh_ports", move |_context| {
+            block_on_transport(backend.list_known_ports())
+                .map(TaskResult::PlatformPortsRefreshed)
+                .map_err(|error| error.to_string())
+        });
+        pending(task_id, "正在刷新串口列表")
+    }
+
+    fn spawn_request_port(&mut self) -> CommandOutcome {
+        // Native has no browser permission prompt. Returning the first
+        // known port keeps the command portable while preserving the
+        // user-driven request semantics on Web.
+        if let Some(task_id) = self.tasks.active_task_id("request_port") {
+            return pending(task_id, "正在获取串口");
+        }
+        let backend = self.transport_backend.clone();
+        let task_id = self.tasks.spawn("request_port", move |_context| {
+            block_on_transport(backend.request_port())
+                .map(|port| TaskResult::PlatformPortsRefreshed(vec![port]))
+                .map_err(|error| error.to_string())
+        });
+        pending(task_id, "正在获取串口")
+    }
+
+    /// 把当前串口参数写回应用配置，供后续 connect/reconnect 复用。
+    fn apply_serial_settings(&mut self, settings: SerialSettings) {
+        self.app_config.baud_rate = settings.baud_rate.to_string();
+        self.app_config.data_bits = settings.data_bits.to_string();
+        self.app_config.stop_bits = settings.stop_bits.to_string();
+        self.app_config.parity = match settings.parity {
+            SerialParity::None => "none",
+            SerialParity::Odd => "odd",
+            SerialParity::Even => "even",
+        }
+        .to_owned();
+    }
+
+    /// 关闭端口。两条路径都落在 `serial:{port}` 这条 per-port 有序队列上，于是「关闭」
+    /// 不会与该端口上仍在排队的发送任务交错；网络端口走 transport 的阻塞关闭（自带
+    /// 超时），真实串口走 platform backend 的 disconnect。
+    fn disconnect_port(&mut self, port_name: String) -> CommandOutcome {
+        let task_port = port_name.clone();
+        let is_network = self
+            .app_config
+            .network_ports
+            .iter()
+            .any(|config| config.display_name() == port_name);
+        let task_id = if is_network {
+            let transport = self.transport.clone();
+            self.tasks.spawn_ordered(
+                format!("serial:{task_port}"),
+                "disconnect",
+                move |_context| {
+                    transport
+                        .close_port_blocking(&task_port, std::time::Duration::from_secs(3))
+                        .map_err(|error| error.to_string())?;
+                    Ok(TaskResult::Disconnected {
+                        port_name: task_port,
+                    })
+                },
+            )
+        } else {
+            let backend = self.transport_backend.clone();
+            let port = PortId::new(task_port.clone());
+            self.tasks.spawn_ordered(
+                format!("serial:{task_port}"),
+                "disconnect",
+                move |_context| {
+                    block_on_transport(backend.disconnect(port.clone()))
+                        .map_err(|error| error.to_string())?;
+                    Ok(TaskResult::TransportDisconnected { port })
+                },
+            )
+        };
+        pending(task_id, format!("正在关闭 {port_name}"))
+    }
+
+    fn cancel_reconnect(&mut self, port_name: String) {
+        if let Some(task_id) = self.reconnect_tasks.remove(&port_name) {
+            self.tasks.cancel(task_id);
+        }
+        // 网络连接中也通过统一任务模型关闭，避免 CancelReconnect 在 UI 线程
+        // 直接触碰 transport 生命周期。
+        if self.transport.status_port(&port_name).connecting {
+            let transport = self.transport.clone();
+            let task_port = port_name.clone();
+            self.tasks.spawn_ordered(
+                format!("serial:{task_port}"),
+                "cancel_reconnect",
+                move |_context| {
+                    transport.close_port(&task_port);
+                    Ok(TaskResult::Disconnected {
+                        port_name: task_port,
+                    })
+                },
+            );
+        }
+    }
+
+    fn dispatch_cancel_task(&mut self, task_id: TaskId) -> Result<CommandOutcome, AppError> {
+        if !self.tasks.cancel(task_id) {
+            return Err(AppError::InvalidState(format!(
+                "后台任务 {:?} 不存在或已经结束",
+                task_id
+            )));
+        }
+        Ok(CommandOutcome::Done)
+    }
+
+    fn dispatch_start_recording(
+        &mut self,
+        file: FileHandle,
+        mode: crate::recording::RecordModeView,
+    ) -> Result<CommandOutcome, AppError> {
+        let path = file
+            .native_path()
+            .ok_or_else(|| AppError::Recording("Native 录制需要路径型文件句柄".to_owned()))?
+            .to_path_buf();
+        self.recorder.set_mode(mode.into());
+        self.recorder
+            .start(path)
+            .map(|()| CommandOutcome::Done)
+            .map_err(|e| AppError::Recording(e.to_string()))
+    }
+
+    /// 回放文件的解析（读完整个 JSONL）交给后台任务，UI 线程上的 `dispatch` 只投递。
+    fn dispatch_load_replay(&mut self, file: FileHandle) -> Result<CommandOutcome, AppError> {
+        let path = file
+            .native_path()
+            .ok_or_else(|| AppError::Replay("Native 回放需要路径型文件句柄".to_owned()))?
+            .to_path_buf();
+        let task_id = self.tasks.spawn("load_replay", move |_context| {
+            ReplayManager::prepare_load(&path)
+                .map(TaskResult::ReplayLoaded)
+                .map_err(|error| error.to_string())
+        });
+        Ok(pending(task_id, "正在加载回放文件"))
+    }
+
+    fn replay_seek_by(&mut self, delta_ms: i64) {
+        let cur = self.replay.status().position_ms;
+        let next = if delta_ms < 0 {
+            cur.saturating_sub((-delta_ms) as u64)
+        } else {
+            cur.saturating_add(delta_ms as u64)
+        };
+        self.replay.seek_ms(next);
+    }
+
+    fn replay_step(&mut self, delta: i32) {
+        if delta > 0 {
+            for _ in 0..delta {
+                let _ = self.replay.step_forward();
+            }
+        } else {
+            for _ in 0..(-delta) {
+                self.replay.step_backward();
+            }
+        }
+    }
+
+    /// 用应用侧记录的插件根目录重扫一次（与 `DiscoverPlugins` 的区别只在根从哪来）。
+    fn spawn_reload_plugins(&mut self) -> CommandOutcome {
+        let roots = self.plugin_manager.roots();
+        let task_id = self.tasks.spawn("reload_plugins", move |_context| {
+            tool_extension::PluginManager::scan_roots(&roots)
+                .map(TaskResult::PluginsDiscovered)
+                .map_err(|error| error.to_string())
+        });
+        pending(task_id, "正在扫描插件")
+    }
+
+    fn spawn_discover_plugins(&mut self, roots: Vec<std::path::PathBuf>) -> CommandOutcome {
+        let task_id = self.tasks.spawn("discover_plugins", move |_context| {
+            tool_extension::PluginManager::scan_roots(&roots)
+                .map(TaskResult::PluginsDiscovered)
+                .map_err(|error| error.to_string())
+        });
+        pending(task_id, "正在扫描插件")
+    }
+
+    fn publish_plugin_command(
+        &self,
+        plugin_id: String,
+        command_id: String,
+        context: serde_json::Value,
+    ) {
+        let mut payload = context;
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("plugin_id".to_owned(), serde_json::json!(plugin_id));
+            obj.insert("command".to_owned(), serde_json::json!(command_id));
+            obj.insert("origin".to_owned(), serde_json::json!("host.command"));
+        }
+        self.bus.publish(tool_core::Event::new(
+            tool_core::topics::PLUGIN_COMMAND_EXECUTE,
+            "plugin.command",
+            tool_core::Direction::Internal,
+            tool_core::Payload::Json(payload),
+        ));
+    }
+
+    fn dispatch_export_terminal(
+        &mut self,
+        format: String,
+        file: FileHandle,
+    ) -> Result<CommandOutcome, AppError> {
+        let export_job = self.terminal.export_job();
+        let task_path = file
+            .native_path()
+            .ok_or_else(|| AppError::Storage("Native 导出需要路径型文件句柄".to_owned()))?
+            .to_path_buf();
+        let file_service = self.file_service.clone();
+        let task_id = self.tasks.spawn("export_terminal", move |_context| {
+            let content = export_job.render(&format);
+            write_exported_content(&file_service, &task_path, &file, &format, content)?;
+            Ok(TaskResult::FileExported { file })
+        });
+        Ok(pending(task_id, "正在导出终端数据"))
     }
 
     fn apply_platform_ports(&mut self, available: Vec<PortDescriptor>) {

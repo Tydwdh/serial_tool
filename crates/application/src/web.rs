@@ -1493,6 +1493,10 @@ impl WebApplication {
         }
     }
 
+    /// wasm 侧的命令路由：长分支的实现搬在本文件按同一顺序排列的私有 `fn` 里，
+    /// 几行的短分支留在原地。新增 `AppCommand` 时这里要与 native 的 `Workbench::dispatch`
+    /// 同步；HEX 解码与发送路由的判定都不在这里做，本函数的 send 分支只调
+    /// `crate::send_plan::plan_send`，判定规则的唯一真相在那儿。
     pub fn dispatch(&self, command: AppCommand) -> Result<CommandOutcome, String> {
         match command {
             AppCommand::StartRecording { file, mode } => {
@@ -1510,23 +1514,12 @@ impl WebApplication {
                 Ok(CommandOutcome::Done)
             }
             AppCommand::EnablePlugin { plugin_id } => {
-                self.plugin_commands
-                    .borrow_mut()
-                    .push(PluginCommand::Enable { plugin_id });
-                Ok(CommandOutcome::Done)
+                self.queue_plugin_command(PluginCommand::Enable { plugin_id })
             }
             AppCommand::DisablePlugin { plugin_id } => {
-                self.plugin_commands
-                    .borrow_mut()
-                    .push(PluginCommand::Disable { plugin_id });
-                Ok(CommandOutcome::Done)
+                self.queue_plugin_command(PluginCommand::Disable { plugin_id })
             }
-            AppCommand::ReloadPlugins => {
-                self.plugin_commands
-                    .borrow_mut()
-                    .push(PluginCommand::Reload);
-                Ok(CommandOutcome::Done)
-            }
+            AppCommand::ReloadPlugins => self.queue_plugin_command(PluginCommand::Reload),
             AppCommand::RefreshMarketplace { url } => self.start_marketplace_refresh(url),
             #[cfg(target_arch = "wasm32")]
             AppCommand::InstallMarketplacePlugin {
@@ -1550,30 +1543,8 @@ impl WebApplication {
                 Ok(CommandOutcome::Done)
             }
             AppCommand::StopRecording => self.request_recording_stop(false, None),
-            AppCommand::PauseRecording => {
-                let mut recording = self.recording.borrow_mut();
-                if recording.running && !recording.paused {
-                    recording.paused = true;
-                    recording.pause_count = recording.pause_count.saturating_add(1);
-                    self.tasks
-                        .borrow_mut()
-                        .events
-                        .push(WebAppEvent::RecordingChanged);
-                }
-                self.wake();
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::ResumeRecording => {
-                let mut recording = self.recording.borrow_mut();
-                recording.paused = false;
-                self.tasks
-                    .borrow_mut()
-                    .events
-                    .push(WebAppEvent::RecordingChanged);
-                drop(recording);
-                self.wake();
-                Ok(CommandOutcome::Done)
-            }
+            AppCommand::PauseRecording => self.pause_recording(),
+            AppCommand::ResumeRecording => self.resume_recording(),
             AppCommand::AddBookmark { name } => {
                 self.bus.publish(Event::new(
                     "recorder.bookmark",
@@ -1584,22 +1555,7 @@ impl WebApplication {
                 self.wake();
                 Ok(CommandOutcome::Done)
             }
-            AppCommand::LoadReplayText { name, text } => {
-                if self.replay_load.borrow().is_some() {
-                    return Err("已有回放文件正在加载".to_owned());
-                }
-                let loader =
-                    ReplayTextLoader::new(name, text).map_err(|error| error.to_string())?;
-                let task_id = self.begin_task("load_replay", "正在解析回放文件");
-                *self.replay_load.borrow_mut() = Some(WebReplayLoadTask {
-                    id: task_id,
-                    loader,
-                });
-                Ok(CommandOutcome::Pending {
-                    task_id,
-                    message: "正在分帧解析回放文件".to_owned(),
-                })
-            }
+            AppCommand::LoadReplayText { name, text } => self.load_replay_text(name, text),
             AppCommand::ReplayPlay => {
                 self.replay.borrow_mut().play();
                 self.notify(WebAppEvent::ReplayChanged { rebuild: false });
@@ -1624,32 +1580,8 @@ impl WebApplication {
                 self.notify(WebAppEvent::ReplayChanged { rebuild: true });
                 Ok(CommandOutcome::Done)
             }
-            AppCommand::ReplaySeekBy { delta_ms } => {
-                let current = self.replay.borrow().status().position_ms;
-                let position_ms = if delta_ms < 0 {
-                    current.saturating_sub(delta_ms.unsigned_abs())
-                } else {
-                    current.saturating_add(delta_ms as u64)
-                };
-                self.replay.borrow_mut().seek_with_replay(position_ms);
-                self.notify(WebAppEvent::ReplayChanged { rebuild: true });
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::ReplayStep { delta } => {
-                let mut replay = self.replay.borrow_mut();
-                if delta >= 0 {
-                    for _ in 0..delta {
-                        replay.step_forward();
-                    }
-                } else if let Some(target_cursor) =
-                    replay.backward_cursor_by(delta.unsigned_abs() as usize)
-                {
-                    replay.seek_cursor_with_replay(target_cursor);
-                }
-                drop(replay);
-                self.notify(WebAppEvent::ReplayChanged { rebuild: true });
-                Ok(CommandOutcome::Done)
-            }
+            AppCommand::ReplaySeekBy { delta_ms } => self.replay_seek_by(delta_ms),
+            AppCommand::ReplayStep { delta } => self.replay_step(delta),
             AppCommand::AddReplayBookmark { name } => {
                 self.replay.borrow_mut().add_bookmark(name);
                 self.wake();
@@ -1665,15 +1597,7 @@ impl WebApplication {
                 self.wake();
                 Ok(CommandOutcome::Done)
             }
-            AppCommand::SetReplayPolicy { policy } => {
-                self.replay.borrow_mut().set_policy(match policy {
-                    ReplayPolicyView::AutoPreferRecorded => ReplayPolicy::AutoPreferRecorded,
-                    ReplayPolicyView::ExactRecorded => ReplayPolicy::ExactRecorded,
-                    ReplayPolicyView::ReparseRaw => ReplayPolicy::ReparseRaw,
-                });
-                self.wake();
-                Ok(CommandOutcome::Done)
-            }
+            AppCommand::SetReplayPolicy { policy } => self.set_replay_policy(policy),
             AppCommand::SetTerminalMergeWindow { ms } => {
                 *self.terminal_merge_window_ms.borrow_mut() = ms;
                 let max_entries = *self.terminal_max_entries.borrow();
@@ -1699,77 +1623,8 @@ impl WebApplication {
                     Err(format!("任务不存在：{task_id:?}"))
                 }
             }
-            AppCommand::CancelReconnect { port } => {
-                if let Some(task_id) = self.reconnect_tasks.borrow_mut().remove(&port) {
-                    let _ = self.cancel_task(task_id);
-                }
-                self.set_transport_status(format!("已取消重连 {port}"));
-
-                // A Promise that is already inside `open()` cannot be
-                // forcefully aborted by wasm-bindgen. Issue an explicit
-                // disconnect as well; if the open was not completed yet, the
-                // backend simply reports a harmless failed close task.
-                let task_port = port.clone();
-                if self.network_ports.borrow().contains_key(port.as_str()) {
-                    let network = self.network_transport.clone();
-                    let task_id = self.spawn_result(
-                        "cancel_reconnect_disconnect",
-                        async move {
-                            let _ = network.disconnect(port).await;
-                            Ok::<(), String>(())
-                        },
-                        move |_, _| WebAppEvent::Disconnected {
-                            port: task_port,
-                            manual: true,
-                        },
-                    );
-                    return Ok(CommandOutcome::Pending {
-                        task_id,
-                        message: "正在取消网络串口重连".to_owned(),
-                    });
-                }
-                if let Some(transport) = self.transport.clone() {
-                    let task_id = self.spawn_result(
-                        "cancel_reconnect_disconnect",
-                        async move {
-                            let _ = transport.disconnect(port).await;
-                            Ok::<(), String>(())
-                        },
-                        move |_, _| WebAppEvent::Disconnected {
-                            port: task_port,
-                            manual: true,
-                        },
-                    );
-                    return Ok(CommandOutcome::Pending {
-                        task_id,
-                        message: "正在取消串口重连".to_owned(),
-                    });
-                }
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::RefreshPorts => {
-                let transport = self.serial_transport()?;
-                self.set_transport_status("正在刷新已授权串口");
-                let network_ports = self.network_ports.clone();
-                let task_id = self.spawn(
-                    "refresh_ports",
-                    async move {
-                        let mut ports = transport.list_known_ports().await?;
-                        ports.extend(
-                            network_ports
-                                .borrow()
-                                .values()
-                                .map(NetworkSerialConfig::descriptor),
-                        );
-                        Ok(ports)
-                    },
-                    |_, ports| WebAppEvent::PortsRefreshed(ports),
-                );
-                Ok(CommandOutcome::Pending {
-                    task_id,
-                    message: "正在刷新已授权串口".to_owned(),
-                })
-            }
+            AppCommand::CancelReconnect { port } => self.cancel_reconnect(port),
+            AppCommand::RefreshPorts => self.refresh_ports(),
             AppCommand::RegisterNetworkPort { config } => {
                 let descriptor = config.descriptor();
                 self.network_ports
@@ -1778,187 +1633,11 @@ impl WebApplication {
                 self.notify(WebAppEvent::NetworkPortAdded(descriptor));
                 Ok(CommandOutcome::Done)
             }
-            AppCommand::RemoveNetworkPort { port } => {
-                self.network_ports.borrow_mut().remove(port.as_str());
-                if self.network_transport.is_connected(&port) {
-                    let network = self.network_transport.clone();
-                    let task_port = port.clone();
-                    let task_id = self.spawn(
-                        "remove_network_port",
-                        async move { network.disconnect(port).await },
-                        move |_, _| WebAppEvent::NetworkPortRemoved(task_port),
-                    );
-                    Ok(CommandOutcome::Pending {
-                        task_id,
-                        message: "正在关闭并移除网络串口".to_owned(),
-                    })
-                } else {
-                    self.notify(WebAppEvent::NetworkPortRemoved(port));
-                    Ok(CommandOutcome::Done)
-                }
-            }
-            AppCommand::RequestPort => {
-                let transport = self.serial_transport()?;
-                self.set_transport_status("等待浏览器选择串口");
-                // requestPort() must be created while the browser still has
-                // the button's transient user activation.  The transport
-                // deliberately constructs the Promise in request_port(),
-                // before returning the future to this scheduler.
-                let future = transport.request_port();
-                let task_id = self.spawn("request_port", future, |id, port| {
-                    WebAppEvent::PortRequested { id, port }
-                });
-                Ok(CommandOutcome::Pending {
-                    task_id,
-                    message: "等待浏览器选择串口".to_owned(),
-                })
-            }
-            AppCommand::Connect { port, settings } => {
-                *self.serial_settings.borrow_mut() = settings;
-                if let Some(config) = self.network_ports.borrow().get(port.as_str()).cloned() {
-                    return self.connect_network(port, config);
-                }
-                let transport = self.serial_transport()?;
-                {
-                    let mut view = self.transport_view.borrow_mut();
-                    view.settings = settings;
-                    view.connecting = true;
-                    view.status = format!("正在打开串口 {port}");
-                }
-                let reconnect_port = port.clone();
-                let task_port = port.clone();
-                let bus = self.bus.clone();
-                let task_events = self.tasks.clone();
-                let repaint_waker = self.repaint_waker.clone();
-                let task_id = self.spawn(
-                    "connect_serial",
-                    async move {
-                        transport.connect(port.clone(), settings).await?;
-                        let rx_port = port.clone();
-                        let rx_bus = bus.clone();
-                        let rx_waker = repaint_waker.clone();
-                        let sink = Rc::new(move |bytes: Vec<u8>| {
-                            rx_bus.publish(serial_rx_event(&rx_port, bytes));
-                            wake_handle(&rx_waker);
-                        });
-                        let disconnect_waker = repaint_waker.clone();
-                        let on_disconnect = Rc::new(move |port| {
-                            task_events
-                                .borrow_mut()
-                                .events
-                                .push(WebAppEvent::Disconnected {
-                                    port,
-                                    manual: false,
-                                });
-                            wake_handle(&disconnect_waker);
-                        });
-                        transport
-                            .start_receive_with_disconnect(port.clone(), sink, on_disconnect)
-                            .map_err(|error| {
-                                tool_platform::TransportError::Operation(error.to_string())
-                            })?;
-                        Ok(())
-                    },
-                    move |_, _| WebAppEvent::Connected { port: task_port },
-                );
-                self.reconnect_tasks
-                    .borrow_mut()
-                    .insert(reconnect_port, task_id);
-                Ok(CommandOutcome::Pending {
-                    task_id,
-                    message: "正在打开串口".to_owned(),
-                })
-            }
-            AppCommand::Reconnect { port } => {
-                if let Some(config) = self.network_ports.borrow().get(port.as_str()).cloned() {
-                    return self.reconnect_network(port, config);
-                }
-                let transport = self.serial_transport()?;
-                let settings = *self.serial_settings.borrow();
-                {
-                    let mut view = self.transport_view.borrow_mut();
-                    view.connecting = true;
-                    view.settings = settings;
-                    view.status = format!("正在重连串口 {port}");
-                }
-                let reconnect_port = port.clone();
-                let task_port = port.clone();
-                let bus = self.bus.clone();
-                let task_events = self.tasks.clone();
-                let repaint_waker = self.repaint_waker.clone();
-                let task_id = self.spawn(
-                    "reconnect_serial",
-                    async move {
-                        let _ = transport.disconnect(port.clone()).await;
-                        transport.connect(port.clone(), settings).await?;
-                        let rx_port = port.clone();
-                        let rx_bus = bus.clone();
-                        let rx_waker = repaint_waker.clone();
-                        let sink = Rc::new(move |bytes: Vec<u8>| {
-                            rx_bus.publish(serial_rx_event(&rx_port, bytes));
-                            wake_handle(&rx_waker);
-                        });
-                        let disconnect_waker = repaint_waker.clone();
-                        let on_disconnect = Rc::new(move |port| {
-                            task_events
-                                .borrow_mut()
-                                .events
-                                .push(WebAppEvent::Disconnected {
-                                    port,
-                                    manual: false,
-                                });
-                            wake_handle(&disconnect_waker);
-                        });
-                        transport
-                            .start_receive_with_disconnect(port.clone(), sink, on_disconnect)
-                            .map_err(|error| {
-                                tool_platform::TransportError::Operation(error.to_string())
-                            })?;
-                        Ok(())
-                    },
-                    move |_, _| WebAppEvent::Connected { port: task_port },
-                );
-                self.reconnect_tasks
-                    .borrow_mut()
-                    .insert(reconnect_port, task_id);
-                Ok(CommandOutcome::Pending {
-                    task_id,
-                    message: "正在重连串口".to_owned(),
-                })
-            }
-            AppCommand::Disconnect { port } => {
-                self.set_transport_status(format!("正在关闭串口 {port}"));
-                if self.network_ports.borrow().contains_key(port.as_str()) {
-                    let network = self.network_transport.clone();
-                    let task_port = port.clone();
-                    let task_id = self.spawn(
-                        "disconnect_network",
-                        async move { network.disconnect(port).await },
-                        move |_, _| WebAppEvent::Disconnected {
-                            port: task_port,
-                            manual: true,
-                        },
-                    );
-                    return Ok(CommandOutcome::Pending {
-                        task_id,
-                        message: "正在关闭网络串口".to_owned(),
-                    });
-                }
-                let transport = self.serial_transport()?;
-                let task_port = port.clone();
-                let task_id = self.spawn(
-                    "disconnect_serial",
-                    async move { transport.disconnect(port).await },
-                    move |_, _| WebAppEvent::Disconnected {
-                        port: task_port,
-                        manual: true,
-                    },
-                );
-                Ok(CommandOutcome::Pending {
-                    task_id,
-                    message: "正在关闭串口".to_owned(),
-                })
-            }
+            AppCommand::RemoveNetworkPort { port } => self.remove_network_port(port),
+            AppCommand::RequestPort => self.request_serial_port(),
+            AppCommand::Connect { port, settings } => self.connect(port, settings),
+            AppCommand::Reconnect { port } => self.reconnect(port),
+            AppCommand::Disconnect { port } => self.disconnect(port),
             // 三条 send 分支与 native 完全同源：路由与 HEX 解码都由 `send_plan::plan_send`
             // 判定（此前这里是本文件的手抄副本，同一串输入两端判定相反）。
             // 不合并成 `cmd @ (SendText { port, .. } | ..)`：1.92.0 对非 Copy 的 `port`
@@ -1985,44 +1664,409 @@ impl WebApplication {
                     .map_err(|error| error.to_string())?;
                 self.send(task_port, plan)
             }
-            AppCommand::SetDtr { port, value } => {
-                let transport = self.serial_transport()?;
-                let task_port = port.clone();
-                let task_id = self.spawn(
-                    "set_dtr",
-                    async move { transport.set_dtr(port, value).await },
-                    move |_, _| WebAppEvent::SignalsChanged {
-                        port: task_port,
-                        signal: SignalKind::Dtr,
-                        value,
-                    },
-                );
-                Ok(CommandOutcome::Pending {
-                    task_id,
-                    message: "正在设置 DTR".to_owned(),
-                })
-            }
-            AppCommand::SetRts { port, value } => {
-                let transport = self.serial_transport()?;
-                let task_port = port.clone();
-                let task_id = self.spawn(
-                    "set_rts",
-                    async move { transport.set_rts(port, value).await },
-                    move |_, _| WebAppEvent::SignalsChanged {
-                        port: task_port,
-                        signal: SignalKind::Rts,
-                        value,
-                    },
-                );
-                Ok(CommandOutcome::Pending {
-                    task_id,
-                    message: "正在设置 RTS".to_owned(),
-                })
-            }
+            AppCommand::SetDtr { port, value } => self.set_dtr(port, value),
+            AppCommand::SetRts { port, value } => self.set_rts(port, value),
             AppCommand::DiscoverPlugins { .. } => {
                 Err("浏览器插件通过导入或插件市场加载".to_owned())
             }
         }
+    }
+
+    /// 插件命令的统一排队入口：`dispatch` 的插件分支只把命令写进这条队列，
+    /// 真正执行由 wasm 组合根取走 `take_plugin_commands()` 后交给插件运行时。
+    fn queue_plugin_command(&self, command: PluginCommand) -> Result<CommandOutcome, String> {
+        self.plugin_commands.borrow_mut().push(command);
+        Ok(CommandOutcome::Done)
+    }
+
+    /// `PauseRecording`：只有正在录制且尚未暂停才置位并计入暂停次数，重复暂停是空操作。
+    fn pause_recording(&self) -> Result<CommandOutcome, String> {
+        let mut recording = self.recording.borrow_mut();
+        if recording.running && !recording.paused {
+            recording.paused = true;
+            recording.pause_count = recording.pause_count.saturating_add(1);
+            self.tasks
+                .borrow_mut()
+                .events
+                .push(WebAppEvent::RecordingChanged);
+        }
+        self.wake();
+        Ok(CommandOutcome::Done)
+    }
+
+    /// `ResumeRecording`：清除暂停标记并广播录制状态变化。
+    fn resume_recording(&self) -> Result<CommandOutcome, String> {
+        let mut recording = self.recording.borrow_mut();
+        recording.paused = false;
+        self.tasks
+            .borrow_mut()
+            .events
+            .push(WebAppEvent::RecordingChanged);
+        drop(recording);
+        self.wake();
+        Ok(CommandOutcome::Done)
+    }
+
+    /// `LoadReplayText`：只登记分帧解析任务（同一时刻只允许一个加载），解析本身由
+    /// `tick_replay_load()` 按帧推进。
+    fn load_replay_text(&self, name: String, text: String) -> Result<CommandOutcome, String> {
+        if self.replay_load.borrow().is_some() {
+            return Err("已有回放文件正在加载".to_owned());
+        }
+        let loader = ReplayTextLoader::new(name, text).map_err(|error| error.to_string())?;
+        let task_id = self.begin_task("load_replay", "正在解析回放文件");
+        *self.replay_load.borrow_mut() = Some(WebReplayLoadTask {
+            id: task_id,
+            loader,
+        });
+        Ok(CommandOutcome::Pending {
+            task_id,
+            message: "正在分帧解析回放文件".to_owned(),
+        })
+    }
+
+    /// `ReplaySeekBy`：把相对毫秒换算成绝对位置，再复用 `ReplaySeek` 的跳转与重建语义。
+    fn replay_seek_by(&self, delta_ms: i64) -> Result<CommandOutcome, String> {
+        let current = self.replay.borrow().status().position_ms;
+        let position_ms = if delta_ms < 0 {
+            current.saturating_sub(delta_ms.unsigned_abs())
+        } else {
+            current.saturating_add(delta_ms as u64)
+        };
+        self.replay.borrow_mut().seek_with_replay(position_ms);
+        self.notify(WebAppEvent::ReplayChanged { rebuild: true });
+        Ok(CommandOutcome::Done)
+    }
+
+    /// `ReplayStep`：前进用 `step_forward`，后退用回溯游标跳转，最后统一发一次变更事件。
+    fn replay_step(&self, delta: i32) -> Result<CommandOutcome, String> {
+        let mut replay = self.replay.borrow_mut();
+        if delta >= 0 {
+            for _ in 0..delta {
+                replay.step_forward();
+            }
+        } else if let Some(target_cursor) = replay.backward_cursor_by(delta.unsigned_abs() as usize)
+        {
+            replay.seek_cursor_with_replay(target_cursor);
+        }
+        drop(replay);
+        self.notify(WebAppEvent::ReplayChanged { rebuild: true });
+        Ok(CommandOutcome::Done)
+    }
+
+    /// `SetReplayPolicy`：把视图层的策略枚举换成 `tool_recorder` 的策略。
+    fn set_replay_policy(&self, policy: ReplayPolicyView) -> Result<CommandOutcome, String> {
+        self.replay.borrow_mut().set_policy(match policy {
+            ReplayPolicyView::AutoPreferRecorded => ReplayPolicy::AutoPreferRecorded,
+            ReplayPolicyView::ExactRecorded => ReplayPolicy::ExactRecorded,
+            ReplayPolicyView::ReparseRaw => ReplayPolicy::ReparseRaw,
+        });
+        self.wake();
+        Ok(CommandOutcome::Done)
+    }
+
+    /// `CancelReconnect`：撤掉重连任务，并对已经在 `open()` 里的连接补发一次显式断开。
+    fn cancel_reconnect(&self, port: PortId) -> Result<CommandOutcome, String> {
+        if let Some(task_id) = self.reconnect_tasks.borrow_mut().remove(&port) {
+            let _ = self.cancel_task(task_id);
+        }
+        self.set_transport_status(format!("已取消重连 {port}"));
+
+        // A Promise that is already inside `open()` cannot be
+        // forcefully aborted by wasm-bindgen. Issue an explicit
+        // disconnect as well; if the open was not completed yet, the
+        // backend simply reports a harmless failed close task.
+        let task_port = port.clone();
+        if self.network_ports.borrow().contains_key(port.as_str()) {
+            let network = self.network_transport.clone();
+            let task_id = self.spawn_result(
+                "cancel_reconnect_disconnect",
+                async move {
+                    let _ = network.disconnect(port).await;
+                    Ok::<(), String>(())
+                },
+                move |_, _| WebAppEvent::Disconnected {
+                    port: task_port,
+                    manual: true,
+                },
+            );
+            return Ok(CommandOutcome::Pending {
+                task_id,
+                message: "正在取消网络串口重连".to_owned(),
+            });
+        }
+        if let Some(transport) = self.transport.clone() {
+            let task_id = self.spawn_result(
+                "cancel_reconnect_disconnect",
+                async move {
+                    let _ = transport.disconnect(port).await;
+                    Ok::<(), String>(())
+                },
+                move |_, _| WebAppEvent::Disconnected {
+                    port: task_port,
+                    manual: true,
+                },
+            );
+            return Ok(CommandOutcome::Pending {
+                task_id,
+                message: "正在取消串口重连".to_owned(),
+            });
+        }
+        Ok(CommandOutcome::Done)
+    }
+
+    /// `RefreshPorts`：已授权串口与已注册的网络串口合并成一次刷新结果。
+    fn refresh_ports(&self) -> Result<CommandOutcome, String> {
+        let transport = self.serial_transport()?;
+        self.set_transport_status("正在刷新已授权串口");
+        let network_ports = self.network_ports.clone();
+        let task_id = self.spawn(
+            "refresh_ports",
+            async move {
+                let mut ports = transport.list_known_ports().await?;
+                ports.extend(
+                    network_ports
+                        .borrow()
+                        .values()
+                        .map(NetworkSerialConfig::descriptor),
+                );
+                Ok(ports)
+            },
+            |_, ports| WebAppEvent::PortsRefreshed(ports),
+        );
+        Ok(CommandOutcome::Pending {
+            task_id,
+            message: "正在刷新已授权串口".to_owned(),
+        })
+    }
+
+    /// `RemoveNetworkPort`：先从名单摘除；仍有连接时等关闭任务结束再发移除事件，否则立刻发。
+    fn remove_network_port(&self, port: PortId) -> Result<CommandOutcome, String> {
+        self.network_ports.borrow_mut().remove(port.as_str());
+        if self.network_transport.is_connected(&port) {
+            let network = self.network_transport.clone();
+            let task_port = port.clone();
+            let task_id = self.spawn(
+                "remove_network_port",
+                async move { network.disconnect(port).await },
+                move |_, _| WebAppEvent::NetworkPortRemoved(task_port),
+            );
+            Ok(CommandOutcome::Pending {
+                task_id,
+                message: "正在关闭并移除网络串口".to_owned(),
+            })
+        } else {
+            self.notify(WebAppEvent::NetworkPortRemoved(port));
+            Ok(CommandOutcome::Done)
+        }
+    }
+
+    /// `RequestPort`：Web Serial 授权请求，Promise 必须在用户手势内创建（原因见函数内注释）。
+    fn request_serial_port(&self) -> Result<CommandOutcome, String> {
+        let transport = self.serial_transport()?;
+        self.set_transport_status("等待浏览器选择串口");
+        // requestPort() must be created while the browser still has
+        // the button's transient user activation.  The transport
+        // deliberately constructs the Promise in request_port(),
+        // before returning the future to this scheduler.
+        let future = transport.request_port();
+        let task_id = self.spawn("request_port", future, |id, port| {
+            WebAppEvent::PortRequested { id, port }
+        });
+        Ok(CommandOutcome::Pending {
+            task_id,
+            message: "等待浏览器选择串口".to_owned(),
+        })
+    }
+
+    /// `Connect`：记住本次串口参数；已注册的网络端口交给 `connect_network`，其余走 Web Serial。
+    fn connect(
+        &self,
+        port: PortId,
+        settings: tool_platform::SerialSettings,
+    ) -> Result<CommandOutcome, String> {
+        *self.serial_settings.borrow_mut() = settings;
+        if let Some(config) = self.network_ports.borrow().get(port.as_str()).cloned() {
+            return self.connect_network(port, config);
+        }
+        let transport = self.serial_transport()?;
+        {
+            let mut view = self.transport_view.borrow_mut();
+            view.settings = settings;
+            view.connecting = true;
+            view.status = format!("正在打开串口 {port}");
+        }
+        let reconnect_port = port.clone();
+        let task_port = port.clone();
+        let bus = self.bus.clone();
+        let task_events = self.tasks.clone();
+        let repaint_waker = self.repaint_waker.clone();
+        let task_id = self.spawn(
+            "connect_serial",
+            async move {
+                transport.connect(port.clone(), settings).await?;
+                let rx_port = port.clone();
+                let rx_bus = bus.clone();
+                let rx_waker = repaint_waker.clone();
+                let sink = Rc::new(move |bytes: Vec<u8>| {
+                    rx_bus.publish(serial_rx_event(&rx_port, bytes));
+                    wake_handle(&rx_waker);
+                });
+                let disconnect_waker = repaint_waker.clone();
+                let on_disconnect = Rc::new(move |port| {
+                    task_events
+                        .borrow_mut()
+                        .events
+                        .push(WebAppEvent::Disconnected {
+                            port,
+                            manual: false,
+                        });
+                    wake_handle(&disconnect_waker);
+                });
+                transport
+                    .start_receive_with_disconnect(port.clone(), sink, on_disconnect)
+                    .map_err(|error| tool_platform::TransportError::Operation(error.to_string()))?;
+                Ok(())
+            },
+            move |_, _| WebAppEvent::Connected { port: task_port },
+        );
+        self.reconnect_tasks
+            .borrow_mut()
+            .insert(reconnect_port, task_id);
+        Ok(CommandOutcome::Pending {
+            task_id,
+            message: "正在打开串口".to_owned(),
+        })
+    }
+
+    /// `Reconnect`：用已记住的串口参数重连；已注册的网络端口交给 `reconnect_network`。
+    fn reconnect(&self, port: PortId) -> Result<CommandOutcome, String> {
+        if let Some(config) = self.network_ports.borrow().get(port.as_str()).cloned() {
+            return self.reconnect_network(port, config);
+        }
+        let transport = self.serial_transport()?;
+        let settings = *self.serial_settings.borrow();
+        {
+            let mut view = self.transport_view.borrow_mut();
+            view.connecting = true;
+            view.settings = settings;
+            view.status = format!("正在重连串口 {port}");
+        }
+        let reconnect_port = port.clone();
+        let task_port = port.clone();
+        let bus = self.bus.clone();
+        let task_events = self.tasks.clone();
+        let repaint_waker = self.repaint_waker.clone();
+        let task_id = self.spawn(
+            "reconnect_serial",
+            async move {
+                let _ = transport.disconnect(port.clone()).await;
+                transport.connect(port.clone(), settings).await?;
+                let rx_port = port.clone();
+                let rx_bus = bus.clone();
+                let rx_waker = repaint_waker.clone();
+                let sink = Rc::new(move |bytes: Vec<u8>| {
+                    rx_bus.publish(serial_rx_event(&rx_port, bytes));
+                    wake_handle(&rx_waker);
+                });
+                let disconnect_waker = repaint_waker.clone();
+                let on_disconnect = Rc::new(move |port| {
+                    task_events
+                        .borrow_mut()
+                        .events
+                        .push(WebAppEvent::Disconnected {
+                            port,
+                            manual: false,
+                        });
+                    wake_handle(&disconnect_waker);
+                });
+                transport
+                    .start_receive_with_disconnect(port.clone(), sink, on_disconnect)
+                    .map_err(|error| tool_platform::TransportError::Operation(error.to_string()))?;
+                Ok(())
+            },
+            move |_, _| WebAppEvent::Connected { port: task_port },
+        );
+        self.reconnect_tasks
+            .borrow_mut()
+            .insert(reconnect_port, task_id);
+        Ok(CommandOutcome::Pending {
+            task_id,
+            message: "正在重连串口".to_owned(),
+        })
+    }
+
+    /// `Disconnect`：按端口名单把关闭动作分到网络串口或 Web Serial 的任务上。
+    fn disconnect(&self, port: PortId) -> Result<CommandOutcome, String> {
+        self.set_transport_status(format!("正在关闭串口 {port}"));
+        if self.network_ports.borrow().contains_key(port.as_str()) {
+            let network = self.network_transport.clone();
+            let task_port = port.clone();
+            let task_id = self.spawn(
+                "disconnect_network",
+                async move { network.disconnect(port).await },
+                move |_, _| WebAppEvent::Disconnected {
+                    port: task_port,
+                    manual: true,
+                },
+            );
+            return Ok(CommandOutcome::Pending {
+                task_id,
+                message: "正在关闭网络串口".to_owned(),
+            });
+        }
+        let transport = self.serial_transport()?;
+        let task_port = port.clone();
+        let task_id = self.spawn(
+            "disconnect_serial",
+            async move { transport.disconnect(port).await },
+            move |_, _| WebAppEvent::Disconnected {
+                port: task_port,
+                manual: true,
+            },
+        );
+        Ok(CommandOutcome::Pending {
+            task_id,
+            message: "正在关闭串口".to_owned(),
+        })
+    }
+
+    /// `SetDtr`：设置 DTR 电平，完成事件带回端口与新值。
+    fn set_dtr(&self, port: PortId, value: bool) -> Result<CommandOutcome, String> {
+        let transport = self.serial_transport()?;
+        let task_port = port.clone();
+        let task_id = self.spawn(
+            "set_dtr",
+            async move { transport.set_dtr(port, value).await },
+            move |_, _| WebAppEvent::SignalsChanged {
+                port: task_port,
+                signal: SignalKind::Dtr,
+                value,
+            },
+        );
+        Ok(CommandOutcome::Pending {
+            task_id,
+            message: "正在设置 DTR".to_owned(),
+        })
+    }
+
+    /// `SetRts`：设置 RTS 电平，完成事件带回端口与新值。
+    fn set_rts(&self, port: PortId, value: bool) -> Result<CommandOutcome, String> {
+        let transport = self.serial_transport()?;
+        let task_port = port.clone();
+        let task_id = self.spawn(
+            "set_rts",
+            async move { transport.set_rts(port, value).await },
+            move |_, _| WebAppEvent::SignalsChanged {
+                port: task_port,
+                signal: SignalKind::Rts,
+                value,
+            },
+        );
+        Ok(CommandOutcome::Pending {
+            task_id,
+            message: "正在设置 RTS".to_owned(),
+        })
     }
 
     /// presentation 只做输入校验，规则与真正发送时完全一致：两者都走

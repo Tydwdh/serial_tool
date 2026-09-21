@@ -112,12 +112,12 @@ cargo tree -p tool-application | grep -i egui    # 0 行
   `cargo test --all-targets` 只覆盖 `crates/app` 一个包，`crates/application/tests/*.rs` 与其他 crate
   既不执行也不被 lint。必须带 `--workspace`（CI 已改为带 `--workspace`）。
 - `rg "egui|eframe" crates/application` **不为 0 行**：`crates/application/src/**` 有 **4 处**在注释里合法提到 egui
-  （`task.rs:136`、`workbench.rs:236`、`model/mod.rs:1`、`service/terminal.rs:3`，均为 doc/行注释）。
+  （`task.rs:136`、`workbench.rs:240`、`model/mod.rs:1`、`service/terminal.rs:3`，均为 doc/行注释）。
   判断 UI 隔离要看 `Cargo.toml` 与 `crates/application/tests/architecture.rs`，不要用这条 grep。
 - MSRV 差异：本机 stable 是 `1.98.0`，CI 钉 `1.92.0`。**必须用 `+1.92.0` 复跑**——历史上两套工具链
   对 lint 的判定确实相反，并因此暴露过两个 red gate（**均已修复**）：
-  * `clippy::nonminimal_bool` @ `crates/application/src/workbench.rs:1158`
-    （`!network.is_some()` → `network.is_none()`，t11 等价重写，无 lint 豁免）；
+  * `clippy::nonminimal_bool` @ `crates/application/src/workbench.rs` 的 `dispatch` 连接分支（原 `:1158`，
+    该文件已随 dispatch 拆分移位，按符号找）：`!network.is_some()` → `network.is_none()`，t11 等价重写，无 lint 豁免）；
   * `clippy::let_and_return` @ `crates/app/src/panel_registry.rs:73-79`（整个 wasm-only 的 `web()`；
     收敛后的返回表达式在 `:78`）：t13 去掉中间的 `let registry = …;` 直接返回，无 lint 豁免。
   **当前状态（修复后）**：`cargo +1.92.0 fmt --all --check`、
@@ -406,7 +406,7 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
      改签名为 `plan_send(cmd, SendTarget::{Serial, Network})`，由两平台**已经持有**的端口种类
      解析：`tool_platform::PortDescriptor::kind`（`crates/platform/src/lib.rs:112`，网络端口在
      `descriptor()` 里就带 `PortKind::Network`）与 native 侧 `SerialPortDescriptor.port_type`
-     （注册于 `crates/application/src/workbench.rs:276`）。理由：`is_network: bool` 只能表达
+     （注册于 `crates/application/src/workbench.rs:760`）。理由：`is_network: bool` 只能表达
      「不是网络就是串口」，于是「端口根本不存在」被折叠成「串口」；有了第三种取值才能把 unknown
      当场拒绝，也才让上面那张表的第一行不再靠命名约定对齐。
    - **wasm 侧发送路径的测试缺口（实测尺寸）**：Task 5 的字节契约是发送路径上唯一被**执行**的
@@ -466,7 +466,7 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
    枚举，以及 native 侧那两个 `Workbench::validate_hex` 调用点一并消失。
    （他们分支上的 CHANGELOG 记的是 1429 → 257：那是相对**他们**基线的数，本树以 1467 → 242 为准。）
    **连带事实（本树实测）**：native 的 `Workbench::validate_hex`（def
-   `crates/application/src/workbench.rs:1048`）现在**一个调用点都没有**；全仓唯一的
+   `crates/application/src/workbench.rs:1125`）现在**一个调用点都没有**；全仓唯一的
    `.validate_hex(` 调用点是 `crates/app/src/web.rs:514`，而 `WebRuntime` 只是
    `WebApplication` 的别名（`crates/application/src/web.rs:37`），故它走 wasm 那份实现。
    **本条留下的方法论（这才是它值钱的部分）**：可达性只能用**调用点形式**核对，
