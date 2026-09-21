@@ -343,15 +343,7 @@ impl SerialPanel {
             .take()
             .expect("metadata was checked before rendering grouped ports");
         let mut actions = Vec::new();
-        let mut groups: BTreeMap<String, Vec<&SerialPortItem>> = BTreeMap::new();
-        for port in view.ports {
-            let group = metadata
-                .groups
-                .get(&port.id)
-                .cloned()
-                .unwrap_or_else(|| UNGROUPED.to_owned());
-            groups.entry(group).or_default().push(port);
-        }
+        let groups = Self::collect_port_groups(view.ports, metadata.groups);
         let group_names: Vec<String> = groups
             .keys()
             .filter(|name| name.as_str() != UNGROUPED)
@@ -359,96 +351,19 @@ impl SerialPanel {
             .collect();
 
         for (group_name, ports) in groups {
-            let group_id = ui.make_persistent_id(("shared-port-group", &group_name));
-            let mut open = ui
-                .ctx()
-                .data_mut(|data| data.get_persisted::<bool>(group_id).unwrap_or(true));
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    // Keep the release layout's plain arrows. Material icon
-                    // glyphs are not guaranteed to be present in a browser's
-                    // fallback font and were rendered as square boxes in Web.
-                    .selectable_label(false, if open { "▾" } else { "▸" })
-                    .clicked()
-                {
-                    open = !open;
-                    actions.push(SerialAction::Refresh);
-                }
-                ui.label(
-                    egui::RichText::new(&group_name).color(if group_name == UNGROUPED {
-                        crate::theme::text_secondary()
-                    } else {
-                        crate::theme::text_primary()
-                    }),
-                );
-                ui.label(
-                    egui::RichText::new(format!("({})", ports.len()))
-                        .color(crate::theme::text_dimmed()),
-                );
-            });
-            ui.ctx()
-                .data_mut(|data| data.insert_persisted(group_id, open));
+            let open = Self::render_port_group_header(ui, &group_name, ports.len(), &mut actions);
 
             if open {
                 for port in ports {
-                    let mut alias = metadata.aliases.get(&port.id).cloned().unwrap_or_default();
-                    let mut selected_group = group_name.clone();
-                    let inline = ui.available_width() >= PORT_INLINE_MIN_WIDTH;
-                    let capabilities = view.capabilities;
-                    let settings = *view.settings;
-                    if inline {
-                        // Keep this row non-wrapping. The width check above is
-                        // deliberately conservative so the editor never wraps
-                        // into the status controls.
-                        ui.horizontal(|ui| {
-                            Self::render_port_status(
-                                ui,
-                                port,
-                                capabilities,
-                                settings,
-                                &mut actions,
-                            );
-                            Self::render_port_editor(
-                                ui,
-                                port,
-                                &mut alias,
-                                &mut selected_group,
-                                &group_name,
-                                &group_names,
-                                &mut metadata,
-                                true,
-                            );
-                        });
-                    } else {
-                        // Narrow docks get an explicit second line. Do not use
-                        // nested `horizontal_wrapped` here: egui cannot always
-                        // account for its wrapped child height correctly.
-                        ui.vertical(|ui| {
-                            ui.horizontal(|ui| {
-                                Self::render_port_status(
-                                    ui,
-                                    port,
-                                    capabilities,
-                                    settings,
-                                    &mut actions,
-                                );
-                            });
-                            ui.horizontal(|ui| {
-                                ui.add_space(16.0);
-                                Self::render_port_editor(
-                                    ui,
-                                    port,
-                                    &mut alias,
-                                    &mut selected_group,
-                                    &group_name,
-                                    &group_names,
-                                    &mut metadata,
-                                    false,
-                                );
-                            });
-                            ui.add_space(4.0);
-                        });
-                    }
+                    Self::render_grouped_port(
+                        ui,
+                        view,
+                        port,
+                        &group_name,
+                        &group_names,
+                        &mut metadata,
+                        &mut actions,
+                    );
                 }
             }
         }
@@ -481,6 +396,145 @@ impl SerialPanel {
             });
         }
 
+        Self::render_new_group_row(ui, view, &mut metadata);
+
+        if let Some(group) = delete_group {
+            metadata.groups.retain(|_, value| value != &group);
+        }
+        if let Some((old_group, new_group)) = rename_group {
+            for value in metadata.groups.values_mut() {
+                if value == &old_group {
+                    *value = new_group.clone();
+                }
+            }
+        }
+
+        view.metadata = Some(metadata);
+        actions
+    }
+
+    /// 按元数据里的分组归属把端口归拢；没有分组的端口统一落进“未分组”。
+    fn collect_port_groups<'p>(
+        ports: &'p [SerialPortItem],
+        assignments: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, Vec<&'p SerialPortItem>> {
+        let mut groups: BTreeMap<String, Vec<&SerialPortItem>> = BTreeMap::new();
+        for port in ports {
+            let group = assignments
+                .get(&port.id)
+                .cloned()
+                .unwrap_or_else(|| UNGROUPED.to_owned());
+            groups.entry(group).or_default().push(port);
+        }
+        groups
+    }
+
+    /// 渲染分组标题行（折叠箭头 + 组名 + 端口数），返回该分组本帧是否展开。
+    ///
+    /// 展开态以组名为 key 持久化在 egui 的内存数据里，跨帧保留。
+    fn render_port_group_header(
+        ui: &mut Ui,
+        group_name: &str,
+        port_count: usize,
+        actions: &mut Vec<SerialAction>,
+    ) -> bool {
+        let group_id = ui.make_persistent_id(("shared-port-group", group_name));
+        let mut open = ui
+            .ctx()
+            .data_mut(|data| data.get_persisted::<bool>(group_id).unwrap_or(true));
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                // Keep the release layout's plain arrows. Material icon
+                // glyphs are not guaranteed to be present in a browser's
+                // fallback font and were rendered as square boxes in Web.
+                .selectable_label(false, if open { "▾" } else { "▸" })
+                .clicked()
+            {
+                open = !open;
+                actions.push(SerialAction::Refresh);
+            }
+            ui.label(
+                egui::RichText::new(group_name).color(if group_name == UNGROUPED {
+                    crate::theme::text_secondary()
+                } else {
+                    crate::theme::text_primary()
+                }),
+            );
+            ui.label(
+                egui::RichText::new(format!("({port_count})")).color(crate::theme::text_dimmed()),
+            );
+        });
+        ui.ctx()
+            .data_mut(|data| data.insert_persisted(group_id, open));
+        open
+    }
+
+    /// 渲染分组里的一个端口行：状态控件 + 别名/分组编辑器。
+    ///
+    /// 可用宽度够（见 `PORT_INLINE_MIN_WIDTH`）就走单行内联，否则拆成显式两行。
+    fn render_grouped_port(
+        ui: &mut Ui,
+        view: &SerialView<'_>,
+        port: &SerialPortItem,
+        group_name: &str,
+        group_names: &[String],
+        metadata: &mut SerialPortMetadata<'_>,
+        actions: &mut Vec<SerialAction>,
+    ) {
+        let mut alias = metadata.aliases.get(&port.id).cloned().unwrap_or_default();
+        let mut selected_group = group_name.to_owned();
+        let inline = ui.available_width() >= PORT_INLINE_MIN_WIDTH;
+        let capabilities = view.capabilities;
+        let settings = *view.settings;
+        if inline {
+            // Keep this row non-wrapping. The width check above is
+            // deliberately conservative so the editor never wraps
+            // into the status controls.
+            ui.horizontal(|ui| {
+                Self::render_port_status(ui, port, capabilities, settings, actions);
+                Self::render_port_editor(
+                    ui,
+                    port,
+                    &mut alias,
+                    &mut selected_group,
+                    group_name,
+                    group_names,
+                    metadata,
+                    true,
+                );
+            });
+        } else {
+            // Narrow docks get an explicit second line. Do not use
+            // nested `horizontal_wrapped` here: egui cannot always
+            // account for its wrapped child height correctly.
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    Self::render_port_status(ui, port, capabilities, settings, actions);
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    Self::render_port_editor(
+                        ui,
+                        port,
+                        &mut alias,
+                        &mut selected_group,
+                        group_name,
+                        group_names,
+                        metadata,
+                        false,
+                    );
+                });
+                ui.add_space(4.0);
+            });
+        }
+    }
+
+    /// 渲染“新建分组”行：选端口 → 填组名 → 把该端口 assign 进去。
+    fn render_new_group_row(
+        ui: &mut Ui,
+        view: &SerialView<'_>,
+        metadata: &mut SerialPortMetadata<'_>,
+    ) {
         // A new group is created by assigning it to a selected port. This
         // keeps the persisted model small and mirrors Native's “group only
         // exists once it contains a port” behavior.
@@ -490,9 +544,10 @@ impl SerialPanel {
             data.get_persisted::<String>(new_group_id)
                 .unwrap_or_default()
         });
+        let ports = view.ports;
         let mut new_port = ui.ctx().data_mut(|data| {
             data.get_persisted::<String>(new_port_id)
-                .or_else(|| view.ports.first().map(|port| port.id.clone()))
+                .or_else(|| ports.first().map(|port| port.id.clone()))
                 .unwrap_or_default()
         });
         ui.horizontal_wrapped(|ui| {
@@ -504,7 +559,7 @@ impl SerialPanel {
                     new_port.as_str()
                 })
                 .show_ui(ui, |ui| {
-                    for port in view.ports {
+                    for port in ports {
                         ui.selectable_value(&mut new_port, port.id.clone(), &port.id);
                     }
                 });
@@ -530,20 +585,6 @@ impl SerialPanel {
             .data_mut(|data| data.insert_persisted(new_group_id, new_group));
         ui.ctx()
             .data_mut(|data| data.insert_persisted(new_port_id, new_port));
-
-        if let Some(group) = delete_group {
-            metadata.groups.retain(|_, value| value != &group);
-        }
-        if let Some((old_group, new_group)) = rename_group {
-            for value in metadata.groups.values_mut() {
-                if value == &old_group {
-                    *value = new_group.clone();
-                }
-            }
-        }
-
-        view.metadata = Some(metadata);
-        actions
     }
 
     /// Render the stable, non-wrapping portion of one grouped port row.

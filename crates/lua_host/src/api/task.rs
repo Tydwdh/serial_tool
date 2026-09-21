@@ -8,7 +8,7 @@ use crate::globals::{
     YIELD_KIND, YIELD_PORT, YIELD_READ_LINE, YIELD_SLEEP, YIELD_TIMEOUT_MS, YIELD_WAIT_PAUSED,
     YIELD_WRITE_LINE_AND_EXPECT,
 };
-use crate::host_services::{LuaHostServices, line_buffer_key};
+use crate::host_services::{LineBufferMap, LuaHostServices, line_buffer_key};
 use mlua::{Function, Lua, Table, Thread, Value};
 use tool_core::{Event, LogLevel};
 use tool_databus::DataBus;
@@ -65,10 +65,20 @@ pub(crate) fn process_tasks(
         Err(_) => return,
     };
 
-    let now_ms = tool_core::now_timestamp_ms();
-    let mut resume_count = 0usize;
-
     // 先收集需要恢复的 task id
+    let ready_ids = collect_ready_tasks(lua, &tasks, host_services);
+
+    // 再按每帧上限恢复这些 coroutine
+    resume_ready_tasks(lua, _bus, _config, &tasks, &ready_ids);
+
+    // 清除当前 task id
+    let _ = lua.globals().set(CURRENT_TASK_ID, Value::Nil);
+}
+
+/// 收集本帧可恢复的 task id：判定 cancelled / sleep / read_line / expect 的到点
+/// 与命中，并把结果写进各等待的结果槽。判定与副作用的顺序同原内联实现。
+fn collect_ready_tasks(lua: &Lua, tasks: &Table, host_services: &LuaHostServices) -> Vec<String> {
+    let now_ms = tool_core::now_timestamp_ms();
     let mut ready_ids: Vec<String> = Vec::new();
     for (id, state) in tasks.pairs::<String, Table>().flatten() {
         if state.get::<bool>(TASK_FINISHED).unwrap_or(true) {
@@ -77,21 +87,7 @@ pub(crate) fn process_tasks(
 
         // ── cancelled 优先：打断 sleep/read_line/expect/paused 等一切等待 ──
         if state.get::<bool>(TASK_CANCELLED).unwrap_or(false) {
-            if let Ok(op) = state.get::<Table>(TASK_YIELD_OP) {
-                let kind: String = op.get(YIELD_KIND).unwrap_or_default();
-                match kind.as_str() {
-                    YIELD_READ_LINE => {
-                        wait_failed(lua, &state, "_read_result", "_read_result_err", "cancelled");
-                    }
-                    // expect 与 write_line_and_expect 共用同一对结果槽
-                    YIELD_EXPECT | YIELD_WRITE_LINE_AND_EXPECT => {
-                        wait_failed(lua, &state, "_expect_result", "_expect_err", "cancelled");
-                    }
-                    _ => {
-                        // sleep / wait_paused / unknown: 直接恢复
-                    }
-                }
-            }
+            wake_cancelled_wait(lua, &state);
             ready_ids.push(id);
             continue;
         }
@@ -101,172 +97,261 @@ pub(crate) fn process_tasks(
             continue;
         }
 
-        if let Ok(op) = state.get::<Table>(TASK_YIELD_OP) {
-            let kind: String = op.get(YIELD_KIND).unwrap_or_default();
-            match kind.as_str() {
-                YIELD_SLEEP => {
-                    let wake_at_ms: u64 = state.get("wake_at_ms").unwrap_or(0);
-                    if now_ms < wake_at_ms {
-                        continue;
-                    }
-                }
-                YIELD_WAIT_PAUSED => {
-                    continue;
-                }
-                YIELD_READ_LINE => {
-                    let port: String = op.get(YIELD_PORT).unwrap_or_default();
-                    let deadline_ms: u64 = op.get(YIELD_DEADLINE_MS).unwrap_or(0);
-                    if deadline_ms > 0 && now_ms > deadline_ms {
-                        wait_failed(lua, &state, "_read_result", "_read_result_err", "timeout");
-                    } else {
-                        let Some(ref map) = host_services.line_buffers else {
-                            continue;
-                        };
-                        let key = line_buffer_key(&host_services.plugin_id, &port);
-                        let mut map_lock = map.lock();
-                        let Some(buffer) = map_lock.get_mut(&key) else {
-                            continue;
-                        };
-                        let Some(line) = buffer.next_line() else {
-                            continue;
-                        };
-                        wait_hit(lua, &state, "_read_result", "_read_result_err", &line);
-                    }
-                }
-                YIELD_EXPECT => {
-                    let port: String = op.get(YIELD_PORT).unwrap_or_default();
-                    let pattern: String = op.get("pattern").unwrap_or_default();
-                    let deadline_ms: u64 = op.get(YIELD_DEADLINE_MS).unwrap_or(0);
-                    if deadline_ms > 0 && now_ms > deadline_ms {
-                        wait_failed(lua, &state, "_expect_result", "_expect_err", "timeout");
-                    } else {
-                        let Some(ref map) = host_services.line_buffers else {
-                            continue;
-                        };
-                        let key = line_buffer_key(&host_services.plugin_id, &port);
-                        let mut map_lock = map.lock();
-                        let Some(buffer) = map_lock.get_mut(&key) else {
-                            continue;
-                        };
-                        // 逐行消费到命中为止：不匹配的行属于本次 expect 的无关输出
-                        let mut matched: Option<String> = None;
-                        while let Some(line) = buffer.next_line() {
-                            if match_pat(&line, &pattern) {
-                                matched = Some(line);
-                                break;
-                            }
-                        }
-                        let Some(line) = matched else {
-                            continue;
-                        };
-                        wait_hit(lua, &state, "_expect_result", "_expect_err", &line);
-                    }
-                }
-                YIELD_WRITE_LINE_AND_EXPECT => {
-                    let port: String = op.get(YIELD_PORT).unwrap_or_default();
-                    let deadline_ms: u64 = op.get(YIELD_DEADLINE_MS).unwrap_or(0);
-                    if deadline_ms > 0 && now_ms > deadline_ms {
-                        wait_failed(lua, &state, "_expect_result", "_expect_err", "timeout");
-                    } else {
-                        let Some(ref map) = host_services.line_buffers else {
-                            continue;
-                        };
-                        let key = line_buffer_key(&host_services.plugin_id, &port);
-                        // 在锁内只收集行，释放锁后再做 Lua 匹配（避免死锁）
-                        let lines: Vec<String> = {
-                            let mut map_lock = map.lock();
-                            if let Some(buffer) = map_lock.get_mut(&key) {
-                                let mut buf = Vec::new();
-                                while let Some(line) = buffer.next_line() {
-                                    buf.push(line);
-                                    // 最多取 64 行避免无限循环
-                                    if buf.len() >= 64 {
-                                        break;
-                                    }
-                                }
-                                buf
-                            } else {
-                                continue;
-                            }
-                        };
-                        // 遍历匹配。未命中的候选行属于本次 expect 的无关输出，扫描后
-                        // 必须消费；否则 64 行以上的噪声会被反复回灌并永久挡住后续 ACK。
-                        // 命中 return 时，只保留命中行之后尚未检查的尾部。
-                        let patterns: Option<Table> = op.get("patterns").ok();
-                        let mut matched = None;
-                        let mut matched_through = None;
-                        for (i, line) in lines.iter().enumerate() {
-                            if let Some(ref pts) = patterns {
-                                for pair in pts.pairs::<Value, Table>().flatten() {
-                                    let p: Table = pair.1;
-                                    let pat: String = p.get(EXPECT_PATTERN).unwrap_or_default();
-                                    let action: String = p
-                                        .get(EXPECT_ACTION)
-                                        .unwrap_or_else(|_| "return".to_owned());
-                                    let pname: String = p.get("name").unwrap_or_default();
-                                    if match_pat(line, &pat) {
-                                        if action == "continue" {
-                                            let _ = state
-                                                .set("status", format!("设备忙: {pname}: {line}"));
-                                            if op
-                                                .get::<bool>(YIELD_CONTINUE_RESETS_TIMEOUT)
-                                                .unwrap_or(false)
-                                            {
-                                                let timeout_ms: u64 =
-                                                    op.get(YIELD_TIMEOUT_MS).unwrap_or(0);
-                                                if timeout_ms > 0 {
-                                                    let _ = op.set(
-                                                        YIELD_DEADLINE_MS,
-                                                        now_ms.saturating_add(timeout_ms),
-                                                    );
-                                                }
-                                            }
-                                            break;
-                                        }
-                                        matched = Some((
-                                            p.get::<String>("name").unwrap_or_default(),
-                                            line.clone(),
-                                        ));
-                                        matched_through = Some(i + 1);
-                                        break;
-                                    }
-                                }
-                            }
-                            if matched.is_some() {
-                                break;
-                            }
-                        }
-                        {
-                            let mut map_lock = map.lock();
-                            if let Some(buffer) = map_lock.get_mut(&key) {
-                                buffer.finish_expect_scan(lines, matched_through);
-                            }
-                        }
-                        let Some((name, line)) = matched else {
-                            continue;
-                        };
-                        // 结果表建不出来时退回 nil：一次分配失败不该弄崩整条调度
-                        let result = lua.create_table().ok();
-                        if let Some(ref r) = result {
-                            let _ = r.set("name", name.as_str());
-                            let _ = r.set("line", line.as_str());
-                            let _ = r.set("elapsed_ms", 0_u64);
-                        }
-                        let _ = state.set(
-                            "_expect_result",
-                            result.map(Value::Table).unwrap_or(Value::Nil),
-                        );
-                    }
-                }
-                _ => {
-                    continue;
-                }
-            }
+        if let Ok(op) = state.get::<Table>(TASK_YIELD_OP)
+            && !wait_is_due(lua, &state, &op, now_ms, host_services)
+        {
+            continue;
         }
         ready_ids.push(id);
     }
+    ready_ids
+}
 
-    for id in &ready_ids {
+/// 取消时按当前等待类型写入失败结果，让 coroutine 恢复后立刻看到 cancelled。
+fn wake_cancelled_wait(lua: &Lua, state: &Table) {
+    if let Ok(op) = state.get::<Table>(TASK_YIELD_OP) {
+        let kind: String = op.get(YIELD_KIND).unwrap_or_default();
+        match kind.as_str() {
+            YIELD_READ_LINE => {
+                wait_failed(lua, state, "_read_result", "_read_result_err", "cancelled");
+            }
+            // expect 与 write_line_and_expect 共用同一对结果槽
+            YIELD_EXPECT | YIELD_WRITE_LINE_AND_EXPECT => {
+                wait_failed(lua, state, "_expect_result", "_expect_err", "cancelled");
+            }
+            _ => {
+                // sleep / wait_paused / unknown: 直接恢复
+            }
+        }
+    }
+}
+
+/// 该 task 的等待是否已到点或已命中：true 表示可以恢复 coroutine，
+/// false 表示本帧继续等待（原各分支的 `continue`）。
+fn wait_is_due(
+    lua: &Lua,
+    state: &Table,
+    op: &Table,
+    now_ms: u64,
+    host_services: &LuaHostServices,
+) -> bool {
+    let kind: String = op.get(YIELD_KIND).unwrap_or_default();
+    match kind.as_str() {
+        YIELD_SLEEP => {
+            let wake_at_ms: u64 = state.get("wake_at_ms").unwrap_or(0);
+            now_ms >= wake_at_ms
+        }
+        // 暂停中：由 wait_if_paused 自己决定何时恢复
+        YIELD_WAIT_PAUSED => false,
+        YIELD_READ_LINE => read_line_is_due(lua, state, op, now_ms, host_services),
+        YIELD_EXPECT => expect_is_due(lua, state, op, now_ms, host_services),
+        YIELD_WRITE_LINE_AND_EXPECT => {
+            write_line_and_expect_is_due(lua, state, op, now_ms, host_services)
+        }
+        _ => false,
+    }
+}
+
+/// `read_line` 等待：超时写失败结果，否则消费一行写回结果槽。
+fn read_line_is_due(
+    lua: &Lua,
+    state: &Table,
+    op: &Table,
+    now_ms: u64,
+    host_services: &LuaHostServices,
+) -> bool {
+    let port: String = op.get(YIELD_PORT).unwrap_or_default();
+    let deadline_ms: u64 = op.get(YIELD_DEADLINE_MS).unwrap_or(0);
+    if deadline_ms > 0 && now_ms > deadline_ms {
+        wait_failed(lua, state, "_read_result", "_read_result_err", "timeout");
+    } else {
+        let Some(ref map) = host_services.line_buffers else {
+            return false;
+        };
+        let key = line_buffer_key(&host_services.plugin_id, &port);
+        let mut map_lock = map.lock();
+        let Some(buffer) = map_lock.get_mut(&key) else {
+            return false;
+        };
+        let Some(line) = buffer.next_line() else {
+            return false;
+        };
+        wait_hit(lua, state, "_read_result", "_read_result_err", &line);
+    }
+    true
+}
+
+/// `expect` 等待：超时写失败结果，否则消费行直到命中。
+fn expect_is_due(
+    lua: &Lua,
+    state: &Table,
+    op: &Table,
+    now_ms: u64,
+    host_services: &LuaHostServices,
+) -> bool {
+    let port: String = op.get(YIELD_PORT).unwrap_or_default();
+    let pattern: String = op.get("pattern").unwrap_or_default();
+    let deadline_ms: u64 = op.get(YIELD_DEADLINE_MS).unwrap_or(0);
+    if deadline_ms > 0 && now_ms > deadline_ms {
+        wait_failed(lua, state, "_expect_result", "_expect_err", "timeout");
+    } else {
+        let Some(ref map) = host_services.line_buffers else {
+            return false;
+        };
+        let key = line_buffer_key(&host_services.plugin_id, &port);
+        let mut map_lock = map.lock();
+        let Some(buffer) = map_lock.get_mut(&key) else {
+            return false;
+        };
+        // 逐行消费到命中为止：不匹配的行属于本次 expect 的无关输出
+        let mut matched: Option<String> = None;
+        while let Some(line) = buffer.next_line() {
+            if match_pat(&line, &pattern) {
+                matched = Some(line);
+                break;
+            }
+        }
+        let Some(line) = matched else {
+            return false;
+        };
+        wait_hit(lua, state, "_expect_result", "_expect_err", &line);
+    }
+    true
+}
+
+/// `write_line_and_expect` 等待：超时先判，再扫描一批候选行匹配多组 pattern。
+///
+/// 未命中的候选行属于本次 expect 的无关输出，扫描后必须消费；否则 64 行以上的
+/// 噪声会被反复回灌并永久挡住后续 ACK。命中 return 时，只保留命中行之后尚未
+/// 检查的尾部。
+fn write_line_and_expect_is_due(
+    lua: &Lua,
+    state: &Table,
+    op: &Table,
+    now_ms: u64,
+    host_services: &LuaHostServices,
+) -> bool {
+    let port: String = op.get(YIELD_PORT).unwrap_or_default();
+    let deadline_ms: u64 = op.get(YIELD_DEADLINE_MS).unwrap_or(0);
+    if deadline_ms > 0 && now_ms > deadline_ms {
+        wait_failed(lua, state, "_expect_result", "_expect_err", "timeout");
+        return true;
+    }
+
+    let Some(ref map) = host_services.line_buffers else {
+        return false;
+    };
+    let key = line_buffer_key(&host_services.plugin_id, &port);
+
+    // 在锁内只收集行，释放锁后再做 Lua 匹配（避免死锁）
+    let Some(lines) = drain_expect_candidates(map, &key) else {
+        return false;
+    };
+
+    let (matched, matched_through) = scan_expect_patterns(state, op, &lines, now_ms);
+    {
+        let mut map_lock = map.lock();
+        if let Some(buffer) = map_lock.get_mut(&key) {
+            buffer.finish_expect_scan(lines, matched_through);
+        }
+    }
+
+    let Some((name, line)) = matched else {
+        return false;
+    };
+    write_expect_result(lua, state, &name, &line);
+    true
+}
+
+/// 一次性取出本批候选行；该 key 没有缓冲区时返回 None（本帧继续等待）。
+fn drain_expect_candidates(map: &LineBufferMap, key: &str) -> Option<Vec<String>> {
+    let mut map_lock = map.lock();
+    let buffer = map_lock.get_mut(key)?;
+    let mut buf = Vec::new();
+    while let Some(line) = buffer.next_line() {
+        buf.push(line);
+        // 最多取 64 行避免无限循环
+        if buf.len() >= 64 {
+            break;
+        }
+    }
+    Some(buf)
+}
+
+/// 在候选行上按声明顺序匹配 patterns。
+/// 返回 `(命中的 name/line, 已检查到的位置)`；两者总是同时为 Some 或同时为 None。
+/// `action = "continue"` 的命中不算结果，只刷新状态文本与超时。
+fn scan_expect_patterns(
+    state: &Table,
+    op: &Table,
+    lines: &[String],
+    now_ms: u64,
+) -> (Option<(String, String)>, Option<usize>) {
+    let patterns: Option<Table> = op.get("patterns").ok();
+    let mut matched = None;
+    let mut matched_through = None;
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(ref pts) = patterns {
+            for pair in pts.pairs::<Value, Table>().flatten() {
+                let p: Table = pair.1;
+                let pat: String = p.get(EXPECT_PATTERN).unwrap_or_default();
+                let action: String = p.get(EXPECT_ACTION).unwrap_or_else(|_| "return".to_owned());
+                let pname: String = p.get("name").unwrap_or_default();
+                if match_pat(line, &pat) {
+                    if action == "continue" {
+                        let _ = state.set("status", format!("设备忙: {pname}: {line}"));
+                        if op
+                            .get::<bool>(YIELD_CONTINUE_RESETS_TIMEOUT)
+                            .unwrap_or(false)
+                        {
+                            let timeout_ms: u64 = op.get(YIELD_TIMEOUT_MS).unwrap_or(0);
+                            if timeout_ms > 0 {
+                                let _ =
+                                    op.set(YIELD_DEADLINE_MS, now_ms.saturating_add(timeout_ms));
+                            }
+                        }
+                        break;
+                    }
+                    matched = Some((p.get::<String>("name").unwrap_or_default(), line.clone()));
+                    matched_through = Some(i + 1);
+                    break;
+                }
+            }
+        }
+        if matched.is_some() {
+            break;
+        }
+    }
+    (matched, matched_through)
+}
+
+/// 把 expect 命中结果写成 `{name, line, elapsed_ms}` 表放进 `_expect_result`。
+fn write_expect_result(lua: &Lua, state: &Table, name: &str, line: &str) {
+    // 结果表建不出来时退回 nil：一次分配失败不该弄崩整条调度
+    let result = lua.create_table().ok();
+    if let Some(ref r) = result {
+        let _ = r.set("name", name);
+        let _ = r.set("line", line);
+        let _ = r.set("elapsed_ms", 0_u64);
+    }
+    let _ = state.set(
+        "_expect_result",
+        result.map(Value::Table).unwrap_or(Value::Nil),
+    );
+}
+
+/// 逐个恢复 ready coroutine；每帧最多恢复 `MAX_TASK_RESUMES_PER_TICK` 个，
+/// 取不到 state / thread 的 task 不计数（与原实现一致）。
+fn resume_ready_tasks(
+    lua: &Lua,
+    bus: &DataBus,
+    config: &LuaRunConfig,
+    tasks: &Table,
+    ready_ids: &[String],
+) {
+    let mut resume_count = 0usize;
+
+    for id in ready_ids {
         if resume_count >= MAX_TASK_RESUMES_PER_TICK {
             break;
         }
@@ -288,36 +373,45 @@ pub(crate) fn process_tasks(
         let _ = lua.globals().set(CURRENT_TASK_ID, id.as_str());
 
         // resume coroutine
-        match thread.resume::<Value>(()) {
-            Ok(_values) => {
-                // coroutine 可能 yield 了或返回了，检查状态
-                match thread.status() {
-                    mlua::ThreadStatus::Resumable => {
-                        // coroutine yielded，yield_op 已在 Lua 侧设置
-                    }
-                    _ => {
-                        // Finished 或 Error — 标记完成
-                        let _ = state.set(TASK_FINISHED, true);
-                    }
-                }
-            }
-            Err(e) => {
-                // CoroutineUnresumable — 记录错误并标记完成
-                let _ = state.set(TASK_FINISHED, true);
-                let _ = state.set("last_error", lua.create_string(e.to_string()).ok());
-                _bus.publish(Event::system_log(
-                    LogLevel::Error,
-                    &_config.source,
-                    format!("任务 '{id}' 失败：{e}"),
-                ));
-            }
-        }
+        resume_task_coroutine(lua, bus, config, &state, &thread, id);
 
         resume_count += 1;
     }
+}
 
-    // 清除当前 task id
-    let _ = lua.globals().set(CURRENT_TASK_ID, Value::Nil);
+/// 恢复单个 coroutine：yield 出去不改状态，结束或报错都标记完成。
+fn resume_task_coroutine(
+    lua: &Lua,
+    bus: &DataBus,
+    config: &LuaRunConfig,
+    state: &Table,
+    thread: &Thread,
+    id: &str,
+) {
+    match thread.resume::<Value>(()) {
+        Ok(_values) => {
+            // coroutine 可能 yield 了或返回了，检查状态
+            match thread.status() {
+                mlua::ThreadStatus::Resumable => {
+                    // coroutine yielded，yield_op 已在 Lua 侧设置
+                }
+                _ => {
+                    // Finished 或 Error — 标记完成
+                    let _ = state.set(TASK_FINISHED, true);
+                }
+            }
+        }
+        Err(e) => {
+            // CoroutineUnresumable — 记录错误并标记完成
+            let _ = state.set(TASK_FINISHED, true);
+            let _ = state.set("last_error", lua.create_string(e.to_string()).ok());
+            bus.publish(Event::system_log(
+                LogLevel::Error,
+                &config.source,
+                format!("任务 '{id}' 失败：{e}"),
+            ));
+        }
+    }
 }
 
 /// 从 task 对象获取 state table
@@ -477,12 +571,28 @@ pub(crate) fn create_task_api(
 ) -> mlua::Result<Table> {
     let table = lua.create_table()?;
 
-    // ctx.task.start(config, fn)
-    let bus_start = bus.clone();
-    let src_start = source.clone();
-    let pid_start = plugin_id.clone();
     let methods = create_task_methods_table(lua)?;
-    table.set(
+    register_start_api(lua, &table, &bus, &source, &plugin_id, &methods)?;
+    register_control_apis(lua, &table, &bus, &source)?;
+    register_list_api(lua, &table)?;
+
+    Ok(table)
+}
+
+/// ── 任务启动 ──：`start(config, fn)` 建 coroutine、登记 state、首次 resume。
+fn register_start_api(
+    lua: &Lua,
+    task_api: &Table,
+    bus: &DataBus,
+    source: &str,
+    plugin_id: &str,
+    methods: &Table,
+) -> mlua::Result<()> {
+    let bus_start = bus.clone();
+    let src_start = source.to_owned();
+    let pid_start = plugin_id.to_owned();
+    let methods = methods.clone();
+    task_api.set(
         "start",
         lua.create_function(move |lua, (config, func): (Table, Function)| {
             let id: String = config.get("id")?;
@@ -494,23 +604,7 @@ pub(crate) fn create_task_api(
             let thread = lua.create_thread(func)?;
 
             // 创建 task 内部状态表
-            let state = lua.create_table()?;
-            state.set("id", id.clone())?;
-            state.set("title", title.clone())?;
-            state.set("thread", &thread)?;
-            state.set(TASK_CANCELLED, false)?;
-            state.set("paused", false)?;
-            state.set("cancellable", cancellable)?;
-            state.set("pausable", pausable)?;
-            state.set("progress_current", 0_u64)?;
-            state.set("progress_total", 0_u64)?;
-            state.set("progress_percent", Value::Nil)?;
-            state.set("status", "running")?;
-            state.set("wake_at_ms", 0_u64)?;
-            state.set(TASK_YIELD_OP, Value::Nil)?;
-            state.set(TASK_FINISHED, false)?;
-            state.set("error", Value::Nil)?;
-            state.set("logs", lua.create_table()?)?;
+            let state = new_task_state(lua, &id, &title, &thread, cancellable, pausable)?;
 
             // 存入全局任务表 — 检查同 ID 是否已有未完成任务
             let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
@@ -525,33 +619,7 @@ pub(crate) fn create_task_api(
             tasks.set(id.clone(), &state)?;
 
             // 创建用户可见的 task 对象
-            let task_obj = lua.create_table()?;
-            task_obj.set("id", id.clone())?;
-
-            // __index: 先查方法表，再查 state
-            let mt = lua.create_table()?;
-            let m_ref = methods.clone();
-            mt.set(
-                "__index",
-                lua.create_function(move |lua, (tbl, key): (Table, String)| {
-                    // 先查方法
-                    if let Ok(v) = m_ref.get::<Value>(key.as_str())
-                        && !v.is_nil()
-                    {
-                        return Ok(v);
-                    }
-                    // 再查 state
-                    let task_id: String = tbl.get("id")?;
-                    let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
-                    if let Ok(s) = tasks.get::<Table>(task_id.as_str())
-                        && let Ok(v) = s.get::<Value>(key.as_str())
-                    {
-                        return Ok(v);
-                    }
-                    Ok(Value::Nil)
-                })?,
-            )?;
-            let _ = task_obj.set_metatable(Some(mt));
+            let task_obj = create_task_object(lua, &methods, &id)?;
 
             bus_start.publish(Event::system_log(
                 LogLevel::Info,
@@ -560,37 +628,112 @@ pub(crate) fn create_task_api(
             ));
 
             // 首次 resume：把 task_obj 传给 function(task)
-            // 如果 task 立即 yield（如 sleep），resume 返回 yield 值
-            // coroutine 的 yield_op / wake_at_ms 已在 sleep_ms 等函数中设置
-            let _ = lua.globals().set(CURRENT_TASK_ID, id.as_str());
-            let resume_result = thread.resume::<Value>(task_obj.clone());
-            let _ = lua.globals().set(CURRENT_TASK_ID, Value::Nil);
-
-            match resume_result {
-                Ok(_) => {
-                    // coroutine 正常返回（未 yield，函数执行完毕）
-                    match thread.status() {
-                        mlua::ThreadStatus::Resumable => {
-                            // yielded — yield_op 已由 Lua 侧设置
-                        }
-                        _ => {
-                            let _ = state.set(TASK_FINISHED, true);
-                        }
-                    }
-                }
-                Err(_) => {
-                    let _ = state.set(TASK_FINISHED, true);
-                }
-            }
+            resume_new_task(lua, &state, &thread, &task_obj, &id);
 
             Ok(Value::Table(task_obj))
         })?,
     )?;
+    Ok(())
+}
 
+/// task 的内部状态表：字段名与初值都是 UI/插件侧读取的契约，逐项与 `start` 原实现一致。
+fn new_task_state(
+    lua: &Lua,
+    id: &str,
+    title: &str,
+    thread: &Thread,
+    cancellable: bool,
+    pausable: bool,
+) -> mlua::Result<Table> {
+    let state = lua.create_table()?;
+    state.set("id", id)?;
+    state.set("title", title)?;
+    state.set("thread", thread)?;
+    state.set(TASK_CANCELLED, false)?;
+    state.set("paused", false)?;
+    state.set("cancellable", cancellable)?;
+    state.set("pausable", pausable)?;
+    state.set("progress_current", 0_u64)?;
+    state.set("progress_total", 0_u64)?;
+    state.set("progress_percent", Value::Nil)?;
+    state.set("status", "running")?;
+    state.set("wake_at_ms", 0_u64)?;
+    state.set(TASK_YIELD_OP, Value::Nil)?;
+    state.set(TASK_FINISHED, false)?;
+    state.set("error", Value::Nil)?;
+    state.set("logs", lua.create_table()?)?;
+    Ok(state)
+}
+
+/// 用户可见的 task 对象：只带 id，其余键经元表先查方法表再查 state。
+fn create_task_object(lua: &Lua, methods: &Table, id: &str) -> mlua::Result<Table> {
+    let task_obj = lua.create_table()?;
+    task_obj.set("id", id)?;
+
+    // __index: 先查方法表，再查 state
+    let mt = lua.create_table()?;
+    let m_ref = methods.clone();
+    mt.set(
+        "__index",
+        lua.create_function(move |lua, (tbl, key): (Table, String)| {
+            // 先查方法
+            if let Ok(v) = m_ref.get::<Value>(key.as_str())
+                && !v.is_nil()
+            {
+                return Ok(v);
+            }
+            // 再查 state
+            let task_id: String = tbl.get("id")?;
+            let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
+            if let Ok(s) = tasks.get::<Table>(task_id.as_str())
+                && let Ok(v) = s.get::<Value>(key.as_str())
+            {
+                return Ok(v);
+            }
+            Ok(Value::Nil)
+        })?,
+    )?;
+    let _ = task_obj.set_metatable(Some(mt));
+    Ok(task_obj)
+}
+
+/// 首次 resume：把 task_obj 传给 function(task)。
+/// 如果 task 立即 yield（如 sleep），resume 返回 yield 值；
+/// coroutine 的 yield_op / wake_at_ms 已在 sleep_ms 等函数中设置。
+fn resume_new_task(lua: &Lua, state: &Table, thread: &Thread, task_obj: &Table, id: &str) {
+    let _ = lua.globals().set(CURRENT_TASK_ID, id);
+    let resume_result = thread.resume::<Value>(task_obj.clone());
+    let _ = lua.globals().set(CURRENT_TASK_ID, Value::Nil);
+
+    match resume_result {
+        Ok(_) => {
+            // coroutine 正常返回（未 yield，函数执行完毕）
+            match thread.status() {
+                mlua::ThreadStatus::Resumable => {
+                    // yielded — yield_op 已由 Lua 侧设置
+                }
+                _ => {
+                    let _ = state.set(TASK_FINISHED, true);
+                }
+            }
+        }
+        Err(_) => {
+            let _ = state.set(TASK_FINISHED, true);
+        }
+    }
+}
+
+/// ── 任务控制 ──：`cancel` / `pause` / `resume`，按 id 改内部 state。
+fn register_control_apis(
+    lua: &Lua,
+    task_api: &Table,
+    bus: &DataBus,
+    source: &str,
+) -> mlua::Result<()> {
     // ctx.task.cancel(id)
     let bus_cancel = bus.clone();
-    let src_cancel = source.clone();
-    table.set(
+    let src_cancel = source.to_owned();
+    task_api.set(
         "cancel",
         lua.create_function(move |lua, id: String| {
             let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
@@ -608,7 +751,7 @@ pub(crate) fn create_task_api(
     )?;
 
     // ctx.task.pause(id)
-    table.set(
+    task_api.set(
         "pause",
         lua.create_function(move |lua, id: String| {
             let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
@@ -622,7 +765,7 @@ pub(crate) fn create_task_api(
     )?;
 
     // ctx.task.resume(id)
-    table.set(
+    task_api.set(
         "resume",
         lua.create_function(move |lua, id: String| {
             let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
@@ -633,46 +776,55 @@ pub(crate) fn create_task_api(
         })?,
     )?;
 
-    // ctx.task.list() → 返回所有 task 摘要
-    table.set(
+    Ok(())
+}
+
+/// ── 任务清单 ──：`list()` 返回所有 task 摘要。
+fn register_list_api(lua: &Lua, task_api: &Table) -> mlua::Result<()> {
+    task_api.set(
         "list",
         lua.create_function(move |lua, ()| {
             let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
             let result = lua.create_table()?;
             for (index, (_id, state)) in tasks.pairs::<String, Table>().flatten().enumerate() {
-                let summary = lua.create_table()?;
-                summary.set("id", state.get::<String>("id").unwrap_or_default())?;
-                summary.set("title", state.get::<String>("title").unwrap_or_default())?;
-                summary.set(
-                    TASK_CANCELLED,
-                    state.get::<bool>(TASK_CANCELLED).unwrap_or(false),
-                )?;
-                summary.set("paused", state.get::<bool>("paused").unwrap_or(false))?;
-                summary.set(
-                    TASK_FINISHED,
-                    state.get::<bool>(TASK_FINISHED).unwrap_or(false),
-                )?;
-                summary.set(
-                    "progress_current",
-                    state.get::<u64>("progress_current").unwrap_or(0),
-                )?;
-                summary.set(
-                    "progress_total",
-                    state.get::<u64>("progress_total").unwrap_or(0),
-                )?;
-                summary.set(
-                    "progress_percent",
-                    state.get::<f64>("progress_percent").unwrap_or(0.0),
-                )?;
-                summary.set("status", state.get::<String>("status").unwrap_or_default())?;
-                summary.set("error", state.get::<String>("error").unwrap_or_default())?;
+                let summary = summarize_task(lua, &state)?;
                 result.set(index + 1, summary)?;
             }
             Ok(Value::Table(result))
         })?,
     )?;
+    Ok(())
+}
 
-    Ok(table)
+/// 单个 task 在 `list()` 里的摘要；字段名与缺省值都是清单契约，逐键不变。
+fn summarize_task(lua: &Lua, state: &Table) -> mlua::Result<Table> {
+    let summary = lua.create_table()?;
+    summary.set("id", state.get::<String>("id").unwrap_or_default())?;
+    summary.set("title", state.get::<String>("title").unwrap_or_default())?;
+    summary.set(
+        TASK_CANCELLED,
+        state.get::<bool>(TASK_CANCELLED).unwrap_or(false),
+    )?;
+    summary.set("paused", state.get::<bool>("paused").unwrap_or(false))?;
+    summary.set(
+        TASK_FINISHED,
+        state.get::<bool>(TASK_FINISHED).unwrap_or(false),
+    )?;
+    summary.set(
+        "progress_current",
+        state.get::<u64>("progress_current").unwrap_or(0),
+    )?;
+    summary.set(
+        "progress_total",
+        state.get::<u64>("progress_total").unwrap_or(0),
+    )?;
+    summary.set(
+        "progress_percent",
+        state.get::<f64>("progress_percent").unwrap_or(0.0),
+    )?;
+    summary.set("status", state.get::<String>("status").unwrap_or_default())?;
+    summary.set("error", state.get::<String>("error").unwrap_or_default())?;
+    Ok(summary)
 }
 
 /// 取消所有 task（插件 disable 时调用），唤醒所有 waiting task 让它们检测取消

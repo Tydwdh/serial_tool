@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tool_core::{Direction, Event, LogLevel, Payload};
-use tool_databus::{DataBus, SubscriptionBacklog, TopicFilter};
+use tool_databus::{DataBus, Subscription, SubscriptionBacklog, TopicFilter};
 
 use crate::format::{RecordMode, should_record_event_with_mode, write_event_counted};
 
@@ -137,35 +137,11 @@ impl JsonlRecorder {
     }
 
     pub fn start(&mut self, path: impl AsRef<Path>) -> io::Result<()> {
-        if self.is_running() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "recorder is already running, stop it first",
-            ));
-        }
-        if self.is_stopping() {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "recorder is still stopping previous session, please wait",
-            ));
-        }
-        // 同步清理上一个 worker（如果有残留的 finished worker）
-        if let Some(mut worker) = self.worker.take() {
-            worker.stop.store(true, Ordering::Relaxed);
-            if let Some(join) = worker.join.take() {
-                let _ = join.join();
-            }
-        }
-        self.stopping = None;
+        self.ensure_startable()?;
+        self.clear_previous_session();
 
         let path = path.as_ref().to_path_buf();
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            create_dir_all(parent)?;
-        }
-
-        let file = File::create(&path)?;
+        let file = Self::create_recording_file(&path)?;
         let path_for_summary = path.clone();
         // recorder 是可靠性链路，不能用 bounded 订阅。
         // UI 面板可以 bounded，recorder 必须 lossless。
@@ -186,19 +162,10 @@ impl JsonlRecorder {
 
         let bus = self.bus.clone();
         let stats_thread = Arc::clone(&self.stats);
-
-        {
-            let mut s = stats_thread.lock();
-            *s = RecorderStats {
-                running: true,
-                ..RecorderStats::default()
-            };
-        }
+        self.reset_stats_on_start();
 
         let join = thread::spawn(move || {
             let mut writer = BufWriter::new(file);
-            let mut written_since_flush = 0u64;
-            let mut last_flush = Instant::now();
             let started_at = Instant::now();
 
             // 统一的错误处理：记录错误、停止 worker、发布日志
@@ -213,110 +180,37 @@ impl JsonlRecorder {
                 stop_thread.store(true, Ordering::SeqCst);
             };
 
-            while !stop_thread.load(Ordering::Relaxed) {
-                match subscription.recv_timeout(Duration::from_millis(100)) {
-                    Ok(event) => {
-                        // 暂停时只消费事件不写入
-                        if pause_for_worker.load(Ordering::Relaxed) {
-                            continue;
-                        }
-                        if should_record_event_with_mode(&event, mode) {
-                            match write_event_counted(&mut writer, &event) {
-                                Ok(bytes) => account_written(&stats_thread, bytes, started_at),
-                                Err(e) => {
-                                    handle_fatal(&format!("write failed: {e}"));
-                                    break;
-                                }
-                            }
-                            written_since_flush += 1;
-                        }
-                    }
-                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                        stats_thread.lock().last_flush_elapsed_ms =
-                            last_flush.elapsed().as_millis() as u64;
-                    }
-                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-                }
-
-                // 周期性 flush：每 500 条或 1 秒，防止崩溃/断电丢失尾部数据
-                if written_since_flush >= 500 || last_flush.elapsed() > Duration::from_secs(1) {
-                    if let Err(e) = writer.flush() {
-                        handle_fatal(&format!("flush failed: {e}"));
-                        break;
-                    }
-                    written_since_flush = 0;
-                    last_flush = Instant::now();
-                }
+            // 主循环只把错误文案交回来上报：`handle_fatal` 需要在同一次持锁里
+            // 同时落 `last_error` 与 `running = false`，为此不把 stats、last_error、
+            // bus、stop 这四份句柄再往函数里传一遍。
+            if let Some(msg) = Self::pump_events(
+                &subscription,
+                &stop_thread,
+                &pause_for_worker,
+                &mut writer,
+                mode,
+                &stats_thread,
+                started_at,
+            ) {
+                handle_fatal(&msg);
             }
 
-            stats_thread.lock().last_flush_elapsed_ms = last_flush.elapsed().as_millis() as u64;
-
-            if !discard_pending_thread.load(Ordering::Relaxed) {
-                for event in subscription.drain() {
-                    if should_record_event_with_mode(&event, mode) {
-                        match write_event_counted(&mut writer, &event) {
-                            Ok(bytes) => account_written(&stats_thread, bytes, started_at),
-                            Err(e) => {
-                                // 这里不走 handle_fatal：worker 已经在收尾，紧接着的尾部代码就会把
-                                // `running` / `stopping` 落回 false，只需把错误登记到两处副本并停止排空。
-                                let msg = format!("drain write failed: {e}");
-                                stats_thread.lock().last_error = Some(msg.clone());
-                                *last_error_thread.lock() = Some(msg.clone());
-                                bus.publish(Event::system_log(LogLevel::Error, "recorder", msg));
-                                break;
-                            }
-                        }
-                    }
-                }
+            if let Some(msg) = Self::drain_pending(
+                &subscription,
+                &discard_pending_thread,
+                &mut writer,
+                mode,
+                &stats_thread,
+                &last_error_thread,
+                started_at,
+            ) {
+                bus.publish(Event::system_log(LogLevel::Error, "recorder", msg));
             }
 
-            if let Err(e) = writer.flush() {
-                let msg = format!("flush failed: {e}");
-                stats_thread.lock().last_error = Some(msg.clone());
-                *last_error_thread.lock() = Some(msg.clone());
-                bus.publish(Event::system_log(
-                    LogLevel::Error,
-                    "recorder",
-                    format!("写入失败：{e}"),
-                ));
-            }
-
-            {
-                let mut s = stats_thread.lock();
-                s.running = false;
-                s.stopping = false;
-            }
+            Self::finish_recording_tail(&mut writer, &stats_thread, &last_error_thread, &bus);
 
             // ── 生成会话完整性摘要 ──
-            let summary_path = path_for_summary.with_extension("summary.json");
-            let (events_written, bytes_written, pause_count) = {
-                let s = stats_thread.lock();
-                (s.events_written, s.bytes_written, s.pause_count)
-            };
-            let (is_clean, error_clone, incomplete) = {
-                let incomplete = stats_thread.lock().incomplete;
-                let guard = last_error_thread.lock();
-                (guard.is_none() && !incomplete, guard.clone(), incomplete)
-            };
-            let summary = serde_json::json!({
-                "ended_at_ms": tool_core::now_timestamp_ms(),
-                "events_written": events_written,
-                "bytes_written": bytes_written,
-                "record_mode": format!("{:?}", mode),
-                "closed_cleanly": is_clean,
-                "incomplete": incomplete,
-                "pause_count": pause_count,
-                "app_version": env!("CARGO_PKG_VERSION"),
-                "error": error_clone,
-            });
-            if let Ok(text) = serde_json::to_string_pretty(&summary)
-                && let Err(e) = std::fs::write(&summary_path, text)
-            {
-                log::warn!(
-                    "recorder: failed to write summary {}: {e}",
-                    summary_path.display()
-                );
-            }
+            Self::write_session_summary(&stats_thread, &last_error_thread, mode, &path_for_summary);
 
             finished_thread.store(true, Ordering::SeqCst);
         });
@@ -336,6 +230,204 @@ impl JsonlRecorder {
             format!("正在录制到 {}（模式：{:?}）", path.display(), self.mode),
         ));
         Ok(())
+    }
+
+    /// 起录前的两道门：正在录制、以及上一次会话还在收尾，都不能再起一个 worker。
+    fn ensure_startable(&self) -> io::Result<()> {
+        if self.is_running() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "recorder is already running, stop it first",
+            ));
+        }
+        if self.is_stopping() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "recorder is still stopping previous session, please wait",
+            ));
+        }
+        Ok(())
+    }
+
+    /// 起录前同步收掉残留：等待已结束却没被收割的 worker，并丢弃上一段的收尾状态。
+    fn clear_previous_session(&mut self) {
+        // 同步清理上一个 worker（如果有残留的 finished worker）
+        if let Some(mut worker) = self.worker.take() {
+            worker.stop.store(true, Ordering::Relaxed);
+            if let Some(join) = worker.join.take() {
+                let _ = join.join();
+            }
+        }
+        self.stopping = None;
+    }
+
+    /// 父目录存在（或可创建）之后才创建录制文件，返回已打开的文件句柄。
+    fn create_recording_file(path: &Path) -> io::Result<File> {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            create_dir_all(parent)?;
+        }
+        File::create(path)
+    }
+
+    /// 起录即把统计整体复位，只留 `running = true` 供 UI 立刻读到状态。
+    fn reset_stats_on_start(&self) {
+        let mut s = self.stats.lock();
+        *s = RecorderStats {
+            running: true,
+            ..RecorderStats::default()
+        };
+    }
+
+    /// worker 主循环：取事件、按模式写盘、按既有阈值周期性落盘。
+    ///
+    /// 写盘/刷盘失败只把错误文案带回、由调用方走 `handle_fatal` 上报；`last_flush_elapsed_ms`
+    /// 仍在循环之后统一写回一次，对应原实现里循环后的那一行。
+    fn pump_events(
+        subscription: &Subscription,
+        stop: &AtomicBool,
+        pause: &AtomicBool,
+        writer: &mut BufWriter<File>,
+        mode: RecordMode,
+        stats: &Mutex<RecorderStats>,
+        started_at: Instant,
+    ) -> Option<String> {
+        let mut written_since_flush = 0u64;
+        let mut last_flush = Instant::now();
+        let mut fatal: Option<String> = None;
+
+        while !stop.load(Ordering::Relaxed) {
+            match subscription.recv_timeout(Duration::from_millis(100)) {
+                Ok(event) => {
+                    // 暂停时只消费事件不写入
+                    if pause.load(Ordering::Relaxed) {
+                        continue;
+                    }
+                    if should_record_event_with_mode(&event, mode) {
+                        match write_event_counted(writer, &event) {
+                            Ok(bytes) => account_written(stats, bytes, started_at),
+                            Err(e) => {
+                                fatal = Some(format!("write failed: {e}"));
+                                break;
+                            }
+                        }
+                        written_since_flush += 1;
+                    }
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    stats.lock().last_flush_elapsed_ms = last_flush.elapsed().as_millis() as u64;
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+            }
+
+            // 周期性 flush：每 500 条或 1 秒，防止崩溃/断电丢失尾部数据
+            if written_since_flush >= 500 || last_flush.elapsed() > Duration::from_secs(1) {
+                if let Err(e) = writer.flush() {
+                    fatal = Some(format!("flush failed: {e}"));
+                    break;
+                }
+                written_since_flush = 0;
+                last_flush = Instant::now();
+            }
+        }
+
+        stats.lock().last_flush_elapsed_ms = last_flush.elapsed().as_millis() as u64;
+        fatal
+    }
+
+    /// 收尾排空：把队列里剩下的事件写完，除非调用方已要求丢弃尾部。
+    ///
+    /// 只返回待发布的错误文案：日志由 worker 线程体发布，本函数不碰 bus。
+    fn drain_pending(
+        subscription: &Subscription,
+        discard_pending: &AtomicBool,
+        writer: &mut BufWriter<File>,
+        mode: RecordMode,
+        stats: &Mutex<RecorderStats>,
+        last_error: &Mutex<Option<String>>,
+        started_at: Instant,
+    ) -> Option<String> {
+        if discard_pending.load(Ordering::Relaxed) {
+            return None;
+        }
+        for event in subscription.drain() {
+            if should_record_event_with_mode(&event, mode) {
+                match write_event_counted(writer, &event) {
+                    Ok(bytes) => account_written(stats, bytes, started_at),
+                    Err(e) => {
+                        // 这里不走 handle_fatal：worker 已经在收尾，紧接着的尾部代码就会把
+                        // `running` / `stopping` 落回 false，只需把错误登记到两处副本并停止排空。
+                        let msg = format!("drain write failed: {e}");
+                        stats.lock().last_error = Some(msg.clone());
+                        *last_error.lock() = Some(msg.clone());
+                        return Some(msg);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// 尾部落盘，并把 `running` / `stopping` 两个渲染位落回 false。
+    fn finish_recording_tail(
+        writer: &mut BufWriter<File>,
+        stats: &Mutex<RecorderStats>,
+        last_error: &Mutex<Option<String>>,
+        bus: &DataBus,
+    ) {
+        if let Err(e) = writer.flush() {
+            let msg = format!("flush failed: {e}");
+            stats.lock().last_error = Some(msg.clone());
+            *last_error.lock() = Some(msg.clone());
+            bus.publish(Event::system_log(
+                LogLevel::Error,
+                "recorder",
+                format!("写入失败：{e}"),
+            ));
+        }
+
+        let mut s = stats.lock();
+        s.running = false;
+        s.stopping = false;
+    }
+
+    /// 生成会话完整性摘要（与录制文件同名的 `.summary.json`）。
+    fn write_session_summary(
+        stats: &Mutex<RecorderStats>,
+        last_error: &Mutex<Option<String>>,
+        mode: RecordMode,
+        path: &Path,
+    ) {
+        let summary_path = path.with_extension("summary.json");
+        let (events_written, bytes_written, pause_count) = {
+            let s = stats.lock();
+            (s.events_written, s.bytes_written, s.pause_count)
+        };
+        let (is_clean, error_clone, incomplete) = {
+            let incomplete = stats.lock().incomplete;
+            let guard = last_error.lock();
+            (guard.is_none() && !incomplete, guard.clone(), incomplete)
+        };
+        let summary = serde_json::json!({
+            "ended_at_ms": tool_core::now_timestamp_ms(),
+            "events_written": events_written,
+            "bytes_written": bytes_written,
+            "record_mode": format!("{:?}", mode),
+            "closed_cleanly": is_clean,
+            "incomplete": incomplete,
+            "pause_count": pause_count,
+            "app_version": env!("CARGO_PKG_VERSION"),
+            "error": error_clone,
+        });
+        if let Ok(text) = serde_json::to_string_pretty(&summary)
+            && let Err(e) = std::fs::write(&summary_path, text)
+        {
+            log::warn!(
+                "recorder: failed to write summary {}: {e}",
+                summary_path.display()
+            );
+        }
     }
 
     pub fn stop(&mut self) {

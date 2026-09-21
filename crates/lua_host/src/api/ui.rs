@@ -18,6 +18,29 @@ pub(crate) fn create_ui_api(
 ) -> mlua::Result<Table> {
     let table = lua.create_table()?;
 
+    // 一个功能域一个 register：键名与注册顺序都保持拆分前不变。
+    register_panel_create_apis(lua, &table, &bus, &source, &plugin_id, declared_panel_ids)?;
+    register_remove_panel_api(lua, &table, &bus, &source, declared_panel_ids)?;
+    register_set_values_api(lua, &table, &bus, &source)?;
+    register_table_row_apis(lua, &table, &bus, &source)?;
+    register_get_panel_api(lua, &table, &bus)?;
+    register_form_field_apis(lua, &table, &bus, &source)?;
+    register_contribution_value_api(lua, &table, &bus, &source)?;
+    register_set_status_api(lua, &table, &bus, &source)?;
+
+    Ok(table)
+}
+
+/// ── 面板创建 ──：`create_chart` / `create_form` / `create_attitude` /
+/// `create_gauge` / `create_table`，各自补上 kind 与 defaults 后发创建事件。
+fn register_panel_create_apis(
+    lua: &Lua,
+    ui: &Table,
+    bus: &DataBus,
+    source: &str,
+    plugin_id: &str,
+    declared_panel_ids: &BTreeSet<String>,
+) -> mlua::Result<()> {
     for (name, kind) in [
         ("create_chart", "chart"),
         ("create_form", "form"),
@@ -26,11 +49,11 @@ pub(crate) fn create_ui_api(
         ("create_table", "table"),
     ] {
         let bus = bus.clone();
-        let source = source.clone();
-        let pid = plugin_id.clone();
+        let source = source.to_owned();
+        let pid = plugin_id.to_owned();
         let static_ids = declared_panel_ids.clone();
 
-        table.set(
+        ui.set(
             name,
             lua.create_function(move |_lua, config: Value| {
                 let mut config = ensure_json_object(lua_value_to_json(config)?, name)?;
@@ -64,11 +87,22 @@ pub(crate) fn create_ui_api(
         )?;
     }
 
+    Ok(())
+}
+
+/// ── 面板销毁 ──：`remove_panel(panel_id)`，宿主托管面板拒绝移除。
+fn register_remove_panel_api(
+    lua: &Lua,
+    ui: &Table,
+    bus: &DataBus,
+    source: &str,
+    declared_panel_ids: &BTreeSet<String>,
+) -> mlua::Result<()> {
     let bus_for_remove = bus.clone();
-    let source_for_remove = source.clone();
+    let source_for_remove = source.to_owned();
     let static_ids_for_remove = declared_panel_ids.clone();
 
-    table.set(
+    ui.set(
         "remove_panel",
         lua.create_function(move |_lua, panel_id: String| {
             if static_ids_for_remove.contains(&panel_id) {
@@ -85,10 +119,14 @@ pub(crate) fn create_ui_api(
         })?,
     )?;
 
-    // ctx.ui.set_values(panel_id, { field = value, ... })：单事件批量更新。
+    Ok(())
+}
+
+/// ── 表单批量赋值 ──：`ctx.ui.set_values(panel_id, { field = value, ... })`：单事件批量更新。
+fn register_set_values_api(lua: &Lua, ui: &Table, bus: &DataBus, source: &str) -> mlua::Result<()> {
     let bus_values = bus.clone();
-    let src_values = source.clone();
-    table.set(
+    let src_values = source.to_owned();
+    ui.set(
         "set_values",
         lua.create_function(move |_lua, (panel_id, values): (String, Value)| {
             let values = ensure_json_object(lua_value_to_json(values)?, "set_values")?;
@@ -105,14 +143,19 @@ pub(crate) fn create_ui_api(
         })?,
     )?;
 
+    Ok(())
+}
+
+/// ── 表格行操作 ──：`table_set_rows` / `table_append_rows` / `table_remove_rows` / `table_clear`。
+fn register_table_row_apis(lua: &Lua, ui: &Table, bus: &DataBus, source: &str) -> mlua::Result<()> {
     for (name, topic) in [
         ("table_set_rows", topics::UI_TABLE_SET_ROWS),
         ("table_append_rows", topics::UI_TABLE_APPEND_ROWS),
         ("table_remove_rows", topics::UI_TABLE_REMOVE_ROWS),
     ] {
         let op_bus = bus.clone();
-        let op_source = source.clone();
-        table.set(
+        let op_source = source.to_owned();
+        ui.set(
             name,
             lua.create_function(move |_lua, (panel_id, rows): (String, Value)| {
                 op_bus.publish(Event::new(
@@ -130,8 +173,8 @@ pub(crate) fn create_ui_api(
     }
 
     let clear_bus = bus.clone();
-    let clear_source = source.clone();
-    table.set(
+    let clear_source = source.to_owned();
+    ui.set(
         "table_clear",
         lua.create_function(move |_lua, panel_id: String| {
             clear_bus.publish(Event::new(
@@ -144,43 +187,61 @@ pub(crate) fn create_ui_api(
         })?,
     )?;
 
+    Ok(())
+}
+
+/// ── 面板查询 ──：`get_panel(panel_id)` 返回面板创建时的配置。
+fn register_get_panel_api(lua: &Lua, ui: &Table, bus: &DataBus) -> mlua::Result<()> {
     let bus_for_get = bus.clone();
 
-    table.set(
+    ui.set(
         "get_panel",
         lua.create_function(move |lua, panel_id: String| {
-            let panel = bus_for_get
-                .history()
-                .into_iter()
-                .rev()
-                .find(|event| {
-                    let is_panel_event = event.topic == topics::UI_PANEL_CREATE
-                        || event.topic == topics::UI_PANEL_REMOVE;
-                    // create 事件里面板 id 叫 id，remove 事件里叫 panel_id。
-                    let event_panel_id = match &event.payload {
-                        Payload::Json(value) => value
-                            .get("id")
-                            .or_else(|| value.get("panel_id"))
-                            .and_then(|value| value.as_str()),
-                        _ => None,
-                    };
-
-                    is_panel_event && event_panel_id == Some(&panel_id)
-                })
-                .and_then(|event| match event.payload {
-                    Payload::Json(value) if event.topic == topics::UI_PANEL_CREATE => Some(value),
-                    _ => None,
-                })
-                .unwrap_or(serde_json::Value::Null);
-
+            let panel = find_panel_config(&bus_for_get, &panel_id);
             json_to_lua_value(lua, &panel)
         })?,
     )?;
 
-    // ctx.ui.set_value(panel_id, field_id, value)
+    Ok(())
+}
+
+/// 倒查事件历史，取该面板最近一次 create 事件的配置；没有则给 `Null`。
+fn find_panel_config(bus: &DataBus, panel_id: &str) -> serde_json::Value {
+    bus.history()
+        .into_iter()
+        .rev()
+        .find(|event| {
+            let is_panel_event =
+                event.topic == topics::UI_PANEL_CREATE || event.topic == topics::UI_PANEL_REMOVE;
+            // create 事件里面板 id 叫 id，remove 事件里叫 panel_id。
+            let event_panel_id = match &event.payload {
+                Payload::Json(value) => value
+                    .get("id")
+                    .or_else(|| value.get("panel_id"))
+                    .and_then(|value| value.as_str()),
+                _ => None,
+            };
+
+            is_panel_event && event_panel_id == Some(panel_id)
+        })
+        .and_then(|event| match event.payload {
+            Payload::Json(value) if event.topic == topics::UI_PANEL_CREATE => Some(value),
+            _ => None,
+        })
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// ── 表单字段 ──：`ctx.ui.set_value(panel_id, field_id, value)`，
+/// 以及只有 Lua 名与 topic 不同、参数与载荷形状一致的 `set_enabled` / `set_visible`。
+fn register_form_field_apis(
+    lua: &Lua,
+    ui: &Table,
+    bus: &DataBus,
+    source: &str,
+) -> mlua::Result<()> {
     let bus_set = bus.clone();
-    let src_set = source.clone();
-    table.set(
+    let src_set = source.to_owned();
+    ui.set(
         "set_value",
         lua.create_function(
             move |_lua, (panel_id, field_id, value): (String, String, Value)| {
@@ -205,8 +266,8 @@ pub(crate) fn create_ui_api(
         ("set_visible", topics::UI_FORM_SET_VISIBLE),
     ] {
         let op_bus = bus.clone();
-        let op_source = source.clone();
-        table.set(
+        let op_source = source.to_owned();
+        ui.set(
             name,
             lua.create_function(
                 move |_lua, (panel_id, field_id, value): (String, String, bool)| {
@@ -226,11 +287,20 @@ pub(crate) fn create_ui_api(
         )?;
     }
 
-    // ctx.ui.set_contribution_value(contribution_id, value)
-    // 用于更新 toggle / progress / label 等 UI contribution 的运行时状态。
+    Ok(())
+}
+
+/// ── Contribution 状态 ──：`ctx.ui.set_contribution_value(contribution_id, value)`
+/// 用于更新 toggle / progress / label 等 UI contribution 的运行时状态。
+fn register_contribution_value_api(
+    lua: &Lua,
+    ui: &Table,
+    bus: &DataBus,
+    source: &str,
+) -> mlua::Result<()> {
     let bus_scv = bus.clone();
-    let src_scv = source.clone();
-    table.set(
+    let src_scv = source.to_owned();
+    ui.set(
         "set_contribution_value",
         lua.create_function(move |_lua, (contribution_id, value): (String, Value)| {
             bus_scv.publish(Event::new(
@@ -247,10 +317,14 @@ pub(crate) fn create_ui_api(
         })?,
     )?;
 
-    // ctx.ui.set_status(text) — 向状态栏推送一条通知（Info 级别）
+    Ok(())
+}
+
+/// ── 状态栏 ──：`ctx.ui.set_status(text)` — 向状态栏推送一条通知（Info 级别）
+fn register_set_status_api(lua: &Lua, ui: &Table, bus: &DataBus, source: &str) -> mlua::Result<()> {
     let bus_status = bus.clone();
-    let src_status = source.clone();
-    table.set(
+    let src_status = source.to_owned();
+    ui.set(
         "set_status",
         lua.create_function(move |_lua, message: String| {
             bus_status.publish(Event::new(
@@ -263,7 +337,7 @@ pub(crate) fn create_ui_api(
         })?,
     )?;
 
-    Ok(table)
+    Ok(())
 }
 
 /// 宿主托管面板（在 `plugin.json` 中声明）的报错文案；create 与 remove 两条路径
