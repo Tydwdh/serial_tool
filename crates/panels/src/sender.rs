@@ -6,8 +6,12 @@
 
 use egui::widgets::text_edit::TextEditState;
 use egui::{Id, Ui};
+use egui_material_icons::icons::{ICON_DELETE, ICON_DELETE_SWEEP};
 
 use crate::design::combo_slot;
+
+/// 「清空全部」两步确认按钮在 egui 临时记忆里的 salt。
+const CLEAR_SEND_HISTORY_CONFIRM_ID: &str = "clear_send_history_confirm";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SendLineEnding {
@@ -445,55 +449,218 @@ fn render_actions(ui: &mut Ui, view: &mut SendView<'_>, actions: &mut Vec<SendAc
     ui.horizontal_wrapped(|ui| render_secondary_row(ui, view, actions));
 }
 
+/// 历史弹层：标题 + 条数、过滤框、定高行列表、两步「清空全部」。
+///
+/// 行是**手绘**的（`allocate_exact_size` + 截断 galley），不用 `ui.button`：按钮宽度按内容
+/// 撑开、行高随字体浮动，长中文条目会把弹层拉成一格一格的空白，删除按钮还会越往下越靠右。
 fn render_history(ui: &mut Ui, view: &mut SendView<'_>) {
     if view.history.is_empty() {
         return;
     }
-    ui.menu_button("历史", |ui| {
-        ui.set_min_width(320.0);
-        ui.add(egui::TextEdit::singleline(view.history_search).hint_text("过滤历史"));
-        let query = view.history_search.trim().to_lowercase();
-        let entries: Vec<String> = view
-            .history
-            .iter()
-            .filter(|item| query.is_empty() || item.to_lowercase().contains(&query))
-            .take(view.max_history)
-            .cloned()
-            .collect();
-        if entries.is_empty() {
-            ui.label("暂无匹配项");
-        } else {
-            let mut selected = None;
-            let mut deleted = None;
-            egui::ScrollArea::vertical()
-                .max_height(300.0)
-                .show(ui, |ui| {
-                    for item in entries {
-                        ui.horizontal(|ui| {
-                            if ui.button(&item).clicked() {
-                                selected = Some(item.clone());
+    ui.menu_button("历史", |ui| history_popup(ui, view));
+}
+
+/// [`render_history`] 的弹层内容。单独成函数是为了让测试能直接渲染它：
+/// `menu_button` 的展开态需要一个点击路径，而这段的回归风险恰恰在弹层里的排版。
+fn history_popup(ui: &mut Ui, view: &mut SendView<'_>) {
+    ui.set_min_width(320.0);
+    ui.set_max_width(420.0);
+    ui.spacing_mut().item_spacing.y = 4.0;
+
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("发送历史")
+                .strong()
+                .color(crate::theme::text_white()),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new(format!("{} 条", view.history.len()))
+                    .small()
+                    .color(crate::theme::text_dimmed()),
+            );
+        });
+    });
+
+    ui.add_space(2.0);
+    let search_response = ui
+        .add(
+            egui::TextEdit::singleline(view.history_search)
+                .hint_text("过滤历史")
+                .desired_width(f32::INFINITY),
+        )
+        .on_hover_text(crate::search::SearchQuery::hover_hint(
+            crate::search::SearchQuery::new(view.history_search, false)
+                .used_invalid_regex_fallback(),
+        ));
+    if !search_response.has_focus() {
+        search_response.request_focus();
+    }
+    ui.add_space(2.0);
+    ui.separator();
+    ui.add_space(2.0);
+
+    // 过滤走共用 SearchQuery：与其它搜索入口一样认 `re:`。
+    let query = crate::search::SearchQuery::new(view.history_search, false);
+    let entries: Vec<String> = view
+        .history
+        .iter()
+        .filter(|item| query.is_empty() || query.matches(item))
+        .take(view.max_history)
+        .cloned()
+        .collect();
+
+    if entries.is_empty() {
+        ui.vertical_centered(|ui| {
+            ui.add_space(12.0);
+            ui.label(egui::RichText::new("无匹配项").color(crate::theme::text_dimmed()));
+            ui.add_space(12.0);
+        });
+    } else {
+        egui::ScrollArea::vertical()
+            .max_height(320.0)
+            .show(ui, |ui| {
+                // item_spacing.y = 0：分隔线要贴在下一行顶边，否则它会悬在两行的
+                // 缝隙里，视觉上错位。列宽也在循环外取一次 —— 循环内 available_width
+                // 会随 min_rect 增长而变大，删除按钮就会越往下越靠右。
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let delete_width = 28.0;
+                let column_width = ui.available_width();
+                let text_width = (column_width - delete_width).max(60.0);
+                let galley_width = (text_width - 16.0).max(20.0);
+                let count = entries.len();
+                // 条目用不小于 15px 的正文，历史里多为命令原文，太小难读。
+                let body_size = ui
+                    .style()
+                    .text_styles
+                    .get(&egui::TextStyle::Body)
+                    .map_or(15.0, |body| body.size.max(15.0));
+                let font_id = egui::FontId::proportional(body_size);
+
+                for (index, item) in entries.iter().enumerate() {
+                    // 按 \n 拆段，每段独立按列宽排版（Truncate 只丢弃溢出的字形，egui 不补
+                    // 省略号），再垂直拼接。
+                    let segments: Vec<std::sync::Arc<egui::Galley>> = item
+                        .split('\n')
+                        .map(|segment| {
+                            egui::WidgetText::from(segment)
+                                .color(crate::theme::text_primary())
+                                .into_galley(
+                                    ui,
+                                    Some(egui::TextWrapMode::Truncate),
+                                    galley_width,
+                                    font_id.clone(),
+                                )
+                        })
+                        .collect();
+                    let text_height: f32 = segments.iter().map(|galley| galley.size().y).sum();
+                    let row_height = 28.0_f32.max(text_height + 8.0);
+
+                    let row = ui.allocate_ui_with_layout(
+                        egui::vec2(column_width, row_height),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            let (_, text_response) = ui.allocate_exact_size(
+                                egui::vec2(text_width, row_height),
+                                egui::Sense::click(),
+                            );
+                            let text_rect = text_response.rect;
+                            if text_response.hovered() {
+                                ui.painter()
+                                    .rect_filled(text_rect, 3.0, crate::theme::bg_hover());
+                            }
+                            let mut y = text_rect.center().y - text_height / 2.0;
+                            for galley in &segments {
+                                ui.painter().galley(
+                                    egui::pos2(text_rect.left() + 8.0, y),
+                                    galley.clone(),
+                                    crate::theme::text_primary(),
+                                );
+                                y += galley.size().y;
+                            }
+                            if text_response.clicked() {
+                                *view.input = item.clone();
+                                *view.history_index = None;
                                 ui.close();
                             }
-                            if ui.small_button("×").clicked() {
-                                deleted = Some(item);
+                            text_response
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text("点击填入发送框");
+
+                            let (_, delete_response) = ui.allocate_exact_size(
+                                egui::vec2(delete_width, row_height),
+                                egui::Sense::click(),
+                            );
+                            let delete_rect = delete_response.rect;
+                            if delete_response.hovered() {
+                                ui.painter().rect_filled(
+                                    delete_rect,
+                                    3.0,
+                                    crate::theme::bg_hover(),
+                                );
                             }
-                        });
+                            ui.painter().text(
+                                delete_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                ICON_DELETE.codepoint,
+                                egui::FontId::new(17.0, ICON_DELETE.font_family()),
+                                if delete_response.hovered() {
+                                    crate::theme::text_primary()
+                                } else {
+                                    crate::theme::text_secondary()
+                                },
+                            );
+                            if delete_response.clicked() {
+                                let removed = item.clone();
+                                view.history.retain(|item| *item != removed);
+                            }
+                            delete_response
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text("删除该条");
+                        },
+                    );
+
+                    if index + 1 < count {
+                        let rect = row.response.rect;
+                        ui.painter().line_segment(
+                            [
+                                egui::pos2(rect.left() + 4.0, rect.bottom()),
+                                egui::pos2(rect.right() - 4.0, rect.bottom()),
+                            ],
+                            egui::Stroke::new(1.0, crate::theme::border()),
+                        );
                     }
-                });
-            if let Some(item) = selected {
-                *view.input = item;
-                *view.history_index = None;
-            }
-            if let Some(item) = deleted {
-                view.history.retain(|candidate| candidate != &item);
-            }
-        }
-        if ui.button("清空历史").clicked() {
-            view.history.clear();
-            view.history_search.clear();
-            ui.close();
-        }
-    });
+                }
+            });
+    }
+
+    ui.add_space(2.0);
+    ui.separator();
+    ui.add_space(2.0);
+    // 两步确认：清空全部历史不可撤销，与终端/日志的「清空」同一份规则。
+    let armed = crate::design::confirm_armed(ui, CLEAR_SEND_HISTORY_CONFIRM_ID);
+    let label = if armed {
+        "确认清空"
+    } else {
+        "清空全部"
+    };
+    let response = crate::design::button(
+        ui,
+        ICON_DELETE_SWEEP,
+        label,
+        crate::design::ButtonKind::Danger,
+    );
+    let clicked = response.clicked();
+    if armed {
+        response.on_hover_text("再次点击清空全部历史，3 秒内有效（Esc 或点击别处取消）");
+    } else {
+        response.on_hover_text("删除所有历史记录");
+    }
+    if crate::design::confirm_click(ui, CLEAR_SEND_HISTORY_CONFIRM_ID, clicked) {
+        view.history.clear();
+        view.history_search.clear();
+        ui.close();
+    }
 }
 
 /// HEX 输入的分词：按空白、`,`、`;` 切开，丢掉空 token。
@@ -979,5 +1146,77 @@ mod tests {
             input.rect().max.y,
             send.min.y
         );
+    }
+
+    /// 渲染一次历史弹层，并把它的占用矩形写回 `popup_rect`。
+    fn history_popup_harness<'a>(
+        fixture: &'a Rc<RefCell<SenderFixture>>,
+        popup_rect: &'a Rc<RefCell<egui::Rect>>,
+    ) -> Harness<'a> {
+        let popup_rect = popup_rect.clone();
+        // 与 `terminal_harness` 同一手法：kittest 在构建时就先跑一帧，而删除图标用的
+        // 具名族 "material-icons" 必须在那之前注册，所以第一帧只注册字体、不渲染。
+        let registered = std::cell::Cell::new(false);
+        Harness::builder()
+            .with_size(egui::vec2(900.0, 600.0))
+            .build_ui(move |ui| {
+                if !registered.get() {
+                    registered.set(true);
+                    egui_material_icons::initialize(ui.ctx());
+                    return;
+                }
+                let mut state = fixture.borrow_mut();
+                let mut view = state.view();
+                history_popup(ui, &mut view);
+                *popup_rect.borrow_mut() = ui.min_rect();
+            })
+    }
+
+    fn history_popup_rect(history: Vec<String>) -> egui::Rect {
+        let fixture = Rc::new(RefCell::new(SenderFixture::new(SendLayout::Horizontal)));
+        fixture.borrow_mut().history = history;
+        let popup_rect = Rc::new(RefCell::new(egui::Rect::NOTHING));
+        let mut harness = history_popup_harness(&fixture, &popup_rect);
+        harness.run();
+        let rect = *popup_rect.borrow();
+        assert!(
+            rect.is_finite() && !rect.is_negative(),
+            "弹层没有布局：{rect:?}"
+        );
+        rect
+    }
+
+    /// 历史弹层的排版契约：**宽度是一个上限**（不随条目长度或窗口宽度增长），且有标题与条数。
+    ///
+    /// 上一版给每条历史画一个 `ui.button`，弹层只有 `set_min_width(320)`、没有上限，
+    /// 一条 200 字的中文历史就能把它拉到窗口那么宽、行与行之间全是空白格（用户截图那样）。
+    /// 变异核对：删掉 `set_max_width(420)` 后本用例变红（弹层从 420 涨到 harness 的 900）。
+    ///
+    /// **本用例证明不了逐段截断**：行是手绘的，galley 宽度只决定"画出多少字"，不参与
+    /// min_rect —— 把 `galley_width` 换成 `f32::INFINITY` 实测仍然绿。那一条要靠肉眼或
+    /// 快照验，别把它记成"有测试守着"。
+    #[test]
+    fn history_popup_keeps_a_fixed_width_and_a_header() {
+        let long = history_popup_rect(vec!["实".repeat(200), "AT".to_owned(), "12321".to_owned()]);
+        let short = history_popup_rect(vec!["AT".to_owned(), "12321".to_owned(), "x".to_owned()]);
+        assert!(
+            (long.width() - short.width()).abs() <= 0.5,
+            "弹层宽度随条目长度变了：长 {long:?} vs 短 {short:?} —— 宽度应当由上限决定"
+        );
+        assert!(
+            long.width() <= 440.0,
+            "弹层没有宽度上限，被条目/窗口撑开了：{long:?}"
+        );
+
+        let fixture = Rc::new(RefCell::new(SenderFixture::new(SendLayout::Horizontal)));
+        fixture.borrow_mut().history = vec!["AT".to_owned(), "12321".to_owned()];
+        let popup_rect = Rc::new(RefCell::new(egui::Rect::NOTHING));
+        let mut harness = history_popup_harness(&fixture, &popup_rect);
+        harness.run();
+        // 旧实现只有一列按钮，没有任何标题；标题与条数是这版排版的组成部分。
+        let header = harness.get_by_label("发送历史");
+        assert!(header.rect().height() > 0.0, "「发送历史」标题未渲染");
+        let count = harness.get_by_label("2 条");
+        assert!(count.rect().height() > 0.0, "「N 条」计数未渲染");
     }
 }

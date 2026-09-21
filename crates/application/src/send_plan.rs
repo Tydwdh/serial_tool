@@ -11,6 +11,7 @@
 
 use crate::command::AppCommand;
 use std::fmt;
+use tool_platform::PortId;
 
 /// 网络端口的任务种类标签。字面值必须与 `spawn_ordered(.., "send_network", ..)` 以及
 /// `crates/application/tests/headless.rs` 的 `task_kind` 断言逐字一致，
@@ -74,6 +75,36 @@ pub fn decode_hex(hex: &str, strict: bool) -> Result<Vec<u8>, String> {
     }
 }
 
+/// 「输入框里的这段内容算哪条发送命令」——四处构造点（native 点发送、native 周期发送、
+/// wasm 点发送、wasm 周期发送）都从这里取命令，于是**换行后缀附加在哪、HEX 走哪一档解码**
+/// 不可能再分叉。此前的分叉实例：周期发送绕过这里，直接调 `tool_transport::send_impl_to`，
+/// 后者把多行 HEX 按行拆成多帧（点一次发送只投一帧）、纯空白文本静默不投、
+/// 非法 HEX 报「无效HEX：…」而不是本模块的「HEX 解析失败：…」。
+///
+/// `line_ending_suffix` 只对文本生效：HEX 输入从不追加换行（与 `crates/panels/src/sender.rs`
+/// 的按钮行为一致）。
+pub fn send_command(
+    port: &str,
+    input: &str,
+    hex_mode: bool,
+    line_ending_suffix: &str,
+    strict: bool,
+) -> AppCommand {
+    let port = PortId::new(port);
+    if hex_mode {
+        AppCommand::SendHex {
+            port,
+            hex: input.to_owned(),
+            strict,
+        }
+    } else {
+        AppCommand::SendText {
+            port,
+            text: format!("{input}{line_ending_suffix}"),
+        }
+    }
+}
+
 /// `is_network` 决定任务种类；字节编码规则两平台共用。
 pub fn plan_send(command: &AppCommand, is_network: bool) -> Result<PlannedSend, SendPlanError> {
     let bytes = match command {
@@ -97,7 +128,6 @@ pub fn plan_send(command: &AppCommand, is_network: bool) -> Result<PlannedSend, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tool_platform::PortId;
 
     fn hex(value: &str, strict: bool) -> AppCommand {
         AppCommand::SendHex {
@@ -212,6 +242,52 @@ mod tests {
         assert_eq!(
             plan_send(&raw, false).unwrap().bytes,
             vec![0x00, 0xAB, 0xFF]
+        );
+    }
+
+    /// 四处构造点共用的命令构造规则：文本追加一次后缀、HEX 永不追加、多行 HEX 是**一次**
+    /// plan（一帧），纯空白文本仍有字节 —— 这几条正是周期发送此前分叉的地方。
+    #[test]
+    fn send_command_is_the_one_payload_rule() {
+        let bytes_of = |command: AppCommand| plan_send(&command, false).unwrap().bytes;
+        assert_eq!(
+            bytes_of(send_command("COM1", "AT", false, "\r\n", false)),
+            b"AT\r\n".to_vec(),
+            "文本必须追加恰好一次换行后缀"
+        );
+        assert_eq!(
+            bytes_of(send_command("COM1", "AT", false, "", false)),
+            b"AT".to_vec(),
+            "换行选 None 时不得凭空多出字节"
+        );
+        assert_eq!(
+            bytes_of(send_command("COM1", "AB CD", true, "\r\n", true)),
+            vec![0xAB, 0xCD],
+            "HEX 绝不追加换行：否则 0x0D 0x0A 会混进载荷"
+        );
+        assert_eq!(
+            bytes_of(send_command("COM1", "AB CD\nEF 10", true, "\r\n", true)),
+            vec![0xAB, 0xCD, 0xEF, 0x10],
+            "多行 HEX 是一次 plan → 一帧四字节，不是每行一帧"
+        );
+        assert_eq!(
+            bytes_of(send_command("COM1", "  ", false, "\r\n", false)),
+            b"  \r\n".to_vec(),
+            "纯空白文本必须真的投递（web 一直如此）：静默 no-op 会让两端帧数不同"
+        );
+        assert!(
+            matches!(
+                send_command("COM1", "AB", true, "\r\n", false),
+                AppCommand::SendHex { strict: false, .. }
+            ),
+            "HEX 开关必须选 SendHex：种类决定 plan_send 走哪条解码分支"
+        );
+        assert!(
+            matches!(
+                send_command("COM1", "AB", false, "\r\n", false),
+                AppCommand::SendText { .. }
+            ),
+            "HEX 关闭必须选 SendText：否则 \"AB\" 会被解码成 1 字节"
         );
     }
 

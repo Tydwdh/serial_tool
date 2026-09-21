@@ -136,6 +136,13 @@ impl UiEventSubscriptions {
 }
 
 impl TransportEndpoint {
+    /// 周期发送等后台 job 的投递入口。签名不变，但内部不再自己判定「HEX 怎么解、
+    /// 换行加在哪」：命令由 `send_plan::send_command` 构造、字节由 `send_plan::plan_send`
+    /// 解码，与 `Workbench::dispatch_send`（点一次发送）同一份规则。
+    ///
+    /// `plan_send` 的 `is_network` 实参在本端点恒为 `false` 且不改变行为：那个标志只决定
+    /// `PlannedSend::task_kind`（任务队列的标签），而本端点两条路径都是 `send_to(port_name, bytes)`，
+    /// 真正的后端由 `TransportManager` 按端口名选。走哪个后端在这里判定过一次就是第二份规则。
     pub fn send(
         &self,
         port_name: &str,
@@ -144,15 +151,11 @@ impl TransportEndpoint {
         line_ending: &str,
         hex_strict: bool,
     ) -> Result<(), String> {
-        tool_transport::send_impl_to(
-            port_name,
-            input,
-            hex_mode,
-            line_ending,
-            hex_strict,
-            &self.transport,
-        )
-        .map_err(|error| tool_transport::translate_error(&error))
+        let command = send_plan::send_command(port_name, input, hex_mode, line_ending, hex_strict);
+        let plan = send_plan::plan_send(&command, false).map_err(|error| error.to_string())?;
+        self.transport
+            .send_to(port_name, plan.bytes)
+            .map_err(|error| tool_transport::translate_error(&error))
     }
 }
 

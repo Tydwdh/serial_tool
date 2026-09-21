@@ -343,18 +343,35 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
      parse_hex_strict, hex_preview}`（native 与 wasm 共用），但仍有 3 处各自实现：
      | 位置 | 为什么留 |
      |---|---|
-     | `crates/panels/src/sender.rs:517` `hex_preview` | 与 `tool_core::hex_preview` **渲染不同**：空输入返回 `""` 而非 `"—"`、无 `|ASCII|` 列、无 32 字节截断、报错带具体原因。二者谁都不该被悄悄替换 —— 那会改变界面输出。 |
-     | `crates/panels/src/sender.rs:518` `hex_error` | 同上：它只判「能不能发」并渲染红色标签文案（`"HEX 中包含无效字符：{token}"`），文案本身是渲染结果。它是**校验器**而非解码器，不被 `grep parse_hex` 命中，容易被漏数。**测试覆盖是本轮补的**：此前该文件 `#[test]` 数为 0，把严格档的 `len() != 2` 放松成 `len() > 2` 全套 585 条仍全绿；现在 `sender.rs` 的 `mod tests` 钉着整张真值表（`gate_has_exactly_one_verdict_per_input_and_mode`、`strict_mode_rejects_every_length_except_two`）与那个分裂格（`gate_and_decoder_disagree_on_repeated_0x_prefix`），上述变异实测打红 2 条。 |
+     | `crates/panels/src/sender.rs:539` `hex_preview` | 与 `tool_core::hex_preview` **渲染不同**：空输入返回 `""` 而非 `"—"`、无 `|ASCII|` 列、无 32 字节截断、报错带具体原因。二者谁都不该被悄悄替换 —— 那会改变界面输出。**但两者的现状不对称**（本轮按调用点核对）：活着的渲染只有 panels 这一份（`sender.rs:434` 调的是本文件 `:539` 的局部函数），`tool_core::hex_preview` 在生产代码里**已无调用点**，只剩自身三条用例（`core/src/lib.rs:792`、`:798`、`:804`）—— 要删它就得先确认没有插件/文档依赖，本轮不动它。 |
+     | `crates/panels/src/sender.rs:519` `hex_error` | 同上：它只判「能不能发」并渲染红色标签文案（`"HEX 中包含无效字符：{token}"`），文案本身是渲染结果。它是**校验器**而非解码器，不被 `grep parse_hex` 命中，容易被漏数。**测试覆盖是本轮补的**：此前该文件 `#[test]` 数为 0，把严格档的 `len() != 2` 放松成 `len() > 2` 全套 585 条仍全绿；现在 `sender.rs` 的 `mod tests` 钉着整张真值表（`gate_has_exactly_one_verdict_per_input_and_mode`、`strict_mode_rejects_every_length_except_two`）与那个分裂格（`gate_and_decoder_disagree_on_repeated_0x_prefix`），上述变异实测打红 2 条。 |
      | `crates/plugin_runtime/src/web_lua.rs:2508` `parse_hex` | wasm 插件 Lua API `ctx.serial.send_hex_to` 的后端，语义与 `tool_core::parse_hex` 不同（要求偶数长度、不认 `0x` 前缀），收敛即改动已发布文档（`docs/lua-plugin-api.md`）承诺的插件行为；且 `tool-plugin-runtime` 目前不依赖 `tool-core`，新增该边会改写 `Cargo.lock`（本轮约束为锁文件不变）。 |
      另：`crates/lua_host/src/codec.rs` 的 `from_hex` 是**有意**独立的 Lua 侧解析器，其归一化规则与
      `tool_core::parse_hex` 对齐，由该文件的 `#25` 用例用同一段输入双向比对钉住。
+   - **周期发送已并入同一份发送判定（本轮闭合）**：native 的周期发送后台线程此前调
+     `tool_transport::send_impl_to`，绕过 `send_plan`，于是同一段输入在「点一次发送」和
+     「开着周期发送」之间有三种不同结果：多行 HEX 按行拆成多帧（点发送只投一帧）、
+     纯空白文本被 `input.trim().is_empty()` 静默当成发送成功（web 会真的投出「文本+换行」）、
+     非法 HEX 报 `translate_error` 的「无效HEX：…」而不是 `SendPlanError` 的「HEX 解析失败：…」。
+     现在 `TransportEndpoint::send` 只做投递，命令由 `send_plan::send_command` 构造、字节由
+     `send_plan::plan_send` 解码，`send_impl_to` 随最后一个调用点一起删除（留着它就是留第二份规则）。
+     「输入框内容 → 命令」的构造点从 4 处（native 点发送 `bottom_panel.rs::do_send`、native 周期发送、
+     wasm 点发送 `web.rs::send_web_current`、wasm 周期发送）收成 1 处；第 5 处
+     `crates/panels/src/sender.rs:346-356` 仍是独立构造（panels 不得依赖 `tool-application`，
+     见本文件依赖边界守卫），它产的是 `SendAction` 而非 `AppCommand`，两处构造由同一条
+     「文本追加后缀、HEX 不追加」规则约束，该规则本身在 `send_plan::send_command` 的单测里钉死。
+     守卫：`crates/application/src/send_plan.rs::send_command_is_the_one_payload_rule`（规则层）
+     与 `crates/application/tests/headless.rs::periodic_send_endpoint_uses_the_shared_send_plan`
+     （真实 loopback 端口上的**帧边界与错误文案**：多行 HEX 恰好一帧四字节、空白文本仍投递、
+     非法 HEX 一帧都不上线）。变异核对：把投递改回 `bytes.chunks(2)` 逐块发送，后者立刻红
+     （收到 3 条 script 而不是 2 条）。
    - **发送路径的残留差异（实测，刻意未收敛）**：`send_plan::plan_send` 收敛的是**判定**，
      不是判定的**输入**。任务种类现在只有一个决策点，但它的唯一路由输入 `is_network: bool`
      仍由各平台自己算：
      | 差异 | native | web | 为什么留 / 后果 |
      |---|---|---|---|
      | `is_network` 的**计算规则** | `Workbench::is_network_port` 比对 `app_config.network_ports` 的字符串；本轮起同时认 `display_name()`（`host:port`）与 `port_id()`（`network://host:port`）两种形态 | `WebApplication::is_network_port` 查 `network_ports` 的键，键只在 `port_id()` 形态下写入（`crates/application/src/web.rs` 的 `RegisterNetworkPort`） | 两种形态都**被持久化**（native 的 `workspace.json` 存 `network_ports`、web 存浏览器设置），统一命名会打断已存工作区，故**不统一命名**。跨平台误分类是**响亮**的：native 形态的 id 到了 web 会走到 `WebSerialTransport::enqueue_command` → `TransportError::PortNotConnected`（`crates/platform/src/web_serial.rs:504`），字节发不出去而不是发往错误设备。native 此前**内部不自洽**（`RemoveNetworkPort` 认两种形态、`is_network_port` 只认一种），本轮闭合，由 `crates/application/tests/headless.rs::network_port_ids_are_recognized_in_both_naming_forms` 双向钉住（两形态→`send_network`，普通串口名→`send_serial`）。 |
-     | HEX **预检的规则来源**（round-1 把这一行记成「预检档位」的两端分歧，**那个分歧不成立** —— 依据的站点是死代码，见本行末与下方更正） | **活着的**按钮门禁是共享面板 `crates/panels/src/sender.rs:325-330`：它传 `*view.hex_strict`（默认 `true`，`crates/app/src/state.rs:301`），「严格」勾选框也是活的（`sender.rs:209-210`）。本平台自己的 `Workbench::validate_hex` **在本平台连调用点都不存在** —— 原有的两个（曾传 `strict = false`）位于 `legacy_send_panel_body` 的死子树内，已随该子树一起删除（见本文件第 8 条） | 按钮门禁是**同一个** `sender.rs:325-330`（`crates/app/src/web.rs:4700` 的 `shared_sender_ui`（`:54` 处把 `tool_panels::sender_ui` 起此别名）也调它）；`web_hex_error` → `WebApplication::validate_hex` → `tool_core` 只出现在 `send_web_current`（定义 `crates/app/src/web.rs:3212`，预检站点 `:3230`）这一条路上，而它的**可达手势是命令面板、不是键位**：web 的键位处理器在 `:3117-3119` 就把 `CMD_SEND` 拦下直接 `return`（注释称"发送键位由面板自己处理"，可 `crates/panels` 内 `Key::Enter` 的发送处理是 **0 处**，面板提示却写着「Ctrl+Enter 发送」（`sender.rs:247`）—— 这条 web 键位疑似死绑定先于本分支，未在本轮改动），于是 `execute_web_command`（def `:3123`）的 `CMD_SEND` 分支（`:3125`）只由命令面板的确认路径到达 | 「`"abc"` 在 native 判可发（按钮亮着）、在 web 判不可发」这句 round-1 的结论是**错的**：两端按钮都由 panels 那份校验器按 `hex_strict` 判，默认严格档下 `"abc"` 在**两端都被拒**（`sender.rs:528`：规范化长度 3 ≠ 2）。真正的残留是**规则来源**、不是档位：活的门禁用 `crates/panels/src/sender.rs:518` 那第三份 `hex_error`（只剥**一层** `0x`），而发送与 web 那条面板外发送路（`send_web_current`）的预检用 `tool_core`（`normalize_hex_token` 的 `trim_start_matches` 反复剥），于是默认严格档下 `"0x0xAB"` 一边判非法（规范化后 `0xAB`，长度 4 ≠ 2）、一边判合法（`AB`）：**两端**都会把这串的发送按钮灰掉，而 `dispatch` 其实接受它 —— 且这条路**用户能走到**：native 的 Ctrl+Enter 走 `crates/app/src/commands.rs:210` 的 `cmd_send_if_ready`（只查「端口已打开 + 输入非空」，**不做 HEX 预检**）→ `do_send` → `dispatch`，web 走 `send_web_current`（命令面板确认那条路，预检用 `tool_core`，同样放行），两边都会把这串真发出去。行为保持的收敛不动它（改了会改变渲染出的 UI）。**本波已把这个分裂两侧的实际行为都变成机器断言**：门禁侧 `crates/panels/src/sender.rs::gate_and_decoder_disagree_on_repeated_0x_prefix`（连同该文件新增的真值表），解码侧 `crates/application/src/send_plan.rs::strict_and_lenient_have_exactly_one_verdict_each` 的 `"0x0xAB"` 一格 —— 今后任何人统一它，会先看到红测试，而不是只看到这张表。**连带事实（按可达性归因）**：`Workbench::validate_hex` 在 native 已经**没有任何调用者**，它的 `strict` 形参既没有 `true` 的调用者也没有测试 —— 原先那两个调用点整体不可达，现已随死子树删除而彻底不存在。 |
+     | HEX **预检的规则来源**（round-1 把这一行记成「预检档位」的两端分歧，**那个分歧不成立** —— 依据的站点是死代码，见本行末与下方更正） | **活着的**按钮门禁是共享面板 `crates/panels/src/sender.rs:324-330`：它传 `*view.hex_strict`（默认 `true`，`crates/app/src/state.rs:301`），「严格」勾选框也是活的（`sender.rs:208`）。本平台自己的 `Workbench::validate_hex` **在本平台连调用点都不存在** —— 原有的两个（曾传 `strict = false`）位于 `legacy_send_panel_body` 的死子树内，已随该子树一起删除（见本文件第 8 条） | 按钮门禁是**同一个** `sender.rs:325-330`（`crates/app/src/web.rs:4794` 的 `shared_sender_ui`（`:55` 处把 `tool_panels::sender_ui` 起此别名）也调它）；`web_hex_error` → `WebApplication::validate_hex` → `tool_core` 只出现在 `send_web_current`（定义 `crates/app/src/web.rs:3206`，预检站点 `:3224`）这一条路上，而它的**可达手势当时只有命令面板、不是键位**：web 的键位处理器当时在 `:3117-3119` 就把 `CMD_SEND` 拦下直接 `return`（注释称"发送键位由面板自己处理"，可 `crates/panels` 内 `Key::Enter` 的发送处理是 **0 处**，面板提示却写着「Ctrl+Enter 发送」（`sender.rs:248`）—— 这条 web 键位疑似死绑定先于本分支，未在本轮改动），于是 `execute_web_command`（def `:3123`）的 `CMD_SEND` 分支（`:3125`）只由命令面板的确认路径到达 **【本轮更正并已修复】**：那个早退已删，`$Send` 的默认键位（`shared_keymap.rs` 的 `(CMD_SEND, "Enter", ctrl)`，两平台同一张默认表）在 web 与 native 一样可达，两侧都由 `send_web_current` / `do_send` 消费。 | 「`"abc"` 在 native 判可发（按钮亮着）、在 web 判不可发」这句 round-1 的结论是**错的**：两端按钮都由 panels 那份校验器按 `hex_strict` 判，默认严格档下 `"abc"` 在**两端都被拒**（`sender.rs:529`：规范化长度 3 ≠ 2）。真正的残留是**规则来源**、不是档位：活的门禁用 `crates/panels/src/sender.rs:519` 那第三份 `hex_error`（只剥**一层** `0x`），而发送与 web 那条面板外发送路（`send_web_current`）的预检用 `tool_core`（`normalize_hex_token` 的 `trim_start_matches` 反复剥），于是默认严格档下 `"0x0xAB"` 一边判非法（规范化后 `0xAB`，长度 4 ≠ 2）、一边判合法（`AB`）：**两端**都会把这串的发送按钮灰掉，而 `dispatch` 其实接受它 —— 且这条路**用户能走到**：native 的 Ctrl+Enter 走 `crates/app/src/commands.rs:210` 的 `cmd_send_if_ready`（只查「端口已打开 + 输入非空」，**不做 HEX 预检**）→ `do_send` → `dispatch`，web 走 `send_web_current`（命令面板确认或 Ctrl+Enter，预检用 `tool_core`，同样放行），两边都会把这串真发出去。行为保持的收敛不动它（改了会改变渲染出的 UI）。**本波已把这个分裂两侧的实际行为都变成机器断言**：门禁侧 `crates/panels/src/sender.rs::gate_and_decoder_disagree_on_repeated_0x_prefix`（连同该文件新增的真值表），解码侧 `crates/application/src/send_plan.rs::strict_and_lenient_have_exactly_one_verdict_each` 的 `"0x0xAB"` 一格 —— 今后任何人统一它，会先看到红测试，而不是只看到这张表。**连带事实（按可达性归因）**：`Workbench::validate_hex` 在 native 已经**没有任何调用者**，它的 `strict` 形参既没有 `true` 的调用者也没有测试 —— 原先那两个调用点整体不可达，现已随死子树删除而彻底不存在。 |
 
      > **错误文案（对先前记录的更正）**：Task 6 **改掉了** native 的非法 HEX 文案，此前写作
      > 「两平台错误文案逐字未变」是错的。本轮之前 native 的 dispatch 错误是
@@ -379,7 +396,7 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
      > **仍然活着的**用户可见前缀站点只剩**红字标签**（不是状态栏）：`bottom_panel.rs:175`
      > 把 `dispatch` 的错误 `.to_string()` 写进 `self.send.error`（另两处 `:186`、`:191` 是
      > 本文件自己造的定长文案，不含 `AppError` 前缀），它经 `SendView.error` 由
-     > `crates/panels/src/sender.rs:156` 的 `ui.colored_label(theme::red(), error)` 渲染，
+     > `crates/panels/src/sender.rs:155` 的 `ui.colored_label(theme::red(), error)` 渲染，
      > 按设计**仍带 `transport: ` 分类前缀**（`#[error("transport: {0}")]`）。
      > **状态栏与 HEX 无关**（round-2 把两者并列是错的）：活着的状态栏错误站点全是
      > DTR/RTS —— `sender.rs:417`、`:425` 产出 `SendAction::SetDtr` / `SetRts`，由
@@ -509,9 +526,48 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
    「Linux clippy 的 `-D warnings` 缺口」。在此之前，CI 的 Linux clippy 用
    `--exclude hardware-workbench-app` 上 `-D warnings`，app 仍跑不带该旗标的整包 lint。
 
+12. **桌面端 / 网页端的体验差异（本轮闭合 6 条，其余如实标注）**：
+    - **已闭合（本轮）**：
+      ① web 的 `Ctrl+Enter` 是死绑定（键位处理器把 `CMD_SEND` 拦下 `return`，注释声称由面板处理，
+      而 `crates/panels` 里发送键位处理是 0 处）—— 早退删掉后与 native 一样可达；
+      ② 四个破坏性站点（native / web 的「恢复默认布局」与「恢复所有默认设置」）此前**全是单击即执行**，
+      其中「恢复所有默认设置」会清掉串口配置、别名、分组、布局、上限、字体与主题且不可撤销 ——
+      现在统一走 `design::confirm_armed` + `design::confirm_click`（与日志/终端「清空」同一份规则），
+      确认态用等宽标签；
+      ③ web 命令面板的过滤是 `to_lowercase().contains(...)`，不认 `re:`、也不显示非法正则的回退提示
+      —— 现在与 native 同样走 `tool_panels::SearchQuery` + `hover_hint`；
+      ④ web 成功动作静默（`WebNotificationLevel::Info` 零构造点）—— 恢复布局/恢复默认现在都推通知，
+      文案与 native 逐字相同；
+      ⑤ web 终端/日志的中文是豆腐块：`setup_web_fonts` 只把中文回退插进 **Proportional** 族，
+      等宽族里只有没有 CJK 字形的 JetBrains Mono，而终端/日志按等宽渲染。native 的
+      `bootstrap::setup_fonts` 一直是 `Monospace = ["jetbrains", "zh", "emoji", …]`，现在两端同序。
+      **本条的验证方式要说清**：依据是两份字体族列表的逐项比对，**没有**截图证据 ——
+      内置浏览器面板不可见时 `take_screenshot` 直接拒绝（`visibilityState=hidden`），
+      而 kittest 跑不了 wasm 侧那个函数。
+      ⑥ 发送器「历史」弹层的排版退化：v1.2.0 删 `legacy_send_panel_body` 时，旧弹层的
+      标题+条数/占满宽过滤框/定高行/固定删除列/两步清空**没有**搬进共享 `render_history`，
+      留下的是一版"每条一个 `ui.button`"的弹层（按钮宽度=内容宽度，长中文条目把弹层拉到
+      窗口宽）。现在共享实现恢复旧排版，两端同时生效，过滤框也接进 `SearchQuery`（从此支持
+      `re:`）。守卫与它的边界都写在
+      `crates/panels/src/sender.rs::history_popup_keeps_a_fixed_width_and_a_header` 的注释里：
+      它钉住宽度上限（删掉 `set_max_width` 实测变红），**钉不住逐段截断**（手绘 galley 不参与
+      `min_rect`，把 `galley_width` 换成 `f32::INFINITY` 仍绿）。
+    - **仍留**：
+      ① native 有浮层 `ToastOverlay`（`crates/app/src/ui/toast.rs`，由 `app/mod.rs:352` 驱动），
+      web 只在底部状态栏渲染同一条通知。不收的原因：要把它的载体从 native 的 `NotificationQueue`
+      泛化到 web 的 `Vec<WebNotification>`，是 UI 结构改动，且本轮无法在浏览器里做回归验证。
+      ② wasm 插件沙箱与 native 引擎能力面不同（`load`/`require`/`package`/`debug`/`os.exit`），
+      浏览器侧 `serial.close()` 不带参数会关掉所有已开端口 —— 需要产品裁决，不是机械收敛。
+      ③ `TransportCapabilities` 两侧都不被读取（能力位形同虚设）。
+      ④ web 错误文案仍有英文与「无 `transport: ` 前缀」差异。
+      ⑤ 换行后缀表有 3 份（`crates/app/src/state.rs`、`crates/app/src/web.rs` 的 `WebLineEnding`、
+      `crates/panels/src/sender.rs` 的 `SendLineEnding`），值一致但没有任何断言钉住；
+      三份各自服务 native / wasm / 共享面板，合并会牵动已持久化的 serde 名字。
+      ⑥ web 把 `webserial:session:N` 会话别名键一起持久化。
+
 ### 本轮裁掉项
 
-12. `crates/app/Cargo.toml` 删除 `crossbeam-channel`（本 crate 0 引用，工作区其它 crate 仍在用）；
+13. `crates/app/Cargo.toml` 删除 `crossbeam-channel`（本 crate 0 引用，工作区其它 crate 仍在用）；
     `crates/panels/Cargo.toml` 删除 `tool-marketplace`。两者都会改写 `Cargo.lock` 的依赖边
     （无版本变更、无新增行）。
 

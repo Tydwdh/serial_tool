@@ -18,6 +18,11 @@ use tool_panels::{
 };
 
 const CONFIG_LOCATION_LABEL_WIDTH: f32 = 96.0;
+
+/// 两步确认按钮在 egui 临时记忆里的 salt。wasm 侧（`web.rs`）用同名字符串，
+/// 两侧各自渲染、互不共享状态，但读起来能认出是同一个动作。
+const LAYOUT_RESET_CONFIRM_ID: &str = "reset_workspace_layout_confirm";
+const RESTORE_DEFAULTS_CONFIRM_ID: &str = "restore_all_defaults_confirm";
 const REPOSITORY_URL: &str = env!("CARGO_PKG_REPOSITORY");
 
 impl WorkbenchApp {
@@ -119,43 +124,40 @@ impl WorkbenchApp {
         });
     }
 
-    /// 恢复默认布局：两步确认，首次点击武装、3 秒内再次点击才真正执行。
+    /// 恢复默认布局：两步确认，走 `design::confirm_*`（与日志/终端的「清空」同一份规则）。
+    ///
+    /// 确认态只换成等宽标签、不插入「取消」按钮：取消由 3 秒超时 / Esc / 点击别处负责，
+    /// 多一个按钮会在窄面板里把整组控件折到下一行。
     fn render_layout_reset_row(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.label("工作区布局");
-            let confirm_id = ui.id().with("reset_workspace_layout_confirm");
-            let now = ui.input(|input| input.time);
-            let armed_at: Option<f64> = ui.ctx().memory(|memory| memory.data.get_temp(confirm_id));
-            let armed = armed_at.is_some_and(|time| now - time < 3.0);
-            let (label, label_color) = if armed {
-                ("确认恢复默认布局?", theme::orange())
+            let armed = design::confirm_armed(ui, LAYOUT_RESET_CONFIRM_ID);
+            let label = if armed {
+                "确认恢复布局"
             } else {
-                ("恢复默认布局", theme::text_primary())
+                "恢复默认布局"
             };
-            let reset_button = ui.button(egui::RichText::new(label).color(label_color));
-            if reset_button
-                .on_hover_text("仅重置面板位置，不修改主题、串口、快捷键和插件状态")
-                .clicked()
-            {
-                if armed {
-                    self.panels.reset_tiles_layout();
-                    ui.ctx()
-                        .memory_mut(|memory| memory.data.remove_temp::<f64>(confirm_id));
-                    match self.save_config() {
-                        Ok(()) => self.set_status_force(
-                            StatusLevel::Info,
-                            "已恢复默认布局，运行中的插件面板已保留",
-                        ),
-                        Err(error) => self.set_status_force(StatusLevel::Error, error),
-                    }
-                } else {
-                    ui.ctx()
-                        .memory_mut(|memory| memory.data.insert_temp(confirm_id, now));
-                }
+            let color = if armed {
+                theme::orange()
+            } else {
+                theme::text_primary()
+            };
+            let response = ui.button(egui::RichText::new(label).color(color));
+            let clicked = response.clicked();
+            if armed {
+                response.on_hover_text("再次点击恢复默认布局，3 秒内有效（Esc 或点击别处取消）");
+            } else {
+                response.on_hover_text("仅重置面板位置，不修改主题、串口、快捷键和插件状态");
             }
-            if armed && ui.small_button("取消").clicked() {
-                ui.ctx()
-                    .memory_mut(|memory| memory.data.remove_temp::<f64>(confirm_id));
+            if design::confirm_click(ui, LAYOUT_RESET_CONFIRM_ID, clicked) {
+                self.panels.reset_tiles_layout();
+                match self.save_config() {
+                    Ok(()) => self.set_status_force(
+                        StatusLevel::Info,
+                        "已恢复默认布局，运行中的插件面板已保留",
+                    ),
+                    Err(error) => self.set_status_force(StatusLevel::Error, error),
+                }
             }
         });
     }
@@ -335,11 +337,22 @@ impl WorkbenchApp {
     }
 
     /// 恢复所有默认设置：串口、录制路径、端口别名/分组、布局、数据上限、字体与主题。
+    ///
+    /// 一次点击就清空全部用户配置且无法撤销，所以走两步确认（`design::confirm_*`）。
     fn render_restore_defaults_row(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            if design::button(ui, ICON_RESTART_ALT, "恢复所有默认设置", ButtonKind::Danger)
-                .clicked()
-            {
+            let armed = design::confirm_armed(ui, RESTORE_DEFAULTS_CONFIRM_ID);
+            let label = if armed {
+                "确认恢复默认设置"
+            } else {
+                "恢复所有默认设置"
+            };
+            let response = design::button(ui, ICON_RESTART_ALT, label, ButtonKind::Danger);
+            let clicked = response.clicked();
+            if armed {
+                response.on_hover_text("再次点击恢复默认，3 秒内有效（Esc 或点击别处取消）");
+            }
+            if design::confirm_click(ui, RESTORE_DEFAULTS_CONFIRM_ID, clicked) {
                 self.serial.selected_port = None;
                 self.serial.baud_rate = "115200".to_owned();
                 self.serial.data_bits = "8".to_owned();

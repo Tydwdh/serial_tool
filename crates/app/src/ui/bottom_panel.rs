@@ -190,18 +190,14 @@ impl WorkbenchApp {
         if input.trim().is_empty() {
             self.send.error = Some("发送内容不能为空".to_owned());
         } else {
-            let command = if self.send.hex_mode {
-                tool_application::AppCommand::SendHex {
-                    port: tool_platform::PortId::new(port),
-                    hex: input.clone(),
-                    strict: self.send.hex_strict,
-                }
-            } else {
-                tool_application::AppCommand::SendText {
-                    port: tool_platform::PortId::new(port),
-                    text: format!("{}{}", input, self.send.line_ending.suffix()),
-                }
-            };
+            // 载荷规则不在这里：与周期发送、共享 sender、web 侧同一个 `send_plan::send_command`。
+            let command = tool_application::send_plan::send_command(
+                &port,
+                &input,
+                self.send.hex_mode,
+                self.send.line_ending.suffix(),
+                self.send.hex_strict,
+            );
             self.send.error = self
                 .workbench
                 .dispatch(command)

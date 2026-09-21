@@ -32,6 +32,7 @@ use tool_application::plugin::{
     PluginSettingView, PluginStateView, PluginSummaryView, PluginUiContributionView, PluginView,
 };
 use tool_application::replay::{ReplayPolicyView, ReplayStateView, ReplayStatusView};
+use tool_application::send_plan;
 use tool_application::web::{SignalKind, WebAppEvent, WebRuntime};
 use tool_application::{AppCommand, AppRuntime, CommandOutcome, TaskId, TransportView};
 use tool_core::Event;
@@ -77,9 +78,12 @@ const WEB_MARKETPLACE_REGISTRY_URL: &str =
     "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugin-marketplace/registry.json";
 const REPOSITORY_URL: &str = env!("CARGO_PKG_REPOSITORY");
 
+/// 两步确认按钮在 egui 临时记忆里的 salt，与 `ui/settings_panel.rs` 的同名常量一致。
+const LAYOUT_RESET_CONFIRM_ID: &str = "reset_workspace_layout_confirm";
+const RESTORE_DEFAULTS_CONFIRM_ID: &str = "restore_all_defaults_confirm";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WebNotificationLevel {
-    #[allow(dead_code)]
     Info,
     Warn,
     Error,
@@ -2928,18 +2932,13 @@ impl WorkbenchApp {
                     let port = application_connected
                         .clone()
                         .expect("application transport was checked");
-                    command = Some(if serial.tx_hex {
-                        AppCommand::SendHex {
-                            port,
-                            hex: serial.send_input.clone(),
-                            strict: serial.hex_strict,
-                        }
-                    } else {
-                        AppCommand::SendText {
-                            port,
-                            text: format!("{}{}", serial.send_input, serial.line_ending.suffix()),
-                        }
-                    });
+                    command = Some(send_plan::send_command(
+                        port.as_str(),
+                        &serial.send_input,
+                        serial.tx_hex,
+                        serial.line_ending.suffix(),
+                        serial.hex_strict,
+                    ));
                     history = Some(serial.send_input.clone());
                     serial.periodic_send_count = serial.periodic_send_count.saturating_add(1);
                     serial.periodic_next_at = Some(now + interval);
@@ -3112,11 +3111,6 @@ impl WorkbenchApp {
             return;
         };
 
-        // The sender already owns Ctrl+Enter so it can validate the current
-        // input and append the configured line ending before sending.
-        if command_id == CMD_SEND {
-            return;
-        }
         self.execute_web_command(&command_id, ctx);
     }
 
@@ -3226,29 +3220,22 @@ impl WorkbenchApp {
                 serial.send_error = Some("发送内容不能为空".to_owned());
                 return;
             }
-            if serial.tx_hex {
-                if let Some(error) = web_hex_error(self.runtime.as_ref(), &input, serial.hex_strict)
-                {
-                    serial.send_error = Some(error);
-                    return;
-                }
-                (
-                    AppCommand::SendHex {
-                        port,
-                        hex: serial.send_input.clone(),
-                        strict: serial.hex_strict,
-                    },
-                    serial.send_input.clone(),
-                )
-            } else {
-                (
-                    AppCommand::SendText {
-                        port,
-                        text: format!("{}{}", serial.send_input, serial.line_ending.suffix()),
-                    },
-                    serial.send_input.clone(),
-                )
+            if serial.tx_hex
+                && let Some(error) = web_hex_error(self.runtime.as_ref(), &input, serial.hex_strict)
+            {
+                serial.send_error = Some(error);
+                return;
             }
+            // 载荷规则与 native 同一处：文本追加换行后缀、HEX 不追加。
+            // 上面的 `web_hex_error` 只是提前给红字提示，不决定投递内容。
+            let command = send_plan::send_command(
+                port.as_str(),
+                &serial.send_input,
+                serial.tx_hex,
+                serial.line_ending.suffix(),
+                serial.hex_strict,
+            );
+            (command, serial.send_input.clone())
         };
         record_web_send_history(&mut self.serial.borrow_mut(), history);
         self.serial.borrow_mut().send_error = None;
@@ -3734,11 +3721,11 @@ impl WorkbenchApp {
     }
 
     /// 面板里可见的命令条目：先按标题过滤查询词，再按最近使用顺序排序。
-    fn web_palette_entries(&self, query: &str) -> Vec<WebPaletteCommand> {
+    fn web_palette_entries(&self, query: &tool_panels::SearchQuery) -> Vec<WebPaletteCommand> {
         let mut entries = self
             .web_palette_commands()
             .into_iter()
-            .filter(|command| query.is_empty() || command.title.to_lowercase().contains(query))
+            .filter(|command| query.is_empty() || query.matches(&command.title))
             .collect::<Vec<_>>();
         entries.sort_by_key(|command| {
             self.command_usage_order
@@ -3782,7 +3769,7 @@ impl WorkbenchApp {
             return;
         }
 
-        let query = self.command_palette_query.trim().to_lowercase();
+        let query = tool_panels::SearchQuery::new(&self.command_palette_query, false);
         let entries = self.web_palette_entries(&query);
         self.sync_web_palette_selection(ctx, entries.len());
 
@@ -3808,6 +3795,11 @@ impl WorkbenchApp {
                                 .hint_text("搜索命令…")
                                 .desired_width(f32::INFINITY)
                                 .frame(egui::Frame::NONE),
+                        )
+                        .on_hover_text(
+                            tool_panels::SearchQuery::hover_hint(
+                                query.used_invalid_regex_fallback(),
+                            ),
                         )
                     })
                     .inner;
@@ -4022,13 +4014,34 @@ impl WorkbenchApp {
             ui.label("浏览器构建使用内嵌字体，不依赖本地文件系统。");
             ui.horizontal_wrapped(|ui| {
                 ui.label("工作区布局");
-                if ui
-                    .button("恢复默认布局")
-                    .on_hover_text("仅重置面板位置，不修改主题、串口和插件状态")
-                    .clicked()
-                {
+                // 两步确认与 native 同一份规则（design::confirm_*）、同一个 salt。
+                let armed = design::confirm_armed(ui, LAYOUT_RESET_CONFIRM_ID);
+                let label = if armed {
+                    "确认恢复布局"
+                } else {
+                    "恢复默认布局"
+                };
+                let color = if armed {
+                    theme::orange()
+                } else {
+                    theme::text_primary()
+                };
+                let response = ui.button(egui::RichText::new(label).color(color));
+                let clicked = response.clicked();
+                if armed {
+                    response
+                        .on_hover_text("再次点击恢复默认布局，3 秒内有效（Esc 或点击别处取消）");
+                } else {
+                    response.on_hover_text("仅重置面板位置，不修改主题、串口和插件状态");
+                }
+                if design::confirm_click(ui, LAYOUT_RESET_CONFIRM_ID, clicked) {
                     self.panels.reset_tiles_layout();
                     self.layout_dirty = true;
+                    self.push_web_notification(
+                        "settings",
+                        WebNotificationLevel::Info,
+                        "已恢复默认布局，运行中的插件面板已保留",
+                    );
                 }
             });
         });
@@ -4178,14 +4191,19 @@ impl WorkbenchApp {
 
     fn render_restore_defaults_row(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            if design::button(
-                ui,
-                ICON_RESTART_ALT,
-                "恢复所有默认设置",
-                design::ButtonKind::Danger,
-            )
-            .clicked()
-            {
+            // 与 native 同一个两步确认规则：一次点击清空全部浏览器端配置不可撤销。
+            let armed = design::confirm_armed(ui, RESTORE_DEFAULTS_CONFIRM_ID);
+            let label = if armed {
+                "确认恢复默认设置"
+            } else {
+                "恢复所有默认设置"
+            };
+            let response = design::button(ui, ICON_RESTART_ALT, label, design::ButtonKind::Danger);
+            let clicked = response.clicked();
+            if armed {
+                response.on_hover_text("再次点击恢复默认，3 秒内有效（Esc 或点击别处取消）");
+            }
+            if design::confirm_click(ui, RESTORE_DEFAULTS_CONFIRM_ID, clicked) {
                 self.reset_web_settings(ui.ctx());
             }
         });
@@ -4294,6 +4312,7 @@ impl WorkbenchApp {
         self.bottom_log_panel.font_size = default_font_size();
         apply_web_theme(ctx, self.ui_theme);
         self.persist_settings();
+        self.push_web_notification("settings", WebNotificationLevel::Warn, "已恢复默认设置");
     }
 
     fn serial_panel_ui(&mut self, ui: &mut egui::Ui, show_settings: bool, show_ports: bool) {
@@ -5929,6 +5948,13 @@ fn setup_web_fonts(cc: &eframe::CreationContext<'_>) {
         .entry(FontFamily::Monospace)
         .or_default()
         .insert(0, "jetbrains".to_owned());
+    // 等宽族也必须带上中文回退：JetBrains Mono 没有 CJK 字形，终端/日志按等宽渲染，
+    // 缺字形就变成豆腐块。native 的 `bootstrap::setup_fonts` 排的是 ["jetbrains", "zh", …]。
+    fonts
+        .families
+        .entry(FontFamily::Monospace)
+        .or_default()
+        .insert(1, "zh".to_owned());
     cc.egui_ctx.set_fonts(fonts);
     egui_material_icons::initialize(&cc.egui_ctx);
 }

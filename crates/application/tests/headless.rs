@@ -1346,3 +1346,97 @@ fn send_bytes_reach_a_connected_network_port() {
          （右补 0 会得到 0xC0，即第二个 U+FFFD）"
     );
 }
+
+/// 周期发送的投递入口（`TransportEndpoint::send`，native 后台线程唯一用的那个）必须与
+/// 一次性发送同一份判定：`send_plan::plan_send`。
+///
+/// 分叉前的实际差异（本用例逐条钉住）：
+/// - 多行 HEX 在周期线程里是**按行各投一帧**（`input.lines()` 逐行解析），而同一段输入
+///   按一次「发送」按钮只投一帧 —— 一个 4 字节包被拆成两个 2 字节包，对端固件看到的
+///   帧边界不同。
+/// - 非法 HEX 的文案是 `translate_error` 的「无效HEX：…」，与 `plan_send` 的
+///   「HEX 解析失败：…」是两套措辞，用户在两侧、两条路径看到的不是同一句话。
+/// - 纯空白文本被 `input.trim().is_empty()` 静默当成「发送成功」，而 web 会把
+///   「文本 + 换行后缀」真的发出去。
+#[test]
+fn periodic_send_endpoint_uses_the_shared_send_plan() {
+    // identify + 两条合法发送；非法 HEX 那条必须一帧都不产生。
+    let (addr, observed) = spawn_loopback_ws_server(3);
+
+    let bus = DataBus::new();
+    let mut wb = Workbench::new(bus);
+    let config = NetworkSerialConfig {
+        host: "127.0.0.1".to_owned(),
+        port: addr.port(),
+        api_key: None,
+    };
+    let name = config.display_name();
+    expect_done(&mut wb, AppCommand::RegisterNetworkPort { config });
+    let connect_task = expect_pending(
+        &mut wb,
+        AppCommand::Connect {
+            port: PortId::new(name.clone()),
+            settings: SerialSettings::default(),
+        },
+    );
+    let connected = tick_until(&mut wb, Duration::from_secs(10), |wb| {
+        task_state(wb, connect_task) == Some(TaskState::Completed)
+    });
+    assert!(
+        connected,
+        "必须连上 loopback 服务器才有可观测的帧：{:?}",
+        task_state(&wb, connect_task)
+    );
+    let handshaked = tick_until(&mut wb, Duration::from_secs(10), |wb| {
+        wb.query_transport().statuses.iter().any(|status| {
+            status.port_name.as_deref() == Some(name.as_str()) && status.open && !status.connecting
+        })
+    });
+    assert!(
+        handshaked,
+        "WebSocket 握手必须完成，否则本用例的帧断言全部退化成零断言：{:?}",
+        wb.query_transport().statuses
+    );
+
+    let endpoint = wb.transport_endpoint();
+
+    // 1) 非法 HEX：报错文案来自共用的 `SendPlanError::Display`，且一帧都不许上线。
+    let invalid = endpoint
+        .send(&name, "AB ZZ", true, "", false)
+        .expect_err("非法 HEX 必须被拒绝");
+    assert!(
+        invalid.starts_with("HEX 解析失败："),
+        "周期发送的 HEX 错误必须与一次性发送同一句（{invalid:?}）"
+    );
+
+    // 2) 文本：换行后缀由共用的命令构造附加，与 `do_send`/共享 sender 同一处。
+    endpoint
+        .send(&name, "AT", false, "\r\n", false)
+        .expect("文本发送必须投递");
+
+    // 3) 多行 HEX：整段是一次 plan，投一帧四字节。四个 0xAB 各自是独立的非法起始字节，
+    //    所以 lossy 渲染恰好四个 U+FFFD；写成 "AB CD" 会得到 U+FFFD + U+036B + U+FFFD，
+    //    因为 `CD AB` 是一段**合法**的两字节序列（`AB CD` 两字节也只出两个 U+FFFD）。
+    endpoint
+        .send(&name, "AB AB\nAB AB", true, "", true)
+        .expect("严格模式多行 HEX 必须投递");
+
+    let (frames, stopped) = drain_frames(&observed, Duration::from_secs(20));
+    assert_eq!(
+        stopped, None,
+        "回路服务器观测中断：{stopped:?}；已收到 {frames:?}"
+    );
+    let parsed: Vec<(String, u64, String)> =
+        frames.iter().map(|frame| json_rpc_frame(frame)).collect();
+    let scripts: Vec<&str> = parsed
+        .iter()
+        .filter(|(method, _, _)| method != "server.connection.identify")
+        .map(|(_, _, script)| script.as_str())
+        .collect();
+    assert_eq!(
+        scripts,
+        vec!["AT\r\n", "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}"],
+        "对端必须恰好收到两条发送：多行 HEX 分成两帧即「周期发送仍在按行拆分」，\
+         纯空白输入多出一帧即「静默 no-op 被改成真发送」"
+    );
+}

@@ -1363,47 +1363,11 @@ impl From<Parity> for sp::Parity {
 
 // ── 发送辅助函数 ──
 //
-// HEX 预览已迁到 `tool_core::hex_preview`（同一份渲染规则，native 与 wasm 共用）。
-
-/// 向指定端口发送文本或 HEX 数据。
-pub fn send_impl_to(
-    port: &str,
-    input: &str,
-    hex: bool,
-    line_ending_suffix: &str,
-    hex_strict: bool,
-    t: &TransportManager,
-) -> TransportResult<()> {
-    if input.trim().is_empty() {
-        return Ok(());
-    }
-    if hex {
-        // 事务性预校验：先解析所有行，任一行失败则不发送任何数据（避免部分发送）。
-        // 判定规则在 `tool_core`（与 web 侧同一份）；这里按行调用，
-        // `parse_hex_strict` 即原 `parse_hex_strict_line`，对单行输入语义不变。
-        let parse_line = if hex_strict {
-            tool_core::parse_hex_strict
-        } else {
-            tool_core::parse_hex
-        };
-        let mut pending: Vec<Vec<u8>> = Vec::with_capacity(input.lines().count());
-        for line in input.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            pending.push(parse_line(trimmed).map_err(TransportError::InvalidHex)?);
-        }
-        for bytes in pending {
-            t.send_to(port, bytes)?;
-        }
-        Ok(())
-    } else {
-        let mut text = input.to_owned();
-        text.push_str(line_ending_suffix);
-        t.send_text_to(port, &text)
-    }
-}
+// 「输入框内容 → 字节」的判定（HEX 解码档位、换行后缀、事务性）不在本 crate：
+// 唯一真相是 application 层的 `send_plan`（依赖方向仍是 application → transport），
+// 本 crate 只接受已经计划好的字节，剩余的 HEX 入口只有插件侧的 `send_hex_to`。
+// 这里曾有第二份实现（`send_impl_to`：按行拆分 HEX、空白输入静默 no-op、错误文案自创
+// 「无效HEX：」），它是桌面端周期发送与点发送行为分叉的根源，随该路径收敛一并删除。
 
 /// 将传输错误翻译为用户友好的中文提示。
 ///

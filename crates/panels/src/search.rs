@@ -6,8 +6,8 @@
 //! `expect_from` / `request` / `write_line_and_expect` 的响应模式约定保持一致
 //! （那三个形态见 `crates/lua_host/src/api/serial.rs` 的 `match_pat`）。
 //!
-//! **不在共用范围内的入口**：发送器的历史过滤框（`sender.rs` 的 `history_search`）
-//! 至今仍按小写子串比较，不编译 `SearchQuery`，所以那里 `re:` 没有特殊含义。
+//! 覆盖范围：终端、日志、数据表、插件市场、命令面板，以及发送器的历史过滤框
+//! （`sender.rs` 的 `history_search`）。
 //!
 //! # 规则
 //!
