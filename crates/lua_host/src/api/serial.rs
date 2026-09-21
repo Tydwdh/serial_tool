@@ -16,7 +16,7 @@ use crate::globals::{
     TASK_YIELD_OP, YIELD_CONTINUE_RESETS_TIMEOUT, YIELD_DEADLINE_MS, YIELD_EXPECT, YIELD_KIND,
     YIELD_PORT, YIELD_READ_LINE, YIELD_TIMEOUT_MS, YIELD_WRITE_LINE_AND_EXPECT,
 };
-use crate::host_services::{LuaHostServices, line_buffer_key};
+use crate::host_services::{LineBufferMap, LuaHostServices, line_buffer_key};
 
 /// 简单 Lua pattern 匹配：支持 `^` 锚点和子串匹配。
 ///
@@ -161,11 +161,17 @@ fn require_task_id(lua: &Lua, api: &str) -> mlua::Result<String> {
     Ok(task_id)
 }
 
+/// 取该任务在 `PLUGIN_TASKS` 里的 state 表；任务不在表里（已退出）时给 `None`。
+/// 读不到 `PLUGIN_TASKS` 全局本身仍按错误上抛，与各调用点原行为一致。
+fn task_state(lua: &Lua, task_id: &str) -> mlua::Result<Option<Table>> {
+    let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
+    Ok(tasks.get::<Table>(task_id).ok())
+}
+
 /// 把 yield op 挂到该任务的 state 上，供 `process_tasks` 下一帧消费。
 /// state 取不到时静默跳过 —— op 仍会返回给 Lua 侧去 yield，与原实现一致。
 fn attach_yield_op(lua: &Lua, task_id: &str, op: &Table) -> mlua::Result<()> {
-    let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
-    if let Ok(state) = tasks.get::<Table>(task_id) {
+    if let Some(state) = task_state(lua, task_id)? {
         let _ = state.set(TASK_YIELD_OP, op.clone());
     }
     Ok(())
@@ -235,9 +241,30 @@ pub(crate) fn create_serial_api(
 ) -> mlua::Result<Table> {
     let table = lua.create_table()?;
 
+    // 注册顺序不可调整：`install_serial_blocking_wrappers` 会用 Lua wrapper 覆盖
+    // 前面注册的同名底层方法（expect / read_line / write_line_and_expect）。
+    register_port_enumeration(lua, &table, &transport)?;
+    register_port_lifecycle(lua, &table, &transport)?;
+    register_send_apis(lua, &table, &transport)?;
+    register_port_status_apis(lua, &table, &transport)?;
+    register_expect_apis(lua, &table, &bus, &transport, host_services)?;
+    register_line_buffer_apis(lua, &table, &transport, host_services)?;
+    register_read_line_apis(lua, &table, &transport, host_services)?;
+    register_write_line_and_expect_apis(lua, &table, &transport, host_services)?;
+    install_serial_blocking_wrappers(lua, &table)?;
+
+    Ok(table)
+}
+
+/// ── 端口枚举 ──：`list`（原始端口列表）、`devices`（统一设备清单形态）。
+fn register_port_enumeration(
+    lua: &Lua,
+    serial: &Table,
+    transport: &TransportManager,
+) -> mlua::Result<()> {
     let transport_for_list = transport.clone();
 
-    table.set(
+    serial.set(
         "list",
         lua.create_function(move |lua, ()| {
             let ports = transport_for_list
@@ -252,7 +279,7 @@ pub(crate) fn create_serial_api(
     )?;
 
     let transport_for_devices = transport.clone();
-    table.set(
+    serial.set(
         "devices",
         lua.create_function(move |lua, ()| {
             let devices = transport_for_devices
@@ -273,12 +300,21 @@ pub(crate) fn create_serial_api(
         })?,
     )?;
 
+    Ok(())
+}
+
+/// ── 端口生命周期 ──：`open` / `close` / `close_port`。
+fn register_port_lifecycle(
+    lua: &Lua,
+    serial: &Table,
+    transport: &TransportManager,
+) -> mlua::Result<()> {
     let transport_for_open = transport.clone();
     // 记录本插件通过 ctx.serial.open 打开的端口，供 close() 只关闭自己打开的端口。
     let opened_by_plugin: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let opened_open = opened_by_plugin.clone();
 
-    table.set(
+    serial.set(
         "open",
         lua.create_function(move |_lua, config: Value| {
             let cfg = lua_value_to_serial_config(config)?;
@@ -293,7 +329,7 @@ pub(crate) fn create_serial_api(
     let transport_for_close = transport.clone();
     let opened_close = opened_by_plugin.clone();
 
-    table.set(
+    serial.set(
         "close",
         lua.create_function(move |_lua, ()| {
             // 只关闭本插件通过 ctx.serial.open 打开的端口，避免误关用户手动打开的串口。
@@ -307,7 +343,7 @@ pub(crate) fn create_serial_api(
 
     let transport_for_close_port = transport.clone();
 
-    table.set(
+    serial.set(
         "close_port",
         lua.create_function(move |_lua, port: String| {
             transport_for_close_port.close_port(&port);
@@ -315,9 +351,14 @@ pub(crate) fn create_serial_api(
         })?,
     )?;
 
+    Ok(())
+}
+
+/// ── 直发 ──：`send_to`（文本）、`send_hex_to`（十六进制），不补换行。
+fn register_send_apis(lua: &Lua, serial: &Table, transport: &TransportManager) -> mlua::Result<()> {
     let transport_for_send_to = transport.clone();
 
-    table.set(
+    serial.set(
         "send_to",
         lua.create_function(move |_lua, (port, text): (String, String)| {
             transport_for_send_to
@@ -328,7 +369,7 @@ pub(crate) fn create_serial_api(
 
     let transport_for_send_hex_to = transport.clone();
 
-    table.set(
+    serial.set(
         "send_hex_to",
         lua.create_function(move |_lua, (port, text): (String, String)| {
             transport_for_send_hex_to
@@ -337,9 +378,18 @@ pub(crate) fn create_serial_api(
         })?,
     )?;
 
+    Ok(())
+}
+
+/// ── 端口状态查询 ──：`status_port`、`open_ports`。
+fn register_port_status_apis(
+    lua: &Lua,
+    serial: &Table,
+    transport: &TransportManager,
+) -> mlua::Result<()> {
     let transport_for_status_port = transport.clone();
 
-    table.set(
+    serial.set(
         "status_port",
         lua.create_function(move |lua, port: String| {
             let status = transport_for_status_port.status_port(&port);
@@ -357,17 +407,31 @@ pub(crate) fn create_serial_api(
 
     let transport_for_open_ports = transport.clone();
 
-    table.set(
+    serial.set(
         "open_ports",
         lua.create_function(move |_lua, ()| Ok(transport_for_open_ports.open_ports()))?,
     )?;
 
+    Ok(())
+}
+
+/// ── 等待响应 ──：`__expect_from_inner` / `__expect_inner` / `__request_inner`
+/// 三个内部实现，加上任务恢复后取结果的 `__expect_finish`。
+/// 对外的 `expect` / `expect_from` / `request` 由 `install_serial_blocking_wrappers`
+/// 的 Lua wrapper 包装这几个内部方法得到。
+fn register_expect_apis(
+    lua: &Lua,
+    serial: &Table,
+    bus: &DataBus,
+    transport: &TransportManager,
+    host_services: &LuaHostServices,
+) -> mlua::Result<()> {
     // ctx.serial.expect_from(port, pattern, timeout_ms) — 端口级 API
     // 任务上下文（CURRENT_TASK_ID 非空）→ 协程 yield；顶层/测试上下文 → 阻塞轮询。
     let expect_from_bus = bus.clone();
     let expect_from_stop = host_services.stop_flag.clone();
     let expect_from_transport = transport.clone();
-    table.set(
+    serial.set(
         "__expect_from_inner",
         lua.create_function(
             move |lua, (port, pattern, timeout_ms): (String, String, Option<u64>)| {
@@ -402,7 +466,7 @@ pub(crate) fn create_serial_api(
     let expect_bus = bus.clone();
     let expect_transport = transport.clone();
     let expect_stop = host_services.stop_flag.clone();
-    table.set(
+    serial.set(
         "__expect_inner",
         lua.create_function(move |lua, (pattern, timeout_ms): (String, Option<u64>)| {
             // 多串口打开时拒绝不带端口的 expect，避免匹配错误端口
@@ -436,7 +500,7 @@ pub(crate) fn create_serial_api(
     let rq_bus = bus.clone();
     let rq_transport = transport.clone();
     let rq_stop = host_services.stop_flag.clone();
-    table.set(
+    serial.set(
         "__request_inner",
         lua.create_function(move |lua, opts: Table| {
             let port: String = opts.get("port")?;
@@ -474,7 +538,7 @@ pub(crate) fn create_serial_api(
     )?;
 
     // ctx.serial.__expect_finish — 任务上下文恢复后读取 expect/request 结果。
-    table.set(
+    serial.set(
         "__expect_finish",
         lua.create_function(move |lua, ()| {
             let task_id = current_task_id(lua);
@@ -483,8 +547,7 @@ pub(crate) fn create_serial_api(
                     "ctx.serial.expect 必须在 ctx.task 协程内使用恢复路径".into(),
                 ));
             }
-            let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
-            if let Ok(state) = tasks.get::<Table>(task_id.as_str()) {
+            if let Some(state) = task_state(lua, &task_id)? {
                 let matched: Option<String> = state.get("_expect_result").ok();
                 let err: Option<String> = state.get("_expect_err").ok();
                 let _ = state.set("_expect_result", Value::Nil);
@@ -502,13 +565,21 @@ pub(crate) fn create_serial_api(
         })?,
     )?;
 
-    // ── 行缓冲区操作 ──
+    Ok(())
+}
 
+/// ── 行缓冲区操作 ──：`flush_rx`（丢弃本插件该端口的已缓存行）、`write_line`（按行发送）。
+fn register_line_buffer_apis(
+    lua: &Lua,
+    serial: &Table,
+    transport: &TransportManager,
+    host_services: &LuaHostServices,
+) -> mlua::Result<()> {
     // ctx.serial.flush_rx(port_name)
     let lb_flush = host_services.line_buffers.clone();
     let pid_flush = host_services.plugin_id.clone();
     let transport_flush = transport.clone();
-    table.set(
+    serial.set(
         "flush_rx",
         lua.create_function(move |_lua, port_name: String| {
             let port_name = transport_flush
@@ -524,7 +595,7 @@ pub(crate) fn create_serial_api(
 
     // ctx.serial.write_line(port_name, line)
     let transport_wl = transport.clone();
-    table.set(
+    serial.set(
         "write_line",
         lua.create_function(move |_lua, (port, line): (String, String)| {
             let port = transport_wl.canonical_open_port_name(&port).unwrap_or(port);
@@ -535,11 +606,22 @@ pub(crate) fn create_serial_api(
         })?,
     )?;
 
+    Ok(())
+}
+
+/// ── read_line ──：`__read_line_begin`（命中缓冲直接返回，否则挂 yield op）
+/// 与 `__read_line_finish`（恢复后读结果）。
+fn register_read_line_apis(
+    lua: &Lua,
+    serial: &Table,
+    transport: &TransportManager,
+    host_services: &LuaHostServices,
+) -> mlua::Result<()> {
     // ctx.serial.read_line(port_name, opts) 的 Rust begin 半边。
     let lb_read = host_services.line_buffers.clone();
     let pid_read = host_services.plugin_id.clone();
     let transport_read = transport.clone();
-    table.set(
+    serial.set(
         "__read_line_begin",
         lua.create_function(move |lua, (port, opts): (String, Table)| {
             let port = transport_read
@@ -586,13 +668,12 @@ pub(crate) fn create_serial_api(
     )?;
 
     // ctx.serial.read_line(port_name, opts) 的 Rust finish 半边。
-    table.set(
+    serial.set(
         "__read_line_finish",
         lua.create_function(move |lua, ()| {
             let task_id = require_task_id(lua, "read_line")?;
             // 恢复后，从 state 中读取结果。返回 table { line = ..., err = ... }
-            let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
-            if let Ok(state) = tasks.get::<Table>(task_id.as_str()) {
+            if let Some(state) = task_state(lua, &task_id)? {
                 let line: Option<String> = state.get("_read_result").ok();
                 let err: Option<String> = state.get("_read_result_err").ok();
                 let _ = state.set("_read_result", Value::Nil);
@@ -617,11 +698,22 @@ pub(crate) fn create_serial_api(
         })?,
     )?;
 
+    Ok(())
+}
+
+/// ── write_line_and_expect ──：`__write_line_and_expect_begin`（发送 + 立即匹配，
+/// 未命中则挂 yield op）与 `__write_line_and_expect_finish`（恢复后读结果）。
+fn register_write_line_and_expect_apis(
+    lua: &Lua,
+    serial: &Table,
+    transport: &TransportManager,
+    host_services: &LuaHostServices,
+) -> mlua::Result<()> {
     // ctx.serial.write_line_and_expect(port, line, opts) 的 Rust begin 半边。
     let lb_expect = host_services.line_buffers.clone();
     let pid_expect = host_services.plugin_id.clone();
-    let transport_expect = transport;
-    table.set(
+    let transport_expect = transport.clone();
+    serial.set(
         "__write_line_and_expect_begin",
         lua.create_function(move |lua, (port, line, opts): (String, String, Table)| {
             let port = transport_expect
@@ -636,33 +728,9 @@ pub(crate) fn create_serial_api(
                     "v0.3 只支持 delimiter=\"\\n\"".into(),
                 ));
             }
-            let patterns: Table = opts.get("patterns").unwrap_or_else(|_| {
-                // 构建默认 expect pattern 表。
-                let t = match lua.create_table() {
-                    Ok(t) => t,
-                    Err(e) => {
-                        log::error!("serial expect create_table failed: {e}");
-                        return lua.globals();
-                    }
-                };
-                let entry = match lua.create_table() {
-                    Ok(e) => e,
-                    Err(e) => {
-                        log::error!("serial expect entry create_table failed: {e}");
-                        return t;
-                    }
-                };
-                let _ = entry.set(EXPECT_PATTERN, "^ok").map_err(|e| {
-                    log::error!("entry.set EXPECT_PATTERN failed: {e}");
-                });
-                let _ = entry.set(EXPECT_ACTION, EXPECT_ACTION_RETURN).map_err(|e| {
-                    log::error!("entry.set EXPECT_ACTION failed: {e}");
-                });
-                let _ = t.set(1, entry).map_err(|e| {
-                    log::error!("t.set entry failed: {e}");
-                });
-                t
-            });
+            let patterns: Table = opts
+                .get("patterns")
+                .unwrap_or_else(|_| default_expect_patterns(lua));
 
             // 发送前清空旧缓冲，避免 stale ok/error 误匹配当前命令
             let flush_before: bool = opts.get("flush_before_send").unwrap_or(true);
@@ -681,66 +749,10 @@ pub(crate) fn create_serial_api(
 
             // 先检查缓冲区是否有立即匹配
             let key = line_buffer_key(&pid_expect, &port);
-            if let Some(ref map) = lb_expect {
-                let mut map_lock = map.lock();
-                if let Some(buffer) = map_lock.get_mut(&key) {
-                    // drain 出最多 64 行做立即匹配。未命中行会被消费，避免同一批
-                    // 噪声被反复检查并挡住后续真正的 ok/ack。
-                    let mut candidates: Vec<String> = Vec::new();
-                    while let Some(candidate) = buffer.next_line() {
-                        candidates.push(candidate);
-                        if candidates.len() >= 64 {
-                            break;
-                        }
-                    }
-                    let mut matched: Option<(Table, String)> = None;
-                    let mut matched_through = None;
-                    for (i, candidate) in candidates.iter().enumerate() {
-                        for pair in patterns.pairs::<Value, Table>().flatten() {
-                            let p: Table = pair.1;
-                            let pat: String = p.get(EXPECT_PATTERN).unwrap_or_default();
-                            let action: String =
-                                p.get(EXPECT_ACTION).unwrap_or_else(|_| "return".to_owned());
-                            if match_pat(candidate, &pat) {
-                                if action == "continue" {
-                                    // 更新 task status 让用户看到设备忙碌
-                                    let tid = current_task_id(lua);
-                                    if !tid.is_empty() {
-                                        let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
-                                        if let Ok(s) = tasks.get::<Table>(tid.as_str()) {
-                                            let pname: String = p.get("name").unwrap_or_default();
-                                            let _ = s.set(
-                                                "status",
-                                                format!("设备忙: {pname}: {candidate}"),
-                                            );
-                                        }
-                                    }
-                                    break;
-                                }
-                                matched = Some((p, candidate.clone()));
-                                matched_through = Some(i + 1);
-                                break;
-                            }
-                        }
-                        if matched.is_some() {
-                            break;
-                        }
-                    }
-                    buffer.finish_expect_scan(candidates, matched_through);
-                    if let Some((p, candidate)) = matched {
-                        let r = lua.create_table()?;
-                        r.set("name", p.get::<String>("name").unwrap_or_default())?;
-                        r.set("line", candidate)?;
-                        r.set("elapsed_ms", 0_u64)?;
-                        let wrapper = lua.create_table()?;
-                        wrapper.set("result", r)?;
-                        wrapper.set("err", Value::Nil)?;
-                        let ready = lua.create_table()?;
-                        ready.set("__ready", true)?;
-                        ready.set("value", wrapper)?;
-                        return Ok(Value::Table(ready));
-                    }
-                }
+            if let Some(ref map) = lb_expect
+                && let Some(ready) = scan_immediate_expect(lua, map, &key, &patterns)?
+            {
+                return Ok(ready);
             }
 
             // 无匹配，返回 yield op，由 Lua wrapper 执行 coroutine.yield。
@@ -766,13 +778,12 @@ pub(crate) fn create_serial_api(
     )?;
 
     // ctx.serial.write_line_and_expect(port, line, opts) 的 Rust finish 半边。
-    table.set(
+    serial.set(
         "__write_line_and_expect_finish",
         lua.create_function(move |lua, ()| {
             let task_id = require_task_id(lua, "write_line_and_expect")?;
             // 恢复后读取结果。返回 table { result = {name,line,elapsed_ms}, err = ... }
-            let tasks: Table = lua.globals().get(PLUGIN_TASKS)?;
-            if let Ok(state) = tasks.get::<Table>(task_id.as_str()) {
+            if let Some(state) = task_state(lua, &task_id)? {
                 let matched: Option<Table> = state.get("_expect_result").ok();
                 let err: Option<String> = state.get("_expect_err").ok();
                 let _ = state.set("_expect_result", Value::Nil);
@@ -796,11 +807,112 @@ pub(crate) fn create_serial_api(
         })?,
     )?;
 
-    install_serial_blocking_wrappers(lua, &table)?;
-
-    Ok(table)
+    Ok(())
 }
 
+/// 构建默认 expect pattern 表：`^ok` 命中即 return。
+///
+/// 建表失败只记日志并退化为一个可用的表，不向 Lua 侧抛错。
+fn default_expect_patterns(lua: &Lua) -> Table {
+    let t = match lua.create_table() {
+        Ok(t) => t,
+        Err(e) => {
+            log::error!("serial expect create_table failed: {e}");
+            return lua.globals();
+        }
+    };
+    let entry = match lua.create_table() {
+        Ok(e) => e,
+        Err(e) => {
+            log::error!("serial expect entry create_table failed: {e}");
+            return t;
+        }
+    };
+    let _ = entry.set(EXPECT_PATTERN, "^ok").map_err(|e| {
+        log::error!("entry.set EXPECT_PATTERN failed: {e}");
+    });
+    let _ = entry.set(EXPECT_ACTION, EXPECT_ACTION_RETURN).map_err(|e| {
+        log::error!("entry.set EXPECT_ACTION failed: {e}");
+    });
+    let _ = t.set(1, entry).map_err(|e| {
+        log::error!("t.set entry failed: {e}");
+    });
+    t
+}
+
+/// 发送后先扫一遍该端口的行缓冲区做立即匹配，命中则返回 `__ready` 包装
+/// （Lua wrapper 据此跳过 `coroutine.yield`），没有命中返回 `None`。
+///
+/// `patterns` 只借用：未命中时同一个模式表还要挂到 yield op 上继续等。
+fn scan_immediate_expect(
+    lua: &Lua,
+    buffers: &LineBufferMap,
+    key: &str,
+    patterns: &Table,
+) -> mlua::Result<Option<Value>> {
+    let mut map_lock = buffers.lock();
+    let Some(buffer) = map_lock.get_mut(key) else {
+        return Ok(None);
+    };
+
+    // drain 出最多 64 行做立即匹配。未命中行会被消费，避免同一批
+    // 噪声被反复检查并挡住后续真正的 ok/ack。
+    let mut candidates: Vec<String> = Vec::new();
+    while let Some(candidate) = buffer.next_line() {
+        candidates.push(candidate);
+        if candidates.len() >= 64 {
+            break;
+        }
+    }
+    let mut matched: Option<(Table, String)> = None;
+    let mut matched_through = None;
+    for (i, candidate) in candidates.iter().enumerate() {
+        for pair in patterns.pairs::<Value, Table>().flatten() {
+            let p: Table = pair.1;
+            let pat: String = p.get(EXPECT_PATTERN).unwrap_or_default();
+            let action: String = p.get(EXPECT_ACTION).unwrap_or_else(|_| "return".to_owned());
+            if !match_pat(candidate, &pat) {
+                continue;
+            }
+            if action == "continue" {
+                // 更新 task status 让用户看到设备忙碌
+                let tid = current_task_id(lua);
+                if !tid.is_empty()
+                    && let Some(s) = task_state(lua, &tid)?
+                {
+                    let pname: String = p.get("name").unwrap_or_default();
+                    let _ = s.set("status", format!("设备忙: {pname}: {candidate}"));
+                }
+                break;
+            }
+            matched = Some((p, candidate.clone()));
+            matched_through = Some(i + 1);
+            break;
+        }
+        if matched.is_some() {
+            break;
+        }
+    }
+    buffer.finish_expect_scan(candidates, matched_through);
+
+    let Some((p, candidate)) = matched else {
+        return Ok(None);
+    };
+    let result = lua.create_table()?;
+    result.set("name", p.get::<String>("name").unwrap_or_default())?;
+    result.set("line", candidate)?;
+    result.set("elapsed_ms", 0_u64)?;
+    let wrapper = lua.create_table()?;
+    wrapper.set("result", result)?;
+    wrapper.set("err", Value::Nil)?;
+    let ready = lua.create_table()?;
+    ready.set("__ready", true)?;
+    ready.set("value", wrapper)?;
+    Ok(Some(Value::Table(ready)))
+}
+
+/// 最后一组注册：用 Lua wrapper 覆盖上面注册的内部方法，对外给出可 yield 的
+/// `expect` / `expect_from` / `request` / `read_line` / `write_line_and_expect`。
 fn install_serial_blocking_wrappers(lua: &Lua, serial: &Table) -> mlua::Result<()> {
     let install: mlua::Function = lua
         .load(

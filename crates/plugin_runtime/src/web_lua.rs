@@ -1151,66 +1151,56 @@ fn create_bus_api(lua: &Lua, host: Rc<dyn PluginHostApi>) -> omnilua::Result<Tab
     Ok(api)
 }
 
+/// 浏览器侧 `ctx.serial` 的装配入口。
+///
+/// 方法按功能域交给下面的 `register_serial_*` 注册；调用顺序就是提取前
+/// `api.set` 的顺序，因此 Lua 侧看到的方法以及每个闭包被创建的时机都没变。
 fn create_serial_api(
     lua: &Lua,
     host: Rc<dyn PluginHostApi>,
     line_buffers: Rc<RefCell<BTreeMap<String, VecDeque<String>>>>,
 ) -> omnilua::Result<Table> {
     let api = lua.create_table()?;
+    register_serial_device_api(lua, host.clone(), &api)?;
+    register_serial_port_api(lua, host.clone(), &api)?;
+    register_serial_send_api(lua, host.clone(), line_buffers, &api)?;
+    register_serial_read_api(lua, &api)?;
+    register_serial_expect_api(lua, host, &api)?;
+    Ok(api)
+}
+
+/// 设备发现与端口申请：`devices`、`request_device`/`request_port`，以及协程里
+/// 真正让出执行权的 `__request_device_begin`/`__request_device_finish` 协议对。
+fn register_serial_device_api(
+    lua: &Lua,
+    host: Rc<dyn PluginHostApi>,
+    api: &Table,
+) -> omnilua::Result<()> {
     let devices_host = host.clone();
     api.set(
         "devices",
         lua.create_function(move |lua, ()| {
-            let devices = devices_host.serial_devices().map_err(host_error)?;
-            value_to_lua(
-                lua,
-                &PluginValue::from_json(
-                    &serde_json::to_value(devices)
-                        .map_err(|error| host_error(PluginError::Host(error.to_string())))?,
-                ),
-            )
+            let devices = serial_devices_json(&*devices_host).map_err(host_error)?;
+            value_to_lua(lua, &PluginValue::from_json(&devices))
         })?,
     )?;
     let request_host = host.clone();
     api.set(
         "request_device",
-        lua.create_function(move |lua, ()| {
-            let device = request_host.serial_request_device().map_err(host_error)?;
-            value_to_lua(
-                lua,
-                &PluginValue::from_json(
-                    &serde_json::to_value(device)
-                        .map_err(|error| lua_error_message(error.to_string()))?,
-                ),
-            )
-        })?,
+        lua.create_function(move |lua, ()| request_serial_device(lua, &*request_host))?,
     )?;
+    // `request_port` 是 `request_device` 的别名：宿主只有"申请一个设备"这一条
+    // 请求，但两种脚本写法都在用。
     let request_port_host = host.clone();
     api.set(
         "request_port",
-        lua.create_function(move |lua, ()| {
-            let device = request_port_host
-                .serial_request_device()
-                .map_err(host_error)?;
-            value_to_lua(
-                lua,
-                &PluginValue::from_json(
-                    &serde_json::to_value(device)
-                        .map_err(|error| lua_error_message(error.to_string()))?,
-                ),
-            )
-        })?,
+        lua.create_function(move |lua, ()| request_serial_device(lua, &*request_port_host))?,
     )?;
     let request_device_host = host.clone();
     api.set(
         "__request_device_begin",
         lua.create_function(move |lua, ()| {
-            let task_id: String = lua.globals().get("__current_task_id").unwrap_or_default();
-            if task_id.is_empty() {
-                return Err(lua_error_message(
-                    "ctx.serial.request_device 必须在 ctx.task 协程内调用",
-                ));
-            }
+            let task_id = require_task_id(lua, "ctx.serial.request_device")?;
             let response = request_device_host
                 .request(PluginHostRequest::SerialRequestDevice {
                     task_id: Some(task_id.clone()),
@@ -1222,11 +1212,10 @@ fn create_serial_api(
             let Some(PluginValue::String(request_id)) = response.get("request_id") else {
                 return Ok(Value::Nil);
             };
-            let tasks: Table = lua.globals().get("__plugin_tasks")?;
-            let state: Table = tasks.get(task_id.as_str())?;
+            let state = task_state_of(lua, &task_id)?;
             let op = lua.create_table()?;
             op.set("kind", "host")?;
-            op.set("request_id", request_id.clone())?;
+            op.set("request_id", request_id.as_str())?;
             state.set("yield_op", op)?;
             state.set("_host_result", Value::Nil)?;
             state.set("_host_result_err", Value::Nil)?;
@@ -1249,46 +1238,22 @@ fn create_serial_api(
             Ok(Value::Nil)
         })?,
     )?;
+    Ok(())
+}
+
+/// 端口的打开、关闭与枚举：`open`、`close`、`close_port`、`open_ports`、`list`。
+fn register_serial_port_api(
+    lua: &Lua,
+    host: Rc<dyn PluginHostApi>,
+    api: &Table,
+) -> omnilua::Result<()> {
     let open_host = host.clone();
     api.set(
         "open",
         lua.create_function(move |lua, value: Value| {
-            let options = match value {
-                Value::String(port) => {
-                    let options = lua.create_table()?;
-                    options.set("port_id", port.to_str()?.to_owned())?;
-                    options
-                }
-                Value::Table(options) => options,
-                _ => {
-                    return Err(lua_error_message(
-                        "ctx.serial.open expects a port id string or options table",
-                    ));
-                }
-            };
-            let port = options
-                .get::<_, String>("port_id")
-                .or_else(|_| options.get::<_, String>("port"))?;
-            let parity = match options
-                .get::<_, String>("parity")
-                .unwrap_or_else(|_| "none".to_owned())
-                .to_ascii_lowercase()
-                .as_str()
-            {
-                "odd" => PluginParity::Odd,
-                "even" => PluginParity::Even,
-                _ => PluginParity::None,
-            };
+            let (port, settings) = parse_open_request(lua, value)?;
             open_host
-                .serial_open(
-                    &PortId::new(port),
-                    PluginSerialSettings {
-                        baud_rate: options.get::<_, u32>("baud_rate").unwrap_or(115_200),
-                        data_bits: options.get::<_, u32>("data_bits").unwrap_or(8) as u8,
-                        stop_bits: options.get::<_, u32>("stop_bits").unwrap_or(1) as u8,
-                        parity,
-                    },
-                )
+                .serial_open(&PortId::new(port), settings)
                 .map_err(host_error)
         })?,
     )?;
@@ -1296,24 +1261,7 @@ fn create_serial_api(
     api.set(
         "close",
         lua.create_function(move |_, port: Option<String>| {
-            let ports = if let Some(port) = port {
-                vec![port]
-            } else {
-                match close_host
-                    .request(PluginHostRequest::SerialOpenPorts)
-                    .map_err(host_error)?
-                {
-                    PluginValue::Array(ports) => ports
-                        .into_iter()
-                        .filter_map(|port| match port {
-                            PluginValue::String(port) => Some(port),
-                            _ => None,
-                        })
-                        .collect(),
-                    _ => Vec::new(),
-                }
-            };
-            for port in ports {
+            for port in close_target_ports(&*close_host, port).map_err(host_error)? {
                 close_host
                     .serial_close(&PortId::new(port))
                     .map_err(host_error)?;
@@ -1346,25 +1294,22 @@ fn create_serial_api(
     api.set(
         "list",
         lua.create_function(move |lua, ()| {
-            let devices = list_host.serial_devices().map_err(host_error)?;
-            let mut value = serde_json::to_value(devices)
-                .map_err(|error| host_error(PluginError::Host(error.to_string())))?;
-            if let serde_json::Value::Array(items) = &mut value {
-                for item in items {
-                    let serde_json::Value::Object(item) = item else {
-                        continue;
-                    };
-                    if let Some(id) = item.get("id").cloned() {
-                        item.insert("port_name".to_owned(), id);
-                    }
-                    if let Some(kind) = item.get("kind").cloned() {
-                        item.insert("port_type".to_owned(), kind);
-                    }
-                }
-            }
-            value_to_lua(lua, &PluginValue::from_json(&value))
+            let mut devices = serial_devices_json(&*list_host).map_err(host_error)?;
+            add_port_name_aliases(&mut devices);
+            value_to_lua(lua, &PluginValue::from_json(&devices))
         })?,
     )?;
+    Ok(())
+}
+
+/// 写出与接收缓冲：`send_to`、`send_hex_to`、`status_port`、`write_line`、
+/// `flush_rx`。`flush_rx` 清的是本实例按端口缓存的接收行。
+fn register_serial_send_api(
+    lua: &Lua,
+    host: Rc<dyn PluginHostApi>,
+    line_buffers: Rc<RefCell<BTreeMap<String, VecDeque<String>>>>,
+    api: &Table,
+) -> omnilua::Result<()> {
     let send_host = host.clone();
     api.set(
         "send_to",
@@ -1398,12 +1343,8 @@ fn create_serial_api(
     api.set(
         "write_line",
         lua.create_function(move |_, (port, line): (String, String)| {
-            let mut bytes = line.into_bytes();
-            if !bytes.ends_with(b"\n") {
-                bytes.push(b'\n');
-            }
             write_host
-                .serial_send(&PortId::new(port), &bytes)
+                .serial_send(&PortId::new(port), &line_bytes(line))
                 .map_err(host_error)
         })?,
     )?;
@@ -1417,18 +1358,21 @@ fn create_serial_api(
             Ok(())
         })?,
     )?;
+    Ok(())
+}
 
+/// 行读取与模式等待的协程协议：`__read_line_begin`/`__read_line_finish` 与
+/// `__expect_begin`/`__expect_finish`。`install_async_wrappers` 把它们包成
+/// `read_line`/`expect_from`/`expect`；这一段本身不碰宿主，只负责挂上 `yield_op`。
+fn register_serial_read_api(lua: &Lua, api: &Table) -> omnilua::Result<()> {
     let read_begin = lua.create_function(|lua, (port, opts): (String, Option<Table>)| {
-        let task_id: String = lua.globals().get("__current_task_id").unwrap_or_default();
-        if task_id.is_empty() {
-            return Err(lua_error_message(
-                "ctx.serial.read_line 必须在 ctx.task 协程内调用",
-            ));
-        }
+        let task_id = require_task_id(lua, "ctx.serial.read_line")?;
         let opts = opts.unwrap_or(lua.create_table()?);
         let op = lua.create_table()?;
         op.set("kind", "read_line")?;
         op.set("port", port)?;
+        // 与提取前一致：`timeout_ms` 在选项表上读两次，不去合并成一次——选项表
+        // 由脚本给出，带 `__index` 时两次读取并不保证相同。
         op.set(
             "timeout_ms",
             opts.get::<_, u64>("timeout_ms").unwrap_or(5_000),
@@ -1437,9 +1381,7 @@ fn create_serial_api(
             "deadline_ms",
             now_ms_via_globals(lua)? + opts.get::<_, u64>("timeout_ms").unwrap_or(5_000),
         )?;
-        let tasks: Table = lua.globals().get("__plugin_tasks")?;
-        let state: Table = tasks.get(task_id.as_str())?;
-        state.set("yield_op", op.clone())?;
+        park_yield_op(lua, &task_id, &op)?;
         Ok(op)
     })?;
     api.set("__read_line_begin", read_begin)?;
@@ -1468,12 +1410,7 @@ fn create_serial_api(
         "__expect_begin",
         lua.create_function(
             |lua, (port, pattern, timeout_ms): (String, String, Option<u64>)| {
-                let task_id: String = lua.globals().get("__current_task_id").unwrap_or_default();
-                if task_id.is_empty() {
-                    return Err(lua_error_message(
-                        "ctx.serial.expect 必须在 ctx.task 协程内调用",
-                    ));
-                }
+                let task_id = require_task_id(lua, "ctx.serial.expect")?;
                 let timeout_ms = timeout_ms.unwrap_or(1_000);
                 let patterns = lua.create_table()?;
                 let entry = lua.create_table()?;
@@ -1488,9 +1425,7 @@ fn create_serial_api(
                 op.set("timeout_ms", timeout_ms)?;
                 let now = now_ms_via_globals(lua)?;
                 op.set("deadline_ms", now.saturating_add(timeout_ms))?;
-                let tasks: Table = lua.globals().get("__plugin_tasks")?;
-                let state: Table = tasks.get(task_id.as_str())?;
-                state.set("yield_op", op.clone())?;
+                park_yield_op(lua, &task_id, &op)?;
                 Ok(op)
             },
         )?,
@@ -1509,26 +1444,26 @@ fn create_serial_api(
             Ok(Value::Nil)
         })?,
     )?;
+    Ok(())
+}
 
+/// 写入并等待响应：`__write_line_and_expect_begin`/`__write_line_and_expect_finish`。
+/// `begin` 先把整行发出去，再挂上 `yield_op` 等待脚本给出的模式命中。
+fn register_serial_expect_api(
+    lua: &Lua,
+    host: Rc<dyn PluginHostApi>,
+    api: &Table,
+) -> omnilua::Result<()> {
     let expect_host = host;
     api.set(
         "__write_line_and_expect_begin",
         lua.create_function(
             move |lua, (port, line, opts): (String, String, Option<Table>)| {
-                let task_id: String = lua.globals().get("__current_task_id").unwrap_or_default();
-                if task_id.is_empty() {
-                    return Err(lua_error_message(
-                        "ctx.serial.write_line_and_expect 必须在 ctx.task 协程内调用",
-                    ));
-                }
+                let task_id = require_task_id(lua, "ctx.serial.write_line_and_expect")?;
                 let opts = opts.unwrap_or(lua.create_table()?);
                 let timeout = opts.get::<_, u64>("timeout_ms").unwrap_or(300_000);
-                let mut bytes = line.into_bytes();
-                if !bytes.ends_with(b"\n") {
-                    bytes.push(b'\n');
-                }
                 expect_host
-                    .serial_send(&PortId::new(port.clone()), &bytes)
+                    .serial_send(&PortId::new(port.clone()), &line_bytes(line))
                     .map_err(host_error)?;
                 let op = lua.create_table()?;
                 op.set("kind", "write_line_and_expect")?;
@@ -1545,9 +1480,7 @@ fn create_serial_api(
                     opts.get::<_, Table>("patterns")
                         .unwrap_or(lua.create_table()?),
                 )?;
-                let tasks: Table = lua.globals().get("__plugin_tasks")?;
-                let state: Table = tasks.get(task_id.as_str())?;
-                state.set("yield_op", op.clone())?;
+                park_yield_op(lua, &task_id, &op)?;
                 Ok(op)
             },
         )?,
@@ -1572,7 +1505,139 @@ fn create_serial_api(
             Ok(result)
         })?,
     )?;
-    Ok(api)
+    Ok(())
+}
+
+/// 当前 `ctx.task` 协程的 task id。
+///
+/// 不在协程里时按各 API 既有的句串报错，`api` 传的就是脚本看到的方法名。
+fn require_task_id(lua: &Lua, api: &str) -> omnilua::Result<String> {
+    let task_id: String = lua.globals().get("__current_task_id").unwrap_or_default();
+    if task_id.is_empty() {
+        return Err(lua_error_message(format!(
+            "{api} 必须在 ctx.task 协程内调用"
+        )));
+    }
+    Ok(task_id)
+}
+
+/// `task_id` 对应任务的状态表。
+///
+/// `*_begin` 用它挂 `yield_op`；`*_finish` 走 [`current_task_state`]，按调度器
+/// 设好的 `__current_task_id` 找到同一份状态。
+fn task_state_of(lua: &Lua, task_id: &str) -> omnilua::Result<Table> {
+    let tasks: Table = lua.globals().get("__plugin_tasks")?;
+    tasks.get(task_id)
+}
+
+/// 把 `op` 挂到任务的 `yield_op` 上，调度器据此在协程恢复时投递结果。
+fn park_yield_op(lua: &Lua, task_id: &str, op: &Table) -> omnilua::Result<()> {
+    let state = task_state_of(lua, task_id)?;
+    state.set("yield_op", op)?;
+    Ok(())
+}
+
+/// 宿主的设备清单转成 JSON 形态，`devices` 与 `list` 共用。
+fn serial_devices_json(host: &dyn PluginHostApi) -> PluginResult<serde_json::Value> {
+    let devices = host.serial_devices()?;
+    serde_json::to_value(devices).map_err(|error| PluginError::Host(error.to_string()))
+}
+
+/// 向宿主申请一个设备并转成 Lua 值，`request_device`/`request_port` 共用。
+///
+/// serde 转换失败按 Lua 运行时错误报出：这条路径与 `devices`/`list` 不同，
+/// 不走 `host_error`，提取前后保持一致。
+fn request_serial_device(lua: &Lua, host: &dyn PluginHostApi) -> omnilua::Result<Value> {
+    let device = host.serial_request_device().map_err(host_error)?;
+    let json =
+        serde_json::to_value(device).map_err(|error| lua_error_message(error.to_string()))?;
+    value_to_lua(lua, &PluginValue::from_json(&json))
+}
+
+/// `ctx.serial.open` 的入参：端口 id 字符串，或带端口与串口参数的选项表。
+/// 串口参数缺省 115200 8N1，校验仍由宿主负责。
+fn parse_open_request(lua: &Lua, value: Value) -> omnilua::Result<(String, PluginSerialSettings)> {
+    let options = match value {
+        Value::String(port) => {
+            let options = lua.create_table()?;
+            options.set("port_id", port.to_str()?.to_owned())?;
+            options
+        }
+        Value::Table(options) => options,
+        _ => {
+            return Err(lua_error_message(
+                "ctx.serial.open expects a port id string or options table",
+            ));
+        }
+    };
+    let port = options
+        .get::<_, String>("port_id")
+        .or_else(|_| options.get::<_, String>("port"))?;
+    let parity = match options
+        .get::<_, String>("parity")
+        .unwrap_or_else(|_| "none".to_owned())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "odd" => PluginParity::Odd,
+        "even" => PluginParity::Even,
+        _ => PluginParity::None,
+    };
+    Ok((
+        port,
+        PluginSerialSettings {
+            baud_rate: options.get::<_, u32>("baud_rate").unwrap_or(115_200),
+            data_bits: options.get::<_, u32>("data_bits").unwrap_or(8) as u8,
+            stop_bits: options.get::<_, u32>("stop_bits").unwrap_or(1) as u8,
+            parity,
+        },
+    ))
+}
+
+/// `ctx.serial.close` 要关闭哪些端口：显式传入的那个，或宿主报告当前打开的全部
+/// 端口。"只关本插件打开的端口"由宿主的 `SerialOpenPorts` 请求负责界定。
+fn close_target_ports(host: &dyn PluginHostApi, port: Option<String>) -> PluginResult<Vec<String>> {
+    if let Some(port) = port {
+        return Ok(vec![port]);
+    }
+    match host.request(PluginHostRequest::SerialOpenPorts)? {
+        PluginValue::Array(ports) => Ok(ports
+            .into_iter()
+            .filter_map(|port| match port {
+                PluginValue::String(port) => Some(port),
+                _ => None,
+            })
+            .collect()),
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// 行文本转成待发送字节，行尾没有 `\n` 时补上。
+fn line_bytes(line: String) -> Vec<u8> {
+    let mut bytes = line.into_bytes();
+    if !bytes.ends_with(b"\n") {
+        bytes.push(b'\n');
+    }
+    bytes
+}
+
+/// 给 `list` 的每个设备条目补上桌面端字段名：`id`/`kind` 同时以
+/// `port_name`/`port_type` 暴露，同一份脚本在两端都能读到熟悉的键名。
+fn add_port_name_aliases(value: &mut serde_json::Value) {
+    let serde_json::Value::Array(items) = value else {
+        return;
+    };
+    for item in items {
+        let serde_json::Value::Object(item) = item else {
+            continue;
+        };
+        if let Some(id) = item.get("id").cloned() {
+            item.insert("port_name".to_owned(), id);
+        }
+        if let Some(kind) = item.get("kind").cloned() {
+            item.insert("port_type".to_owned(), kind);
+        }
+    }
 }
 
 fn install_async_wrappers(lua: &Lua) -> omnilua::Result<()> {
