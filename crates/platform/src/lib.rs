@@ -209,6 +209,36 @@ pub enum TransportError {
 pub type TransportResult<T> = Result<T, TransportError>;
 pub type TransportFuture<T> = Pin<Box<dyn Future<Output = TransportResult<T>> + 'static>>;
 
+/// 把平台传输错误翻译成用户可见的中文提示。
+///
+/// **与 `tool_transport::translate_error` 是同一个用户概念的两个枚举**：`tool-transport`
+/// 只在 native 编译（wasm 依赖不到它），所以本函数与它必须各留一份；同一件事在两端说
+/// 同一句话这件事由 `tests/transport_error_wording.rs` 机器钉住，改任何一侧的文案都会
+/// 让那条断言变红 —— 请两边一起改，别只动一处。逐字抄来的那几条（`PortNotConnected`
+/// 对应 `TransportError::PortNotOpen`）刻意不做改写。
+///
+/// `Operation(detail)` 原样返回：native 侧的 `operation_error` 放进来的已经是
+/// `tool_transport::translate_error` 的结果（`QueueFull` / `WorkerClosed` / `InvalidHex`
+/// 这些只有 transport 侧才有的变体都走这条路），再套一层中文框架就成了
+/// 「操作失败：串口错误：…」这类同义反复。
+///
+/// 按变体类型化分发，不做字符串匹配（与 transport 侧同一份规则）。
+pub fn translate_error(err: &TransportError) -> String {
+    match err {
+        TransportError::Unsupported => "此平台不支持该传输能力".into(),
+        TransportError::NoPortAvailable => "没有可用的串口（请先连接设备或申请端口）".into(),
+        TransportError::PortNotKnown(port) => {
+            format!("未知串口 {port}（授权列表里没有它，请重新申请端口）")
+        }
+        // 与 `tool_transport::translate_error` 的 `PortNotOpen` 逐字相同。
+        TransportError::PortNotConnected(port) => {
+            format!("串口 {port} 未打开（可能已断开，请重连）")
+        }
+        TransportError::PermissionDenied => "浏览器拒绝了串口授权请求".into(),
+        TransportError::Operation(detail) => detail.clone(),
+    }
+}
+
 fn serial_event(
     topic: &str,
     direction: tool_core::Direction,

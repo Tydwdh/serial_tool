@@ -581,7 +581,24 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
       `WEB_SERIAL` 两份常量还逐位相同）。结论：这条不是"死代码可删"，而是
       **"native 绕过了自己声明的能力"** —— 要让后端上报真正生效，得先决定 `request_port` 在桌面端
       是否该露出"申请端口"入口，那是 UI 行为改动，需要肉眼回归，不在机械收敛范围内。
-      ④ web 错误文案仍有英文与「无 `transport: ` 前缀」差异。
+      ④ 传输失败的文案 —— **原先记成"web 仍是英文、且没有 `transport: ` 前缀"，这个归因不准**。
+      按调用点重测：中文映射 `tool_transport::translate_error` 全仓只有**一个**生产调用点
+      （`application/src/workbench.rs` 的 `TransportEndpoint::send`，即周期发送那一行），
+      而 `platform/src/native.rs` 的 `operation_error` 在能翻译之前就把强类型错误 `.to_string()` 了 ——
+      所以**桌面端在同一批失败上同样是英文**，这不是平台差异，是一个调用点丢掉了变体。
+      本波已修（有测试）：`tool_platform` 补了自己的 `translate_error`（6 个变体，两端都编译），
+      web 侧接在 `application/src/web.rs` 的 `spawn` 缝上（赶在变体被丢掉之前，两个出口
+      `snapshot.message` 与 `TaskFailed` 一起覆盖），`operation_error` 改为先翻译再嵌入，
+      并去掉 `start_receive_with_disconnect` 那两处双重 `Operation(..)` 包装
+      （此前用户会读到两句连在一起的 "…operation failed: …"）。
+      两份映射之间"同一件事说同一句话"由 `crates/platform/tests/transport_error_wording.rs`
+      机器钉住（实测：只改 `PortNotConnected` 一个字面量，3 条用例变红并打印左右原文）。
+      **仍然英文**（本波未动，逐条核过）：`application/src/workbench.rs` 里三处
+      `error.to_string()`（网络端口的打开/发送路径，以及 `:1271` 那处喂给 `"would block"`
+      字符串重试判定的分支）、`platform/src/native.rs` 里 `"native transport worker stopped"`
+      这个英文字面量；另外 `transport: ` 前缀来自 `application/src/error.rs` 的
+      `#[error("transport: {0}")]`，而 `AppError` 被 cfg 挡在 wasm 之外，所以**前缀这一项
+      仍然是两端不同**（native 有、web 无）。
       ⑤ 【本波已闭合】换行后缀表原有 3 份（native `state::LineEnding`、wasm `WebLineEnding`、
       共享面板 `SendLineEnding`），值一致但没有任何断言钉住，两端还各写两份 4 臂 **identity** `match`
       （类型不同才需要转）。现在收进 `tool_core::LineEnding`（`crates/core/src/lib.rs:454`），
@@ -591,6 +608,10 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
       `#[serde(rename_all = "lowercase")]` 实测打红 3 条、去掉即回绿，所以这条断言不是摆设；
       三份表本身由 `line_ending_label_and_suffix_tables` 与 `line_ending_default_is_none` 钉住
       （变体顺序、标签、后缀字节序、默认值）。
+      **另有实机证据**：本波真开了一次桌面窗口（`target/debug` 的构建），发送器的换行下拉
+      按 `ALL` 顺序渲染出「无 / LF / CR / CRLF」，而那次运行写回的
+      `%APPDATA%\HardwareWorkbench\workspace.json` 里是 `"line_ending": "None"` ——
+      持久化形状在真实读写路径上保持裸变体名，不只是单测里成立。
       ⑥ web 把 `webserial:session:N` 会话别名键一起持久化。
 
 ### 本轮裁掉项

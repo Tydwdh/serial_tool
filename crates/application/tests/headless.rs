@@ -110,6 +110,15 @@ fn task_state(wb: &Workbench, task_id: TaskId) -> Option<TaskState> {
         .map(|snapshot| snapshot.state)
 }
 
+/// 读取任务快照对用户说的话：成功/进行中的文案之外，**失败时这里就是错误原文**，
+/// 所以它才是「用户到底看到了哪句话」的观测点。
+fn task_message(wb: &Workbench, task_id: TaskId) -> Option<String> {
+    wb.task_snapshots()
+        .into_iter()
+        .find(|snapshot| snapshot.id == task_id)
+        .map(|snapshot| snapshot.message)
+}
+
 /// 断言命令进入异步执行，并返回其 task id。
 fn expect_pending(wb: &mut Workbench, command: AppCommand) -> TaskId {
     match wb.dispatch(command).expect("命令必须被接受") {
@@ -1438,5 +1447,68 @@ fn periodic_send_endpoint_uses_the_shared_send_plan() {
         vec!["AT\r\n", "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}"],
         "对端必须恰好收到两条发送：多行 HEX 分成两帧即「周期发送仍在按行拆分」，\
          纯空白输入多出一帧即「静默 no-op 被改成真发送」"
+    );
+}
+
+/// 端口从未打开时，两条投递入口都必须说中文，且说的是同一句话。
+///
+/// 收敛前的实测状态：桌面端只有周期发送（`TransportEndpoint::send`）过了
+/// `tool_transport::translate_error`；点一次「发送」走平台后端，`native.rs::operation_error`
+/// 当时直接 `TransportError::to_string()`，**变体在能被翻译之前就被压成英文原文**，
+/// 于是同一个未打开的端口在两条路上得到两种语言。这里钉的是端到端的那两句：
+/// 外框（`transport operation failed: `）是平台错误枚举 `Display` 的既有形状，
+/// 本轮只保证括号里的正文是中文且与周期发送逐字相同。
+#[test]
+fn sending_to_a_port_that_was_never_opened_reads_in_chinese_on_both_entry_points() {
+    const PORT: &str = "COM_HEADLESS_CLOSED";
+    const CLOSED_PORT_WORDS: &str = "串口 COM_HEADLESS_CLOSED 未打开（可能已断开，请重连）";
+
+    let bus = DataBus::new();
+    let mut wb = Workbench::new(bus);
+
+    // ① 一次性发送：走 `NativeTransportBackend::send` → `operation_error`。
+    let task = expect_pending(
+        &mut wb,
+        AppCommand::SendText {
+            port: PortId::new(PORT),
+            text: "AT".to_owned(),
+        },
+    );
+    assert_eq!(
+        task_kind(&wb, task).as_deref(),
+        Some("send_serial"),
+        "未注册成网络端口的名字必须走串口后端，否则本用例测的不是 `operation_error`"
+    );
+    let ended = tick_until(&mut wb, Duration::from_secs(10), |wb| {
+        matches!(
+            task_state(wb, task),
+            Some(TaskState::Completed | TaskState::Failed)
+        )
+    });
+    assert!(
+        ended,
+        "发送任务必须在 10s 内结束，实际: {:?}",
+        task_state(&wb, task)
+    );
+    assert_eq!(
+        task_state(&wb, task),
+        Some(TaskState::Failed),
+        "端口从未打开，发送不得假装成功"
+    );
+    assert_eq!(
+        task_message(&wb, task).as_deref(),
+        Some(format!("transport operation failed: {CLOSED_PORT_WORDS}").as_str()),
+        "任务失败句串变了：正文不再是周期发送那句中文，或外框被改写出了 `Display` 的形状"
+    );
+
+    // ② 周期发送：同一个失败，同一句中文（少了平台层的英文外框）。
+    let endpoint = wb.transport_endpoint();
+    assert_eq!(
+        endpoint
+            .send(PORT, "AT", false, "\r\n", false)
+            .expect_err("端口没开，周期发送必须报错而不是静默成功"),
+        CLOSED_PORT_WORDS,
+        "两条入口的正文从这里起必须逐字相同 —— 它就是 `operation_error` 塞进 \
+         `TransportError::Operation` 的那个载荷"
     );
 }

@@ -1083,7 +1083,16 @@ impl WebApplication {
         T: 'static,
         F: Future<Output = tool_platform::TransportResult<T>> + 'static,
     {
-        self.spawn_result(kind, future, complete)
+        // 传输错误在这里就换成中文：`spawn_result` 的两个用户可见出口（任务快照的
+        // `message`、`TaskFailed` 的 `error`）都只是 `error.to_string()`，而
+        // `TransportError` 的 `Display` 是英文的。翻译必须赶在变体信息被丢掉之前，
+        // 也就是这一处 —— 换到那两个出口里做就只剩一句英文原文可以照着抄了。
+        let translated = async move {
+            future
+                .await
+                .map_err(|error| tool_platform::translate_error(&error))
+        };
+        self.spawn_result(kind, translated, complete)
     }
 
     fn spawn_result<T, F, E>(
@@ -1924,8 +1933,9 @@ impl WebApplication {
                     wake_handle(&disconnect_waker);
                 });
                 transport
-                    .start_receive_with_disconnect(port.clone(), sink, on_disconnect)
-                    .map_err(|error| tool_platform::TransportError::Operation(error.to_string()))?;
+                    // 它本来就是 `platform::TransportError`：再包一层 `Operation` 会把变体
+                    // 压成字符串，用户读到两句连在一起的 "…operation failed: …"。
+                    .start_receive_with_disconnect(port.clone(), sink, on_disconnect)?;
                 Ok(())
             },
             move |_, _| WebAppEvent::Connected { port: task_port },
@@ -1981,8 +1991,9 @@ impl WebApplication {
                     wake_handle(&disconnect_waker);
                 });
                 transport
-                    .start_receive_with_disconnect(port.clone(), sink, on_disconnect)
-                    .map_err(|error| tool_platform::TransportError::Operation(error.to_string()))?;
+                    // 它本来就是 `platform::TransportError`：再包一层 `Operation` 会把变体
+                    // 压成字符串，用户读到两句连在一起的 "…operation failed: …"。
+                    .start_receive_with_disconnect(port.clone(), sink, on_disconnect)?;
                 Ok(())
             },
             move |_, _| WebAppEvent::Connected { port: task_port },

@@ -1241,219 +1241,190 @@ impl WorkbenchApp {
         }
     }
 
+    /// 浏览器每帧的事件泵：一次取空本帧事件队列，逐条交给 `handle_web_event`。
+    ///
+    /// 这里不做限量、也不许提前退出：队列是一次性取走的，运行时不会替我们留着没处理的
+    /// 那条，跳过任何一条就等于丢掉它的 UI 状态与回执（录制导出、Lua 请求回执都是单次
+    /// 状态机推进，错过补不回来）。事件顺序即产生顺序，逐条按序处理，不要重排。
     fn poll_web_events(&mut self, ctx: &egui::Context) {
         let Some(runtime) = self.runtime.clone() else {
             return;
         };
         for event in runtime.drain_events() {
-            let mut plugin_lua_file_resolution = None;
-            let mut plugin_lua_serial_resolution = None;
-            let mut plugin_files = None;
-            let mut marketplace_files = None;
-            let mut theme_import = None;
-            let mut serial = self.serial.borrow_mut();
-            match event {
-                WebAppEvent::TaskStateChanged(snapshot) if snapshot.kind == "refresh_ports" => {}
-                WebAppEvent::TaskStateChanged(snapshot) => {
-                    serial.status = snapshot.message;
-                }
-                WebAppEvent::RecordingChanged
-                | WebAppEvent::PluginsChanged
-                | WebAppEvent::MarketplaceChanged
-                | WebAppEvent::UpdateChanged => {}
-                WebAppEvent::RecordingExportReady {
+            self.handle_web_event(event, ctx);
+        }
+    }
+
+    /// 单条事件落地。三段顺序就是原来循环体的顺序：
+    /// ① 持有串口的 `RefCell` 借用，就地改 UI 状态，同时把需要 `&mut self` 的收尾动作攒进局部变量；
+    /// ② `drop(serial)` 释放借用；
+    /// ③ 按「主题 → 插件安装 → 市场插件 → Lua 文件回执 → Lua 串口回执」补做收尾。
+    ///
+    /// ②→③ 的先后不能改：③ 里的方法会在部分路径上再次 `borrow_mut` 串口，借用没释放就当场 panic。
+    /// ③ 内部的顺序也不能改：它和 ① 各条 arm 都会写 `serial.status`，后写的覆盖先写的。
+    fn handle_web_event(&mut self, event: WebAppEvent, ctx: &egui::Context) {
+        let mut plugin_lua_file_resolution = None;
+        let mut plugin_lua_serial_resolution = None;
+        let mut plugin_files = None;
+        let mut marketplace_files = None;
+        let mut theme_import = None;
+        let mut serial = self.serial.borrow_mut();
+        match event {
+            WebAppEvent::TaskStateChanged(snapshot) if snapshot.kind == "refresh_ports" => {}
+            WebAppEvent::TaskStateChanged(snapshot) => {
+                serial.status = snapshot.message;
+            }
+            WebAppEvent::RecordingChanged
+            | WebAppEvent::PluginsChanged
+            | WebAppEvent::MarketplaceChanged
+            | WebAppEvent::UpdateChanged => {}
+            WebAppEvent::RecordingExportReady {
+                id,
+                name,
+                content,
+                incomplete,
+            } => {
+                finish_web_recording_export(
+                    self.runtime.as_ref(),
+                    &mut serial,
                     id,
                     name,
                     content,
                     incomplete,
-                } => {
-                    let result = download_text_file(&name, "application/x-ndjson", content);
-                    if let Some(runtime) = self.runtime.as_ref() {
-                        runtime.finish_recording_export(id, result.clone());
-                    }
-                    serial.status = match result {
-                        Ok(()) if incomplete => "录制已停止并导出（数据不完整）".to_owned(),
-                        Ok(()) => "录制已停止并导出".to_owned(),
-                        Err(error) => format!("录制导出失败：{error}"),
-                    };
-                }
-                WebAppEvent::ReplayChanged { rebuild } => {
-                    if rebuild {
-                        self.terminal_panel.clear();
-                        self.bottom_log_panel.clear();
-                        self.dynamic_panels.clear_charts();
-                    }
-                    self.replay_panel.set_load_pending(false);
-                    serial.status = "回放状态已更新".to_owned();
-                }
-                WebAppEvent::TerminalCleared => {
+                );
+            }
+            WebAppEvent::ReplayChanged { rebuild } => {
+                if rebuild {
                     self.terminal_panel.clear();
-                    serial.status = "终端已清空".to_owned();
+                    self.bottom_log_panel.clear();
+                    self.dynamic_panels.clear_charts();
                 }
-                WebAppEvent::TextLoaded {
-                    kind, name, text, ..
-                } if kind == "replay_load" => {
-                    self.replay_panel.path = name.clone();
-                    if let Some(runtime) = self.runtime.as_ref() {
-                        self.terminal_panel.clear();
-                        self.bottom_log_panel.clear();
-                        self.dynamic_panels.clear_charts();
-                        match runtime.dispatch(AppCommand::LoadReplayText { name, text }) {
-                            Ok(CommandOutcome::Pending { .. }) => {
-                                self.replay_panel.set_load_pending(true);
-                                serial.status = "回放文件读取完成，正在后台解析".to_owned();
-                            }
-                            Ok(_) => serial.status = "回放文件已提交加载".to_owned(),
-                            Err(error) => {
-                                self.replay_panel.message = Some(error.clone());
-                                serial.status = format!("回放加载失败：{error}");
-                            }
-                        }
-                    }
-                }
-                WebAppEvent::TextLoaded {
-                    kind, name, text, ..
-                } if kind == "theme_import" => {
-                    theme_import = Some((name, text));
-                    serial.status = "主题文件读取完成，正在应用".to_owned();
-                }
-                WebAppEvent::TextLoaded { id, kind, text, .. } if kind == "lua_host_file" => {
-                    plugin_lua_file_resolution = Some((id, true, text));
-                    serial.status = "Lua 插件文件读取完成".to_owned();
-                }
-                WebAppEvent::TextLoaded { kind, .. } => {
-                    serial.status = format!("异步任务完成：{kind}");
-                }
-                WebAppEvent::FilesLoaded { kind, files, .. } if kind == "plugin_import" => {
-                    serial.status = "插件文件读取完成，正在安装".to_owned();
-                    plugin_files = Some(files);
-                }
-                WebAppEvent::MarketplaceFilesLoaded {
-                    plugin_id, files, ..
-                } => {
-                    serial.status = "市场插件文件读取完成，正在安装".to_owned();
-                    marketplace_files = Some((plugin_id, files));
-                }
-                WebAppEvent::FilesLoaded { kind, .. } => {
-                    serial.status = format!("异步任务完成：{kind}");
-                }
-                WebAppEvent::PortsRefreshed(ports) => {
-                    apply_web_refreshed_ports(&mut serial, ports);
-                }
-                WebAppEvent::PortRequested { id, port } => {
-                    plugin_lua_serial_resolution =
-                        Some((id, Ok(PluginSerialDevice::from(port.clone()))));
-                    select_authorized_port(&mut serial, port);
-                    serial.status = "设备已授权，可连接".to_owned();
-                }
-                WebAppEvent::PortAttached(port) => {
-                    accept_web_attached_port(&mut serial, port);
-                }
-                WebAppEvent::PortDetached(port) => {
-                    forget_web_detached_port(&mut serial, port);
-                }
-                WebAppEvent::NetworkPortAdded(port) => {
-                    select_authorized_port(&mut serial, port);
-                    serial.status = "网络串口已添加，可连接".to_owned();
-                }
-                WebAppEvent::NetworkPortRemoved(port) => {
-                    forget_web_network_port(&mut serial, port);
-                }
-                WebAppEvent::Connected { port } => {
-                    serial.reconnect = None;
-                    select_web_port_state(&mut serial, Some(port.clone()));
-                    serial.connected = Some(port.clone());
-                    serial.status = format!("已连接 {port} @ {}", settings_label(serial.settings));
-                }
-                WebAppEvent::Disconnected { port, manual } => {
-                    if serial.connected.as_ref() == Some(&port) {
-                        serial.connected = None;
-                        if serial.auto_reconnect && !manual {
-                            let descriptor =
-                                serial.ports.iter().find(|item| item.id == port).cloned();
-                            serial.reconnect = Some(web_reconnect_state(port.clone(), descriptor));
-                        }
-                    }
-                    serial.status = "设备已断开".to_owned();
-                }
-                WebAppEvent::Sent { bytes, .. } => {
-                    serial.status = format!("发送已提交（{bytes} 字节）");
-                }
-                WebAppEvent::SignalsChanged { signal, value, .. } => {
-                    match signal {
-                        SignalKind::Dtr => serial.dtr = value,
-                        SignalKind::Rts => serial.rts = value,
-                    }
-                    serial.status = format!("{signal:?} 已更新");
-                }
-                WebAppEvent::TerminalSettingsChanged {
-                    merge_window_ms,
-                    max_entries,
-                } => {
-                    self.terminal_panel.merge_window_ms = merge_window_ms;
-                    self.terminal_panel.set_max_entries(max_entries);
-                }
-                WebAppEvent::TaskFailed { id, error } => {
-                    if self
-                        .plugins
-                        .pending_lua_file_requests
-                        .borrow()
-                        .contains_key(&id)
-                    {
-                        plugin_lua_file_resolution = Some((id, false, error.clone()));
-                    }
-                    if self
-                        .plugins
-                        .pending_lua_serial_requests
-                        .borrow()
-                        .contains_key(&id)
-                    {
-                        plugin_lua_serial_resolution = Some((id, Err(error.clone())));
-                    }
-                    if !handle_web_reconnect_task_failed(&mut serial, id, &error) {
-                        serial.status = format!("操作失败：{error}");
-                    }
-                }
-                WebAppEvent::TaskCancelled { id } => {
-                    if self
-                        .plugins
-                        .pending_lua_file_requests
-                        .borrow()
-                        .contains_key(&id)
-                    {
-                        plugin_lua_file_resolution =
-                            Some((id, false, "Lua 插件文件读取已取消".to_owned()));
-                    }
-                    if self
-                        .plugins
-                        .pending_lua_serial_requests
-                        .borrow()
-                        .contains_key(&id)
-                    {
-                        plugin_lua_serial_resolution =
-                            Some((id, Err("Lua 插件串口授权已取消".to_owned())));
-                    }
-                    if !handle_web_reconnect_task_cancelled(&mut serial, id) {
-                        serial.status = "操作已取消".to_owned();
-                    }
+                self.replay_panel.set_load_pending(false);
+                serial.status = "回放状态已更新".to_owned();
+            }
+            WebAppEvent::TerminalCleared => {
+                self.terminal_panel.clear();
+                serial.status = "终端已清空".to_owned();
+            }
+            WebAppEvent::TextLoaded {
+                kind, name, text, ..
+            } if kind == "replay_load" => {
+                self.replay_panel.path = name.clone();
+                if let Some(runtime) = self.runtime.as_ref() {
+                    self.terminal_panel.clear();
+                    self.bottom_log_panel.clear();
+                    self.dynamic_panels.clear_charts();
+                    dispatch_web_replay_load(
+                        runtime,
+                        &mut self.replay_panel,
+                        &mut serial,
+                        name,
+                        text,
+                    );
                 }
             }
-            drop(serial);
-            if let Some((_name, source)) = theme_import {
-                self.apply_web_theme_import(source, ctx);
+            WebAppEvent::TextLoaded {
+                kind, name, text, ..
+            } if kind == "theme_import" => {
+                theme_import = Some((name, text));
+                serial.status = "主题文件读取完成，正在应用".to_owned();
             }
-            if let Some(files) = plugin_files {
-                self.apply_web_plugin_files(files);
+            WebAppEvent::TextLoaded { id, kind, text, .. } if kind == "lua_host_file" => {
+                plugin_lua_file_resolution = Some((id, true, text));
+                serial.status = "Lua 插件文件读取完成".to_owned();
             }
-            if let Some((plugin_id, files)) = marketplace_files {
-                self.apply_web_marketplace_files(plugin_id, files);
+            WebAppEvent::TextLoaded { kind, .. } => {
+                serial.status = format!("异步任务完成：{kind}");
             }
-            if let Some((id, ok, result)) = plugin_lua_file_resolution {
-                self.resolve_web_lua_file_request(id, ok, &result);
+            WebAppEvent::FilesLoaded { kind, files, .. } if kind == "plugin_import" => {
+                serial.status = "插件文件读取完成，正在安装".to_owned();
+                plugin_files = Some(files);
             }
-            if let Some((id, result)) = plugin_lua_serial_resolution {
-                self.resolve_web_lua_serial_request(id, result);
+            WebAppEvent::MarketplaceFilesLoaded {
+                plugin_id, files, ..
+            } => {
+                serial.status = "市场插件文件读取完成，正在安装".to_owned();
+                marketplace_files = Some((plugin_id, files));
             }
+            WebAppEvent::FilesLoaded { kind, .. } => {
+                serial.status = format!("异步任务完成：{kind}");
+            }
+            WebAppEvent::PortsRefreshed(ports) => {
+                apply_web_refreshed_ports(&mut serial, ports);
+            }
+            WebAppEvent::PortRequested { id, port } => {
+                plugin_lua_serial_resolution =
+                    Some((id, Ok(PluginSerialDevice::from(port.clone()))));
+                select_authorized_port(&mut serial, port);
+                serial.status = "设备已授权，可连接".to_owned();
+            }
+            WebAppEvent::PortAttached(port) => {
+                accept_web_attached_port(&mut serial, port);
+            }
+            WebAppEvent::PortDetached(port) => {
+                forget_web_detached_port(&mut serial, port);
+            }
+            WebAppEvent::NetworkPortAdded(port) => {
+                select_authorized_port(&mut serial, port);
+                serial.status = "网络串口已添加，可连接".to_owned();
+            }
+            WebAppEvent::NetworkPortRemoved(port) => {
+                forget_web_network_port(&mut serial, port);
+            }
+            WebAppEvent::Connected { port } => {
+                apply_web_connected(&mut serial, port);
+            }
+            WebAppEvent::Disconnected { port, manual } => {
+                apply_web_disconnected(&mut serial, port, manual);
+            }
+            WebAppEvent::Sent { bytes, .. } => {
+                serial.status = format!("发送已提交（{bytes} 字节）");
+            }
+            WebAppEvent::SignalsChanged { signal, value, .. } => {
+                apply_web_signals(&mut serial, signal, value);
+            }
+            WebAppEvent::TerminalSettingsChanged {
+                merge_window_ms,
+                max_entries,
+            } => {
+                self.terminal_panel.merge_window_ms = merge_window_ms;
+                self.terminal_panel.set_max_entries(max_entries);
+            }
+            WebAppEvent::TaskFailed { id, error } => {
+                (plugin_lua_file_resolution, plugin_lua_serial_resolution) =
+                    take_web_lua_resolutions(&self.plugins, id, &error, &error);
+                if !handle_web_reconnect_task_failed(&mut serial, id, &error) {
+                    serial.status = format!("操作失败：{error}");
+                }
+            }
+            WebAppEvent::TaskCancelled { id } => {
+                (plugin_lua_file_resolution, plugin_lua_serial_resolution) =
+                    take_web_lua_resolutions(
+                        &self.plugins,
+                        id,
+                        "Lua 插件文件读取已取消",
+                        "Lua 插件串口授权已取消",
+                    );
+                if !handle_web_reconnect_task_cancelled(&mut serial, id) {
+                    serial.status = "操作已取消".to_owned();
+                }
+            }
+        }
+        drop(serial);
+        if let Some((_name, source)) = theme_import {
+            self.apply_web_theme_import(source, ctx);
+        }
+        if let Some(files) = plugin_files {
+            self.apply_web_plugin_files(files);
+        }
+        if let Some((plugin_id, files)) = marketplace_files {
+            self.apply_web_marketplace_files(plugin_id, files);
+        }
+        if let Some((id, ok, result)) = plugin_lua_file_resolution {
+            self.resolve_web_lua_file_request(id, ok, &result);
+        }
+        if let Some((id, result)) = plugin_lua_serial_resolution {
+            self.resolve_web_lua_serial_request(id, result);
         }
     }
 
@@ -1839,6 +1810,131 @@ impl WorkbenchApp {
         self.dispatch_serial(command, ctx);
         self.persist_settings();
     }
+}
+
+// ── poll_web_events 的分段实现 ──
+//
+// 下面每个私有函数对应 `handle_web_event` 里的一条 match arm，**自上而下就是 arm 的顺序**。
+// 拆出来只是为了让那条 `match` 读起来像一张分发表，不改变任何判定顺序与文案。
+//
+// 它们都在串口的 `RefCell` 借用仍被持有时被调用，所以参数只收具体字段的借用
+// （`&mut WebSerialState`、`&mut ReplayPanel`……），不收 `&mut self`——整块 `&mut self`
+// 会和 `self.serial` 的借用在借用检查器里打架。需要 `&mut self` 的收尾动作（主题导入、
+// 插件安装、Lua 回执）留在 `handle_web_event` 的 `drop(serial)` 之后，别往这里搬。
+
+/// 录制导出的文本已就绪，三步：浏览器落盘 → 把同一个结果回执给运行时 → 按结果写状态文案。
+///
+/// 回执传的是 `result.clone()`，原件留给文案，所以运行时与界面看到的必然是同一次落盘。
+/// 运行时还没建好（`runtime` 为 `None`）时只落盘、不回执，文案照写。
+fn finish_web_recording_export(
+    runtime: Option<&WebRuntime>,
+    serial: &mut WebSerialState,
+    id: TaskId,
+    name: String,
+    content: String,
+    incomplete: bool,
+) {
+    let result = download_text_file(&name, "application/x-ndjson", content);
+    if let Some(runtime) = runtime {
+        runtime.finish_recording_export(id, result.clone());
+    }
+    serial.status = match result {
+        Ok(()) if incomplete => "录制已停止并导出（数据不完整）".to_owned(),
+        Ok(()) => "录制已停止并导出".to_owned(),
+        Err(error) => format!("录制导出失败：{error}"),
+    };
+}
+
+/// 回放 JSONL 文本读好了：派发后台解析命令，按 Pending / Done / Err 三条路径回填面板与文案。
+///
+/// 只有 `Pending` 才点亮面板的「加载中」，关掉它的是之后的 `ReplayChanged` 事件；
+/// `Done` 不动 `load_pending`，只有 `Err` 才把错误文本挂到面板上。
+/// 三处数据视图的清空留在调用方那条 arm 里、且早于本函数：先清旧回放，再提交新文件。
+fn dispatch_web_replay_load(
+    runtime: &WebRuntime,
+    replay_panel: &mut ReplayPanel,
+    serial: &mut WebSerialState,
+    name: String,
+    text: String,
+) {
+    match runtime.dispatch(AppCommand::LoadReplayText { name, text }) {
+        Ok(CommandOutcome::Pending { .. }) => {
+            replay_panel.set_load_pending(true);
+            serial.status = "回放文件读取完成，正在后台解析".to_owned();
+        }
+        Ok(_) => serial.status = "回放文件已提交加载".to_owned(),
+        Err(error) => {
+            replay_panel.message = Some(error.clone());
+            serial.status = format!("回放加载失败：{error}");
+        }
+    }
+}
+
+/// 连接成功：丢掉待重连记录、把选中项跟到这台端口，最后落一条带串口参数的文案。
+///
+/// 带参数的文案必须排在最后：`select_web_port_state` 会按端口档位改掉 `serial.settings`，
+/// 先算文案就会显示连接前的旧波特率。
+fn apply_web_connected(serial: &mut WebSerialState, port: PortId) {
+    serial.reconnect = None;
+    select_web_port_state(serial, Some(port.clone()));
+    serial.connected = Some(port.clone());
+    serial.status = format!("已连接 {port} @ {}", settings_label(serial.settings));
+}
+
+/// 断开：只有断的确实是当前连接端口才清 `connected`；非手动断开（设备自己掉的）且开了
+/// 自动重连时，拿列表里的描述符挂上重连记录——设备重插可能改名，靠
+/// `WebReconnectState::matches` 才认得出还是同一台机器。
+/// 状态文案无条件写，与是否挂上重连记录无关。
+fn apply_web_disconnected(serial: &mut WebSerialState, port: PortId, manual: bool) {
+    if serial.connected.as_ref() == Some(&port) {
+        serial.connected = None;
+        if serial.auto_reconnect && !manual {
+            let descriptor = serial.ports.iter().find(|item| item.id == port).cloned();
+            serial.reconnect = Some(web_reconnect_state(port.clone(), descriptor));
+        }
+    }
+    serial.status = "设备已断开".to_owned();
+}
+
+/// 信号线回写：Dtr / Rts 各点亮一个布尔，随后统一落一条 `{:?} 已更新` 文案。
+/// `match` 覆盖 `SignalKind` 的全部变体，运行时新增一根线时这里会编译不过，提醒补赋值。
+fn apply_web_signals(serial: &mut WebSerialState, signal: SignalKind, value: bool) {
+    match signal {
+        SignalKind::Dtr => serial.dtr = value,
+        SignalKind::Rts => serial.rts = value,
+    }
+    serial.status = format!("{signal:?} 已更新");
+}
+
+/// Lua 宿主两类挂起请求的迟到终态：`(文件读取回执, 串口授权回执)`。
+type WebLuaTaskResolutions = (
+    Option<(TaskId, bool, String)>,
+    Option<(TaskId, Result<PluginSerialDevice, String>)>,
+);
+
+/// 任务失败与任务取消这两条终态都可能属于 Lua 宿主挂起的请求：文件读取与串口授权各查一张表，
+/// 命中哪张就把这条终态转成对应回执，交给 `handle_web_event` 在串口借用释放后送回宿主。
+///
+/// 两张表都要查，命中一张也不能提前返回（一个任务 id 只会落在其中一张里，但查之前无从判断）。
+/// 未命中的那张表不产出回执、也不克隆消息文本，所以 `file_message` / `serial_message`
+/// 只在真需要回执时才变成 `String`。
+fn take_web_lua_resolutions(
+    plugins: &WebPluginState,
+    id: TaskId,
+    file_message: &str,
+    serial_message: &str,
+) -> WebLuaTaskResolutions {
+    let file = plugins
+        .pending_lua_file_requests
+        .borrow()
+        .contains_key(&id)
+        .then(|| (id, false, file_message.to_owned()));
+    let lua_serial = plugins
+        .pending_lua_serial_requests
+        .borrow()
+        .contains_key(&id)
+        .then(|| (id, Err(serial_message.to_owned())));
+    (file, lua_serial)
 }
 
 impl DockHost for WorkbenchApp {

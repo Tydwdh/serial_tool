@@ -71,14 +71,46 @@
   `ensure_theme_dir()` 提前到 `startup_config()` 之前，用例立刻报
   「启动步骤次序被改」，还原后回绿。字面量审计：`app/mod.rs` 的 16 条字符串、9 条数字字面量
   与 HEAD 多重集一致，两条注释只是从 `//` 升为 `///`。
+- 第五批长函数：浏览器端每帧事件泵 `poll_web_events` 215 → 8 行（剩下的就是"克隆 runtime、
+  排空事件、逐个交出去"），函数体逐字搬进 `handle_web_event`，再按 match 分支顺序拆出
+  `finish_web_recording_export`、`dispatch_web_replay_load`、`apply_web_connected`、
+  `apply_web_disconnected`、`apply_web_signals`、`take_web_lua_resolutions` 六个同文件私有函数。
+  **两处刻意没拆**：30 个臂的 `match` 保持完整（`TextLoaded`/`FilesLoaded` 靠"带守卫的臂在前、
+  兜底臂在后"的顺序，拆成嵌套子匹配可能改变命中的臂），以及 `handle_web_event` 末尾那五步
+  （五个延迟临时量 + `drop(serial)` + 五步收尾）—— 拆它需要一个只被两三个函数用的五字段包，
+  而 `drop` 与紧随其后的借用是防 panic 的相邻关系。浏览器端最长的函数由 215 降到 165 行；
+  全仓最长的生产函数易主为 `crates/panels/src/sender.rs` 的 `history_popup`（200 行）。
+  字面量审计：`web/mod.rs` 的 260 条字符串、95 条数字字面量、102 条注释多重集与 HEAD 一致，
+  零丢失、零新增字面量，另新增 47 条解释性注释。
 - 更正一条已经与代码不符的架构结论（文档，不改行为）：`docs/ARCHITECTURE.md` 第 12 条「仍留 ③」
   原写 `TransportCapabilities` "两侧都不被读取"。实测共享串口面板读它 7 处、覆盖 5 个能力位；
   真实的不对称是 native 把交给面板的那份能力写成字面量，而后端上报的 `capabilities()` 在 native
-  不参与 UI。同一轮里核过的另两条（web 仍显示英文 `TransportError` 文案、`webserial:session:N`
-  仍被生成）确认仍然成立，未改文。改后的表述一律写成可复核的 grep 形式。
+  不参与 UI。同轮顺手核过的另两条里，`webserial:session:N` 仍被生成这条确认成立；
+  而"web 仍显示英文 `TransportError` 文案"那条**在同一轮晚些时候也被推翻**（归因错了：
+  桌面端在同一批失败上同样是英文），见「修复」小节与下一条。改后的表述一律写成可复核的
+  grep 形式。
 
 ### 修复
 
+- 修复**连接/断开/发送失败时用户读到英文句子**（两端都是，此前只记在网页端名下）。根因不是
+  平台差异，而是一个调用点把强类型错误提前压成了字符串：`platform/src/native.rs` 的
+  `operation_error` 用 `error.to_string()` 折进 `TransportError::Operation(..)`，变体信息就此丢失；
+  全仓唯一的中文映射 `tool_transport::translate_error` 只剩周期发送那一行能享受。
+  现在：`tool_platform` 有了自己的 `translate_error`（6 个变体，native 与 wasm 都编译），
+  web 侧接在 `application/src/web.rs` 的 `spawn` 缝上（赶在变体丢失之前，一次覆盖
+  `snapshot.message` 与 `TaskFailed` 两个出口），`operation_error` 改为先翻译再嵌入，
+  并去掉 `start_receive_with_disconnect` 的两处双重 `Operation(..)` 包装 ——
+  **用户可见的措辞变化**：以前是 `transport operation failed: port is not connected: COM3`
+  （网页端还会看到两句连在一起的 `…operation failed: …`），现在是
+  「串口 COM3 未打开（可能已断开，请重连）」，两端同一句话。
+  守卫是 `crates/platform/tests/transport_error_wording.rs`：每个变体一条精确字符串断言、
+  一条"没有臂落到通用兜底"的覆盖断言、以及一条**跨两份映射的一致性断言**
+  （同一件事两边必须逐字相同）。实测它抓得住：只把 `PortNotConnected` 的字面量改成
+  「串口 … 没打开」，3 条用例变红并打印左右原文。
+  **仍然英文**（本波未动，逐条核过并在 ARCHITECTURE 里记名）：`application/src/workbench.rs`
+  网络端口路径的三处 `error.to_string()`、`platform/src/native.rs` 的
+  `"native transport worker stopped"` 字面量；`transport: ` 前缀仍只有 native 有
+  （`AppError` 被 cfg 挡在 wasm 之外）。
 - 修复测试随机红：主题调色板是**进程级全局**（`ACTIVE_THEME`），而 cargo 在同一个测试二进制里
   默认多线程跑用例，于是"切换主题后断言取色"的用例与"先解析颜色、之后才和 `theme::*()` 比对"的
   用例（仪表盘的 zone 颜色、`value_color`）会互相踩。实测同一个测试二进制以 16 线程连跑 40 次：

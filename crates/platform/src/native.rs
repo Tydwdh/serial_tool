@@ -43,8 +43,14 @@ where
     })
 }
 
+/// 把 native 的 `tool_transport::TransportError` 折进平台错误枚举。
+///
+/// 必须先过一遍 `tool_transport::translate_error` 再取字符串：`to_string()` 会丢掉变体，
+/// 桌面端的连接/发送/关闭失败就此只剩英文（此前正是如此，全仓唯一被翻译过的文案是
+/// `Workbench::send` 那条周期发送入口）。`Operation` 因此按契约承载**已翻译**的中文，
+/// `crate::translate_error` 对它原样返回，不再套第二层框架。
 fn operation_error(error: tool_transport::TransportError) -> TransportError {
-    TransportError::Operation(error.to_string())
+    TransportError::Operation(tool_transport::translate_error(&error))
 }
 
 fn settings_to_native(port: PortId, settings: SerialSettings) -> SerialConfig {
