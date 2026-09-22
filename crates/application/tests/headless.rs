@@ -852,6 +852,162 @@ fn plugin_enable_disable_transitions_state_and_rejects_unknown_ids() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// 到用户眼前的插件错误必须是中文（第 22 轮：Enable/Disable 的派发与
+/// `discover_plugins` / `reload_plugins` 两个后台任务都改走 `tool_extension::translate_error`）。
+///
+/// 逐字钉的是**没有外来细节**的那格（`NotFound`：整句都是我们自己写的，而它正是桌面用户
+/// 点「启用」后状态栏读到的东西）。带 OS 原文的两格只钉中文框架：框架是契约，那半句细节
+/// 跟随机器与系统语言（本机实测 `"read_dir"` 失败给的是「目录名称无效。 (os error 267)」），
+/// 钉死它会让本用例变成一台机器的快照 —— 与 `crates/transport` 的 `Io` 臂同一取舍。
+///
+/// 这里刻意不写 `AppError` 那句的完整形状：`plugin: ` 前缀仍属英文，那是下一轮的事。
+///
+/// 本文件**没有**驱动的三格，如实记下原因（逐字中文都在 `crates/extension/tests/error_wording.rs`）：
+/// - `AlreadyEnabled` / `Stopping` 要一个真在跑的 Lua 探针，其行为已由本文件另外两条用例
+///   （状态迁移、停机窗口谓词）覆盖，再为文案起一次运行时不划算；
+/// - `UnsupportedRuntime` 的输入进不来：`scan_roots` 先跑 `manifest.validate()`，
+///   而非 `lua` 的 runtime 在登记成 record 之前就被折成诊断了；
+/// - `Lua` 臂当前根本没有生产者（`run_plugin` 一律返回 `Ok`，脚本错误走运行时状态与诊断）。
+#[test]
+fn plugin_failures_reach_the_user_in_chinese() {
+    let bus = DataBus::new();
+    let mut wb = Workbench::new(bus);
+    let missing = "__no_such_plugin__";
+
+    // ① 启用 / 禁用一个从未发现的插件：两格都是整句中文，逐字钉。
+    let enable_error = wb
+        .dispatch(AppCommand::EnablePlugin {
+            plugin_id: missing.to_owned(),
+        })
+        .expect_err("启用未知插件必须报错");
+    let AppError::Plugin(enable_words) = &enable_error else {
+        panic!("启用未知插件的错误类型应为 AppError::Plugin，实际: {enable_error:?}");
+    };
+    assert_eq!(
+        enable_words.as_str(),
+        "未找到插件 __no_such_plugin__（请先重新扫描插件目录）"
+    );
+
+    let disable_error = wb
+        .dispatch(AppCommand::DisablePlugin {
+            plugin_id: missing.to_owned(),
+        })
+        .expect_err("禁用未知插件必须报错");
+    let AppError::Plugin(disable_words) = &disable_error else {
+        panic!("禁用未知插件的错误类型应为 AppError::Plugin，实际: {disable_error:?}");
+    };
+    assert_eq!(
+        disable_words.as_str(),
+        "未找到插件 __no_such_plugin__（请先重新扫描插件目录）"
+    );
+
+    // ② 插件目录在、`main.lua` 不在：启用时读脚本失败 → `Io` 臂。
+    //    扫描只看 manifest，所以这一步本身必须成功，失败点才有得测。
+    let root = write_probe_plugin("error-wording");
+    std::fs::remove_file(root.join("headless.probe").join("main.lua")).expect("删掉探针脚本");
+    let discovered = expect_pending(
+        &mut wb,
+        AppCommand::DiscoverPlugins {
+            roots: vec![root.clone()],
+        },
+    );
+    assert!(
+        tick_until(&mut wb, Duration::from_secs(10), |wb| matches!(
+            task_state(wb, discovered),
+            Some(TaskState::Completed | TaskState::Failed)
+        )),
+        "discover_plugins 任务必须在超时前结束"
+    );
+    assert_eq!(task_state(&wb, discovered), Some(TaskState::Completed));
+
+    let script_missing = wb
+        .dispatch(AppCommand::EnablePlugin {
+            plugin_id: "headless.probe".to_owned(),
+        })
+        .expect_err("缺 main.lua 的插件必须启用失败");
+    let AppError::Plugin(script_words) = &script_missing else {
+        panic!("读脚本失败应为 AppError::Plugin，实际: {script_missing:?}");
+    };
+    assert!(
+        script_words.starts_with("插件文件访问失败："),
+        "启用失败的整句必须是中文框架，实际 {script_words:?}"
+    );
+    assert!(
+        !script_words.contains("io error:"),
+        "英文 Display 框架又漏进了用户可见文案：{script_words:?}"
+    );
+
+    // ③ 扫描根是个普通文件：`discover_plugins` 的失败消息经任务快照直达状态栏。
+    let file_as_root = root.join("not-a-directory");
+    std::fs::write(&file_as_root, "这不是目录").expect("写入占位文件");
+    let failed_discover = expect_pending(
+        &mut wb,
+        AppCommand::DiscoverPlugins {
+            roots: vec![file_as_root],
+        },
+    );
+    assert!(
+        tick_until(&mut wb, Duration::from_secs(10), |wb| matches!(
+            task_state(wb, failed_discover),
+            Some(TaskState::Completed | TaskState::Failed)
+        )),
+        "discover_plugins 任务必须在超时前结束"
+    );
+    assert_eq!(task_state(&wb, failed_discover), Some(TaskState::Failed));
+    let discover_words =
+        task_message(&wb, failed_discover).expect("失败任务必须留下一句给用户的话");
+    assert!(
+        discover_words.starts_with("插件文件访问失败："),
+        "discover_plugins 的失败消息必须是中文框架，实际 {discover_words:?}"
+    );
+    assert!(
+        !discover_words.contains("io error:"),
+        "discover_plugins 的失败消息里漏进了英文 Display 框架：{discover_words:?}"
+    );
+
+    // ④ 记在应用侧的根在两次扫描之间被换成普通文件：`reload_plugins` 是另一处 wire，
+    //    它的根来自 `PluginManager::roots()` 而不是命令参数，所以必须单独钉一次。
+    let recorded = expect_pending(
+        &mut wb,
+        AppCommand::DiscoverPlugins {
+            roots: vec![root.clone()],
+        },
+    );
+    assert!(
+        tick_until(&mut wb, Duration::from_secs(10), |wb| matches!(
+            task_state(wb, recorded),
+            Some(TaskState::Completed | TaskState::Failed)
+        )),
+        "discover_plugins 任务必须在超时前结束"
+    );
+    assert_eq!(task_state(&wb, recorded), Some(TaskState::Completed));
+    std::fs::remove_dir_all(&root).expect("收回插件根目录");
+    std::fs::write(&root, "根目录已不是目录").expect("把插件根换成普通文件");
+
+    let reload = expect_pending(&mut wb, AppCommand::ReloadPlugins);
+    assert_eq!(task_kind(&wb, reload).as_deref(), Some("reload_plugins"));
+    assert!(
+        tick_until(&mut wb, Duration::from_secs(10), |wb| matches!(
+            task_state(wb, reload),
+            Some(TaskState::Completed | TaskState::Failed)
+        )),
+        "reload_plugins 任务必须在超时前结束"
+    );
+    assert_eq!(task_state(&wb, reload), Some(TaskState::Failed));
+    let reload_words = task_message(&wb, reload).expect("失败任务必须留下一句给用户的话");
+    assert!(
+        reload_words.starts_with("插件文件访问失败："),
+        "reload_plugins 的失败消息必须是中文框架，实际 {reload_words:?}"
+    );
+    assert!(
+        !reload_words.contains("io error:"),
+        "reload_plugins 的失败消息里漏进了英文 Display 框架：{reload_words:?}"
+    );
+
+    // 收尾：根目录已被换成普通文件，不留后台文件。
+    let _ = std::fs::remove_file(&root);
+}
+
 /// 重启交接的判定必须来自权威状态（PluginManager 的 stopping 表），不是错误文案。
 ///
 /// 覆盖三个方向，任一处判定「说谎」都会红：

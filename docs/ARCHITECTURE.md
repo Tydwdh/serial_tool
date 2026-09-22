@@ -734,6 +734,39 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
       > 状态栏、native 直接丢弃，那是产品可见的取舍，不在机械收敛范围内。
       > 那 9 个变体的中文映射器仍在待办，另有 `dispatch_load_replay`、`write_exported_content`
       > 与 `AppRuntime::dispatch` 的 `transport: ` 前缀也未动。
+      >
+      > **第 22 轮做了那个翻译**（685 → 698）：`tool_extension::translate_error` 按变体分发、
+      > **不写 `_ =>`**（与 `tests/error_wording.rs` 的 `variant_name` 同一形状，两处都不写兜底 ⇒
+      > 新增变体忘记配中文就编译不过，而不是悄悄把英文漏给用户），接上四处用户可见出口
+      > （`Workbench` 的 Enable/Disable 派发、`spawn_reload_plugins`、`spawn_discover_plugins`）。
+      > 同一轮删掉 `ExtensionError::UnsupportedApiVersion`：全仓**零构造点**，真实路径是
+      > `scan_roots` 里 `api_version_supported()` 为假时推一条中文 `unsupported_api_version`
+      > 诊断再 `continue`（与第 20 轮那两个零构造 `AppCommand` 同一类）。
+      > 带外来细节的三臂（`Io`/`Manifest`/`Lua(mlua)`）只钉**中文框架**不钉细节 ——
+      > 本机实测 `read_dir` 失败给的是「目录名称无效。 (os error 267)」，钉死它就把用例
+      > 变成一台机器的快照（`tool_transport` 的 `Io` 臂同一取舍）。
+      > **动手时更正三条我自己的前置判断**（都记下来，免得下轮再按错的推）：
+      > ① `tool-extension` **不参与 wasm 编译** —— `crates/application/Cargo.toml` 把它放在
+      > `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]` 里，所以"因为它两端都编译所以
+      > 不能复用 native-only 的 `tool_transport::translate_error`"这条理由是错的（真正的原因是
+      > 领域不同 + `ExtensionError` 是另一个枚举；顺带一提 `tool-extension` 本来就依赖
+      > `tool-transport`）。② `UnsupportedRuntime` 的分支活着但**输入进不来**：`spec::RUNTIMES`
+      > 只有 `lua`，而 `scan_roots` 在登记成 record 之前先跑 `manifest.validate()`，
+      > 非 lua 的 runtime 早被折成中文诊断，用户读不到这个变体。③ `ExtensionError::Lua`
+      > **没有生产者**：`run_plugin` 一律返回 `Ok`（脚本错误走运行时状态与诊断），
+      > 全仓唯一的 `Err(LuaHostError::…)` 是 `LuaHost::run_script` 里的 `AlreadyRunning`，
+      > 而 `run_script` 零调用者。⇒ 这两臂是下一轮的死代码候选，别当成"已覆盖的用户路径"。
+      > **同一轮新查出的两处英文到用户眼前**（在 `scan_roots` 的诊断里，不在派发路径上，
+      > 所以本轮的四条接线没覆盖它们）：`manager.rs` 里
+      > `format!("manifest 解析失败: {error}")` 的 `error` **就是** `ExtensionError`，于是插件面板
+      > 渲染成双重框架 `manifest 解析失败: manifest parse error: <serde 原文>`；
+      > 紧挨着的那条 `permission_denied` 诊断正文干脆是裸 `error.to_string()`（纯英文），
+      > 两端各自经 `ui/tiles.rs` 与 `web/plugins.rs` 的面板诊断列表渲染。两处都是一行
+      > `translate_error(&error)` 的事，刻意留给下一轮（与 `plugin: ` 前缀同批）。
+      > **现在用户点「启用」看到的整句**仍是 `启用插件 demo.x 失败：plugin: 未找到插件 demo.x
+      > （请先重新扫描插件目录）` —— 正文已中文化，`AppError` 那句英文 `plugin: ` 前缀还在
+      > （已核实全仓没有任何判定读 `AppError` 的 `Display`，所以换掉它是安全的，只是范围另开一轮）。
+      > `dispatch_load_replay` 与 `write_exported_content` 仍未接映射器。
       ⑤ 【本波已闭合】换行后缀表原有 3 份（native `state::LineEnding`、wasm `WebLineEnding`、
       共享面板 `SendLineEnding`），值一致但没有任何断言钉住，两端还各写两份 4 臂 **identity** `match`
       （类型不同才需要转）。现在收进 `tool_core::LineEnding`（`crates/core/src/lib.rs:454`），

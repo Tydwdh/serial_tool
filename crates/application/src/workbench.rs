@@ -374,12 +374,12 @@ impl Workbench {
                 .plugin_manager
                 .enable(&plugin_id)
                 .map(|()| CommandOutcome::Done)
-                .map_err(|e| AppError::Plugin(e.to_string())),
+                .map_err(|e| AppError::Plugin(tool_extension::translate_error(&e))),
             AppCommand::DisablePlugin { plugin_id } => self
                 .plugin_manager
                 .disable(&plugin_id)
                 .map(|()| CommandOutcome::Done)
-                .map_err(|e| AppError::Plugin(e.to_string())),
+                .map_err(|e| AppError::Plugin(tool_extension::translate_error(&e))),
             AppCommand::ReloadPlugins => Ok(self.spawn_reload_plugins()),
             AppCommand::RefreshMarketplace { .. } | AppCommand::CheckForUpdate => Err(
                 AppError::InvalidCommand("市场和更新由桌面组合根负责".to_owned()),
@@ -933,7 +933,7 @@ impl Workbench {
         let task_id = self.tasks.spawn("reload_plugins", move |_context| {
             tool_extension::PluginManager::scan_roots(&roots)
                 .map(TaskResult::PluginsDiscovered)
-                .map_err(|error| error.to_string())
+                .map_err(|error| tool_extension::translate_error(&error))
         });
         pending(task_id, "正在扫描插件")
     }
@@ -942,7 +942,7 @@ impl Workbench {
         let task_id = self.tasks.spawn("discover_plugins", move |_context| {
             tool_extension::PluginManager::scan_roots(&roots)
                 .map(TaskResult::PluginsDiscovered)
-                .map_err(|error| error.to_string())
+                .map_err(|error| tool_extension::translate_error(&error))
         });
         pending(task_id, "正在扫描插件")
     }

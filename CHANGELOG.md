@@ -6,6 +6,32 @@
 
 ### 调整
 
+- 插件错误到用户眼前改走中文映射器（四道门 698 passed / 0 failed / 7 ignored，基线 685 → 698）：
+  新增 `tool_extension::translate_error(&ExtensionError) -> String`，按**变体**分发且**不写 `_ =>`**
+  （`crates/extension/tests/error_wording.rs` 的 `variant_name` 同样不写兜底 ⇒ 以后加变体忘了配中文
+  就编译不过，而不是悄悄把英文漏给用户），接上四处用户可见出口 —— `Workbench` 的 Enable/Disable
+  派发与 `spawn_reload_plugins` / `spawn_discover_plugins` 两条任务失败消息（后者落
+  `TaskSnapshot::message`，即第 10 轮已经中文化的同一条状态栏）。桌面用户此前点「启用」一个不存在
+  的插件，状态栏读到的是 `启用插件 x 失败：plugin: plugin 'x' was not found`（中文框架套英文前缀
+  套英文正文），现在正文那半是中文了。
+  顺带删掉 `ExtensionError::UnsupportedApiVersion`：**全仓零构造点**，真实路径是 `scan_roots` 里
+  `api_version_supported()` 为假时推一条中文 `unsupported_api_version` 诊断再 `continue`
+  （与第 20 轮那两个零构造 `AppCommand` 同一类；`publish = false` 且该枚举不序列化，不算对外破坏）。
+  用例分两层：`NotFound` 整句逐字钉（自己写的句子、且正是状态栏那句），带 OS 细节的三臂
+  （`Io`/`Manifest`/`Lua(mlua)`）只钉中文框架 + 断言英文 `Display` 没漏进来 ——
+  本机实测 `read_dir` 失败给的是「目录名称无效。 (os error 267)」，钉死细节就把用例变成一台机器的快照。
+  三处变异实测：把一处接线改回 `.to_string()`、改一个中文字面量、给枚举加第 9 个变体，
+  分别让逐字用例 / 文案用例 / 两处穷尽 `match` 编译失败变红。
+  **三条被推翻的前置判断（记下来免得下轮重推）**：① `tool-extension` 其实**不参与 wasm 编译**
+  （`crates/application/Cargo.toml` 把它放在 `cfg(not(target_arch = "wasm32"))` 下）；
+  ② `UnsupportedRuntime` 的分支活着但输入进不来（`spec::RUNTIMES` 只有 `lua`，`scan_roots` 先跑
+  `manifest.validate()`，非法 runtime 早被折成中文诊断）；③ `ExtensionError::Lua` **没有生产者**
+  （`run_plugin` 一律返回 `Ok`；全仓唯一那个 `Err(LuaHostError::AlreadyRunning)` 在零调用者的
+  `LuaHost::run_script` 里）。②③ 两臂是下一轮的死代码候选。
+  **同一轮新查出两处英文到用户眼前**、刻意留到下轮与 `plugin: ` 前缀同批：`scan_roots` 的
+  `manifest 解析失败: {error}` 内插的正是 `ExtensionError`（渲染成 `manifest 解析失败: manifest
+  parse error: …` 双重框架），紧邻的 `permission_denied` 诊断正文是裸 `error.to_string()`。
+  `dispatch_load_replay` 与 `write_exported_content` 仍未接映射器。
 - 插件「重启」交接的判据从**英文错误子串**换成类型化状态查询（四道门 685 passed / 0 failed /
   7 ignored，基线 682 → 685）：`crates/app/src/ui/tiles.rs` 的 `take_pending_restart` 循环原先写
   `if let Err(AppError::Plugin(message)) = dispatch(EnablePlugin) && message.contains("shutting down")`，
