@@ -120,9 +120,12 @@ pub(crate) fn scroll_is_at_bottom(
 /// 判定自动跟随是否继续所需的全部输入：一次开关状态 + 指针位置 + 本帧滚动几何。
 ///
 /// 收拢之前这里是 3 个相邻 bool 紧跟 4 个相邻 f32：七对相邻参数里有六对同型，
-/// 那六对任意对调都编译得过且零告警（第 30 轮逐对普查）；而唯一的调用点
-/// `AutoScrollState::update` 没有任何用例覆盖 —— 实参顺序排错，`tool-panels` 的
-/// 202 条测试照样全绿。
+/// 那六对任意对调都编译得过且零告警（第 30 轮逐对普查）；当时唯一的调用点
+/// `AutoScrollState::update` 还没有用例覆盖 —— 实参顺序排错，`tool-panels`
+/// 整套测试照样全绿。
+///
+/// 第 31 轮补上了那个调用点：`table.rs` 的用例按真实帧驱动 `update`，六对里每一对
+/// 现在都至少被一条用例抓到（含曾经全盲的 `content_height` ↔ `viewport_height`）。
 ///
 /// 与 `transport` 的 `NetworkWorkerContext` 同一式子（无 trait、无泛型、无 builder），
 /// 也受同一条限度约束：命名字段拦的是**写法**不是**取值**。位置排错在结构体字面量上
@@ -142,9 +145,10 @@ pub(crate) struct AutoScrollInputs {
     /// 本帧的偏移，与 `previous_offset_y` 是同一物理量的两个时刻。两者对调会同时翻转
     /// `moved_away_from_bottom` 与 `moved_towards_bottom`，自动跟随的进出因此整个反过来。
     pub(crate) offset_y: f32,
-    /// 内容总高。**本轮普查里唯一没有任何用例抓到的一对**就是它与 `viewport_height`
-    /// 的对调：换过来后 `bottom_offset` 被 `.max(0.0)` 钳成 0，“是否到底”恒为真，
-    /// 而这七条用例的期望值全都照样成立 —— 这一对只剩字段名在拦。
+    /// 内容总高。第 30 轮普查里唯一没人抓到的一对就是它与 `viewport_height` 的对调：
+    /// 换过来后 `bottom_offset` 被 `.max(0.0)` 钳成 0，“是否到底”恒为真，而那七条
+    /// 用例的期望值全都照样成立。第 31 轮起由 `table.rs` 的
+    /// `following_resumes_only_once_the_view_reaches_the_bottom` 在调用点抓到。
     pub(crate) content_height: f32,
     /// 可视区高度：调用方传的是 `inner_rect.height()`，不是内容能显示多少行。
     pub(crate) viewport_height: f32,

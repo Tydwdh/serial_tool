@@ -6,6 +6,24 @@
 
 ### 调整
 
+- 自动滚动的**调用点**第一次有了真驱动的用例，第 30 轮普查里"六行全静默"变成"六对全被抓到"
+  （四道门 718 passed / 0 failed / 7 ignored，基线 711 → 718，多的 7 条全是用例；
+  **生产逻辑只改了一处**：`inner_rect.height()` 从各算一遍绑成一次 `viewport_height`，
+  因为状态机与"该不该修复贴底"读的是同一个量，两处独立求值等于留一条漂移的口子）。
+  `crates/panels/src/table.rs` 的测试模块加一套 `Frame` + `drive()`：按真实帧跑
+  `AutoScrollState::update`，基准帧给定几何（视口 100 / 内容 1000 / 底部 = 900，
+  两个高度必须不等否则那一对分辨不出），每只用例只改自己判别的一两个字段。
+  **普查 A 层重跑：六对相邻同型字段每一对都至少被一条用例抓到**（最薄的一对是
+  `content_height`↔`viewport_height`，恰好 2 条，删用例时得记得）；另外 5 个探针
+  （`scroll_is_at_bottom` 的两处位置对调、`previous_offsets` 被收成共用一份、悬停注到别处、
+  按下事件丢掉）也全红。变异仍然**全部编译得过** —— 抓它的只有运行时断言，这正是本轮要补的东西。
+  **顺带查到的 egui 0.35 注入事实**（以后本仓写 UI 用例都要用）：`RawInput` 已经没有 `pointer`
+  字段，`hover_pos()` / `primary_down()` 只能靠 `Event::PointerMoved` / `Event::PointerButton` 推；
+  而 `PointerButton` 按下抬起都会顺带写下位置，所以"本帧无悬停"必须一个指针事件都不发 ——
+  自检用例第一版因此是**假绿**（只用按下帧，破坏 `PointerMoved` 的变异照样通过），改成
+  "悬停 / 悬停+按下 / 全新 Context 无事件"三种读回才咬得住；且 egui 跨 pass 保留指针状态，
+  "无悬停"那一帧必须换新 `Context`。稳定性另测：`tool-panels` 连跑 15 次 0 红，
+  单线程再跑一遍同样 209/0/1。
 - 收掉自动滚动的参数墙，棘轮再降一条（8 → 7 条豁免）：`panels/lib.rs::next_auto_scroll_state`
   收 3 个相邻 bool + 4 个相邻 f32，全部相邻同型对调里 5 组零告警编译得过（只有 `bool`↔`f32`
   那组被 `E0308` 拦住）。四道门 711 passed / 0 failed / 7 ignored（与基线逐字相同，纯重构）。

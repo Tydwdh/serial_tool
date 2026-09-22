@@ -226,6 +226,9 @@ impl AutoScrollState {
             .is_some_and(|position| inner_rect.contains(position));
         let primary_down = ui.input(|input| input.pointer.primary_down());
         let previous_offset_y = self.previous_offsets.get(key).copied().unwrap_or(offset_y);
+        // 可视区高度只从 `inner_rect` 取一次：状态机和底部修复判定读的是同一个量，
+        // 各算一遍等于给两处留出漂移的机会。
+        let viewport_height = inner_rect.height();
         let next_enabled = crate::next_auto_scroll_state(crate::AutoScrollInputs {
             auto_scroll: self.enabled,
             pointer_inside,
@@ -234,11 +237,11 @@ impl AutoScrollState {
             previous_offset_y,
             offset_y,
             content_height,
-            viewport_height: inner_rect.height(),
+            viewport_height,
         });
         let should_repair_stick_to_bottom = next_enabled
             && !crate::scroll_delta_moves_away_from_bottom(scroll_delta_y)
-            && !crate::scroll_is_at_bottom(offset_y, content_height, inner_rect.height());
+            && !crate::scroll_is_at_bottom(offset_y, content_height, viewport_height);
 
         if self.enabled != next_enabled {
             if !self.enabled && next_enabled {
@@ -794,9 +797,10 @@ pub(crate) fn wheel_scroll_during_selection(selection_dragging: bool, wheel_delt
 #[cfg(test)]
 mod tests {
     use super::{
-        RowHighlight, RowSelection, TextSelectionRows, bulk_copy_requires_confirmation,
-        claim_copy_focus, copy_text_with_feedback, edge_scroll_delta, estimated_wrapped_line_count,
-        owns_copy_focus, take_copy_feedback, wheel_scroll_during_selection,
+        AutoScrollState, RowHighlight, RowSelection, TextSelectionRows,
+        bulk_copy_requires_confirmation, claim_copy_focus, copy_text_with_feedback,
+        edge_scroll_delta, estimated_wrapped_line_count, owns_copy_focus, take_copy_feedback,
+        wheel_scroll_during_selection,
     };
 
     #[test]
@@ -968,5 +972,369 @@ mod tests {
         assert_eq!(wheel_scroll_during_selection(true, 24.0), 24.0);
         assert_eq!(wheel_scroll_during_selection(true, -24.0), -24.0);
         assert_eq!(wheel_scroll_during_selection(false, 24.0), 0.0);
+    }
+
+    // ── 自动跟随：从唯一的生产调用点 `AutoScrollState::update` 驱动 ──────────
+    //
+    // 第 30 轮把 8 个位置参数收进 `AutoScrollInputs` 后普查过：那八个字段里六对相邻
+    // 同型值任意对调，仓库里没有一条用例变红 —— 因为唯一能看见这次装配的调用点没有
+    // 用例。下面这批不直接调 `next_auto_scroll_state`，只喂 `update` 真实帧：第 31 轮
+    // 逐对复查过，这六对现在每一对都至少被一条用例抓到，曾经全盲的那一对也不例外。
+
+    /// 基准视图：可视区高 100、内容高 1000，因此“贴底”对应 `offset_y = 900`。
+    /// 内容高与可视区高必须是两个不同的数，否则这两个字段就换不出来了。
+    const SCROLLABLE_VIEW: egui::Rect =
+        egui::Rect::from_min_max(egui::pos2(100.0, 100.0), egui::pos2(300.0, 200.0));
+    const POINTER_INSIDE: egui::Pos2 = egui::pos2(200.0, 150.0);
+    const POINTER_OUTSIDE: egui::Pos2 = egui::pos2(200.0, 40.0);
+    const CONTENT_HEIGHT: f32 = 1000.0;
+    const BOTTOM_OFFSET: f32 = 900.0;
+    const MID_DOCUMENT: f32 = 400.0;
+    /// 滚轮符号照 egui：正 = 翻历史（离开底部），负 = 追最新。
+    const WHEEL_UP: f32 = 24.0;
+    const WHEEL_DOWN: f32 = -24.0;
+    const VIEW_KEY: &str = "log";
+    const OTHER_VIEW_KEY: &str = "terminal:COM3";
+
+    /// 一帧喂给 `update` 的全部外部输入。
+    ///
+    /// 用命名字段而不是位置参数，理由和 `crate::AutoScrollInputs` 一样：这里三个相邻
+    /// `f32` 加两个相邻 `bool`，按位置传会把第 30 轮刚拆掉的那面墙在测试里重新砌起来。
+    #[derive(Clone, Copy)]
+    struct Frame {
+        key: &'static str,
+        /// `ScrollArea` 的 inner rect：`update` 既从它取可视区高度，也用它判定悬停。
+        inner_rect: egui::Rect,
+        /// 指针悬停位置；`None` = 本帧 egui 报不出位置（鼠标移出视图或窗口）。
+        hover: Option<egui::Pos2>,
+        primary_down: bool,
+        content_height: f32,
+        offset_y: f32,
+        scroll_delta_y: f32,
+    }
+
+    /// 基准帧：指针在视图内、左键松开、开着跟随、停在文档中部且本帧没有滚轮。
+    /// 每个用例只改自己判别的那一两个字段，其余继承这里的值，读起来才知道谁在起作用。
+    const BASE_FRAME: Frame = Frame {
+        key: VIEW_KEY,
+        inner_rect: SCROLLABLE_VIEW,
+        hover: Some(POINTER_INSIDE),
+        primary_down: false,
+        content_height: CONTENT_HEIGHT,
+        offset_y: MID_DOCUMENT,
+        scroll_delta_y: 0.0,
+    };
+
+    /// 把 `hover` / `primary_down` 写成 egui 认的输入。
+    ///
+    /// egui 0.35 的 `RawInput` 已经没有 `pointer` 字段，`hover_pos()` 与
+    /// `primary_down()` 只能由 `events` 里的 `PointerMoved` / `PointerButton` 推出来。
+    /// 报不出位置时就一个事件都不发：`PointerButton` 无论按下还是抬起都会顺带写下位置，
+    /// 补一个抬起事件会把“本帧没有悬停”污染成“悬停在别处”。按下必然带着位置，
+    /// 因此按下状态只在有位置时注入。
+    fn pointer_events(frame: &Frame) -> egui::RawInput {
+        let mut raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 400.0),
+            )),
+            ..Default::default()
+        };
+        let Some(position) = frame.hover else {
+            return raw;
+        };
+        raw.events.push(egui::Event::PointerMoved(position));
+        if frame.primary_down {
+            raw.events.push(egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            });
+        }
+        raw
+    }
+
+    /// 跑一帧真实的 egui pass。
+    ///
+    /// 每帧一个新的 `Context`：`update` 只读指针、只写自己那份 map/set，帧间连续性全在
+    /// `AutoScrollState` 里。这样 egui 的 `buttons_down` 不会漏进下一帧，断言也不依赖
+    /// 它的重绘调度。
+    fn drive(state: &mut AutoScrollState, frame: Frame) {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(pointer_events(&frame), |ui| {
+            state.update(
+                ui,
+                frame.key,
+                frame.inner_rect,
+                frame.content_height,
+                frame.offset_y,
+                frame.scroll_delta_y,
+            );
+        });
+    }
+
+    /// 上面那套注入是否真的有效 —— 下面每条用例都建立在它之上，所以先让它自己能变红。
+    ///
+    /// `update` 从 egui 只读两个量：`pointer.hover_pos()` 和 `pointer.primary_down()`。
+    /// 这里把同一份注入直接读回来，顺带确认基准几何确实“内/外”各就各位。注入一旦随
+    /// egui 升级失效，本用例会红，而不是让“指针在视图外 → 状态不变”那类断言永远空过。
+    #[test]
+    fn injected_pointer_events_reach_the_input_reads() {
+        let ctx = egui::Context::default();
+
+        // 只悬停、不按键：位置只可能来自 `PointerMoved`。缺这一半，`PointerButton`
+        // 顺带写下的位置会把失效的 `PointerMoved` 注入盖住 —— 第一版就是这么漏的。
+        let _ = ctx.run_ui(pointer_events(&BASE_FRAME), |ui| {
+            assert_eq!(
+                ui.input(|input| input.pointer.hover_pos()),
+                Some(POINTER_INSIDE)
+            );
+            assert!(!ui.input(|input| input.pointer.primary_down()));
+        });
+
+        // 按下之后两个读法仍要各自成立。
+        let pressed = Frame {
+            primary_down: true,
+            ..BASE_FRAME
+        };
+        let _ = ctx.run_ui(pointer_events(&pressed), |ui| {
+            assert_eq!(
+                ui.input(|input| input.pointer.hover_pos()),
+                Some(POINTER_INSIDE)
+            );
+            assert!(ui.input(|input| input.pointer.primary_down()));
+        });
+        assert!(SCROLLABLE_VIEW.contains(POINTER_INSIDE));
+        assert!(!SCROLLABLE_VIEW.contains(POINTER_OUTSIDE));
+
+        // 同一个读法在不注入时必须取不到值：判别量来自注入，不是默认值碰巧合适。
+        // 全新 Context —— 指针位置与按下状态在 egui 里本来就跨帧保留。
+        let untouched = egui::Context::default();
+        let _ = untouched.run_ui(egui::RawInput::default(), |ui| {
+            assert_eq!(ui.input(|input| input.pointer.hover_pos()), None);
+            assert!(!ui.input(|input| input.pointer.primary_down()));
+        });
+    }
+
+    /// 指针不在视图内时，这一帧什么都不该发生 —— 哪怕其余每个脱离条件都成立。
+    ///
+    /// 判别量是 `pointer_inside`：左键按着、滚轮翻历史、偏移还在往回走，唯独指针在
+    /// 别处。两帧分别覆盖“报不出位置”的两种来源（悬停在视图外、本帧根本没有指针事件）。
+    /// 与下一条用例只差一个悬停点，所以“`auto_scroll` 与 `pointer_inside` 对调”（把
+    /// 开关当成位置、把位置当成开关）在这里会以“跟随被踢掉”的形式变红。
+    #[test]
+    fn pointer_outside_the_viewport_leaves_auto_scroll_untouched() {
+        let mut state = AutoScrollState::default();
+        let dragged_outside = Frame {
+            hover: Some(POINTER_OUTSIDE),
+            primary_down: true,
+            offset_y: 300.0,
+            scroll_delta_y: WHEEL_UP,
+            ..BASE_FRAME
+        };
+
+        drive(&mut state, dragged_outside);
+        // 第二个来源：这一帧 egui 一个指针事件都没收到，位置与按下都读不出来。
+        drive(
+            &mut state,
+            Frame {
+                hover: None,
+                primary_down: false,
+                offset_y: 100.0,
+                ..dragged_outside
+            },
+        );
+
+        assert!(state.enabled, "指针没在视图内，跟随不该掉");
+        assert!(
+            !state.take_pending(VIEW_KEY),
+            "指针在视图外时也不该替这个视图补一次滚到底"
+        );
+    }
+
+    /// 与上一条只差悬停点：指针进了视图，向上翻历史就是明确的“别看最新”。
+    ///
+    /// 这条是上一条的反证 —— 如果注入失效（两条用例其实都在“指针在外”下运行），
+    /// 这里就会红。同时它也反证 `pointer_inside` 与 `primary_down` 的对调：本帧左键
+    /// 是松开的，对调后状态机读到“没有悬停”，跟随就不会掉。
+    #[test]
+    fn wheel_up_inside_the_viewport_disengages_following() {
+        let mut state = AutoScrollState::default();
+
+        drive(
+            &mut state,
+            Frame {
+                scroll_delta_y: WHEEL_UP,
+                ..BASE_FRAME
+            },
+        );
+
+        assert!(!state.enabled, "视图内向上滚轮应当立即暂停跟随");
+        assert!(
+            !state.take_pending(VIEW_KEY),
+            "暂停的那一帧不该同时排一次滚到底"
+        );
+
+        // 停在文档中部、这帧没有滚轮：暂停状态必须自己维持下去，也不能偷偷补滚。
+        drive(&mut state, BASE_FRAME);
+        assert!(!state.enabled);
+        assert!(!state.take_pending(VIEW_KEY));
+    }
+
+    /// 偏移回落本身不是用户意图，按下左键才算。
+    ///
+    /// 判别量是 `primary_down`：第 2、3 帧的偏移一路往文档顶部走（400→300→200），只有
+    /// 第 3 帧左键按着。内容变短、虚拟列表回收行都会造成第 2 帧那种回落，跟随不该因此掉。
+    /// 第 2 帧钉住 `scroll_delta_y`/`previous_offset_y`：对调后半路的 400 被读成正向
+    /// 滚轮量，回落就成了脱离。第 3 帧钉住 `previous_offset_y`/`offset_y`（方向被读反）
+    /// 与 `offset_y`/`content_height`（“已经到底”被读成事实），两种都把这次拖拽当成没发生。
+    #[test]
+    fn only_a_pressed_button_turns_an_offset_drop_into_a_drag() {
+        let mut state = AutoScrollState::default();
+        drive(&mut state, BASE_FRAME);
+
+        drive(
+            &mut state,
+            Frame {
+                offset_y: 300.0,
+                ..BASE_FRAME
+            },
+        );
+        assert!(state.enabled, "没有按下左键的偏移回落不该暂停跟随");
+
+        drive(
+            &mut state,
+            Frame {
+                offset_y: 200.0,
+                primary_down: true,
+                ..BASE_FRAME
+            },
+        );
+        assert!(!state.enabled, "按着左键把视图拖离底部，才是主动放弃跟随");
+    }
+
+    /// 恢复跟随的门槛是“真的到底了”，不是“这帧在往下走”。
+    ///
+    /// 三帧：暂停中停在文档中部（400）→ 往下滚到 500 → 滚到 900（= 内容高 - 可视区高），
+    /// 只有第三帧该恢复并排一次滚到底。第二帧钉的是第 30 轮普查里唯一无人可见的那对：
+    /// `content_height` 与 `viewport_height` 对调后 `(可视区 - 内容).max(0.0)` 恒为 0，
+    /// “是否到底”成了恒真，于是“还在半路就往里滚了一下”被当成恢复跟随。第一帧另挡两种
+    /// 装配错：`auto_scroll` 与 `pointer_inside` 对调会把暂停中的视图凭空恢复，
+    /// `offset_y` 与 `content_height` 对调会让第一帧就读到“已在底部”。
+    #[test]
+    fn following_resumes_only_once_the_view_reaches_the_bottom() {
+        let mut state = AutoScrollState {
+            enabled: false,
+            ..Default::default()
+        };
+
+        drive(&mut state, BASE_FRAME);
+        assert!(!state.enabled);
+        assert!(!state.take_pending(VIEW_KEY));
+
+        let halfway = Frame {
+            offset_y: 500.0,
+            scroll_delta_y: WHEEL_DOWN,
+            ..BASE_FRAME
+        };
+        drive(&mut state, halfway);
+        assert!(!state.enabled, "内容高与可视区高对调后这里会误判成已到底");
+        assert!(!state.take_pending(VIEW_KEY));
+
+        drive(
+            &mut state,
+            Frame {
+                offset_y: BOTTOM_OFFSET,
+                ..halfway
+            },
+        );
+        assert!(state.enabled, "贴到底且继续向下，才该恢复跟随");
+        assert!(state.take_pending(VIEW_KEY));
+    }
+
+    /// 开着跟随却没贴到底：每帧都要自己补一次“滚到底”，但只在真有需要时补。
+    ///
+    /// 这条管 `update` 里独立于状态机的那半个判定（`should_repair_stick_to_bottom`）。
+    /// 第一帧是判别帧：内容比可视区长、偏移停在半路、本帧没有滚轮，必须补。
+    /// `scroll_delta_y` 与 `previous_offset_y` 在这一帧对调，会把半路的 400 读成正向
+    /// 滚轮量，跟随当场掉掉、补滚也就没了；`scroll_is_at_bottom(offset_y, content_height,
+    /// viewport_height)` 里任意一对相邻实参对调都会把这帧读成“已经到底”，于是该补的不补。
+    /// 后两帧管另两个边界：内容比可视区短（压根没得滚）与已经贴底 —— 都不许补。
+    #[test]
+    fn a_followed_view_that_is_not_at_the_bottom_queues_one_repair() {
+        let mut state = AutoScrollState::default();
+
+        drive(&mut state, BASE_FRAME);
+        assert!(state.enabled);
+        assert!(
+            state.take_pending(VIEW_KEY),
+            "开着跟随却停在半路，本帧就该把视图按回底部"
+        );
+
+        drive(
+            &mut state,
+            Frame {
+                content_height: 50.0,
+                offset_y: 0.0,
+                ..BASE_FRAME
+            },
+        );
+        assert!(
+            !state.take_pending(VIEW_KEY),
+            "内容比可视区短，没有可滚的余地，不该补滚"
+        );
+
+        drive(
+            &mut state,
+            Frame {
+                offset_y: BOTTOM_OFFSET,
+                scroll_delta_y: WHEEL_DOWN,
+                ..BASE_FRAME
+            },
+        );
+        assert!(state.enabled, "向下滚轮是追最新，不是放弃跟随");
+        assert!(!state.take_pending(VIEW_KEY), "已经贴底了，不需要再补一次");
+    }
+
+    /// 每个视图各存自己那份上一帧偏移。
+    ///
+    /// 终端按端口展开成多个视图，共用一个 `AutoScrollState`：判别量是 `key`。前两帧给
+    /// 两个视图各播一个偏移（400 与 900），第三帧才让第一个视图贴到底 —— 恢复跟随并只
+    /// 为它自己排一次滚到底。第二帧那句“都不该恢复”拦的是 `previous_offsets` 退化成
+    /// 一份全局偏移：那时第二个视图会拿第一个视图的 400 当自己的上一帧，自己的 900
+    /// 就成了“朝底部移动”，跟随凭空恢复。
+    #[test]
+    fn each_view_keeps_its_own_previous_offset() {
+        let mut state = AutoScrollState {
+            enabled: false,
+            ..Default::default()
+        };
+
+        drive(&mut state, BASE_FRAME);
+        drive(
+            &mut state,
+            Frame {
+                key: OTHER_VIEW_KEY,
+                offset_y: BOTTOM_OFFSET,
+                ..BASE_FRAME
+            },
+        );
+        assert!(!state.enabled, "两个视图各自贴自己的上一帧，都不该恢复");
+        assert!(!state.take_pending(OTHER_VIEW_KEY));
+
+        drive(
+            &mut state,
+            Frame {
+                offset_y: BOTTOM_OFFSET,
+                ..BASE_FRAME
+            },
+        );
+        assert!(state.enabled);
+        assert!(state.take_pending(VIEW_KEY));
+        assert!(
+            !state.take_pending(OTHER_VIEW_KEY),
+            "另一个视图的位置变化不该替它排队"
+        );
     }
 }

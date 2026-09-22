@@ -196,9 +196,23 @@ cargo tree -p tool-application | grep -i egui    # 0 行
   > 另记一处结构管不到的重复：`table.rs:241` 为了算"该不该修复贴底"又**独立**按同一顺序
   > 把 `(offset_y, content_height, viewport_height)` 传给 `scroll_is_at_bottom` 一次
   > （3 参，不触发 `too_many_arguments`，所以那处没有豁免也没有本轮的命名保护）。
-  > **下一轮该补的**：`table.rs` 的测试模块已经能用 `ctx.run_ui(RawInput::default(), …)`
-  > 驱动真 `Ui`，照那个式子喂给 `AutoScrollState::update` 一个合成 hover 位置 + 滚轮增量，
-  > 就能把 A 层那六行从"静默"变成"对调即红"，并顺手收掉上面那处三参重复。
+  > **第 31 轮把那六行从"静默"变成"对调即红"**（711 → 718，多的是 7 条新用例）：`table.rs`
+  > 的测试模块新增一套 `Frame` + `drive()` 的式子，**按真实帧**驱动 `AutoScrollState::update`，
+  > 每只用例只改自己判别的那一两个字段。普查 A 层重跑：**六对同型字段全部至少被一条用例抓到**
+  > （最薄的一对是 `content_height`↔`viewport_height`，恰好 2 条 —— 删用例时要记得），
+  > 另加 5 个探针（`scroll_is_at_bottom` 那两处位置对调、`previous_offsets` 收成共用一份、
+  > 悬停注到别处、按下事件丢掉）也都红。那处三参重复按"只绑一次 `viewport_height`"收掉，
+  > 没动任何签名。**仍无覆盖的是别的东西**：`update` 之外没有别的调用点，而面板整体的
+  > 像素级行为照旧只能在真窗口里看。
+  > **顺带查到的 egui 0.35 注入事实（本仓以后写 UI 用例都要用）**：`RawInput` **已经没有
+  > `pointer` 字段**，`hover_pos()` / `primary_down()` 只能由 `events` 里的
+  > `Event::PointerMoved` / `Event::PointerButton` 推出来。两个坑：① `PointerButton`
+  > 无论按下还是抬起**都会顺带写下位置**，所以"本帧没有悬停"必须**一个指针事件都不发**，
+  > 补一个抬起会把"无悬停"污染成"悬停在别处"；探针据此发现了我第一版自检用例是**假绿**的
+  > （只用按下帧，破坏 `PointerMoved` 的变异体照样通过自检）。② egui 跨 pass 保留指针状态，
+  > 所以"无悬停"那一帧要**换一个新 `Context`**，在同一 ctx 上再跑一次 `RawInput::default()`
+  > 读到的是上一帧的位置。每帧一个新 `Context` 还有个好处：`update` 只读指针、只写自己那份
+  > map/set，帧间连续性全在 `AutoScrollState` 里，断言就不依赖 egui 的重绘调度了。
   **当前状态（修复后）**：`cargo +1.92.0 fmt --all --check`、
   `cargo +1.92.0 clippy --workspace --all-targets -- -D warnings`、
   `cargo +1.92.0 test --workspace --all-targets` 三条均 **exit 0**。
