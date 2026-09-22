@@ -82,6 +82,25 @@
   全仓最长的生产函数易主为 `crates/panels/src/sender.rs` 的 `history_popup`（200 行）。
   字面量审计：`web/mod.rs` 的 260 条字符串、95 条数字字面量、102 条注释多重集与 HEAD 一致，
   零丢失、零新增字面量，另新增 47 条解释性注释。
+- 两处"参数墙"收拢，**退掉 2 条 lint 豁免**（全仓 `#[allow(clippy::…)]` 由 9 条降到 7 条）：
+  `render_rows_view` 20 → 7 个参数、`render_log_rows` 14 → 6 个。每帧的只读输入收进
+  `RowsViewInputs<'a>`（13 个命名字段，4 个消费者）与 `LogRowsInputs`（8 个字段，3 个消费者），
+  三个可变借用（`selection` / `text_selection_rows` / `virtual_rows`）仍作独立参数。
+  **真正的收获不是参数个数，而是调用点从位置变成名字**：此前 `stick_to_bottom` 与
+  `force_scroll_to_bottom`、`show_hex` 与 `show_raw` 这些相邻 bool 在调用点上无法区分，
+  换错两个编译不报错、渲染却变；现在这种错误在写法上就表达不出来。
+  **等价性证据**：HEAD（`c279bb2`）的独立 worktree 与本树各渲染同一批事件，
+  终端 / 日志各自的**空态与有数据态**四段一帧 shapes 共 176 个（含每条 galley 文本、图层、
+  裁剪矩形）逐行比对，SHA256 一致（`619de6e0…`）。摘要夹具这一轮专门补了空态一路 ——
+  原来的夹具永远有行，而本轮改动同时动到了两个面板的"无数据"分支，不补就会比出一条死分支。
+  敏感性另外验：把 `measure_rows` 的 `text_padding` 由 `4.0` 改成 `5.0`，摘要立刻变
+  （`0ed60754…`），改回即回到原值。
+  **探针同时暴露了一个比对盲区（如实记下）**：把空态的高度下限 `max(40.0)` 改成 `41.0`，
+  摘要**不变**（确认过是重新编译过的，不是旧二进制）。也就是说 A/B 证明不了这一行；
+  它靠的是逐行读用法 —— 老版里 `height` 只被空态分支用掉（非空路径用的是 `total_height`
+  与 `full_width`），所以把 clamp 移进 `render_empty_rows_view` 等价。
+  字面量审计：`terminal.rs` 337 条字符串 / 376 条数字、`log.rs` 137 / 173 与 HEAD 多重集一致，
+  零丢失、零新增，各多 6 条解释性注释；没有只换比较运算符的行。
 - 更正一条已经与代码不符的架构结论（文档，不改行为）：`docs/ARCHITECTURE.md` 第 12 条「仍留 ③」
   原写 `TransportCapabilities` "两侧都不被读取"。实测共享串口面板读它 7 处、覆盖 5 个能力位；
   真实的不对称是 native 把交给面板的那份能力写成字面量，而后端上报的 `capabilities()` 在 native

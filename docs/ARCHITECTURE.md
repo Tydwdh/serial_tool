@@ -122,8 +122,11 @@ cargo tree -p tool-application | grep -i egui    # 0 行
     收敛后的返回表达式在 `:78`）：t13 去掉中间的 `let registry = …;` 直接返回，无 lint 豁免。
   **当前状态（修复后）**：`cargo +1.92.0 fmt --all --check`、
   `cargo +1.92.0 clippy --workspace --all-targets -- -D warnings`、
-  `cargo +1.92.0 test --workspace --all-targets` 三条均 **exit 0**，
-  test 为 **590 passed / 0 failed / 7 ignored**（22 targets；= Task 6 落 `send_plan` 前的
+  `cargo +1.92.0 test --workspace --all-targets` 三条均 **exit 0**。
+  用例数**不要按这里的数字判断对错**，它每轮都会随新用例增长（写下这一段时是 590，
+  本文件最近一次复核时是 663，`ignored` 一直是 7 条依赖安静调度的计时用例）；
+  判据始终是上面这三条命令的退出码。
+  历史构成（590 = Task 6 落 `send_plan` 前的
   578 + `send_plan` 的 6 条单测，该模块无 `cfg` 门控所以跑在 native 测试目标里
   + Task 6 复审轮的 1 条 `headless.rs` 端口命名形态用例
   + 终审修波的 5 条：`crates/panels/src/sender.rs` 的 HEX 门禁 3 条、

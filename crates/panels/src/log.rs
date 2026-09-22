@@ -540,17 +540,19 @@ impl LogPanel {
         let outcome = render_log_rows(
             ui,
             rows,
-            !self.entry_order.is_empty(),
-            scroll_to_row,
-            self.auto_scroll.enabled,
-            force_scroll_to_bottom,
-            scroll_delta_y,
-            self.font_size,
-            self.visible_rows_generation,
+            &LogRowsInputs {
+                has_any_entries: !self.entry_order.is_empty(),
+                scroll_to_row,
+                stick_to_bottom: self.auto_scroll.enabled,
+                force_scroll_to_bottom,
+                wheel_scroll_delta_y: scroll_delta_y,
+                font_size: self.font_size,
+                visible_rows_generation: self.visible_rows_generation,
+                navigate_highlight: self.navigate_highlight,
+            },
             &mut self.selection,
             &mut self.text_selection_rows,
             &mut self.virtual_rows,
-            self.navigate_highlight,
         );
 
         if let Some(id) = outcome.pending_navigate_to_id {
@@ -875,11 +877,13 @@ fn estimated_log_row_height(
         .max(base_row_height)
 }
 
-/// 渲染日志消息流的行视图，返回滚动几何与双击跳转目标。
-#[allow(clippy::too_many_arguments)]
-fn render_log_rows(
-    ui: &mut egui::Ui,
-    rows: &VecDeque<LogEntry>,
+/// 一帧内日志行视图的只读输入：滚动意图、显示代次与跳转目标。
+/// 这些值原先是 `render_log_rows` 的位置参数，相邻 bool
+/// （`stick_to_bottom` / `force_scroll_to_bottom`）互换编译不报错、渲染却变；
+/// 收进结构体后调用点按字段名书写，参数数量超限的 lint 豁免也随之删除。
+/// 可变借用（`selection` / `text_selection_rows` / `virtual_rows`）不是这帧的输入，
+/// 仍作为独立参数传入（模式与 terminal.rs 的 `RowsViewInputs` 一致）。
+struct LogRowsInputs {
     has_any_entries: bool,
     scroll_to_row: Option<usize>,
     stick_to_bottom: bool,
@@ -887,35 +891,38 @@ fn render_log_rows(
     wheel_scroll_delta_y: f32,
     font_size: f32,
     visible_rows_generation: u64,
+    navigate_highlight: Option<(u64, f64)>,
+}
+
+/// 渲染日志消息流的行视图，返回滚动几何与双击跳转目标。
+fn render_log_rows(
+    ui: &mut egui::Ui,
+    rows: &VecDeque<LogEntry>,
+    inputs: &LogRowsInputs,
     selection: &mut RowSelection,
     text_selection_rows: &mut TextSelectionRows,
     virtual_rows: &mut VirtualRowIndex,
-    navigate_highlight: Option<(u64, f64)>,
 ) -> LogRenderOutcome {
     let mut pending_navigate: Option<u64> = None;
-    let font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
+    let font_id = egui::FontId::new(inputs.font_size, egui::FontFamily::Monospace);
     let base_row_height = ui.fonts_mut(|f| f.row_height(&font_id));
-    selection.sync_rows_with_generation(rows.iter().map(|entry| entry.id), visible_rows_generation);
+    selection.sync_rows_with_generation(
+        rows.iter().map(|entry| entry.id),
+        inputs.visible_rows_generation,
+    );
 
     if rows.is_empty() {
-        return render_empty_log_rows(ui, has_any_entries);
+        return render_empty_log_rows(ui, inputs.has_any_entries);
     }
 
     let scroll_output = ScrollArea::vertical()
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
         .auto_shrink([false, false])
-        .stick_to_bottom(stick_to_bottom)
+        .stick_to_bottom(inputs.stick_to_bottom)
         .id_salt(LOG_SCROLL_ID)
         .show(ui, |ui| {
-            let frame = layout_log_row_frame(
-                ui,
-                rows,
-                virtual_rows,
-                &font_id,
-                base_row_height,
-                visible_rows_generation,
-                navigate_highlight,
-            );
+            let frame =
+                layout_log_row_frame(ui, rows, virtual_rows, &font_id, base_row_height, inputs);
             // 逐行绘制标签 + 可选择的文本
             let mut interaction = begin_log_rows_interaction(
                 ui,
@@ -960,17 +967,10 @@ fn render_log_rows(
                 row_heights_changed,
                 &interaction,
                 selection,
-                wheel_scroll_delta_y,
+                inputs.wheel_scroll_delta_y,
             );
-            pending_navigate = resolve_log_row_interactions(
-                ui,
-                &mut interaction,
-                &frame,
-                rows,
-                selection,
-                scroll_to_row,
-                force_scroll_to_bottom,
-            );
+            pending_navigate =
+                resolve_log_row_interactions(ui, &mut interaction, &frame, rows, selection, inputs);
         });
 
     LogRenderOutcome {
@@ -1030,9 +1030,10 @@ fn layout_log_row_frame(
     virtual_rows: &mut VirtualRowIndex,
     font_id: &egui::FontId,
     base_row_height: f32,
-    visible_rows_generation: u64,
-    navigate_highlight: Option<(u64, f64)>,
+    inputs: &LogRowsInputs,
 ) -> LogRowFrame {
+    let (visible_rows_generation, navigate_highlight) =
+        (inputs.visible_rows_generation, inputs.navigate_highlight);
     let font_size = font_id.size;
     let full_width = ui.available_width().max(0.0);
     let text_color = ui.style().visuals.text_color();
@@ -1436,9 +1437,10 @@ fn resolve_log_row_interactions(
     frame: &LogRowFrame,
     rows: &VecDeque<LogEntry>,
     selection: &mut RowSelection,
-    scroll_to_row: Option<usize>,
-    force_scroll_to_bottom: bool,
+    inputs: &LogRowsInputs,
 ) -> Option<u64> {
+    let (scroll_to_row, force_scroll_to_bottom) =
+        (inputs.scroll_to_row, inputs.force_scroll_to_bottom);
     let (navigate_target, hovered_row) = resolve_log_row_clicks(
         ui,
         &mut interaction.hl,

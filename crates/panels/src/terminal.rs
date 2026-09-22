@@ -919,24 +919,26 @@ impl TerminalPanel {
             };
             render_rows_view(
                 ui,
-                &scroll_key,
-                scroll_height,
                 &self.store,
                 visible_ids,
-                visible_ids_update,
-                scroll_to_row,
-                self.show_hex,
-                self.show_raw,
-                self.auto_scroll.enabled,
-                force_scroll_to_bottom,
-                scroll_delta_y,
-                self.font_size,
-                &self.port_aliases,
+                &RowsViewInputs {
+                    scroll_key: &scroll_key,
+                    height: scroll_height,
+                    visible_ids_update,
+                    scroll_to_row,
+                    show_hex: self.show_hex,
+                    show_raw: self.show_raw,
+                    stick_to_bottom: self.auto_scroll.enabled,
+                    force_scroll_to_bottom,
+                    wheel_scroll_delta_y: scroll_delta_y,
+                    font_size: self.font_size,
+                    port_aliases: &self.port_aliases,
+                    empty_hint,
+                    navigate_highlight: self.navigate_highlight,
+                },
                 &mut self.selection,
                 &mut self.text_selection_rows,
-                empty_hint,
                 &mut self.virtual_rows,
-                self.navigate_highlight,
             )
         };
 
@@ -1207,13 +1209,32 @@ fn scaled_row_columns(font_size: f32) -> RowColumns {
     }
 }
 
-/// 无数据时的接收区：只画引导文案，并保留滚动条占位。
-fn render_empty_rows_view(
-    ui: &mut egui::Ui,
-    scroll_key: &str,
+/// 一帧内行视图的只读输入：几何、显示开关、滚动意图与外部数据。
+/// 这些值原先是 `render_rows_view` 的位置参数，相邻的两个 bool
+/// （`stick_to_bottom` / `force_scroll_to_bottom`）互换编译不报错、渲染却变；
+/// 收进结构体后调用点按字段名书写，参数数量超限的 lint 豁免也随之删除。
+/// 可变借用（`selection` / `text_selection_rows` / `virtual_rows`）不是这帧的输入，
+/// 仍作为独立参数传入（模式与 log.rs 的 `LogRowFrame` 一致）。
+struct RowsViewInputs<'a> {
+    scroll_key: &'a str,
     height: f32,
-    empty_hint: &str,
-) -> RenderOutcome {
+    visible_ids_update: VisibleIdsUpdate,
+    scroll_to_row: Option<usize>,
+    show_hex: bool,
+    show_raw: bool,
+    stick_to_bottom: bool,
+    force_scroll_to_bottom: bool,
+    wheel_scroll_delta_y: f32,
+    font_size: f32,
+    port_aliases: &'a HashMap<String, String>,
+    empty_hint: &'a str,
+    navigate_highlight: Option<(u64, f64)>,
+}
+
+/// 无数据时的接收区：只画引导文案，并保留滚动条占位。
+fn render_empty_rows_view(ui: &mut egui::Ui, inputs: &RowsViewInputs<'_>) -> RenderOutcome {
+    let (scroll_key, empty_hint) = (inputs.scroll_key, inputs.empty_hint);
+    let height = inputs.height.max(40.0);
     let scroll_output = ScrollArea::vertical()
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
         .max_height(height)
@@ -1251,11 +1272,10 @@ fn measure_rows(
     ui: &mut egui::Ui,
     widths: &TerminalTableWidths,
     font_id: &egui::FontId,
-    font_size: f32,
     row_height: f32,
-    show_hex: bool,
-    show_raw: bool,
+    inputs: &RowsViewInputs<'_>,
 ) -> RowMeasure {
+    let (font_size, show_hex, show_raw) = (inputs.font_size, inputs.show_hex, inputs.show_raw);
     let hex_width = widths.hex;
     let preview_width = widths.preview;
     let text_padding = 4.0;
@@ -1332,12 +1352,12 @@ struct RowsRects {
 /// 为整块行内容分配布局空间，并算出各列的区域矩形。
 fn allocate_rows_rects(
     ui: &mut egui::Ui,
-    scroll_key: &str,
     widths: &TerminalTableWidths,
     full_width: f32,
     total_height: f32,
-    show_hex: bool,
+    inputs: &RowsViewInputs<'_>,
 ) -> RowsRects {
+    let (scroll_key, show_hex) = (inputs.scroll_key, inputs.show_hex);
     let (label_width, hex_width, preview_width) = (widths.label, widths.hex, widths.preview);
     let (full_rect, _alloc_response) =
         ui.allocate_exact_size(egui::vec2(full_width, total_height), Sense::hover());
@@ -2204,41 +2224,27 @@ fn scroll_rows_to_bottom_if_requested(ui: &mut egui::Ui, force_scroll_to_bottom:
 }
 
 /// 渲染接收区行视图。时间 / 端口 / 方向三列固定显示，只有内容列随 `show_hex` / `show_raw` 切换。
-#[allow(clippy::too_many_arguments)]
 fn render_rows_view(
     ui: &mut egui::Ui,
-    scroll_key: &str,
-    height: f32,
     store: &TerminalStore,
     row_ids: &[u64],
-    visible_ids_update: VisibleIdsUpdate,
-    scroll_to_row: Option<usize>,
-    show_hex: bool,
-    show_raw: bool,
-    stick_to_bottom: bool,
-    force_scroll_to_bottom: bool,
-    wheel_scroll_delta_y: f32,
-    font_size: f32,
-    port_aliases: &HashMap<String, String>,
+    inputs: &RowsViewInputs<'_>,
     selection: &mut RowSelection,
     text_selection_rows: &mut TextSelectionRows,
-    empty_hint: &str,
     virtual_rows: &mut VirtualRowIndex,
-    navigate_highlight: Option<(u64, f64)>,
 ) -> RenderOutcome {
-    let height = height.max(40.0);
-    let font_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
+    let font_id = egui::FontId::new(inputs.font_size, egui::FontFamily::Monospace);
     let row_height = ui.fonts_mut(|f| f.row_height(&font_id));
-    if visible_ids_update.changed {
+    if inputs.visible_ids_update.changed {
         selection.sync_rows(row_ids.iter().copied());
     }
 
     // 列宽随字体大小缩放（基准 13px）
-    let columns = scaled_row_columns(font_size);
+    let columns = scaled_row_columns(inputs.font_size);
 
     if row_ids.is_empty() {
         virtual_rows.clear();
-        return render_empty_rows_view(ui, scroll_key, height, empty_hint);
+        return render_empty_rows_view(ui, inputs);
     }
 
     let label_width = columns.label_width;
@@ -2248,29 +2254,26 @@ fn render_rows_view(
     let scroll_output = ScrollArea::vertical()
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
         .auto_shrink([false, false])
-        .stick_to_bottom(stick_to_bottom)
-        .id_salt((scroll_key, "v2"))
+        .stick_to_bottom(inputs.stick_to_bottom)
+        .id_salt((inputs.scroll_key, "v2"))
         .show(ui, |ui| {
             let full_width = ui.available_width().max(0.0);
-            let widths = terminal_table_widths(full_width, label_width, show_hex);
-            let measure = measure_rows(
-                ui, &widths, &font_id, font_size, row_height, show_hex, show_raw,
-            );
+            let widths = terminal_table_widths(full_width, label_width, inputs.show_hex);
+            let measure = measure_rows(ui, &widths, &font_id, row_height, inputs);
             let layout_key = measure.layout_key;
             let total_height = sync_rows_virtual_index(
                 ui,
                 virtual_rows,
                 row_ids,
-                visible_ids_update,
+                inputs.visible_ids_update,
                 layout_key,
                 row_height,
             );
-            let rects =
-                allocate_rows_rects(ui, scroll_key, &widths, full_width, total_height, show_hex);
+            let rects = allocate_rows_rects(ui, &widths, full_width, total_height, inputs);
             let label_rect = rects.label_rect;
 
             // 逐行几何状态：记录每行的 y 与高度，供 hover / 框选命中判定
-            let mut hl = RowHighlight::new(ui, scroll_key);
+            let mut hl = RowHighlight::new(ui, inputs.scroll_key);
             let render_range = rows_render_range(
                 virtual_rows,
                 row_ids,
@@ -2288,7 +2291,7 @@ fn render_rows_view(
 
             let mut interaction = begin_rows_interaction(
                 ui,
-                scroll_key,
+                inputs.scroll_key,
                 &hl,
                 row_ids,
                 &rects,
@@ -2308,7 +2311,7 @@ fn render_rows_view(
                 let rendered = build_row_galleys(ui, &row, current_y, &measure);
                 row_heights_changed |= virtual_rows.set_height(row_idx, rendered.entry_height);
                 paint_row_hover_and_selection(ui, &hl, selection, &rects, &rendered, row_idx);
-                paint_navigate_highlight(ui, &rects, &rendered, &row, navigate_highlight);
+                paint_navigate_highlight(ui, &rects, &rendered, &row, inputs.navigate_highlight);
                 paint_row_labels(
                     ui,
                     &row,
@@ -2316,7 +2319,7 @@ fn render_rows_view(
                     &columns,
                     &measure,
                     &rendered,
-                    port_aliases,
+                    inputs.port_aliases,
                 );
                 // --- 可选择的正文内容（HEX / 原始 / 显示文本） ---
                 if measure.hex_width > 0.0 {
@@ -2334,20 +2337,26 @@ fn render_rows_view(
                 total_height,
                 row_heights_changed,
             ));
-            apply_selection_scroll(ui, &rects, &interaction, selection, wheel_scroll_delta_y);
+            apply_selection_scroll(
+                ui,
+                &rects,
+                &interaction,
+                selection,
+                inputs.wheel_scroll_delta_y,
+            );
             let click = resolve_row_click_targets(
                 ui,
                 &mut hl,
                 &interaction,
                 &rects,
-                scroll_key,
+                inputs.scroll_key,
                 row_ids,
                 selection,
             );
             navigate_id = click.navigate_id;
 
             // 跳转到目标行（搜索时双击 → 离开搜索进入上下文）
-            if let Some(target_row) = scroll_to_row {
+            if let Some(target_row) = inputs.scroll_to_row {
                 let y_top = label_rect.top() + virtual_rows.row_top(target_row);
                 let target_rect =
                     egui::Rect::from_min_size(egui::pos2(0.0, y_top), egui::vec2(1.0, 1.0));
@@ -2378,7 +2387,7 @@ fn render_rows_view(
                 show_all_rows_menu_items(ctx_ui, store, row_ids, &measure);
             });
 
-            scroll_rows_to_bottom_if_requested(ui, force_scroll_to_bottom);
+            scroll_rows_to_bottom_if_requested(ui, inputs.force_scroll_to_bottom);
         });
 
     RenderOutcome {
