@@ -133,6 +133,28 @@
 
 ### 修复
 
+- 修复重连循环里一个**从来没生效过**的判定：`workbench.rs` 用
+  `network.is_some() && error.to_ascii_lowercase().contains("would block")` 决定"要不要再试一次"。
+  换成读类型化错误的 `kind`（`reconnect_is_worth_retrying`，只认 `Io(ErrorKind::WouldBlock)`），
+  翻译只发生在交给用户那一处。**这个分支此前恒假**，两个方向都假：
+  `io::Error::new(kind, msg)` 的 `Display` 只打印 `msg`、不含 kind 名，而全仓唯一造出
+  `WouldBlock` 的 `TransportManager::open_serial` 给的 msg 本身就是中文「… 正在关闭中，请稍后重试」；
+  再加上 `network.is_some()` 把它限定在网络端口，而 `open_network_serial` 没有这条错误路径。
+  **必须说清的限度（不要读成"重连现在会重试了"）**：改成 kind 判定之后，
+  **没有任何一种失败从"立即放弃"变成"重试"** —— 两个分支都没有 `WouldBlock` 生产者：
+  串口那条的 kind 在 `platform/src/native.rs::operation_error` 就已折成字符串（要修得动
+  `tool-platform`，超出本轮范围），网络那条 `open_network_serial` 在 TCP/WS 连接失败时仍返回 `Ok`
+  （失败由 worker 线程以日志事件发布）。本轮净效果：判定从"看起来在判、其实恒假"变成
+  "语义正确、当前无人触发"，并有一条注释把这件事写死。
+  **用户可见的变化只有文案**：串口重连硬失败不再带英文 `transport operation failed:` 框架，
+  网络重连失败从 `io error: …` 变成 `操作超时：…`（与 `web.rs` 同一边界已有的翻译一致）。
+  守卫：`workbench.rs` 的 `mod tests` 钉住 kind→重试的对应关系（`WouldBlock` 才重试；
+  **文字长得像"正在关闭中"的硬失败不重试**），`headless.rs` 钉住公开面上真走得通的三支
+  （硬失败立刻放弃、失败文案是中文、网络端口确实走网络分支）。子代理报了 6 次变异，
+  其中一条**诚实记为没抓到**：把成功返回值 `Reconnected` 换成 `TransportConnected` 时三条用例全绿，
+  于是它改断言为"成功必须携带 `poll_tasks` 会应用的结果"（该变异随即变红）。我另外在 16 路
+  CPU 负载下把那条依赖墙钟的用例连跑 8 次全部通过（0.01–0.11s），不是运气过的计时测试。
+  两个待你拍板的问题记在 `docs/ARCHITECTURE.md` 第 12 条 ④。
 - 修复**连接/断开/发送失败时用户读到英文句子**（两端都是，此前只记在网页端名下）。根因不是
   平台差异，而是一个调用点把强类型错误提前压成了字符串：`platform/src/native.rs` 的
   `operation_error` 用 `error.to_string()` 折进 `TransportError::Operation(..)`，变体信息就此丢失；

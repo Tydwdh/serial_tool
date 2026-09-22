@@ -610,6 +610,24 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
       这个英文字面量；另外 `transport: ` 前缀来自 `application/src/error.rs` 的
       `#[error("transport: {0}")]`，而 `AppError` 被 cfg 挡在 wasm 之外，所以**前缀这一项
       仍然是两端不同**（native 有、web 无）。
+      > **再更正一次（第 9 轮）**：上面这句里"重连那处喂字符串给重试判定"已经修掉了 ——
+      > 判定改读类型化 `kind`（`reconnect_is_worth_retrying`），两条失败出口各自过
+      > `translate_error`，不再是英文。同一轮还发现**"三处 `error.to_string()`"这个数是我自己数错的**：
+      > `grep -n "error\.to_string()" crates/application/src/workbench.rs` 实际命中 18 处
+      > （含 `AppError::Plugin` / `AppError::Transport` 这些包装），**其中哪些真的会到用户眼前、
+      > 哪些只是内部转换，还没逐条核过** —— 这是下一轮的取证项，不要引用"三处"这个数。
+      >
+      > **第 9 轮留下的两个待拍板问题**（都不是机械收敛能定的）：
+      > ① 重连那个 3 秒预算的循环，改成类型化判定之后**仍然没有任何生产者**
+      > （串口的 kind 在 `platform/src/native.rs::operation_error` 就丢了；网络的
+      > `open_network_serial` 连接失败时照样返回 `Ok`，失败以日志事件发布）。
+      > 要么把 `WouldBlock` 生产者接到路上（需要 `tool_platform::TransportError` 携带 kind 的变体），
+      > 要么承认这段循环是死代码并删掉、让重连失败即返回。
+      > ② 是否把 `ErrorKind::TimedOut`（`close_port_blocking` 超时那条，网络端口真能走到）
+      > 也算可重试 —— 那会让那种情况下重连真的试满 3 秒，是用户可见行为变化。
+      > 另有一个子代理发现、本轮**没动**的不对称：`start_reconnect` 只按 `display_name()` 匹配
+      > 网络端口，所以 `network://host:port` 形态的 id 会静默走串口分支
+      > （与 `is_network_port` 认两种形态不一致）。
       ⑤ 【本波已闭合】换行后缀表原有 3 份（native `state::LineEnding`、wasm `WebLineEnding`、
       共享面板 `SendLineEnding`），值一致但没有任何断言钉住，两端还各写两份 4 臂 **identity** `match`
       （类型不同才需要转）。现在收进 `tool_core::LineEnding`（`crates/core/src/lib.rs:454`），

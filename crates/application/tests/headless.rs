@@ -1512,3 +1512,163 @@ fn sending_to_a_port_that_was_never_opened_reads_in_chinese_on_both_entry_points
          `TransportError::Operation` 的那个载荷"
     );
 }
+
+// ── 重连循环的失败判定（`Workbench::start_reconnect`）────────────────────────
+//
+// 循环有两条失败出口：「端口还在关闭中（`Io(WouldBlock)`）→ 每 10ms 再试一次，最多 3 秒」
+// 与「硬失败 → 立刻放弃」。判定读的是类型化错误里的 `kind`（`reconnect_is_worth_retrying`
+// 的文档记着旧版那句英文子串匹配为什么从来没生效），翻译只发生在交给用户的那一句上。
+//
+// **「WouldBlock 会重试」这一支从 `Workbench` 的公开面上驱动不出来**，不是漏了：
+// 全工作区唯一造出 `Io(WouldBlock)` 的是 `TransportManager::open_serial`（串口路径），
+// 而串口重连的错误在到得了本文件之前就被 `crates/platform/src/native.rs::operation_error`
+// 折成 `TransportError::Operation(中文)`，`kind` 已丢；网络路径的 `open_network_serial`
+// 根本没有这条错误（它的连接失败发生在 worker 线程里，以日志事件发布，`open` 自身仍返回
+// Ok）。所以 `kind → 重试` 的对应关系由 `crates/application/src/workbench.rs` 里的
+// `reconnect_only_retries_a_port_that_is_still_closing` 钉住；下面三条钉的是公开面上
+// 真走得通的另外几支。
+
+/// 打不开的口必须**立刻**放弃：3 秒预算是留给「还在关闭中」的，不是留给硬失败的。
+///
+/// 把串口分支的 `return Err(...)` 改成继续重试，这条用例会在 2.5s 时看到任务仍然
+/// Running 而变红（真失败要等满 3 秒），用户侧的症状就是「重连一个不存在的口也要转 3 秒」。
+#[test]
+fn reconnect_gives_up_at_once_on_a_port_that_cannot_be_opened() {
+    const PORT: &str = "COM_HEADLESS_RECONNECT_HARD_FAIL";
+
+    let bus = DataBus::new();
+    let mut wb = Workbench::new(bus);
+    let task = expect_pending(
+        &mut wb,
+        AppCommand::Reconnect {
+            port: PortId::new(PORT),
+        },
+    );
+    assert_eq!(
+        task_kind(&wb, task).as_deref(),
+        Some("reconnect"),
+        "Reconnect 必须落到重连任务本身，否则下面测的不是那条循环"
+    );
+
+    let gave_up = tick_until(&mut wb, Duration::from_millis(2_500), |wb| {
+        matches!(
+            task_state(wb, task),
+            Some(TaskState::Completed | TaskState::Failed)
+        )
+    });
+    assert!(
+        gave_up,
+        "硬失败必须在 3 秒重试预算之内结束，实际: {:?}",
+        task_state(&wb, task)
+    );
+    assert_eq!(
+        task_state(&wb, task),
+        Some(TaskState::Failed),
+        "端口根本打不开，重连不得假装成功"
+    );
+    assert_ne!(
+        task_message(&wb, task).as_deref(),
+        Some("重连超时（3 秒）"),
+        "放弃的理由必须是端口给的那句错，而不是被重试预算兜掉的超时"
+    );
+}
+
+/// 重连失败最终给用户看的那句话必须是翻译过的中文，不带平台 `Display` 的英文外框。
+///
+/// 旧的写法是 `map_err(|error| error.to_string())`：它把 `tool_platform::TransportError`
+/// 整个 `Display` 出来（`transport operation failed: …`）—— 变体信息在能被翻译之前就被
+/// 压成了字符串。换成 `translate_error` 之后，英文外框换成中文框架（`IO 错误：…` /
+/// `串口错误：…`），正文沿用 transport 侧已经翻译过的那句。断言刻意只钉与系统 locale
+/// 无关的两件事：英文外框不得出现、句子里必须有汉字 —— 框架（`IO 错误：` 等）本身就是
+/// 中文写的，OS 给的那半句原文才随 locale 变。
+#[test]
+fn reconnect_failure_words_are_translated_before_they_reach_the_user() {
+    const PORT: &str = "COM_HEADLESS_RECONNECT_WORDING";
+
+    let bus = DataBus::new();
+    let mut wb = Workbench::new(bus);
+    let task = expect_pending(
+        &mut wb,
+        AppCommand::Reconnect {
+            port: PortId::new(PORT),
+        },
+    );
+    let ended = tick_until(&mut wb, Duration::from_secs(10), |wb| {
+        matches!(
+            task_state(wb, task),
+            Some(TaskState::Completed | TaskState::Failed)
+        )
+    });
+    assert!(
+        ended,
+        "重连任务必须在 10s 内结束，实际: {:?}",
+        task_state(&wb, task)
+    );
+    let words = task_message(&wb, task).expect("任务快照必须带着失败原文");
+
+    assert!(
+        !words.contains("transport operation failed"),
+        "平台错误的英文外框又漏到用户面前了：{words:?}"
+    );
+    assert!(
+        !words.contains("io error:"),
+        "错误的 `Display` 原文又被当成用户文案了：{words:?}"
+    );
+    assert!(
+        words.chars().any(|c| matches!(c, '\u{4E00}'..='\u{9FFF}')),
+        "用户看到的那句必须带中文框架（`IO 错误：` / `串口错误：` 这类），实际: {words:?}"
+    );
+}
+
+/// 已注册网络端口的重连必须走循环的网络分支：`open_network_serial` + `Reconnected`。
+///
+/// 网络分支与串口分支在循环里各拿各的错误类型、各造各的结果，写回落到串口分支的话，
+/// `open_serial` 会拿着 `127.0.0.1:9` 这种名字去枚举物理口，用户看到的是一句硬失败。
+#[test]
+fn network_reconnect_takes_the_network_branch_of_the_loop() {
+    let bus = DataBus::new();
+    let mut wb = Workbench::new(bus);
+    let config = NetworkSerialConfig {
+        host: "127.0.0.1".to_owned(),
+        port: 9,
+        api_key: None,
+    };
+    let name = config.display_name();
+    expect_done(&mut wb, AppCommand::RegisterNetworkPort { config });
+
+    let task = expect_pending(
+        &mut wb,
+        AppCommand::Reconnect {
+            port: PortId::new(name.clone()),
+        },
+    );
+    assert_eq!(task_kind(&wb, task).as_deref(), Some("reconnect"));
+    let ended = tick_until(&mut wb, Duration::from_secs(10), |wb| {
+        matches!(
+            task_state(wb, task),
+            Some(TaskState::Completed | TaskState::Failed)
+        )
+    });
+    assert!(
+        ended,
+        "网络重连必须在 10s 内结束，实际: {:?}",
+        task_state(&wb, task)
+    );
+    assert_eq!(
+        task_state(&wb, task),
+        Some(TaskState::Completed),
+        "网络端口 open 失败原因在 worker 线程里，重连这一层必须按 `open_network_serial` \
+         的返回值收尾；落到串口分支就会 Failed（`COM` 枚举根本不认这个名字）"
+    );
+    // `Reconnected` 的落点：`poll_tasks` 把它写回选中端口。
+    // 这条**钉不住 `Reconnected` 与 `TransportConnected` 的区别**：两者在 `poll_tasks` 里的
+    // 落点逐字相同（实测把网络分支的 Ok 换成 `TransportConnected { port }`，本用例仍绿）。
+    // 它钉的是「成功必须带一个会被 `poll_tasks` 落进 app 状态的结果」—— 换成 `TransportSent`
+    // 这类没人处理的变体，选中端口还是空句，这里立刻变红。
+    assert_eq!(
+        wb.query_transport().config.port_name,
+        name,
+        "重连成功必须带一个被 `poll_tasks` 落进选中端口的结果，实际: {:?}",
+        wb.query_transport().config.port_name
+    );
+}
