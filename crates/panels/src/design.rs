@@ -345,6 +345,18 @@ pub fn segmented_toggle(
     response
 }
 
+/// 自动跟随生效时，把滚动位置钉到内容末尾。
+///
+/// 终端与日志两个面板原本各有一份**逐字节相同**的实现（只差函数名）。留两份的意义
+/// 只是让改一处忘一处：这条路径依赖"在当前位置分配一个零尺寸锚点再滚到它"，
+/// 任何一份被单独改动都会让两个面板的自动跟随行为静默分叉。
+pub(crate) fn scroll_to_bottom_if_requested(ui: &mut egui::Ui, force_scroll_to_bottom: bool) {
+    if force_scroll_to_bottom {
+        let (rect, _sense) = ui.allocate_exact_size(egui::vec2(0.0, 0.0), egui::Sense::hover());
+        ui.scroll_to_rect(rect, Some(egui::Align::BOTTOM));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

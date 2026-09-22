@@ -1460,7 +1460,7 @@ fn resolve_log_row_interactions(
         show_log_context_menu(ctx_ui, rows, &selected_indices, &hovered_row);
     });
 
-    scroll_log_rows_to_bottom_if_requested(ui, force_scroll_to_bottom);
+    design::scroll_to_bottom_if_requested(ui, force_scroll_to_bottom);
 
     navigate_target
 }
@@ -1471,14 +1471,6 @@ fn log_selected_row_indices(selection: &RowSelection) -> Vec<usize> {
         selection.selected_indices().collect()
     } else {
         Vec::new()
-    }
-}
-
-/// 自动跟随生效时，把滚动位置钉到内容末尾。
-fn scroll_log_rows_to_bottom_if_requested(ui: &mut egui::Ui, force_scroll_to_bottom: bool) {
-    if force_scroll_to_bottom {
-        let (rect, _sense) = ui.allocate_exact_size(egui::vec2(0.0, 0.0), egui::Sense::hover());
-        ui.scroll_to_rect(rect, Some(egui::Align::BOTTOM));
     }
 }
 

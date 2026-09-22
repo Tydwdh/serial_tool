@@ -2215,14 +2215,6 @@ fn show_all_rows_menu_items(
     }
 }
 
-/// 自动跟随生效时，把滚动位置钉到内容末尾。
-fn scroll_rows_to_bottom_if_requested(ui: &mut egui::Ui, force_scroll_to_bottom: bool) {
-    if force_scroll_to_bottom {
-        let (rect, _sense) = ui.allocate_exact_size(egui::vec2(0.0, 0.0), egui::Sense::hover());
-        ui.scroll_to_rect(rect, Some(egui::Align::BOTTOM));
-    }
-}
-
 /// 渲染接收区行视图。时间 / 端口 / 方向三列固定显示，只有内容列随 `show_hex` / `show_raw` 切换。
 fn render_rows_view(
     ui: &mut egui::Ui,
@@ -2387,7 +2379,7 @@ fn render_rows_view(
                 show_all_rows_menu_items(ctx_ui, store, row_ids, &measure);
             });
 
-            scroll_rows_to_bottom_if_requested(ui, inputs.force_scroll_to_bottom);
+            design::scroll_to_bottom_if_requested(ui, inputs.force_scroll_to_bottom);
         });
 
     RenderOutcome {

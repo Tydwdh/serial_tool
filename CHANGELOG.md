@@ -125,6 +125,11 @@
   （不留"一个东西两个名字"，那是下一次复制的起点）。
   **判据是 wasm 侧**：这两个文件 native 根本不编译，所以用
   `cargo check -p hardware-workbench-app --target wasm32-unknown-unknown`（exit 0、零告警）。
+- 终端与日志各有一份**逐字节相同**的"自动跟随时把滚动钉到末尾"助手
+  （`scroll_rows_to_bottom_if_requested` / `scroll_log_rows_to_bottom_if_requested`，
+  只差函数名），收进 `design::scroll_to_bottom_if_requested` 一份。
+  可见性只到 `pub(crate)`（两个调用点都在 `tool-panels` 内），不扩公开面。
+  这两份分叉的症状是"一个面板跟随、另一个不跟随"，而两处代码本来就没理由不同。
 
 ### 修复
 
