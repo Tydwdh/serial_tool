@@ -407,13 +407,6 @@ impl Workbench {
                 self.app_config.terminal_max_entries = max;
                 Ok(CommandOutcome::Done)
             }
-            AppCommand::ExportTerminal { format, file } => {
-                self.dispatch_export_terminal(format, file)
-            }
-            AppCommand::ExportLog { format: _, file: _ } => {
-                // 日志导出仍由 LogPanel 负责（Presentation），此处占位避免 UI 直接触及 recorder
-                Ok(CommandOutcome::Done)
-            }
         }
     }
 
@@ -969,25 +962,6 @@ impl Workbench {
         ));
     }
 
-    fn dispatch_export_terminal(
-        &mut self,
-        format: String,
-        file: FileHandle,
-    ) -> Result<CommandOutcome, AppError> {
-        let export_job = self.terminal.export_job();
-        let task_path = file
-            .native_path()
-            .ok_or_else(|| AppError::Storage("Native 导出需要路径型文件句柄".to_owned()))?
-            .to_path_buf();
-        let file_service = self.file_service.clone();
-        let task_id = self.tasks.spawn("export_terminal", move |_context| {
-            let content = export_job.render(&format);
-            write_exported_content(&file_service, &task_path, &file, &format, content)?;
-            Ok(TaskResult::FileExported { file })
-        });
-        Ok(pending(task_id, "正在导出终端数据"))
-    }
-
     fn apply_platform_ports(&mut self, available: Vec<PortDescriptor>) {
         let ports = available
             .into_iter()
@@ -1365,9 +1339,9 @@ impl crate::AppRuntime for Workbench {
 
 /// 导出内容落盘的唯一一处：CSV 前置 UTF-8 BOM（Excel 兼容），其余格式原样写出。
 ///
-/// 终端导出与 presentation 自行准备数据的 `spawn_file_export` 共用这里，避免
-/// 「改了一侧的 BOM/落盘细节，另一侧静默分叉」。错误仍是平台服务的字符串形式，
-/// 由调用方所在的 worker 闭包直接向上抛给任务模型。
+/// 调用方只剩 `spawn_file_export`：presentation 自己准备好内容交进来，BOM 与文件
+/// 服务的接触都留在这里，也就是 worker 闭包内，不会在 egui 回调里写大文件。
+/// 错误仍是平台服务的字符串形式，由调用方所在的 worker 闭包直接向上抛给任务模型。
 fn write_exported_content(
     file_service: &NativeFileService,
     path: &std::path::Path,

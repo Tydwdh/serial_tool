@@ -51,8 +51,20 @@ tool-core (Event/Payload/Config)
 1. 在 `tool-application::command::AppCommand` 加变体
 2. 在 `workbench.rs` 实现 `dispatch` 分支 + `query`/`TerminalService` 扩展；
    **`dispatch` 有两套实现**（native `workbench.rs` / wasm `application/src/web.rs`，变体数已实测不同：
-   仅 native 有 `ExportLog`/`ExportTerminal`/`LoadReplay`，仅 web 有
+   仅 native 有 `LoadReplay`，仅 web 有
    `InstallMarketplacePlugin`/`LoadReplayText`），只改一侧就是埋下「同一命令在两端行为不同」
+   > **第 20 轮按这条清单查出并删掉的两个变体**：`ExportTerminal` 与 `ExportLog`（都是
+   > `#[cfg(not(target_arch = "wasm32"))]`，所以 wasm 侧的穷尽 `match` 从来没见过它们）。
+   > 两者**全仓零构造点**（含测试），插件层也拿不到 `AppCommand`（`lua_host`/`plugin_runtime`/
+   > `extension` 里 0 引用），于是 `ExportTerminal` 的处理器 `dispatch_export_terminal` 成了
+   > 终端导出的**第二份实现**（与活路径同样落到 `write_exported_content`，连带
+   > `ServiceTerminal::export_job` → `TerminalExportJob` → `render_export` → `csv_escape`/
+   > `format_dir` 一条只被它用的链，共 −111 行）；而 `ExportLog` 的处理器是个**明确写着占位**的
+   > no-op。占位背后那条设计约束留着，别顺手改回来：**日志导出归 `LogPanel`（presentation），
+   > application 层不碰 recorder**。
+   > 终端导出的活路径只有一条：`crates/app/src/commands.rs` 的
+   > `export_terminal_data` → `Workbench::spawn_file_export` → `write_exported_content`
+   > —— 别再在 `dispatch` 里加第三个入口。
 3. 判定/解码类逻辑放**无 `cfg` 门控**的共享模块（发送侧的先例是 `send_plan::plan_send`），
    不要在两个 `dispatch` 里各抄一份 —— HEX 解析曾抄到 4 份，后果即两端判定相反
 4. 写 `crates/application/tests/headless.rs` 用例（不启动 egui）

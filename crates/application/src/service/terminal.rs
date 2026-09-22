@@ -21,22 +21,6 @@ pub struct TerminalService {
     assembler: TerminalAssembler,
 }
 
-/// 后台导出任务持有的终端只读快照入口。
-#[derive(Clone)]
-pub struct TerminalExportJob {
-    store: Arc<RwLock<TerminalStore>>,
-}
-
-impl TerminalExportJob {
-    pub fn render(&self, format: &str) -> String {
-        // 只在锁内复制条目，随后立即释放；大字符串生成和 JSON/CSV
-        // 序列化不占用终端接收路径的写锁。
-        let items = self.store.read().iter().cloned().collect::<Vec<_>>();
-        let entries = items.iter().map(entry_from_item).collect::<Vec<_>>();
-        render_export(&entries, format)
-    }
-}
-
 impl TerminalService {
     pub fn new(bus: DataBus) -> Self {
         Self {
@@ -63,12 +47,6 @@ impl TerminalService {
     pub fn clear(&mut self) {
         self.store.write().clear();
         self.subscription.clear();
-    }
-
-    pub fn export_job(&self) -> TerminalExportJob {
-        TerminalExportJob {
-            store: Arc::clone(&self.store),
-        }
     }
 
     /// Consume serial events without delaying their insertion into the store.
@@ -131,37 +109,6 @@ impl TerminalService {
     }
 }
 
-fn render_export(entries: &[TerminalEntry], format: &str) -> String {
-    match format {
-        "csv" => {
-            let mut out = String::from("seq,port,direction,text\n");
-            for entry in entries {
-                out.push_str(&format!(
-                    "{},{},{},{}\n",
-                    entry.seq,
-                    csv_escape(&entry.port),
-                    format_dir(entry.direction),
-                    csv_escape(&entry.display_text)
-                ));
-            }
-            out
-        }
-        "json" => serde_json::to_string_pretty(entries).unwrap_or_default(),
-        _ => entries
-            .iter()
-            .map(|entry| {
-                format!(
-                    "{} [{}] {}",
-                    entry.port,
-                    format_dir(entry.direction),
-                    entry.display_text
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-    }
-}
-
 fn payload_bytes(payload: &Payload) -> std::borrow::Cow<'_, [u8]> {
     if let Some(bytes) = payload.as_bytes() {
         std::borrow::Cow::Borrowed(bytes)
@@ -195,20 +142,4 @@ fn format_hex(bytes: &[u8]) -> String {
         out.push_str(&format!("{byte:02X}"));
     }
     out
-}
-
-fn csv_escape(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_owned()
-    }
-}
-
-fn format_dir(d: tool_core::Direction) -> &'static str {
-    match d {
-        tool_core::Direction::Rx => "RX",
-        tool_core::Direction::Tx => "TX",
-        tool_core::Direction::Internal => "IN",
-    }
 }

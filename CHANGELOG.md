@@ -6,6 +6,27 @@
 
 ### 调整
 
+- 把"46 个 `AppCommand` 里，两端各自处理了哪些"对照了一遍，查出**两个从来没人构造的变体**并删掉
+  它们与整条只被它们用到的链（4 个文件、净 −107 行）：
+  - `AppCommand::ExportTerminal` 的处理器 `Workbench::dispatch_export_terminal` 是终端导出的
+    **第二份实现**——和活路径一样落到 `write_exported_content`，于是删掉它又连带摘出
+    `ServiceTerminal::export_job` → `TerminalExportJob` → `render_export` → `csv_escape`/
+    `format_dir`（每一样的"没有别人用"都是词边界 grep 查的；私有函数那几样另有 clippy 的
+    `dead_code` 兜底，它们若真成孤儿，`-D warnings` 门就会红）。
+  - `AppCommand::ExportLog` 的处理器是一个**注释里明写"占位"**的 no-op（忽略两个字段直接返回 Done）。
+  两个变体都带 `#[cfg(not(target_arch = "wasm32"))]`，所以 wasm 侧那份穷尽 `match` 从来没见过它们
+  —— 删掉后 wasm 的变体集逐字不变，不存在"别的命令换了分支"的可能（由 wasm 门证实）。
+  可达性也核过：全仓（含测试）零构造点，且 `lua_host`/`plugin_runtime`/`extension` 里对
+  `AppCommand` 是 0 引用，插件（本仓全是 Lua）没有任何途径构造命令；`AppCommand` 只 derive
+  `Debug, Clone`，**不序列化**，所以这不是 serde 形状改动。
+  占位虽然删了，它背后那条设计约束留在 ARCHITECTURE 里：**日志导出归 `LogPanel`（presentation），
+  application 层不碰 recorder**；终端导出的活路径也只有一条
+  （`commands.rs::export_terminal_data` → `Workbench::spawn_file_export` → `write_exported_content`），
+  并写明"别再在 `dispatch` 里加第三个入口"。
+  字面量审计单独看过消失的用户可见文案：`Native 导出需要路径型文件句柄` 与任务种类
+  `export_terminal` 都还在活路径上用的那份里（各少一处重复）；只有 `正在导出终端数据`
+  整串消失，而它**只可能由那条不可达命令产生**，用户从来没见过它。
+  四道门 exit 0（682 passed / 0 failed / 7 ignored —— 与基线逐字相同，一条用例都没删）。
 - "持久化 JSON 里哪个键声明了 schema 版本"这条键名规则（`schema_version` 优先、历史键名
   `version` 兜底、非整数当作没声明）此前**在三个 crate 里逐字写四遍**：
   `crates/app/src/config.rs` 两遍（`declared_schema_version` 与 `parse_persisted_config`）、

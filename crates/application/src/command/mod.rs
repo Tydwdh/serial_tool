@@ -187,18 +187,6 @@ pub enum AppCommand {
     SetTerminalMaxEntries {
         max: usize,
     },
-
-    #[cfg(not(target_arch = "wasm32"))]
-    ExportTerminal {
-        format: String,
-        file: FileHandle,
-    },
-
-    #[cfg(not(target_arch = "wasm32"))]
-    ExportLog {
-        format: String,
-        file: FileHandle,
-    },
 }
 
 /// `dispatch` 的返回值：调用方可据此更新 UI 或展示错误。
