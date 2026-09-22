@@ -6,6 +6,64 @@
 
 ### 调整
 
+- **录制文件的两道 io 出口各套一句中文框架并点名路径（`create_recording_file`）；「用户可见错误正文
+  里的英文」这一类到此清完**（本轮只动 `crates/recorder/src/recorder.rs` 一个函数 + 它的
+  `#[cfg(test)] mod tests`，签名与 `io::Result<File>` 不变、不新增错误枚举/trait/模块、不加 `pub`；
+  四道门 fmt / native clippy `-D warnings` / wasm clippy / test 全 **EXIT=0**，
+  **721 passed / 0 failed / 7 ignored**、32 条 `test result:` 行 —— 基线 720 **净增 1 条**，
+  新增 `create_recording_file_frames_both_io_exits_in_chinese`，另把既有
+  `start_fails_with_invalid_path` 就地加强（它原本只 `assert!(result.is_err())`，钉不住任何文案），
+  两条都算同一族。**（1）改前的两句用户可见串**（native 状态栏，本机中文 Windows 实测）：
+  建目录失败 = `录制错误：当文件已存在时，无法创建该文件。 (os error 183)`、建文件失败 =
+  `录制错误：拒绝访问。 (os error 5)` —— 两句里**没有一处**说明是哪一步、对哪个路径失败，
+  而这两步的修法完全不同（一个是父路径不想要个目录、一个是目标名撞上了目录）。
+  **改后**（逐字取自一次真跑通的 `Workbench::dispatch(StartRecording)`，临时探针跑完即删）：
+  `录制错误：创建录制目录 C:\Users\…\probe-dir-….jsonl\subdir 失败：当文件已存在时，无法创建该文件。 (os error 183)`
+  / `录制错误：创建录制文件 C:\Users\…\probe-file-… 失败：拒绝访问。 (os error 5)`。
+  框架形状不是新造的：照 `tool_updater` 里**同样两处操作**已有的
+  `创建父目录 {} 失败：{e}` / `创建文件 {} 失败：{e}`（全角 `：`，路径放在框架里、细节留在冒号后），
+  比"两段都用 `：` 串起来"少一处歧义 —— Windows 路径自带 `C:`。**（2）kind 是承重的**：包装一律
+  `io::Error::new(err.kind(), ..)`，**不是** `io::Error::other(..)`（后者会让 Display 一模一样、
+  kind 却折成 `Other`，把读 kind 的分支静默改瞎 —— 第 9/11 轮的可重试判定与
+  `tool_transport::translate_error` 的 `Io` 臂读的都是它），理由写进函数文档注释，并且**有用例钉它**：
+  把两处改成 `ErrorKind::Other` 的变异体在文案完全一致的情况下仍红
+  （`left: Other / right: PermissionDenied`）。**（3）动手前的三份普查**（这一族被咬过两次）：
+  (a) **没人拿这段文字做判定** —— 全仓 `contains(`/`starts_with(`/`== "` 扫过一遍，唯一的活体
+  错误文案子串判定是 `crates/transport/src/lib.rs:1419` 的 `message.contains("os error 13")`，
+  它在私有 `is_permission_denied` 里、只被 `translate_error(&TransportError)` 的
+  `Serial`/`Io` 两臂调用，而 `TransportError::Io` 的四个生产者全在 transport 内部
+  （channel/serialport），录制失败走的是 `AppError::Recording(String)`、**结构上进不去**；
+  且框架把 OS 细节**原样**留在冒号后，即使将来进得去也照旧命中。**这条判定本身仍是第 9/11 轮
+  那族的隐患（读英文子串猜 kind），本轮按要求只报不修**。(b) **它到用户眼前的路不是那两块面板**：
+  `crates/panels/src/recording.rs:166` 那句 `录制错误：{error}` 读的是
+  `RecorderStats::last_error`（只有 worker 的写/刷盘失败写它，起录失败早于 worker 存在），
+  `crates/app/src/web/mod.rs:2641` 那个 `录制错误` 徽标读的是 web 自己的内存态
+  （web 起录不落盘，`create_recording_file` 在 wasm 侧跑不到）—— 真正的出口是 native 状态栏
+  `commands.rs::start_or_stop_recording` 的 `set_status_force(Error, error.to_string())`。
+  **web 只把原因挂在 `on_hover_text` 上、标签本身不带正文**，要不要与 native 对齐是产品决定，
+  本轮不动（与已挂账的两处 web/native 差异同族）。(c) **两条分支都真能撞上**：录制路径是录制面板里
+  一个**可手输**的文本框（`device_panel.rs` 把 `&mut self.recorder_path` 直接交给面板），
+  另有「浏览」按钮走 `pick_recording_path` 的 rfd 另存为；默认值是
+  `default_recorder_path()` = 用户日志目录下 `session-<ms>.jsonl`，且相对路径由
+  `resolve_recorder_path` 折到用户数据目录。⇒ ① 靠手输一个穿过普通文件的路径（或改到一个
+  建不出来的位置）撞上，② 靠把路径填成一个已存在的目录撞上（手输那条口不加 `.jsonl` 后缀）。
+  **（4）三条红证**（同一份用例分别对着三种旧代码跑）：旧实现原封 → 两条都红；只留 ① 的框架、
+  ② 退回裸 `File::create` → ② 那一格红；两处文案都对、kind 折成 `Other` → kind 那一格红。
+  用例不依赖权限（Windows 上 chmod 造不出来）、不分平台 `#[cfg]`、不硬编 OS 原话：
+  **同一个用例里先跑一次裸操作拿到本机原话与 kind**，再要求框架化的结果逐项相等，
+  手法与 `replay.rs` 的 `native_load_exits_all_mint_a_chinese_frame` 同一套。
+  ① 的 kind 两边都推得出来（Windows `ERROR_ALREADY_EXISTS` / POSIX `EEXIST` ⇒ `AlreadyExists`，
+  实测本机 183 就是它）；② 的 kind 平台不同（Windows `PermissionDenied` / Linux `IsADirectory`），
+  所以只钉"等于裸操作的 kind"与"不是 `Other`"这两条。**（5）这一类闭合**：第 22–25 轮把到用户
+  眼前的英文错误正文清完，`create_recording_file` 是当时**只记不修**的最后一条（`docs/ARCHITECTURE.md`
+  第 25 轮那段末尾那句话已按实况改写）。这一族到这里没有已知的活站点剩着，**还开着的两件都不是
+  文案问题、而是等用户拍板的产品决定**：web 状态栏那个只挂 hover 文本的 `录制错误` 徽标要不要把
+  原因摊开，以及第 38 轮留下的 `ExpectNoTx` 语义（`docs/ARCHITECTURE.md:459`）。
+  **顺带记两条查出来、本轮没动的**：`replay.rs:246/:254` 那两句中文框架是
+  `io::Error::other(..)` 包的、kind 已折成 `Other`，且用的是半角 `: `；`autosave.rs:23` 的
+  `录制失败: {e}` 也是半角 `:`（同文件另一处与 `recorder.rs` 全用 `：`）—— 都是文案/kind 一致性问题，
+  各要动自己的用例，另起一轮。
+
 - **extension 最后那处「轮数预算」与 recorder 的 `sleep(500)` 各换成等真条件的有界等待；recorder 的
   7 处收割等待一起从无界/5s 提到实测兜底 30s**（本轮**零用户可见变化**：只动 `crates/extension/src/manager.rs`
   与 `crates/recorder/src/recorder.rs` 两个 `#[cfg(test)] mod tests`，生产代码逐字节未动 —— 两文件

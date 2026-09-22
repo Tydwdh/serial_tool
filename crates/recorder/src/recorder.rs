@@ -259,13 +259,34 @@ impl JsonlRecorder {
     }
 
     /// 父目录存在（或可创建）之后才创建录制文件，返回已打开的文件句柄。
+    ///
+    /// 两道出口各套一句中文框架并点名路径。`Recorder::start` 只把这里的 `io::Error`
+    /// `to_string()` 进 `AppError::Recording`，用户读到的是状态栏那句
+    /// `录制错误：<正文>` —— 正文裸冒时就是操作系统原文，既不说是哪一步失败
+    /// （建目录还是建文件），也不说是对哪个路径失败，而这两点正是他要改的东西。
+    ///
+    /// 包装必须用 `io::Error::new(err.kind(), ..)`，不能图省事用 `io::Error::other(..)`：
+    /// `kind()` 在本工作区是承重的（第 9/11 轮的重试判定与 `tool_transport::translate_error`
+    /// 的 `Io` 臂都读它），折成 `Other` 不会立刻报错，只会让将来这些按 kind 分派的分支
+    /// 静默认不出录制失败。形状照 `tool_updater` 里同样两处操作（`创建父目录 {} 失败：{e}` /
+    /// `创建文件 {} 失败：{e}`），OS 细节原样留在冒号后，不改写、不翻译。
     fn create_recording_file(path: &Path) -> io::Result<File> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
-            create_dir_all(parent)?;
+            create_dir_all(parent).map_err(|err| {
+                io::Error::new(
+                    err.kind(),
+                    format!("创建录制目录 {} 失败：{err}", parent.display()),
+                )
+            })?;
         }
-        File::create(path)
+        File::create(path).map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!("创建录制文件 {} 失败：{err}", path.display()),
+            )
+        })
     }
 
     /// 起录即把统计整体复位，只留 `running = true` 供 UI 立刻读到状态。
@@ -1027,11 +1048,93 @@ mod tests {
         fs::write(&invalid_path, b"blocker").unwrap();
         let nested = invalid_path.join("subdir").join("recording.jsonl");
 
-        let result = rec.start(&nested);
-        assert!(result.is_err(), "expected error for invalid path, got Ok");
+        // 框架还必须活着走到 `Recorder::start` 这一侧才算数：`dispatch_start_recording`
+        // 对这只 `io::Error` 只做 `to_string()` 进 `AppError::Recording`，这里少一句框架，
+        // 用户状态栏上读到的就是裸的操作系统原文。
+        let err = rec
+            .start(&nested)
+            .expect_err("普通文件之下建不出目录，起录必须失败");
+        let words = err.to_string();
+        assert!(
+            words.starts_with("创建录制目录 "),
+            "起录失败要说是【哪一步】失败，got {words}"
+        );
+        assert!(
+            words.contains(&nested.parent().unwrap().display().to_string()),
+            "起录失败还要说是对【哪个路径】失败，got {words}"
+        );
         assert!(!rec.is_running());
 
         let _ = fs::remove_file(&invalid_path);
+    }
+
+    // ── Test 7b：录制文件的两道 io 出口各有一句中文框架，点名路径，且不改 kind ──
+
+    /// 两道出口的可移植触发方式（`create_recording_file` 只有这两步会失败）：
+    ///
+    /// ① 建目录：目标放在**一个已存在的普通文件**之下（`<blocker>/subdir/recording.jsonl`）。
+    ///    `create_dir_all` 递归到那个普通文件上 `mkdir` 就翻车：Windows 给
+    ///    `ERROR_ALREADY_EXISTS`、POSIX 给 `EEXIST`，两边都映成 `AlreadyExists`，而
+    ///    `create_dir_all` 内部"`path.is_dir()` 就算了"的兜底救不了它（它不是目录）。
+    ///    这正是 `start_fails_with_invalid_path` 走的那条路，也是真实用户手输路径能撞上的。
+    /// ② 建文件：目标路径本身是一个已存在的目录。这一步的 kind **随平台不同**
+    ///    （Windows `ERROR_ACCESS_DENIED` ⇒ `PermissionDenied`，Linux `EISDIR` ⇒
+    ///    `IsADirectory`），所以不硬编某个 kind、也不 `#[cfg]` 分平台。
+    ///
+    /// 两条都不写权限相关的前提（chmod / 只读根目录）：那在 Windows 上根本造不出来。
+    /// 断言手法与 `replay.rs` 的 `native_load_exits_all_mint_a_chinese_frame` 同一套 ——
+    /// **在同一个用例里先跑一次裸操作**，拿到本机 OS 的原话与 kind，再要求框架化的结果
+    /// 逐项相等。这样钉住的是「框架 + 路径 + 原样带出的细节」这一整个形状，而 OS 那半句
+    /// 随机器语言变（中文 Windows 是「拒绝访问。」，英文是 `Access is denied.`），
+    /// 用例在任一种语言下都成立，退回裸 `?` 或改写成 `io::Error::other(..)` 都当即红。
+    #[test]
+    fn create_recording_file_frames_both_io_exits_in_chinese() {
+        let stamp = tool_core::now_timestamp_ms();
+
+        // ① 建目录失败：点名的是【父目录】，失败的那一步建的正是它。
+        let blocker = temp_file(&format!("test-frame-dir-{stamp}.jsonl"));
+        fs::write(&blocker, b"blocker").unwrap();
+        let nested_parent = blocker.join("subdir");
+        let nested = nested_parent.join("recording.jsonl");
+        let raw_dir = create_dir_all(&nested_parent).expect_err("测试前提：普通文件之下建不出目录");
+        let dir_error =
+            JsonlRecorder::create_recording_file(&nested).expect_err("① 建目录失败必须冒出来");
+        assert_eq!(
+            dir_error.to_string(),
+            format!("创建录制目录 {} 失败：{raw_dir}", nested_parent.display()),
+            "① 必须是「一句中文框架 + 点名的目录路径 + 原样带出的 OS 细节」，多一句少一句都算变"
+        );
+        assert_eq!(dir_error.kind(), raw_dir.kind(), "① 框架不得改 kind");
+        assert_eq!(
+            dir_error.kind(),
+            io::ErrorKind::AlreadyExists,
+            "① 的 kind 在 Windows 与 POSIX 两边都应是 AlreadyExists（推导见上），got {:?}",
+            dir_error.kind()
+        );
+
+        // ② 建文件失败：目录本身能过 ①（它的父目录就是 temp_dir），翻车在 `File::create`。
+        let dir_target = temp_file(&format!("test-frame-file-{stamp}"));
+        fs::create_dir(&dir_target).unwrap();
+        let raw_file = File::create(&dir_target).expect_err("测试前提：目录不能当录制文件打开");
+        let file_error =
+            JsonlRecorder::create_recording_file(&dir_target).expect_err("② 建文件失败必须冒出来");
+        assert_eq!(
+            file_error.to_string(),
+            format!("创建录制文件 {} 失败：{raw_file}", dir_target.display()),
+            "② 必须是「一句中文框架 + 点名的文件路径 + 原样带出的 OS 细节」，多一句少一句都算变"
+        );
+        assert_eq!(file_error.kind(), raw_file.kind(), "② 框架不得改 kind");
+        // 单独钉这一条，是因为 `io::Error::other(..)` 恰好是"看起来一样能过"的写法：
+        // 文案分毫不差，kind 却被折成 Other，读 kind 的分支（第 9/11 轮的重试判定、
+        // `tool_transport::translate_error` 的 `Io` 臂）会静默认不出录制失败。
+        assert_ne!(
+            file_error.kind(),
+            io::ErrorKind::Other,
+            "② 的 OS 给得出具体 kind，出现 Other 说明框架退回了 `io::Error::other(..)`"
+        );
+
+        let _ = fs::remove_file(&blocker);
+        let _ = fs::remove_dir(&dir_target);
     }
 
     // ── worker 线程存活：panic 不得让 recorder 继续自称"正在录制" ──

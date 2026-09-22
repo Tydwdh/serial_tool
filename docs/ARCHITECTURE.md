@@ -1244,7 +1244,19 @@ panic / 置位什么都不做的手工线程，与磁盘和调度无关）·
       > 把已带框架的路径套成双重框架。**顺带纠一处可达性**：文件"不存在"根本走不到
       > `File::open`（`metadata` 先失败，用户看到的本就是中文那句），新框架管的是
       > 目录 / 被独占 / 权限。同形状但不同命令的一处（`create_recording_file` 的
-      > `create_dir_all` / `File::create` 未框架化 → `录制错误：<OS 原文>`）**只记不修**。
+      > `create_dir_all` / `File::create`）**第 40 轮补上了**（这一条当时只记不修）：两道出口
+      > 各一句中文框架、各点名自己的路径 —— `创建录制目录 <父目录> 失败：<OS 原文>` 与
+      > `创建录制文件 <目标> 失败：<OS 原文>`，形状取自 `tool_updater` 里同样两处操作。
+      > 两处都按 `io::Error::new(err.kind(), ..)` 包，**不跟**回放那两条的 `io::Error::other(..)`
+      > （它们把 kind 折成 `Other` 了，第 25 轮的取舍没写理由）：`kind()` 在本工作区有承重用途
+      > （第 9/11 轮的重试判定、`tool_transport::translate_error` 的 `Io` 臂读的都是它）。
+      > **再纠一处可达性**：这句到用户眼前的路是 native **状态栏**（`commands.rs` 的
+      > `start_or_stop_recording` → `set_status_force(Error, error.to_string())` → `AppError::Recording`
+      > 的 `录制错误：{0}`），**不是**录制面板那句 `录制错误：{error}`（它读
+      > `RecorderStats::last_error`，只有 worker 的写/刷盘失败进得去，起录失败根本不写它），
+      > 也不是 web 状态栏那个把原因挂在 hover 文本里的 `录制错误` 徽标（web 起录不落盘，
+      > `create_recording_file` 在 wasm 侧结构上跑不到）。逐字契约在
+      > `crates/recorder/src/recorder.rs` 的 `create_recording_file_frames_both_io_exits_in_chinese`。
       > **踩过的坑记下来**：`tool-platform` 现在有两个 `translate_error`
       > （根目录那份管 `TransportError`，`storage` 模块那份管 `StorageError`，各自与自己的
       > 错误类型同处），从根路径调 storage 那份会直接 E0308 —— 不是重名错误，但引用时要写全模块。
