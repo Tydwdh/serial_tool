@@ -743,25 +743,23 @@ impl TransportManager {
         let stop = Arc::new(AtomicBool::new(false));
         let alive = Arc::new(AtomicBool::new(true));
         let connecting = Arc::new(AtomicBool::new(true));
-        let thread_stop = Arc::clone(&stop);
-        let thread_alive = Arc::clone(&alive);
-        let thread_connecting = Arc::clone(&connecting);
-        let thread_bus = self.bus.clone();
         let source = format!("serial:{port_name}");
-        let thread_source = source.clone();
-        // 取 UI 重绘唤醒器（app 层注入），传给 worker 在 publish 后调用。
-        let thread_waker = self.repaint_waker.lock().clone();
 
-        let join = network::spawn_network_worker(
-            config.clone(),
+        // worker 拿走的是同一批 Arc 的副本：`stop` / `alive` / `connecting` 之后还要
+        // 装进 `PortHandle`，`source` 还要发生命周期事件，所以这里逐个 clone。
+        // 取 UI 重绘唤醒器（app 层注入），传给 worker 在 publish 后调用；先落进局部
+        // 变量再构造上下文，是为了让锁在语句结束就释放，不要横跨 `thread::spawn`。
+        let waker = self.repaint_waker.lock().clone();
+        let join = network::spawn_network_worker(network::NetworkWorkerContext {
+            config: config.clone(),
             command_rx,
-            thread_stop,
-            thread_alive,
-            thread_connecting,
-            thread_bus,
-            thread_source,
-            thread_waker,
-        )?;
+            stop: Arc::clone(&stop),
+            alive: Arc::clone(&alive),
+            connecting: Arc::clone(&connecting),
+            bus: self.bus.clone(),
+            source: source.clone(),
+            waker,
+        })?;
 
         self.ports.lock().insert(
             port_name.clone(),

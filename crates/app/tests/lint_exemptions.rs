@@ -27,7 +27,9 @@ use std::path::{Path, PathBuf};
 /// `cfg_attr` 形式也算豁免 —— 它同样只是让告警静默，所以一起钉住。
 ///
 /// **判"某条豁免是不是空转"的正确做法**（第 9 轮与第 17 轮都用它，第 17 轮据此删掉 6 条；
-/// 第 28 轮再跑一次，10 条全部复发、一条没删）：
+/// 第 28 轮再跑一次，当时那 10 条全部复发、一条没删；第 29 轮把
+/// `transport/network.rs` 的 2 条 `too_many_arguments` 换成单参数的 `NetworkWorkerContext`，
+/// 清单收到 8 条 —— 摘下来的那 2 条不需要重测，代码里已经没有它们的落点）：
 /// 把 `crates/` 下的豁免一次摘光，然后**分别**跑两条 clippy ——
 /// `--workspace --all-targets`（native）与 `--target wasm32-unknown-unknown -p hardware-workbench-app`
 /// （wasm）—— 谁点名谁就还需要，两边都不点名的才是死的。只看并集不够：
@@ -39,14 +41,13 @@ use std::path::{Path, PathBuf};
 /// `crates/app` 那 4 条完全没被检查到）。要把每条豁免都点到位，得把这两条命令
 /// **去掉 `-D warnings` 再各跑一遍**收集全部告警 —— 否则"没复发"可能只是"没检查"。
 const EXPECTED: &[&str] = &[
-    // clippy 豁免（7 条）
+    // clippy 豁免（5 条；第 29 轮把 `transport/network.rs` 的 2 条 `too_many_arguments`
+    // 换成单参数的 `NetworkWorkerContext` 后删掉）
     "crates/app/src/config.rs clippy::large_enum_variant",
     "crates/lua_host/src/lib.rs clippy::too_many_arguments",
     "crates/panels/src/gauge.rs clippy::too_many_arguments",
     "crates/panels/src/lib.rs clippy::too_many_arguments",
     "crates/panels/src/serial.rs clippy::too_many_arguments",
-    "crates/transport/src/network.rs clippy::too_many_arguments",
-    "crates/transport/src/network.rs clippy::too_many_arguments",
     // dead_code 豁免（3 条；第 17 轮摘光重测后，6 条 wasm 侧的判为空转已删）
     "crates/app/src/shared_keymap.rs dead_code",
     "crates/app/src/shared_keymap.rs dead_code",
@@ -143,8 +144,8 @@ fn allows_in_line(line: &str) -> Vec<String> {
         .collect()
 }
 
-/// （文件, lint）→ 出现次数。同一文件同一 lint 可以有多条（`transport/network.rs`
-/// 就有两条 `too_many_arguments`），所以必须数次数，去重会让"在已登记文件里再加一条"溜过去。
+/// （文件, lint）→ 出现次数。同一文件同一 lint 可以有多条（`app/src/shared_keymap.rs`
+/// 就有两条 `dead_code`），所以必须数次数，去重会让"在已登记文件里再加一条"溜过去。
 fn collected() -> BTreeMap<(String, String), usize> {
     let root = workspace_root();
     let mut files = Vec::new();

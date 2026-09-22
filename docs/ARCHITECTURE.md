@@ -162,6 +162,26 @@ cargo tree -p tool-application | grep -i egui    # 0 行
   > `git rev-list --count <第 N 轮的提交>..HEAD -- <文件>`；`git log --grep=… | tail -1`
   > 抓到的可能是更早的、正文里偶然提到同一词的提交，于是把历史全算进去
   > （第 28 轮就是这么得到"每个被豁免文件都改过"这个假前提的 —— 实际只有 `config.rs` 变了 3 次）。
+  >
+  > **第 29 轮把其中 2 条 `too_many_arguments` 真的消掉了，不是摘下来**（棘轮 10 → 8）：
+  > `transport/src/network.rs` 的 `spawn_network_worker` 与 `network_worker_loop` 收同一串
+  > **8 个位置参数**，其中 `stop` / `alive` / `connecting` 是**三个相邻的同型
+  > `Arc<AtomicBool>`**。实测三种对调（stop↔alive、alive↔connecting、stop↔connecting）
+  > `cargo check --workspace` **全部零告警通过** —— 危险是真的。但"测试能不能抓到"要分开说：
+  > `alive`↔`connecting`（初值都是 `true`，唯一同值的一对）**让 `cargo test -p tool-transport`
+  > 32/32 全绿**，只有 `crates/application/tests/headless.rs` 的网络用例抓得住；
+  > 另两种之所以红，是因为 `stop` 初值为 `false` 而另两个为 `true`，换错的 worker 读到
+  > `stop == true` 直接在握手前退出 —— **是初值救了测试，不是测试设计到位**。
+  > 收成一个 `pub(crate) struct NetworkWorkerContext`（沿用第 8 轮 `RowsViewInputs` 那一式，
+  > 无 trait / 无泛型 / 无 builder）之后，两条 `#[allow]` 删除，函数各自只剩一个参数，
+  > 调用点六个 `thread_*` 临时别名剩一个（`waker` 必须留在外面取，否则 `parking_lot` 的守卫
+  > 会跨 `thread::spawn` 存活 —— 与原代码同一做法）。
+  > **准确的说法**：命名字段拦的是**写法**不是**取值** —— 位置错排在结构体字面量语法上不存在了、
+  > 漏字段 E0063、把非标记塞进标记位 E0308，但 `alive: Arc::clone(&connecting)` 这种同型对调
+  > 照样编译得过（实测），只是必须把矛盾写在字段名旁边。这条限度也写进了结构体的 doc，
+  > 免得后来人把它读成类型层的保证。
+  > 顺带：那三个标记各自第一次有了自己的注释（关闭请求 / `AliveGuard` 负责的存活位 /
+  > 握手完成或失败后置假的连接位），原先它们只存在于名字里。
   **当前状态（修复后）**：`cargo +1.92.0 fmt --all --check`、
   `cargo +1.92.0 clippy --workspace --all-targets -- -D warnings`、
   `cargo +1.92.0 test --workspace --all-targets` 三条均 **exit 0**。

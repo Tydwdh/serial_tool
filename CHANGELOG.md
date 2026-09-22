@@ -6,6 +6,28 @@
 
 ### 调整
 
+- 把网络 worker 的参数墙收进命名字段，**退掉 2 条 `too_many_arguments` 豁免（棘轮 10 → 8）**；
+  四道门 711 passed / 0 failed / 7 ignored（与基线逐字相同 —— 纯重构，不新增用例也不删用例）。
+  `transport/src/network.rs` 的 `spawn_network_worker` 与 `network_worker_loop` 收同一串 8 个
+  位置参数，其中 `stop`/`alive`/`connecting` 是**三个相邻同型 `Arc<AtomicBool>`**。
+  **先证明危险不是假想**：三种两两对调（stop↔alive、alive↔connecting、stop↔connecting）
+  `cargo check --workspace` 全部零告警通过。**但"测试抓不抓得到"必须分开说**：
+  `alive`↔`connecting` 是唯一初值相同的一对（都 `true`），它让 `cargo test -p tool-transport`
+  **32/32 全绿**，只有 `crates/application/tests/headless.rs` 的网络用例抓得住；另两种会红，
+  只是因为 `stop` 初值 `false`、换错后 worker 读到 `stop == true` 就在握手前退出 ——
+  **是初值救了测试，不是测试设计到位**（这句别写成"测试覆盖了参数顺序"）。
+  收成一个 `pub(crate) struct NetworkWorkerContext`（第 8 轮 `RowsViewInputs` 同一式子，
+  无 trait/泛型/无 builder），两个函数各自只剩一个参数、两条 `#[allow]` 删除；调用点
+  六个 `thread_*` 临时别名剩一个（`waker` 必须留在字面量外取，否则 `parking_lot` 的守卫会
+  跨 `thread::spawn` 存活，与原代码同一做法）。三个标记第一次各自有了注释（原先只存在于名字里）。
+  **准确的说法**：命名字段拦的是**写法**不是**取值** —— 位置排错在结构体字面量上没有语法、
+  漏字段 E0063、类型不对 E0308（三条都实测过），但 `alive: Arc::clone(&connecting)` 这种同型
+  对调照样编译得过（也实测了），只是必须把矛盾写在字段名旁边；这条限度写进了结构体 doc。
+  守卫同步收紧：`EXPECTED` 去掉那两行、文件里"7 条 clippy / 10 条"的计数一起改，
+  并把 `collected()` 举例用的"同文件同 lint 两条"改指到仍然成立的 `shared_keymap.rs`
+  （原来那个例子正是被本轮删掉的两条）；重新加回一条 `#[allow]` 实测报
+  "清单 8 条，实际 9 条"后移除。顺带自查：`grep allow` 会在 `send_plan.rs`、`sender.rs`
+  各命中一行 —— 那是**注释里引用的字面量**，守卫跳过 `//` 开头的行，所以清单没有洞。
 - 重查这 10 条 lint 豁免是否空转 —— **负向结论：10 条全部复发，一条没删**（四道门 711 / 0 / 7，
   与基线逐字相同；本轮只改了守卫测试自己的文档注释，零生产代码变动）。做法沿用第 17 轮：
   一次摘光、native 与 wasm **分别**跑（只跑一条会得出相反结论）。逐站点的新证据：

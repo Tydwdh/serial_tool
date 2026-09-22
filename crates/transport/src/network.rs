@@ -55,40 +55,51 @@ fn publish_network_error(bus: &DataBus, port_name: &str, detail: impl std::fmt::
     ));
 }
 
-// 刻意与 `network_worker_loop` 同形：本函数只负责把这批值原样搬上新线程，收拢成
-// 上下文结构体得同时改两侧和 `lib.rs` 的调用点，换来的只是多一个载体类型。
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn spawn_network_worker(
-    config: NetworkSerialConfig,
-    command_rx: Receiver<SerialCommand>,
-    stop: Arc<AtomicBool>,
-    alive: Arc<AtomicBool>,
-    connecting: Arc<AtomicBool>,
-    bus: DataBus,
-    source: String,
-    waker: Option<Arc<dyn RepaintWaker>>,
-) -> TransportResult<JoinHandle<()>> {
-    let join = thread::spawn(move || {
-        network_worker_loop(
-            config, command_rx, stop, alive, connecting, bus, source, waker,
-        );
-    });
-    Ok(join)
+/// 网络 worker 线程运行所需的全部环境：一次连接从建立到关闭，worker 拥有的就是这八样。
+///
+/// 判据与第 8 轮收拢渲染输入时相同：`stop` / `alive` / `connecting` 是三个同型的
+/// `Arc<AtomicBool>`，当作相邻位置参数传时任意两个对调编译都不报错。收进命名字段后
+/// 拦住的仍是**写法**而不是**取值**：位置排错在这里没有语法，少一个字段 E0063、
+/// 类型不对 E0308；而 `alive: Arc::clone(&connecting)` 这种同型对调照样编译得过，
+/// 它只是多要求在字段名旁边把矛盾写出来，不是类型层的保证。
+pub(crate) struct NetworkWorkerContext {
+    pub(crate) config: NetworkSerialConfig,
+    pub(crate) command_rx: Receiver<SerialCommand>,
+    /// 关闭请求：任一条关闭路径置位，worker 主循环据此退出。
+    pub(crate) stop: Arc<AtomicBool>,
+    /// worker 存活标记，由 `AliveGuard` 在退出（含 panic 展开）时置 false。
+    pub(crate) alive: Arc<AtomicBool>,
+    /// 连接中标记：握手完成或连接失败后置 false，`PortHandle` 据此区分
+    /// 「连接中」与「已断开」。
+    pub(crate) connecting: Arc<AtomicBool>,
+    pub(crate) bus: DataBus,
+    /// 事件来源，形如 `serial:127.0.0.1:7125`。
+    pub(crate) source: String,
+    /// worker 每次 publish 之后调用的重绘唤醒器；为 `None`（没有 UI 挂着）时照常发事件，
+    /// 只是没人被催着重绘。
+    pub(crate) waker: Option<Arc<dyn RepaintWaker>>,
 }
 
-// 入参即网络线程的整套运行环境：stop/alive/connecting 各被不同的退出与兜底分支按
-// 不同方式借用，收进结构体只会把这些借用变成一个大结构的字段借用。
-#[allow(clippy::too_many_arguments)]
-fn network_worker_loop(
-    config: NetworkSerialConfig,
-    command_rx: Receiver<SerialCommand>,
-    stop: Arc<AtomicBool>,
-    alive: Arc<AtomicBool>,
-    connecting: Arc<AtomicBool>,
-    bus: DataBus,
-    source: String,
-    waker: Option<Arc<dyn RepaintWaker>>,
-) {
+/// 把这套运行环境原样搬上 worker 线程；语义全在 [`network_worker_loop`]。
+pub(crate) fn spawn_network_worker(
+    context: NetworkWorkerContext,
+) -> TransportResult<JoinHandle<()>> {
+    Ok(thread::spawn(move || network_worker_loop(context)))
+}
+
+fn network_worker_loop(context: NetworkWorkerContext) {
+    // 解构回原来的名字：三个标记各被不同的退出与兜底分支按不同方式借用，
+    // 收拢参数不该把这些借用改成大结构的字段借用。
+    let NetworkWorkerContext {
+        config,
+        command_rx,
+        stop,
+        alive,
+        connecting,
+        bus,
+        source,
+        waker,
+    } = context;
     // 覆盖全部退出路径（含 panic 展开）：原本五处显式 `alive.store(false)` 只写在
     // return/尾部，worker 一旦 panic 就整体跳过，网络端口变成不可重开的僵尸。
     let _alive_guard = crate::AliveGuard(Arc::clone(&alive));
