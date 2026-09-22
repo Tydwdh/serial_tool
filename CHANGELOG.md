@@ -6,6 +6,23 @@
 
 ### 调整
 
+- 再跑一次第 9 轮那套"把豁免一次摘光、让 clippy 逐条点名"的实验，**判出 6 条早已空转的
+  `dead_code` 豁免并删掉**（`crates/app/src/panel_registry.rs` 的 `PanelKind` 一条，
+  `crates/panels/src/gauge.rs` 的 `ZoneKind` / `from_config` / `parse_zones` /
+  `parse_zone_color` / `parse_zone_kind` 五条）。它们全是
+  `#[cfg_attr(target_arch = "wasm32", allow(dead_code))]`，而护着的东西在 wasm 上早就是活引用：
+  `PanelKind` 在 `crates/app/src/web/mod.rs` 里既被构造也被 `match`；gauge 那五个由
+  `crates/panels/src/dynamic/ingest.rs` 在总线驱动下调用（`DynamicPanels` 在 wasm 侧是活的）。
+  **这 6 条只有 wasm 那半边测得出来**：只跑 native clippy 会得出相反结论 —— 被
+  `cfg_attr(wasm32)` 护着的东西在 native 构建里本来就活着，native 永远不会抱怨它。
+  实验过程里差点多做一件错事：`gauge.rs` 同文件还有一条 `too_many_arguments`，它在 wasm 侧
+  **仍被点名**（`draw_arc` 9 参），跟着那 5 条一起删就会让 wasm 门直接红；按目标分别核过才留下。
+  于是豁免棘轮从 16 条收紧到 **10 条（7 clippy + 3 dead_code）**，`lint_exemptions.rs` 的
+  字面量清单同步收紧，并把"分别跑两条 clippy 再判空转"的方法写进那份守卫与 ARCHITECTURE。
+  收紧后的守卫自己也被证明会红：把其中一条豁免原样加回去，测试报
+  「清单 10 条，实际 11 条 / 新增 crates/panels/src/gauge.rs dead_code 多了 1 条」。
+  **生产行为零变化** —— 空转的 `allow` 只是让告警静默，删掉它不改变任何代码路径；
+  四道门 exit 0（677 passed / 0 failed / 7 ignored，一条用例没动）。
 - 清掉最后 **3 个零引用的 `pub` 项**，于是这一类取证到底了：把扫描形态铺开到
   `pub fn` / `struct` / `enum` / `trait` / `const` / `static` / `type` / `union` 之后重跑，
   **481 个候选里 0 个还有"只出现在自己定义行"的项**（第 11 轮是 28 个，全部 `pub fn`）。

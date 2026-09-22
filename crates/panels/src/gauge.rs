@@ -26,7 +26,6 @@ pub(crate) struct GaugeZone {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 enum ZoneKind {
     Safe,
     Warn,
@@ -49,7 +48,6 @@ impl GaugePanel {
         }
     }
 
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn from_config(
         bus: &DataBus,
         topic: impl Into<String>,
@@ -423,7 +421,6 @@ fn gauge_value_from_text(text: &str) -> Option<f64> {
 }
 
 /// 从 Lua 配置的 zones 数组解析色区
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn parse_zones(zones_value: Option<&Value>) -> Vec<GaugeZone> {
     let Some(arr) = zones_value.and_then(Value::as_array) else {
         return Vec::new();
@@ -449,7 +446,6 @@ pub(crate) fn parse_zones(zones_value: Option<&Value>) -> Vec<GaugeZone> {
     result
 }
 
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn parse_zone_color(s: &str) -> Color32 {
     match s.to_lowercase().as_str() {
         "green" => theme::green(),
@@ -463,7 +459,6 @@ fn parse_zone_color(s: &str) -> Color32 {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn parse_zone_kind(s: &str) -> ZoneKind {
     match s.to_lowercase().as_str() {
         "green" => ZoneKind::Safe,

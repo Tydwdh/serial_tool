@@ -14,13 +14,20 @@ use std::path::{Path, PathBuf};
 
 /// 当前允许的豁免，每项写成「路径 空格 lint 名」，同一项重复几次就代表几条。
 ///
-/// 用单字符串而不是元组，是为了让 16 行都留在 rustfmt 的列宽内（元组会被拆成
+/// 用单字符串而不是元组，是为了让清单留在 rustfmt 的列宽内（元组会被拆成
 /// 四行一组，反而看不出"这是一张清单"）。
 ///
-/// 这份清单是**扫出来的**，不是记出来的：`dead_code` 那 9 条多数写在
-/// `#[cfg_attr(target_arch = …, allow(dead_code))]` 里（某个 target 上整块关掉时，
+/// 这份清单是**扫出来的**，不是记出来的：`dead_code` 那 3 条写在
+/// `#[cfg_attr(not(target_arch = …), allow(dead_code))]` 里（某个 target 上整块关掉时，
 /// 剩下的引用会变死），对应 `docs/ARCHITECTURE.md` 里 Linux / wasm 死代码那张表。
 /// `cfg_attr` 形式也算豁免 —— 它同样只是让告警静默，所以一起钉住。
+///
+/// **判"某条豁免是不是空转"的正确做法**（第 9 轮与第 17 轮都用它，第 17 轮据此删掉 6 条）：
+/// 把 `crates/` 下的豁免一次摘光，然后**分别**跑两条 clippy ——
+/// `--workspace --all-targets`（native）与 `--target wasm32-unknown-unknown -p hardware-workbench-app`
+/// （wasm）—— 谁点名谁就还需要，两边都不点名的才是死的。只看并集不够：
+/// `cfg_attr(target_arch = "wasm32", …)` 护着的东西在 native 构建里本来就活着，
+/// native 永远不会抱怨它，只在 wasm 那半边才测得出来。
 const EXPECTED: &[&str] = &[
     // clippy 豁免（7 条）
     "crates/app/src/config.rs clippy::large_enum_variant",
@@ -30,16 +37,10 @@ const EXPECTED: &[&str] = &[
     "crates/panels/src/serial.rs clippy::too_many_arguments",
     "crates/transport/src/network.rs clippy::too_many_arguments",
     "crates/transport/src/network.rs clippy::too_many_arguments",
-    // dead_code 豁免（9 条，多数随 cfg 生效）
-    "crates/app/src/panel_registry.rs dead_code",
+    // dead_code 豁免（3 条；第 17 轮摘光重测后，6 条 wasm 侧的判为空转已删）
     "crates/app/src/shared_keymap.rs dead_code",
     "crates/app/src/shared_keymap.rs dead_code",
     "crates/app/src/state.rs dead_code",
-    "crates/panels/src/gauge.rs dead_code",
-    "crates/panels/src/gauge.rs dead_code",
-    "crates/panels/src/gauge.rs dead_code",
-    "crates/panels/src/gauge.rs dead_code",
-    "crates/panels/src/gauge.rs dead_code",
 ];
 
 /// 把清单折成「（路径, lint）→ 条数」。

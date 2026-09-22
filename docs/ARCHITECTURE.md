@@ -122,12 +122,23 @@ cargo tree -p tool-application | grep -i egui    # 0 行
     收敛后的返回表达式在 `:78`）：t13 去掉中间的 `let registry = …;` 直接返回，无 lint 豁免。
   > **现存豁免的清单不在本文重复维护** —— 唯一真相是
   > `crates/app/tests/lint_exemptions.rs` 里钉住的那份（扫描 `crates/**/*.rs`，按
-  > 「文件 + lint → 条数」比对；写下这一段时是 16 条：7 条 clippy + 9 条 `dead_code`，
-  > 后者多数写在 `#[cfg_attr(target_arch = …, allow(dead_code))]` 里，对应下面
+  > 「文件 + lint → 条数」比对；第 17 轮重测后是 10 条：7 条 clippy + 3 条 `dead_code`，
+  > 后者写在 `#[cfg_attr(not(target_arch = …), allow(dead_code))]` 里，对应下面
   > Linux / wasm 死代码那张表）。加一条豁免必须显式改那份清单，测试会红；
   > 摘一条则应同时把清单收紧。本仓第 6 轮一次摘光后发现 3 条早已空转，
   > 第 8 轮把两处渲染参数墙（`render_rows_view` 20 参、`render_log_rows` 14 参）
-  > 收进命名字段输入结构体后又退掉 2 条 `too_many_arguments`。
+  > 收进命名字段输入结构体后又退掉 2 条 `too_many_arguments`，
+  > **第 17 轮再摘光重测，又判出 6 条空转**（`panel_registry.rs` 的 `PanelKind` 一条 +
+  > `gauge.rs` 的 5 条：`ZoneKind` / `from_config` / `parse_zones` / `parse_zone_color` /
+  > `parse_zone_kind`）—— 它们护着的东西在 wasm 上早就是活引用了：`PanelKind` 在
+  > `crates/app/src/web/mod.rs` 里既被构造也被 `match`，gauge 那几个由
+  > `crates/panels/src/dynamic/ingest.rs` 在总线驱动下调用，而 `DynamicPanels` 在 wasm 侧是活的。
+  > **判空转的正确做法（这一条值钱在避坑）**：一次摘光之后**分别**跑两条 clippy ——
+  > native 的 `--workspace --all-targets` 与 `--target wasm32-unknown-unknown -p hardware-workbench-app`
+  > —— 两边都不点名的才是死的。只跑 native 会得出完全相反的结论：`cfg_attr(target_arch =
+  > "wasm32", …)` 护着的东西在 native 构建里本来就活着，native 永远不会抱怨它。
+  > 另外**别把同文件的另一条豁免顺手带走**：`gauge.rs` 那条 `too_many_arguments` 在 wasm
+  > 侧仍被点名，摘光时它必须回来，否则 wasm 门直接红。
   **当前状态（修复后）**：`cargo +1.92.0 fmt --all --check`、
   `cargo +1.92.0 clippy --workspace --all-targets -- -D warnings`、
   `cargo +1.92.0 test --workspace --all-targets` 三条均 **exit 0**。

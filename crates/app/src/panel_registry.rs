@@ -32,7 +32,6 @@ pub(crate) enum BuiltinPanel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) enum PanelKind {
     Builtin(BuiltinPanel),
     Dynamic { suffix: String },
