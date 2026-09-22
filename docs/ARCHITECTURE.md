@@ -558,7 +558,19 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
       泛化到 web 的 `Vec<WebNotification>`，是 UI 结构改动，且本轮无法在浏览器里做回归验证。
       ② wasm 插件沙箱与 native 引擎能力面不同（`load`/`require`/`package`/`debug`/`os.exit`），
       浏览器侧 `serial.close()` 不带参数会关掉所有已开端口 —— 需要产品裁决，不是机械收敛。
-      ③ `TransportCapabilities` 两侧都不被读取（能力位形同虚设）。
+      ③ `TransportCapabilities` —— **原先记的"两侧都不被读取（能力位形同虚设）"是错的，本轮按调用点
+      重测更正**。共享串口面板真的读它：`grep -n "capabilities\.\w\+" crates/panels/src/serial.rs`
+      命中 7 处、覆盖 5 个能力位（`connect`/`disconnect` 在"连接按钮"与"端口列表项"里各一处，
+      另有 `send`、`set_dtr`、`set_rts`；那几处都是 `add_enabled(...)` 与 DTR/RTS 的"变了才写"守卫）。
+      **真实的不对称在取值来源**：web 把后端上报的能力交给面板（`crates/app/src/web/serial.rs` 里
+      `transport_view…map(|view| view.capabilities)`，网络端口才走 `WEB_NETWORK`），
+      native 却把交给面板的那份**写死成字面量**（`grep -rn "TransportCapabilities {" crates/app/src`
+      命中 `ui/device_panel.rs` 的 `{ request_port: false, ..NATIVE_SERIAL }`，另有 `ui/top_bar.rs`
+      的 `show_request_port: false`），所以 `NativeTransport::capabilities()` 的返回值对 native 的
+      UI 不起作用；而 7 位里的 `list_known_ports`/`request_port` 两位全仓无人读（`NATIVE_SERIAL` 与
+      `WEB_SERIAL` 两份常量还逐位相同）。结论：这条不是"死代码可删"，而是
+      **"native 绕过了自己声明的能力"** —— 要让后端上报真正生效，得先决定 `request_port` 在桌面端
+      是否该露出"申请端口"入口，那是 UI 行为改动，需要肉眼回归，不在机械收敛范围内。
       ④ web 错误文案仍有英文与「无 `transport: ` 前缀」差异。
       ⑤ 【本波已闭合】换行后缀表原有 3 份（native `state::LineEnding`、wasm `WebLineEnding`、
       共享面板 `SendLineEnding`），值一致但没有任何断言钉住，两端还各写两份 4 臂 **identity** `match`
