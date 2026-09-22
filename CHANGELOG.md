@@ -6,6 +6,32 @@
 
 ### 调整
 
+- 插件「重启」交接的判据从**英文错误子串**换成类型化状态查询（四道门 685 passed / 0 failed /
+  7 ignored，基线 682 → 685）：`crates/app/src/ui/tiles.rs` 的 `take_pending_restart` 循环原先写
+  `if let Err(AppError::Plugin(message)) = dispatch(EnablePlugin) && message.contains("shutting down")`，
+  读的是 `ExtensionError::Stopping` 的 `Display`。
+  **和第 9 轮那个恒假判定同形，但这一条是活的**：`PluginManager::disable` 只设 stop 标记、不 join，
+  Lua 线程要到 `plugin_event_loop` 循环顶才看那个标记、而每轮最多睡 50 ms（`wait_duration` 实测为
+  `.unwrap_or(50ms).min(50ms)`），所以「点重启 → 下一帧 enable 被拒 → 塞回队列再等一帧」是常态路径。
+  下一轮本要把 `ExtensionError` 的 9 个变体翻成中文 —— 照旧写法，那句 `contains` 会从那一刻起永久恒假：
+  用户点「重启」再没任何反应，而四道门逐字全绿（判据写在 egui 渲染分支里，没有任何用例经过那里）。
+  所以先拆雷再翻译：新增 `PluginManager::is_stopping`（回答前照 `enable` 一样先收割一次，`enable`
+  反过来调用它 ⇒ `stopping_plugins.iter().any(...)` 那条比较只剩一份）、
+  `Workbench::plugin_is_stopping` 做最窄转发（`plugin_manager` 字段仍私有），组合根从此问状态不问文案。
+  **用户可观察行为零变化**（两条分支的取舍与旧代码逐一对应：仍在关闭就留到下一帧、其余失败照旧丢弃）。
+  证据分两层，各证一半：
+  - 判定本身可驱动 ⇒ `headless.rs::plugin_restart_handoff_relies_on_the_stopping_predicate` 用真实
+    Lua 探针插件走 false → 停机窗口内 true 且同窗口 enable 必被拒 → 收割后翻回 false 并重新启用；
+    把 `is_stopping` 改成恒 false 实测变红。它只观察一次那个停机窗口（不轮询），所以另量了失败率：
+    空闲连跑 30 次 0 红、整套 headless 并行连跑 5 次 0 红。
+  - 文案独立性不可驱动（那两行在渲染分支）⇒ `crates/app/tests/plugin_restart_handoff.rs` 钉形状：
+    循环体必须恰好问一次 `plugin_is_stopping` 且派发排在其后，`.contains(` / `to_string()` /
+    `"shutting down"` / `AppError::Plugin` 一律不许出现。把改动前的写法原样贴回去，两条断言双双变红，
+    恢复后全绿；另实测把 `Stopping` 文案换成中文后，受影响 4 个 crate 的 362 passed 前后逐字相同。
+  web 侧同名循环**刻意没动**（已核实 wasm 的 `dispatch(EnablePlugin)` 只是入队并返回 `Ok`，
+  `Stopping` 在浏览器侧根本不产生，不是同一颗雷）；顺带记下一处已核实、未修的不对称：enable 失败时
+  web 把错误写进状态栏、native 直接丢弃，那是产品取舍。`ExtensionError` 九个变体的中文映射器
+  因此排到下一轮。
 - 把"46 个 `AppCommand` 里，两端各自处理了哪些"对照了一遍，查出**两个从来没人构造的变体**并删掉
   它们与整条只被它们用到的链（4 个文件、净 −107 行）：
   - `AppCommand::ExportTerminal` 的处理器 `Workbench::dispatch_export_terminal` 是终端导出的

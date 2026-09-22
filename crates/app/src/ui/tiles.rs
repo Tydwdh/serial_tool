@@ -43,14 +43,16 @@ impl WorkbenchApp {
                         })
                         .inner;
                     for plugin_id in self.plugins_panel.take_pending_restart() {
-                        if let Err(tool_application::AppError::Plugin(message)) = self
-                            .workbench
-                            .dispatch(tool_application::AppCommand::EnablePlugin {
-                                plugin_id: plugin_id.clone(),
-                            })
-                            && message.contains("shutting down")
-                        {
+                        // 旧运行时还在退出就把重启请求留给下一帧。判定取自 PluginManager
+                        // 的 stopping_plugins，而不是错误文案：文案一换（例如翻译成中文），
+                        // 靠子串匹配的分支会静默变成永假，「重启」就再也不生效。
+                        if self.workbench.plugin_is_stopping(&plugin_id) {
                             self.plugins_panel.push_pending_restart(plugin_id);
+                        } else {
+                            // 其余失败保持原行为：这里不报错，插件没起来由面板状态本身呈现。
+                            let _ = self
+                                .workbench
+                                .dispatch(tool_application::AppCommand::EnablePlugin { plugin_id });
                         }
                     }
                     self.handle_plugin_panel_events(events);

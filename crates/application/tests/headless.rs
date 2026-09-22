@@ -185,11 +185,14 @@ fn write_replay_fixture(name: &str, event_count: usize) -> PathBuf {
 
 /// 生成一个最小 Lua 插件（写在临时目录，不触碰仓库 plugins/）。
 ///
+/// `dir` 只决定临时目录名：用例之间各用一份，免得一方收尾 `remove_dir_all`
+/// 把另一方正在读的脚本删掉。插件 ID 固定为 `headless.probe`。
+///
 /// `ctx.bus.on` 是必须的：没有 callback/command/timer/task 的脚本执行完，运行时
 /// 会立即退出（lua_host「插件已完成（无回调）」），启用后状态马上会变 Finished。
-fn write_probe_plugin() -> PathBuf {
+fn write_probe_plugin(dir: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
-        "serial-tool-headless-plugin-{}",
+        "serial-tool-headless-plugin-{dir}-{}",
         std::process::id()
     ));
     let plugin_dir = root.join("headless.probe");
@@ -722,7 +725,7 @@ fn plugin_enable_disable_transitions_state_and_rejects_unknown_ids() {
     wb.tick(0.0);
 
     // 真实发现 → 启用 → 禁用 → 再启用（插件写在临时目录，不触碰仓库 plugins/）。
-    let root = write_probe_plugin();
+    let root = write_probe_plugin("lifecycle");
     let discover_task = expect_pending(
         &mut wb,
         AppCommand::DiscoverPlugins {
@@ -842,6 +845,135 @@ fn plugin_enable_disable_transitions_state_and_rejects_unknown_ids() {
         if wb.plugin_state("headless.probe") == Some(PluginStateView::Disabled)
             && wb.take_plugin_cleanup_requests().is_empty()
         {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 重启交接的判定必须来自权威状态（PluginManager 的 stopping 表），不是错误文案。
+///
+/// 覆盖三个方向，任一处判定「说谎」都会红：
+/// ① Running 期间为 false——否则 `always true` 的判定会把重启永远挂在队列上；
+/// ② disable 后、线程退出前为 true，且 enable 在同窗口被拒——这就是 UI 每帧
+///    重投重启请求所依据的答案；被拒也不得吞掉停机状态；
+/// ③ 收割到线程真正退出后翻回 false，enable 重新可用。
+///
+/// 全程只走 Workbench API：不跑 egui，也不断言任何错误文本（本用例存在的意义
+/// 就是「换了文案也不该坏」）。
+#[test]
+fn plugin_restart_handoff_relies_on_the_stopping_predicate() {
+    let bus = DataBus::new();
+    let mut wb = Workbench::new(bus.clone());
+    let plugin_logs = bus.subscribe(TopicFilter::exact(topics::LOG_SYSTEM));
+    let probe = "headless.probe";
+
+    let root = write_probe_plugin("restart");
+    let discover_task = expect_pending(
+        &mut wb,
+        AppCommand::DiscoverPlugins {
+            roots: vec![root.clone()],
+        },
+    );
+    assert!(
+        tick_until(&mut wb, Duration::from_secs(10), |wb| matches!(
+            task_state(wb, discover_task),
+            Some(TaskState::Completed | TaskState::Failed)
+        )),
+        "discover_plugins 任务必须在超时前结束"
+    );
+    expect_done(
+        &mut wb,
+        AppCommand::EnablePlugin {
+            plugin_id: probe.to_owned(),
+        },
+    );
+
+    // 与邻居用例同一判据：等到脚本真的在 Lua 运行时里跑起来。
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut script_started = false;
+    while Instant::now() < deadline {
+        wb.tick(0.0);
+        if plugin_logs.drain().iter().any(|event| {
+            event
+                .payload
+                .text_lossy()
+                .contains("headless probe plugin started")
+        }) {
+            script_started = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(script_started, "探针插件必须真实运行起来才有停机窗口可测");
+    assert!(
+        !wb.plugin_is_stopping(probe),
+        "运行中的插件不在停机窗口里（否则重启请求会被无限挂起）"
+    );
+
+    expect_done(
+        &mut wb,
+        AppCommand::DisablePlugin {
+            plugin_id: probe.to_owned(),
+        },
+    );
+
+    // disable 只设 stop 标记、不 join：Lua 线程还在自己那一片（最多 50ms）事件里退场，
+    // 所以这里观察到的是真实窗口，不是采样运气。
+    assert!(
+        wb.plugin_is_stopping(probe),
+        "禁用后、线程退出前 plugin_is_stopping 必须为 true，重启请求才能被留到下一帧"
+    );
+    assert!(
+        wb.dispatch(AppCommand::EnablePlugin {
+            plugin_id: probe.to_owned(),
+        })
+        .is_err(),
+        "仍在关闭时 enable 必须失败——它与 plugin_is_stopping 共用同一条判定"
+    );
+    assert!(
+        wb.plugin_is_stopping(probe),
+        "被拒的 enable 不得吞掉停机窗口：判定必须仍然为 true"
+    );
+
+    // 收割到线程真正退出：判定翻回 false，重启这才被派发。
+    let mut window_closed = false;
+    for _ in 0..200 {
+        wb.process_plugin_lifecycle();
+        if !wb.plugin_is_stopping(probe) {
+            window_closed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        window_closed,
+        "运行时退出后 plugin_is_stopping 必须翻回 false，否则重启永远等不完"
+    );
+    expect_done(
+        &mut wb,
+        AppCommand::EnablePlugin {
+            plugin_id: probe.to_owned(),
+        },
+    );
+    assert_eq!(
+        wb.plugin_state(probe),
+        Some(PluginStateView::Running),
+        "窗口结束后必须能重新启用"
+    );
+    assert!(!wb.plugin_is_stopping(probe));
+
+    // 收尾：不留后台线程与临时目录。
+    expect_done(
+        &mut wb,
+        AppCommand::DisablePlugin {
+            plugin_id: probe.to_owned(),
+        },
+    );
+    for _ in 0..200 {
+        wb.process_plugin_lifecycle();
+        if !wb.plugin_is_stopping(probe) && wb.take_plugin_cleanup_requests().is_empty() {
             break;
         }
         std::thread::sleep(Duration::from_millis(5));

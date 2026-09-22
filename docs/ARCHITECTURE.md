@@ -702,6 +702,38 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
       > **仍未被任何用例钉住的一条**：`cancel_reconnect` 的规范化 —— 造不出一个"重连正在进行
       > 中"的可达状态（`WouldBlock` 那条没有生产者，见上面 ④），把它的规范化删掉整套用例仍绿。
       > 留在这里而不是假装测过。
+      >
+      > **第 21 轮：动手翻译之前先拆掉的一颗雷**。上面点名"仍然把英文原文摊给用户"的插件
+      > 扫描那两处，取证时查到 **`ExtensionError` 的英文文案正在被一处判定读着**：
+      > 组合根的插件重启交接（`crates/app/src/ui/tiles.rs`，`take_pending_restart` 那个循环）
+      > 原先写 `if let Err(AppError::Plugin(message)) = dispatch(EnablePlugin) &&
+      > message.contains("shutting down")`，判据来自 `ExtensionError::Stopping` 的 `Display`
+      > （`plugin '{0}' is still shutting down`）。与第 9 轮那个死判定同形，**但这条是活的**：
+      > `PluginManager::disable` 刻意只设 stop 标记、不 join（免卡 UI），Lua 线程要到
+      > `lua_host` 事件循环顶部才看那个标记、而循环体默认在 `recv_timeout` 里最多睡 50 ms，
+      > 于是「按 Restart → 下一帧 enable 被拒 → 塞回队列再等一帧」是**常态路径**。
+      > 照原计划把 9 个变体翻成中文，这条分支立即永久恒假：用户点「重启」再没反应，
+      > 而四道门逐字全绿 —— 因为判据在 egui 分支里，那部分没有任何用例经过。
+      > 所以顺序反过来了：先换成类型化判定，翻译留给下一轮。
+      > `PluginManager::is_stopping` 回答前照 `enable` 的样子先收割一次，`enable` 反过来调用它
+      > —— 那条 `stopping_plugins.iter().any(...)` 比较从此只有一份；
+      > `Workbench::plugin_is_stopping` 是最窄的转发（`plugin_manager` 字段仍私有）。
+      > 判定本身由 `headless.rs::plugin_restart_handoff_relies_on_the_stopping_predicate`
+      > 真驱动：运行中为 false → 禁用后窗口内为 true 且同窗口 enable 必被拒、被拒也不吞掉窗口
+      > → 收割到线程真正退出后翻回 false 且能重新启用。把 `is_stopping` 改成恒 false 实测变红
+      > （恒 true 由第一与第三条断言挡）。它断言的那个"窗口"没有轮询、只观察一次，
+      > 所以另测了失败率：空闲连跑 30 次 0 红，整套 headless 并行连跑 5 次 0 红。
+      > 文案独立性这条**没法用行为测**（那两行在渲染分支里，测试不跑 egui），改由
+      > `crates/app/tests/plugin_restart_handoff.rs` 钉形状：循环体里必须恰好问一次
+      > `plugin_is_stopping`、且派发在其后，`.contains(` / `to_string()` / `"shutting down"` /
+      > `AppError::Plugin` 一个都不许出现。把旧写法原样贴回去，它的两条断言双双变红，恢复后全绿
+      > ——「改文案顺手杀掉重启」从今往后由 CI 拦，不再靠人记得。
+      > **本轮没做也不假装有**：web 侧那处重启交接保持原样（已核实 `AppCommand::EnablePlugin`
+      > 在 wasm 的 `dispatch` 里只是入队并返回 `Ok`，`Stopping` 在浏览器侧根本不产生，
+      > 所以它不是同一颗雷）；但留下一处**已核实、未修**的不对称：派发失败时 web 会把错误写进
+      > 状态栏、native 直接丢弃，那是产品可见的取舍，不在机械收敛范围内。
+      > 那 9 个变体的中文映射器仍在待办，另有 `dispatch_load_replay`、`write_exported_content`
+      > 与 `AppRuntime::dispatch` 的 `transport: ` 前缀也未动。
       ⑤ 【本波已闭合】换行后缀表原有 3 份（native `state::LineEnding`、wasm `WebLineEnding`、
       共享面板 `SendLineEnding`），值一致但没有任何断言钉住，两端还各写两份 4 臂 **identity** `match`
       （类型不同才需要转）。现在收进 `tool_core::LineEnding`（`crates/core/src/lib.rs:454`），

@@ -299,8 +299,10 @@ impl PluginManager {
     }
 
     pub fn enable(&mut self, plugin_id: &str) -> ExtensionResult<()> {
+        // 收割已停止的插件，避免 restart 时误判为 Stopping。AlreadyEnabled 读的是
+        // lua_runtimes，必须在它之前看到收割结果，所以这里先跑一次
+        // （`is_stopping` 内部那次是幂等的：列表已空，只是几个条目的扫描）。
         self.update_runtime_states();
-        // 收割已停止的插件，避免 restart 时误判为 Stopping
         self.reap_stopping_plugins();
 
         if self.lua_runtimes.contains_key(plugin_id) {
@@ -308,7 +310,8 @@ impl PluginManager {
         }
 
         // 检查是否正在关闭中，防止同一插件同时存在两个运行时。
-        if self.stopping_plugins.iter().any(|(id, _)| id == plugin_id) {
+        // 判定与 UI 的重启交接同源（见 `is_stopping`），比较逻辑只留一份。
+        if self.is_stopping(plugin_id) {
             return Err(ExtensionError::Stopping(plugin_id.to_owned()));
         }
 
@@ -412,6 +415,17 @@ impl PluginManager {
         ));
 
         Ok(())
+    }
+
+    /// 插件运行时是否仍在关闭中（`disable` 已设 stop、线程尚未退出的窗口）。
+    ///
+    /// 这是「能不能重新启用」的唯一权威判定：`enable` 用它拒绝重复启用，UI 的
+    /// 重启交接也用它决定是否把请求留到下一帧，谁都不再去匹配错误文案。
+    /// 回答前先收割一次，否则已退出的线程会被永远当作「还在关闭」。
+    pub fn is_stopping(&mut self, plugin_id: &str) -> bool {
+        self.update_runtime_states();
+        self.reap_stopping_plugins();
+        self.stopping_plugins.iter().any(|(id, _)| id == plugin_id)
     }
 
     /// 收割已停止的插件线程。在 process_pending 中每帧调用。

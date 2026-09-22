@@ -622,6 +622,11 @@ impl Workbench {
         self.plugin_manager.plugin_ids()
     }
 
+    /// 插件运行时是否仍在关闭中：重启交接等下一帧的依据，来自 PluginManager 的权威状态。
+    pub fn plugin_is_stopping(&mut self, plugin_id: &str) -> bool {
+        self.plugin_manager.is_stopping(plugin_id)
+    }
+
     pub fn process_plugin_lifecycle(&mut self) -> usize {
         self.plugin_manager.process_pending()
     }
