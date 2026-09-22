@@ -6,6 +6,52 @@
 
 ### 调整
 
+- 串口分组编辑器里那段**只为"未来调用者"兜底的同步块删掉**，参数墙收掉、**棘轮再降一条（6 → 5）**；
+  四道门 **725 passed / 0 failed / 7 ignored**（723 → 725；`tool-panels` lib 的用例数 215 → 217，
+  新增的 2 条全是那条形状守卫拆出来的两个用例）。**用户侧一处都没变**：删的是恒等价的重复写入，别名输入与分组
+  下拉的行为、外观与持久化全部照旧。
+  `crates/panels/src/serial.rs::render_port_editor` 末尾原先有 11 行
+  `if selected_group != current_group { … }`，注释说它是为了"将来有人不走 ComboBox 回调就改掉初值"。
+  普查下来这个调用者**不存在**，于是它不是兜底而是逐字重复：① `current_group` 全文件只被这一处读；
+  ② 两个调用点（`render_grouped_port` 的单行内联分支与窄屏显式两行分支）都是
+  `let mut selected_group = group_name.to_owned();` 并把同一个 `group_name` 当 `current_group`
+  传进去 —— 进函数时必然相等；
+  ③ 能把它改不等的只有 `ComboBox::show_ui` 里那两个 `ui.selectable_value(selected_group, …)`，
+  而 **egui 0.35 写值与标脏在同一支**（`egui-0.35.0/src/ui.rs:1944`
+  `if response.clicked() && *current_value != selected_value { *current_value = selected_value;
+  response.mark_changed(); }`，`changed()` 读的就是这个 flag，`response.rs:593/605`），
+  所以"选中值 ≠ 初值"⟺那两个 `if … .changed()` 本帧已经跑过，而它们做的 remove/insert 与那段
+  逐字相同（`UNGROUPED` → `groups.remove`，组名 → `groups.insert`）。按本仓"不留投机兜底"的规矩，
+  **块连同那个参数一起删，注释里也没留那句"未来调用者"**。
+  剩下的是第 29/30/32 轮同一式：7 个位置参数（`ui` 除外）收进 `PortEditorInputs`（字段名与原参数
+  逐字相同，私有、无 trait / 无泛型 / 无 builder，`SerialView`/`SerialPortMetadata`/`SerialPanel::*`
+  签名与 serde 字段全不动），函数体只在开头多 6 行解构（`ComboBox` 的闭包要同时握
+  `selected_group` 与 `metadata`，走 `&mut` 结构体的字段借用进不了闭包），其余**逐字节不变**；
+  参数 **8 → 2**，函数 **68 → 53 行**，`#[allow(clippy::too_many_arguments)]` 删除。
+  **一处与简报不同的地方**：`metadata` 字段没法写成 `&'a mut SerialPortMetadata<'a>` ——
+  `&mut` 对内部生命周期是**不变的**，那样写等于要求元数据引用的数据活得和调用点的局部
+  `alias`/`selected_group` 一样久，实测 8 条错误（E0597×4 / E0507 / 3 条 lifetime）。rustc 的
+  "建议"是把 `render_grouped_port` 所有参数并成一个生命周期 —— 那是把墙摊开而不是收掉。
+  正解是给 `metadata` 单独的 `'b`（`PortEditorInputs<'a, 'b>`），那正是原参数
+  `&mut SerialPortMetadata<'_>` 省略掉的两个生命周期；限度已写进结构体 doc，免得后来人"简化"回去。
+  **覆盖要说准**：这条路径改动前后**都没有任何行为用例**驱动 —— 全仓 grep `grouped_port_list_ui`
+  / `SerialPortMetadata` 在 `crates/` 下零测试命中，生产消费者只有
+  `app/src/ui/device_panel.rs:347` 与 `app/src/web/serial.rs:265`。所以本轮的答复不是补一个
+  行为测试，而是一条**源码形状守卫**（`serial.rs` 首个 `#[cfg(test)] mod tests`，2 条用例）：
+  读文件、归一行尾、把注释与字符串的内容抹成空格再扫，断言 `current_group` **全文件 0 次**
+  （连注释里都不许留名，这条先红过一次：被抓住的正是守卫自己的散文）、两处调用点各有一条
+  `alias: &mut alias,` 与 `selected_group: &mut selected_group,`、任何 `PortEditorInputs {` 字面量里
+  不得出现 `X: &mut Y` 且 `X != Y`，另加两条防空转下界（字面量恰好 2 个、函数体顶层语句 ≥11 条，
+  实测 11）；被搜索的字面量一律 `concat!` 拼，否则本模块自己的文本会被当成命中。
+  **红证明**：把一处调用点的两个字段值对调 —— 先确认这个版本**编译零告警通过**（危险是真的，
+  类型系统看不见），守卫随即红并点名两侧，原文是
+  `PortEditorInputs 字面量里出现交叉绑定：alias: &mut selected_group、selected_group: &mut alias`。
+  恢复后回绿。**顺带纠一条事实（简报担心的方向是对的，对象错了）**：`.gitattributes` 钉着
+  `*.rs text eol=lf`，`serial.rs` 实测也确实是纯 LF（0 处 CRLF），所以本文件切片不会因为行尾错位；
+  但"整棵树是 CRLF"和"整棵树是 LF"两个说法都不成立 —— `crates/app/src/config.rs`（722 行全 CRLF）与
+  `crates/core/src/lib.rs`（993 行全 CRLF）在盘上就是 CRLF，本轮改的 `docs/ARCHITECTURE.md` 也是。
+  守卫里那步归一化因此不是装饰，是必须的。这条限度照第 32 轮的口径说：`from_t`-式的
+  `alias: &mut selected_group` 如今**在源码里自我暴露，且被形状守卫生效**，不是一句"错误无法表达"。
 - 仪表盘弧线几何抽成可测函数，`draw_arc` 的参数墙收掉、**棘轮再降一条（7 → 6）**；
   四道门 **723 passed / 0 failed / 7 ignored**（718 → 723，多的 5 条全是用例）。
   原先 9 个位置参数里 `radius`/`start_deg`/`sweep_deg`/`from_t`/`to_t` 是**五个相邻 f32**，

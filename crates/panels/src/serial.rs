@@ -119,6 +119,25 @@ pub struct SerialPortMetadata<'a> {
     pub groups: &'a mut BTreeMap<String, String>,
 }
 
+/// `render_port_editor` 的输入。之所以收成结构体而不是继续用位置参数：
+/// `alias` 与 `selected_group` 是相邻的两个 `&mut String`，在调用点调换它们
+/// 编译不报错，却会把用户输入的别名写进分组表、把组名写进别名。按字段名
+/// 书写后，写错会在调用点源码里自我暴露（`alias: &mut selected_group` 一眼
+/// 看得见），并由本文件末尾的形状守卫机械挡住。
+///
+/// `metadata` 单独带一个 `'b`：`&mut` 对其内部生命周期是不变的，写成
+/// `&'a mut SerialPortMetadata<'a>` 会要求元数据引用的那份数据活得和本函数
+/// 调用点的局部 `alias` / `selected_group` 一样久，编译不过。两个生命周期
+/// 正是原参数 `&mut SerialPortMetadata<'_>` 省略掉的形状。
+struct PortEditorInputs<'a, 'b> {
+    port: &'a SerialPortItem,
+    alias: &'a mut String,
+    selected_group: &'a mut String,
+    group_names: &'a [String],
+    metadata: &'a mut SerialPortMetadata<'b>,
+    inline: bool,
+}
+
 pub struct SerialPanel;
 
 impl SerialPanel {
@@ -489,13 +508,14 @@ impl SerialPanel {
                 Self::render_port_status(ui, port, capabilities, settings, actions);
                 Self::render_port_editor(
                     ui,
-                    port,
-                    &mut alias,
-                    &mut selected_group,
-                    group_name,
-                    group_names,
-                    metadata,
-                    true,
+                    &mut PortEditorInputs {
+                        port,
+                        alias: &mut alias,
+                        selected_group: &mut selected_group,
+                        group_names,
+                        metadata,
+                        inline: true,
+                    },
                 );
             });
         } else {
@@ -510,13 +530,14 @@ impl SerialPanel {
                     ui.add_space(16.0);
                     Self::render_port_editor(
                         ui,
-                        port,
-                        &mut alias,
-                        &mut selected_group,
-                        group_name,
-                        group_names,
-                        metadata,
-                        false,
+                        &mut PortEditorInputs {
+                            port,
+                            alias: &mut alias,
+                            selected_group: &mut selected_group,
+                            group_names,
+                            metadata,
+                            inline: false,
+                        },
                     );
                 });
                 ui.add_space(4.0);
@@ -654,17 +675,13 @@ impl SerialPanel {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn render_port_editor(
-        ui: &mut Ui,
-        port: &SerialPortItem,
-        alias: &mut String,
-        selected_group: &mut String,
-        current_group: &str,
-        group_names: &[String],
-        metadata: &mut SerialPortMetadata<'_>,
-        inline: bool,
-    ) {
+    fn render_port_editor(ui: &mut Ui, inputs: &mut PortEditorInputs<'_, '_>) {
+        let port = inputs.port;
+        let alias = &mut *inputs.alias;
+        let selected_group = &mut *inputs.selected_group;
+        let group_names = inputs.group_names;
+        let metadata = &mut *inputs.metadata;
+        let inline = inputs.inline;
         ui.label("别名");
         let alias_width = if inline {
             (ui.available_width() - 150.0).clamp(120.0, 240.0)
@@ -710,18 +727,6 @@ impl SerialPanel {
                     }
                 }
             });
-
-        // Keep the model consistent when a future caller changes the initial
-        // selection without going through the ComboBox callback.
-        if selected_group != current_group {
-            if selected_group == UNGROUPED {
-                metadata.groups.remove(&port.id);
-            } else {
-                metadata
-                    .groups
-                    .insert(port.id.clone(), selected_group.clone());
-            }
-        }
     }
 
     /// Render DTR/RTS controls for the currently connected port.
@@ -871,4 +876,256 @@ fn serial_settings_label(settings: SerialSettings) -> String {
         "{} {}{}{}",
         settings.baud_rate, settings.data_bits, parity, settings.stop_bits
     )
+}
+
+#[cfg(test)]
+mod tests {
+    //! `render_port_editor` 的形状守卫。
+    //!
+    //! 说清楚它守什么、不守什么：`alias` 与 `selected_group` 是相邻的两个
+    //! `&mut String`，收进 `PortEditorInputs` 之前，在调用点把它们写反是类型
+    //! 全对、编译通过的错误，代价由用户付（敲进别名的文字进了分组表，反之亦
+    //! 然）。结构体只消灭了**位置**错配这一种失误，风险挪到了字段赋值上，
+    //! 所以这里机械地盯住赋值本身：显式写出的 `X: &mut Y` 必须 `X == Y`，并且
+    //! 两处调用点各有一条。
+    //!
+    //! 两条被删掉的东西也钉住：那个只为“未来调用者”兜底的初值参数、以及它喂的
+    //! 同步块不许回来 —— 这条断言扫的是整个文件连注释一起，所以连这里都不能写出
+    //! 它的名字（名字在失败消息里由 `DEAD_SYNC` 展开）。函数体也不许被搬空后让
+    //! 守卫继续绿。
+    //!
+    //! 实现上两个坑：被搜索的字面量一律用 `concat!` 拼，否则本模块自己的文本
+    //! 会被当成命中（同 `crates/app/tests/lint_exemptions.rs`）；扫描前先按行
+    //! 把注释与字符串的**内容**抹成空格，文档里引用这些字面量才不会误计。
+
+    use std::fs;
+    use std::path::Path;
+
+    const EDITOR_FN: &str = concat!("fn ", "render_port_editor");
+    const INPUTS_LITERAL: &str = concat!("PortEditorInputs", " {");
+    const ALIAS_BINDING: &str = concat!("alias: &mut ", "alias,");
+    const GROUP_BINDING: &str = concat!("selected_group: &mut ", "selected_group,");
+    const DEAD_SYNC: &str = concat!("current", "_group");
+    const TEST_MODULE: &str = concat!("#[cfg(", "test)]");
+    /// 调用点个数：宽行的单行内联一处，窄行的显式两行一处。
+    const CALL_SITES: usize = 2;
+    /// 写守卫时实测函数体有 11 条顶层 `;` 语句。取下界而非相等：加语句不算坏，
+    /// 把函数搬空才红。
+    const MIN_TOP_LEVEL_STATEMENTS: usize = 11;
+
+    /// 读源文件，并把 CRLF 归一成 LF：签出成哪种行尾取决于机器上的 git 配置，
+    /// 按字节切片时不赌它。
+    fn source() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("serial.rs");
+        fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("读取 {path:?} 失败：{error}"))
+            .replace("\r\n", "\n")
+    }
+
+    /// 把行注释与字符串字面量的内容替换成空格，长度和换行位置都不变，之后的
+    /// 花括号配对与 `;` 计数只需普通扫描。
+    fn mask_comments_and_strings(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '/' if chars.peek() == Some(&'/') => {
+                    out.push_str("  ");
+                    for inner in chars.by_ref() {
+                        if inner == '\n' {
+                            out.push('\n');
+                            break;
+                        }
+                        out.push(' ');
+                    }
+                }
+                '"' => {
+                    out.push(' ');
+                    let mut escaped = false;
+                    for inner in chars.by_ref() {
+                        out.push(' ');
+                        if inner == '\n' {
+                            break; // 本文件没有跨行字符串，防御性收尾
+                        }
+                        if escaped {
+                            escaped = false;
+                        } else if inner == '\\' {
+                            escaped = true;
+                        } else if inner == '"' {
+                            break;
+                        }
+                    }
+                }
+                other => out.push(other),
+            }
+        }
+        out
+    }
+
+    /// 只看测试模块之前的部分：守卫不该扫到自己。
+    fn production(text: &str) -> &str {
+        match text.find(TEST_MODULE) {
+            Some(at) => &text[..at],
+            None => text,
+        }
+    }
+
+    /// 取 `needle` 之后第一对花括号之间的内容（不含花括号）。传入的应当是抹过
+    /// 字面量的文本，否则字符串里的括号会让配对错位。
+    fn slice_braced<'t>(text: &'t str, needle: &str) -> &'t str {
+        let at = text
+            .find(needle)
+            .unwrap_or_else(|| panic!("文件里找不到 `{needle}`：守卫要盯的东西不见了"));
+        let open = text[at..]
+            .find('{')
+            .unwrap_or_else(|| panic!("`{needle}` 后面没有花括号"));
+        let body = &text[at + open + 1..];
+        let mut depth = 1usize;
+        for (index, ch) in body.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &body[..index];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("`{needle}` 的花括号没有闭合");
+    }
+
+    /// 每个 `PortEditorInputs { ... }` 字面量的内部文本。
+    fn input_literals(code: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        let mut offset = 0usize;
+        while let Some(at) = code[offset..].find(INPUTS_LITERAL) {
+            let start = offset + at;
+            let region = slice_braced(&code[start..], INPUTS_LITERAL);
+            out.push(region);
+            offset = start + INPUTS_LITERAL.len() + region.len() + 1;
+        }
+        out
+    }
+
+    /// 数函数体内顶层（深度 0）以 `;` 结尾的语句。
+    fn top_level_statements(body: &str) -> usize {
+        let mut depth = 0usize;
+        let mut count = 0usize;
+        for ch in body.chars() {
+            match ch {
+                '{' | '(' | '[' => depth += 1,
+                '}' | ')' | ']' => depth = depth.saturating_sub(1),
+                ';' if depth == 0 => count += 1,
+                _ => {}
+            }
+        }
+        count
+    }
+
+    /// 一段文本末尾的标识符，即 `X: &mut ...` 里的 `X`。
+    fn trailing_ident(text: &str) -> Option<String> {
+        let name: String = text
+            .trim_end()
+            .chars()
+            .rev()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+            .collect();
+        (!name.is_empty()).then(|| name.chars().rev().collect())
+    }
+
+    /// 找出区域内所有 `X: &mut Y` 且 `X != Y` 的交叉绑定，返回 `(字段, 值)`。
+    fn cross_bindings(region: &str) -> Vec<(String, String)> {
+        const SEP: &str = concat!(": ", "&mut ");
+        let mut out = Vec::new();
+        for (at, _) in region.match_indices(SEP) {
+            let Some(field) = trailing_ident(&region[..at]) else {
+                continue;
+            };
+            let value_text = region[at + SEP.len()..].trim_start_matches([' ', '&', '*']);
+            let value: String = value_text
+                .chars()
+                .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                .collect();
+            if value.is_empty() {
+                continue;
+            }
+            // `&mut inputs.foo` 这种路径形状不归这条规则管，交给类型系统判断。
+            if value_text[value.len()..].starts_with('.') {
+                continue;
+            }
+            if value != field {
+                out.push((field, value));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn deleted_group_sync_block_stays_deleted() {
+        // 扫的是整个文件连注释一起。这个参数只为“未来调用者”兜底，而这种调用者
+        // 并不存在：两个调用点的初值都取自同一个 `group_name`，而 egui 0.35 的
+        // `selectable_value` 只在写值那一支才 `mark_changed`，所以“选中值不同于
+        // 初值”等价于回调里那两个 `if … .changed()` 本帧已经跑过，块内的
+        // remove/insert 是逐字重复。参数名由 `DEAD_SYNC` 在下面的消息里展开。
+        let text = source();
+        let found = text.matches(DEAD_SYNC).count();
+        assert_eq!(
+            found, 0,
+            "`{DEAD_SYNC}` 在文件里出现 {found} 次，应为 0 次：它只为一个不存在的\
+             调用者兜底，删掉的同步块不要回来。"
+        );
+    }
+
+    #[test]
+    fn port_editor_fields_bind_to_their_own_local_at_both_call_sites() {
+        let text = source();
+        let code = mask_comments_and_strings(production(&text));
+
+        // 先挡住“代码被搬空、守卫还是绿”这种退化。
+        let literals = code.matches(INPUTS_LITERAL).count();
+        assert_eq!(
+            literals, CALL_SITES,
+            "结构体字面量 `{INPUTS_LITERAL}` 应有 {CALL_SITES} 个（两处调用点各一个），\
+             实际 {literals} 个。"
+        );
+        let body = slice_braced(&code, EDITOR_FN);
+        let statements = top_level_statements(body);
+        assert!(
+            statements >= MIN_TOP_LEVEL_STATEMENTS,
+            "`render_port_editor` 只剩 {statements} 条顶层语句，少于实测的 \
+             {MIN_TOP_LEVEL_STATEMENTS} 条：函数体大概被搬走了，这条守卫会退化。"
+        );
+
+        // 交叉绑定先查：写反的一对字段同时也会打破下面的计数断言，但只有这条
+        // 能同时点名「哪个字段被绑到了哪个局部」，报错更快。
+        for region in input_literals(&code) {
+            let swapped = cross_bindings(region);
+            assert!(
+                swapped.is_empty(),
+                "PortEditorInputs 字面量里出现交叉绑定：{}\n相邻的 `&mut String` \
+                 写反是编译得过的，别名文字会进分组表、组名会进别名。每条都该写成\
+                 `字段: &mut 同名的局部`。",
+                swapped
+                    .iter()
+                    .map(|(field, value)| format!("`{field}: &mut {value}`"))
+                    .collect::<Vec<_>>()
+                    .join("、")
+            );
+        }
+
+        // 字段名 ↔ 同名局部变量的绑定，两处调用点各一条。
+        for (binding, field) in [(ALIAS_BINDING, "alias"), (GROUP_BINDING, "selected_group")] {
+            let found = code.matches(binding).count();
+            assert_eq!(
+                found, CALL_SITES,
+                "字段 `{field}` 的同名绑定 `{binding}` 应有 {CALL_SITES} 条（每处调用点\
+                 一条），实际 {found} 条。少了说明有人不再绑同名局部，多了说明调用点\
+                 不止两处。"
+            );
+        }
+    }
 }

@@ -31,8 +31,10 @@ use std::path::{Path, PathBuf};
 /// `transport/network.rs` 的 2 条 `too_many_arguments` 换成单参数的 `NetworkWorkerContext`，
 /// 清单收到 8 条；第 30 轮把 `panels/lib.rs::next_auto_scroll_state` 的 8 个位置参数换成
 /// 单参数的 `AutoScrollInputs`，清单收到 7 条；第 32 轮把 `panels/gauge.rs::draw_arc`
-/// 的 5 个相邻同型 `f32` 收进命名字段的 `ArcSpec`，清单收到 6 条 —— 摘下来的那些不需要
-/// 重测，代码里已经没有它们的落点）：
+/// 的 5 个相邻同型 `f32` 收进命名字段的 `ArcSpec`，清单收到 6 条；第 33 轮把
+/// `panels/serial.rs::render_port_editor` 的 7 个位置参数（`alias` 与 `selected_group`
+/// 是相邻同型的 `&mut String`）收进命名字段的 `PortEditorInputs`，清单收到 5 条
+/// —— 摘下来的那些不需要重测，代码里已经没有它们的落点）：
 /// 把 `crates/` 下的豁免一次摘光，然后**分别**跑两条 clippy ——
 /// `--workspace --all-targets`（native）与 `--target wasm32-unknown-unknown -p hardware-workbench-app`
 /// （wasm）—— 谁点名谁就还需要，两边都不点名的才是死的。只看并集不够：
@@ -44,13 +46,13 @@ use std::path::{Path, PathBuf};
 /// `crates/app` 那 4 条完全没被检查到）。要把每条豁免都点到位，得把这两条命令
 /// **去掉 `-D warnings` 再各跑一遍**收集全部告警 —— 否则"没复发"可能只是"没检查"。
 const EXPECTED: &[&str] = &[
-    // clippy 豁免（3 条，重新数过；第 29 轮把 `transport/network.rs` 的 2 条
+    // clippy 豁免（2 条，重新数过；第 29 轮把 `transport/network.rs` 的 2 条
     // `too_many_arguments` 换成单参数的 `NetworkWorkerContext`、第 30 轮把 `panels/lib.rs`
     // 的 1 条换成单参数的 `AutoScrollInputs`、第 32 轮把 `panels/gauge.rs` 的 1 条换成
-    // 命名字段的 `ArcSpec` 之后各删掉）
+    // 命名字段的 `ArcSpec`、第 33 轮把 `panels/serial.rs` 的 1 条换成命名字段的
+    // `PortEditorInputs` 之后各删掉）
     "crates/app/src/config.rs clippy::large_enum_variant",
     "crates/lua_host/src/lib.rs clippy::too_many_arguments",
-    "crates/panels/src/serial.rs clippy::too_many_arguments",
     // dead_code 豁免（3 条；第 17 轮摘光重测后，6 条 wasm 侧的判为空转已删）
     "crates/app/src/shared_keymap.rs dead_code",
     "crates/app/src/shared_keymap.rs dead_code",

@@ -234,6 +234,39 @@ cargo tree -p tool-application | grep -i egui    # 0 行
   > 新用例钉的是**字段名在 `arc_points` 里的含义**，没有东西钉 `paint` 往这些字段**填了什么**；
   > 那一层要 `Painter`/`Ui` 驱动，第 31 轮那套事件注入只对纯判定管用，所以停手而不是再造一层抽象。
   > 结论要说准：`from_t: sweep_deg` 如今在源码里自我暴露，但**"参数墙收掉"≠"调用点有覆盖"**。
+  >
+  > **第 33 轮删掉 `serial.rs::render_port_editor` 末尾那段恒等价的同步块，同法收掉参数墙，
+  > 棘轮 6 → 5**（723 → 725，多的 2 条是一条源码形状守卫拆出来的两个用例）。这段
+  > `if selected_group != current_group { … }` 带着"为未来调用者兜底"的注释活了很久，普查证明
+  > 那个调用者不存在、于是它是**逐字重复**：`current_group` 全文件只被它自己读；两个调用点都
+  > `let mut selected_group = group_name.to_owned();` 并把同一个 `group_name` 当 `current_group`
+  > 传入，进入时必然相等；唯一能改它的是 `ComboBox::show_ui` 里的两个 `selectable_value`，而
+  > **egui 0.35 把"写值"和"标脏"放在同一支**（`src/ui.rs:1944`
+  > `if response.clicked() && *current_value != selected_value { *current_value = selected_value;
+  > response.mark_changed(); }`；`Response::changed()` 读的就是这个 flag，`src/response.rs:593/605`），
+  > 所以"不同于初值"⟺那两个 `if … .changed()` 本帧已跑过，而它们做的 `remove`/`insert` 与那段
+  > 一模一样。按"不留投机兜底"删块 + 删参数，注释一并删掉。参数墙沿用第 29/30/32 轮那一式：
+  > `PortEditorInputs`（字段名与原参数逐字相同，私有、无 trait/泛型/builder），
+  > 参数 **8 → 2**、函数 **68 → 53 行**、`#[allow]` 删除，公共 API 与 serde 字段不动。
+  > **一处结构上被迫的偏离**：`metadata` 不能写成 `&'a mut SerialPortMetadata<'a>` —— `&mut`
+  > 对内部生命周期**不变**，那等于要求元数据引用的数据活得和调用点局部 `alias`/`selected_group`
+  > 一样久，实测 8 条错（4×E0597 + E0507 + 3×lifetime）；rustc 给的建议是把 `render_grouped_port`
+  > 全部参数并成一个生命周期，那是**把墙摊开**不是收掉。正解是单给 `'b`，也就是原参数
+  > `&mut SerialPortMetadata<'_>` 本来就省略掉的两个生命周期。另记：闭包要同时握
+  > `selected_group` 与 `metadata`，所以字段必须在函数开头解构成局部量（同 `RowsViewInputs`）。
+  > **本轮的"覆盖"答案与前几轮不同，要说白**：这条路径改动前后**都没有任何行为用例**驱动
+  > （`crates/` 下 grep `grouped_port_list_ui` / `SerialPortMetadata` 零测试命中，消费者只有
+  > `device_panel.rs:347` 与 `web/serial.rs:265`），而第 31 轮那套事件注入要真 `Context` 才测得出
+  > 下拉的点击，本轮没有为此再造一层抽象。所以补的是**源码形状守卫**：读文件、归一行尾（这步不是
+  > 装饰：`.gitattributes` 钉了 `*.rs text eol=lf`、`serial.rs` 也确实是纯 LF，但盘上
+  > `app/src/config.rs` 与 `core/src/lib.rs` 两个文件是**整文件 CRLF**，赌不得）、把注释
+  > 与字符串内容抹成空格再扫，钉 `current_group` 全文件 0 次、两处调用点各一条同名绑定、
+  > `PortEditorInputs {` 字面量里不得有 `X: &mut Y` 且 `X != Y`，外加两条防空转下界
+  > （字面量恰好 2 个、函数体顶层语句 ≥11 条）。**红证明在两个调用点各做了一遍**（第二遍故意挑
+  > 窄屏那一支，证明确实是逐个字面量在查而不是盯死一处）——
+  > 两个版本都**编译零告警通过**，守卫随即红并点名 `alias: &mut selected_group` /
+  > `selected_group: &mut alias` 两侧，恢复后回绿。所以结论是：写错**会在调用点源码里自我暴露，
+  > 并且被这条形状守卫生效**，不能说成"错误无法表达"。
   **当前状态（修复后）**：`cargo +1.92.0 fmt --all --check`、
   `cargo +1.92.0 clippy --workspace --all-targets -- -D warnings`、
   `cargo +1.92.0 test --workspace --all-targets` 三条均 **exit 0**。
