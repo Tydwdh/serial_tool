@@ -6,6 +6,34 @@
 
 ### 调整
 
+- "持久化 JSON 里哪个键声明了 schema 版本"这条键名规则（`schema_version` 优先、历史键名
+  `version` 兜底、非整数当作没声明）此前**在三个 crate 里逐字写四遍**：
+  `crates/app/src/config.rs` 两遍（`declared_schema_version` 与 `parse_persisted_config`）、
+  `crates/lua_host/src/config.rs` 一遍、`crates/panels/src/theme.rs` 一遍。
+  一致靠的是 app 里那段注释（"这里与 `parse_persisted_config` 都必须同时接受两个键，
+  否则这类配置会被读成 v0：既可能重复执行 v0 迁移，也可能漏掉「版本高于当前程序」的判定"）
+  —— **没有任何机器检查**。现在收成 `tool_core::config::declared_schema_version(&Map) ->
+  Option<u32>`（core 本来就持有 `CURRENT_SCHEMA_VERSION`，三个 crate 本来就依赖它，
+  没加任何依赖边），四处全走它；**各家盖在它上面的策略刻意原地不动**：app 保持
+  `Option<u32>` 与 `.unwrap_or(0)` 两种读法、lua_host 保持 `contains_key` 守卫、
+  theme 保持 `if version == 0` 的 v0 迁移分支。**生产行为零变化**（理由逐条核：
+  `unwrap_or(0)` 只在 `None` 时生效，与旧的 `.unwrap_or(0) as u32` 同值）。
+  `contains_key(...)` 与 `declared_schema_version(...).is_some()` **不等价**，所以守卫没动：
+  `{"version":"1"}` 这种"键在、值不是整数"的文档，前者仍走带 `values` 的分支，
+  后者会掉进 v0 分支把整个根对象当配置读 —— 这一点写成了代码注释。
+  键名规则拿到它的**第一个机器检查**：core 三条新用例（两个键都认、`schema_version` 优先、
+  非整数/缺失为 `None`，含"先命中的键决定结果，不会回落到另一个键"这条现状语义），
+  app 再加一条跨reader一致性用例 `legacy_version_key_is_a_version_for_both_config_readers`
+  —— 它断言的是**完整错误文本**而不是 `is_err()`，因为消息里的版本号才是"parse 侧到底认出了
+  哪个键"的唯一可观察量。变异验证四次：删掉历史键 → core 与 app 两条同时红；颠倒优先级 →
+  core 红；把非整数读成 `Some(0)` → core 红。
+  **本轮顺带查出一个既有缺陷（没动，已开单）**：`parse_persisted_config` 会往 map 里
+  **插入** `schema_version` 却没有删掉 `version`，而配置结构体上有 serde `alias = "version"`，
+  于是一份只声明了历史键、版本又不高于当前的配置反序列化时直接报
+  「配置字段无效：duplicate field `schema_version`」；`theme.rs` 正是用
+  `object.remove("version")` 避开了这个坑。上面那条 app 用例之所以钉的是"未来版本"的
+  历史键文档，就是因为它在插入之前就被拒绝了、绕不到这个 bug —— 这是第 19 轮的靶子。
+  四道门 exit 0（681 passed / 0 failed / 7 ignored = 677 + 4 条新用例）。
 - 再跑一次第 9 轮那套"把豁免一次摘光、让 clippy 逐条点名"的实验，**判出 6 条早已空转的
   `dead_code` 豁免并删掉**（`crates/app/src/panel_registry.rs` 的 `PanelKind` 一条，
   `crates/panels/src/gauge.rs` 的 `ZoneKind` / `from_config` / `parse_zones` /

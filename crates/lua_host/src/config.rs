@@ -4,7 +4,9 @@ use serde_json::Map;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use tool_core::config::{CURRENT_SCHEMA_VERSION, atomic_write_json, quarantine_corrupt_file};
+use tool_core::config::{
+    CURRENT_SCHEMA_VERSION, atomic_write_json, declared_schema_version, quarantine_corrupt_file,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct PluginConfigDocument {
@@ -96,12 +98,10 @@ impl ConfigStore {
             return (Map::new(), false, false);
         };
 
+        // 守卫看的是"有没有版本键"，不是"版本能不能读出来"：非整数的版本值仍要走
+        // 下面的分支，否则这份文档会被当成 v0 的根对象布局读取。
         if object.contains_key("schema_version") || object.contains_key("version") {
-            let version = object
-                .get("schema_version")
-                .or_else(|| object.get("version"))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0) as u32;
+            let version = declared_schema_version(object).unwrap_or(0);
             if version > CURRENT_SCHEMA_VERSION {
                 log::error!(
                     "plugin config {} uses unsupported future schema v{version}",

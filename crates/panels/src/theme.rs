@@ -9,7 +9,8 @@ use std::{
     },
 };
 use tool_core::config::{
-    CURRENT_SCHEMA_VERSION, atomic_write_json, atomic_write_text, quarantine_corrupt_file,
+    CURRENT_SCHEMA_VERSION, atomic_write_json, atomic_write_text, declared_schema_version,
+    quarantine_corrupt_file,
 };
 
 /// 可选界面配色。One Dark Pro 系列取自官方 VS Code 主题；Catppuccin 配色取自官方调色板库。
@@ -292,11 +293,7 @@ fn migrate_theme_file(path: &Path) -> Result<(), String> {
             format!("主题 {} 根节点必须是 JSON 对象", path.display()),
         ));
     };
-    let version = object
-        .get("schema_version")
-        .or_else(|| object.get("version"))
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0) as u32;
+    let version = declared_schema_version(object).unwrap_or(0);
     if version > CURRENT_SCHEMA_VERSION {
         return Err(format!(
             "主题 {} 使用了未来格式 v{version}，当前仅支持到 v{CURRENT_SCHEMA_VERSION}",

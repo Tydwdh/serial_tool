@@ -132,19 +132,15 @@ pub(crate) enum ConfigLoadResult {
     FutureVersion { path: PathBuf, version: u32 },
 }
 
-/// 读出配置声明的 schema 版本，不解析其余字段。
+/// 读出配置声明的 schema 版本，不解析其余字段；解析失败或非对象都按"没有声明"处理。
 ///
-/// `version` 是 `schema_version` 之前的历史键名，这里与 `parse_persisted_config`
-/// 都必须同时接受两个键，否则这类配置会被读成 v0：既可能重复执行 v0 迁移，
-/// 也可能漏掉"版本高于当前程序"的判定。
+/// 键名规则（`schema_version` 优先、历史键名 `version` 兜底）见
+/// `tool_core::config::declared_schema_version`：本函数与下面的
+/// `parse_persisted_config` 因此共用同一条规则，不会再各读各的。
 fn declared_schema_version(text: &str) -> Option<u32> {
     let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
     let object = value.as_object()?;
-    object
-        .get("schema_version")
-        .or_else(|| object.get("version"))
-        .and_then(serde_json::Value::as_u64)
-        .map(|version| version as u32)
+    tool_core::config::declared_schema_version(object)
 }
 
 fn parse_persisted_config(text: &str) -> Result<(PersistedConfig, bool), String> {
@@ -153,11 +149,8 @@ fn parse_persisted_config(text: &str) -> Result<(PersistedConfig, bool), String>
     let object = value
         .as_object_mut()
         .ok_or_else(|| "配置根节点必须是 JSON 对象".to_owned())?;
-    let version = object
-        .get("schema_version")
-        .or_else(|| object.get("version"))
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0) as u32;
+    // 未声明版本按 v0 读取并迁移到当前版本。
+    let version = tool_core::config::declared_schema_version(object).unwrap_or(0);
     if version > CURRENT_SCHEMA_VERSION {
         return Err(format!(
             "配置版本 {version} 高于当前程序支持的 {CURRENT_SCHEMA_VERSION}"
@@ -498,6 +491,26 @@ mod tests {
             Some(CURRENT_SCHEMA_VERSION + 1)
         );
         assert!(parse_persisted_config(&value.to_string()).is_err());
+    }
+
+    /// 只用历史键名 `version` 声明版本的文档，两条读取路径必须给出同一个版本号。
+    /// 这里断言完整错误文本而不是 `is_err()`：消息里的版本号是"parse 侧到底认出了
+    /// 哪个键"的唯一可观察量——若它漏掉 `version` 而读成 v0，就不会拒绝而是迁移放行。
+    #[test]
+    fn legacy_version_key_is_a_version_for_both_config_readers() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&legacy_workspace_json()).expect("valid test JSON");
+        value["version"] = serde_json::json!(CURRENT_SCHEMA_VERSION + 1);
+        let text = value.to_string();
+
+        let version = CURRENT_SCHEMA_VERSION + 1;
+        assert_eq!(declared_schema_version(&text), Some(version));
+        assert_eq!(
+            parse_persisted_config(&text).err(),
+            Some(format!(
+                "配置版本 {version} 高于当前程序支持的 {CURRENT_SCHEMA_VERSION}"
+            ))
+        );
     }
 
     // ── ensure_jsonl_extension ──

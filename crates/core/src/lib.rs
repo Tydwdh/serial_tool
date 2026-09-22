@@ -13,6 +13,27 @@ pub mod config {
     /// 所有由工作台管理的 JSON 配置文档当前使用的 schema 版本。
     pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
+    /// 读出配置对象声明的 schema 版本，只回答"这个文件声明了什么"。
+    ///
+    /// 键名规则：`schema_version` 优先，历史键名 `version` 兜底；两个键都不存在，
+    /// 或先命中的那个键不是整数时返回 `None`。
+    ///
+    /// `version` 是 `schema_version` 之前的历史键名，所有读取持久化配置的地方
+    /// 都必须同时接受两个键，否则这类配置会被读成 v0：既可能重复执行 v0 迁移，
+    /// 也可能漏掉"版本高于当前程序"的判定。
+    ///
+    /// 覆盖在它之上的策略——拒绝加载、隔离坏文件、按 v0 迁移——**刻意留在各调用方**，
+    /// 每类配置的取舍不同；本函数不改变任何一方的判定。
+    pub fn declared_schema_version(
+        object: &serde_json::Map<String, serde_json::Value>,
+    ) -> Option<u32> {
+        object
+            .get("schema_version")
+            .or_else(|| object.get("version"))
+            .and_then(serde_json::Value::as_u64)
+            .map(|version| version as u32)
+    }
+
     /// 原子写入文本：先落盘到同目录临时文件，再备份并替换目标文件。
     pub fn atomic_write_text(path: &Path, text: &str) -> Result<(), String> {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -909,5 +930,59 @@ mod tests {
         let msg = r#"{"jsonrpc":"2.0","result":"ok","id":1}"#;
         assert_eq!(parse_gcode_response(msg), None);
         assert_eq!(parse_gcode_response("not json"), None);
+    }
+
+    // ── config::declared_schema_version：版本键名规则 ──
+    //
+    // 这条规则曾在三个 crate 里各写一遍、只靠注释保持一致，以下用例是它的第一个
+    // 机器检查：删掉任一键名、颠倒优先级、或把非整数读成 Some(0) 都会在这里变红。
+
+    fn object_of(source: &str) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::from_str::<Value>(source)
+            .expect("用例本身必须是合法 JSON")
+            .as_object()
+            .expect("用例根节点必须是 JSON 对象")
+            .clone()
+    }
+
+    #[test]
+    fn declared_schema_version_accepts_both_key_names() {
+        let versioned = object_of(r#"{"schema_version": 2}"#);
+        assert_eq!(config::declared_schema_version(&versioned), Some(2));
+
+        // `version` 是 `schema_version` 之前的历史键名：单独出现也算版本声明，
+        // 不能被读成 v0。
+        let legacy = object_of(r#"{"version": 3}"#);
+        assert_eq!(config::declared_schema_version(&legacy), Some(3));
+    }
+
+    #[test]
+    fn declared_schema_version_prefers_the_current_key_name() {
+        let both = object_of(r#"{"schema_version": 2, "version": 7}"#);
+        assert_eq!(config::declared_schema_version(&both), Some(2));
+    }
+
+    #[test]
+    fn declared_schema_version_needs_an_integer_value() {
+        // 两个键都没有：文件没有声明版本。
+        let unversioned = object_of(r#"{"values": {}}"#);
+        assert_eq!(config::declared_schema_version(&unversioned), None);
+
+        // 值不是整数（字符串 / null / 浮点）同样不算声明版本。
+        for source in [
+            r#"{"version": "2"}"#,
+            r#"{"schema_version": null}"#,
+            r#"{"schema_version": 1.5}"#,
+        ] {
+            assert_eq!(
+                config::declared_schema_version(&object_of(source)),
+                None,
+                "非整数值应读成 None：{source}"
+            );
+        }
+
+        // 先命中的键决定结果：`schema_version` 是非整数时不会回落到 `version`。
+        let broken_current = object_of(r#"{"schema_version": "x", "version": 4}"#);
+        assert_eq!(config::declared_schema_version(&broken_current), None);
     }
 }
