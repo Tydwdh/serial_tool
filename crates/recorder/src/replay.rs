@@ -233,6 +233,11 @@ impl ReplayManager {
     }
 
     /// 只做文件读取和解析，不触碰 ReplayManager，可安全放到 worker 线程。
+    ///
+    /// **从这里出去的每一个 `io::Error` 都自带中文框架**：派发侧（`dispatch_load_replay`）
+    /// 只做 `to_string()`，框架少补一处就是英文 OS 原文上状态栏；反过来在派发侧再包一层，
+    /// 就成了两重中文框架的同义反复。所以三条出口（取大小、打开、逐行读）各自在生产处
+    /// 补一句，新增出口时照同一条规则办。
     pub fn prepare_load(path: impl AsRef<std::path::Path>) -> io::Result<ReplayLoadData> {
         let path = path.as_ref().to_path_buf();
 
@@ -243,7 +248,10 @@ impl ReplayManager {
             return Err(oversize_file_error(metadata.len()));
         }
 
-        let file = File::open(&path)?;
+        // 走到这里文件是存在的（上一步 `metadata` 已成功），所以这一条管的是
+        // 「路径是目录」「被别的进程独占」「权限不够」这三类打开失败。
+        let file =
+            File::open(&path).map_err(|e| io::Error::other(format!("回放文件打开失败: {e}")))?;
         Self::prepare_load_lines(path, BufReader::new(file).lines())
     }
 
@@ -268,7 +276,9 @@ impl ReplayManager {
         let mut skipped = 0usize;
         let mut first_errors: Vec<String> = Vec::new();
         for (line_index, line) in lines.enumerate() {
-            let line = line?;
+            // 读行失败（网络盘中途掉线、文件读到一半被收回）也是原样上状态栏的那一个
+            // `?`，所以它同样在生产处补框架，与 `prepare_load` 的另两条出口同一个形状。
+            let line = line.map_err(|e| io::Error::other(format!("回放文件读取失败: {e}")))?;
             // 行号 1-based 且包含空行：与浏览器侧 `ReplayTextLoader` 的错误定位一致。
             parse_jsonl_line(
                 &line,
@@ -1096,6 +1106,49 @@ mod tests {
         assert_eq!(prepared.report.loaded, 1);
         assert_eq!(prepared.report.skipped, 1);
         assert_eq!(prepared.report.first_errors.len(), 1);
+    }
+
+    /// 原生加载的三条 IO 出口各有一句中文框架（规则记在 `prepare_load` 的文档注释里）。
+    ///
+    /// 派发侧（`dispatch_load_replay`）只做 `to_string()`，所以这里少一句，用户就在状态栏
+    /// 上读到一句英文 OS 原文。三条出口在本用例里一次驱动到位：任何一条退回裸 `?`，
+    /// 对应那一格立刻红。
+    #[test]
+    fn native_load_exits_all_mint_a_chinese_frame() {
+        let dir = std::env::temp_dir().join(format!(
+            "replay-wording-test-{}",
+            tool_core::now_timestamp_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // ① 取大小：路径不存在。OS 细节随机器与 locale 变，钉不住，只钉框架。
+        let missing = dir.join("nope.jsonl");
+        let error = ReplayManager::prepare_load(&missing).expect_err("不存在的路径必须失败");
+        assert!(
+            error.to_string().starts_with("获取文件大小失败: "),
+            "① 的框架变了：{error}"
+        );
+
+        // ② 打开：目录能 stat 到，却不能当文件打开（Windows 拒绝访问 / Linux 是目录）。
+        let raw = File::open(&dir).expect_err("测试前提：目录不能当文件打开");
+        let error = ReplayManager::prepare_load(&dir).expect_err("目录必须打不开");
+        assert_eq!(
+            error.to_string(),
+            format!("回放文件打开失败: {raw}"),
+            "② 必须是「一句中文框架 + 原样带出的 OS 细节」，多一句少一句都算变"
+        );
+
+        // ③ 逐行读：读盘中途失败（网络盘掉线一类）驱动不出来，只能注入失败的迭代器。
+        let lines: [io::Result<String>; 1] = [Err(io::Error::other("网络磁盘已断开"))];
+        let error = ReplayManager::prepare_load_lines(dir.clone(), lines.into_iter())
+            .expect_err("读行失败必须冒出来");
+        assert_eq!(
+            error.to_string(),
+            "回放文件读取失败: 网络磁盘已断开",
+            "③ 的框架或载荷被改动了"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

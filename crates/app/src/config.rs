@@ -261,16 +261,22 @@ fn native_store_for(path: &Path) -> Result<(NativeSettingsStore, String), String
 
 fn read_native_file(path: &Path) -> Result<Option<Vec<u8>>, String> {
     let (store, key) = native_store_for(path)?;
-    store.load_blocking(key).map_err(|error| error.to_string())
+    // 本函数其余失败正文都是中文（见 `native_store_for`），这里也不能把 `StorageError`
+    // 的英文 `Display` 原样摊给用户：设置面板「最近工作区 → 打开」失败时直接渲染这句。
+    store
+        .load_blocking(key)
+        .map_err(|error| tool_platform::storage::translate_error(&error))
 }
 
 fn write_native_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     let bytes =
         serde_json::to_vec_pretty(value).map_err(|error| format!("JSON 序列化失败：{error}"))?;
     let (store, key) = native_store_for(path)?;
+    // 与 `read_native_file` 同一个正文规则。今天这条到不了用户眼前（`save_config` 的
+    // 十个调用点都只 `log::warn!`），统一它是为了同一个失败只有一种说法。
     store
         .save_blocking(key, bytes)
-        .map_err(|error| error.to_string())
+        .map_err(|error| tool_platform::storage::translate_error(&error))
 }
 
 /// 主题目录内的文件以相对路径保存，便携包或安装目录改变后仍能恢复主题。
@@ -474,6 +480,36 @@ mod tests {
             "custom_theme_path": "one-dark-pro.json"
         })
         .to_string()
+    }
+
+    /// 「最近工作区 → 打开」把 `read_native_file` 的 Err 正文**原样**渲染进状态栏
+    /// （`ui/settings_panel.rs` 的那条 `set_status_force(StatusLevel::Error, error)`），
+    /// 所以这句必须是中文框架，不能是 `StorageError` 的英文 `Display`。
+    /// 形状选「该是文件的地方放一个目录」：文件缺失走的是 `Ok(None)`，只有读失败才出错，
+    /// 而这个做法不依赖平台（Windows 给拒绝访问、类 Unix 给 Is a directory）。
+    #[test]
+    fn unreadable_workspace_file_fails_with_the_chinese_storage_frame() {
+        let root = std::env::temp_dir().join(format!(
+            "hw-config-read-words-{}-{}",
+            std::process::id(),
+            tool_core::now_timestamp_ms()
+        ));
+        std::fs::create_dir_all(&root).expect("建临时根目录");
+        let path = root.join("workspace.json");
+        std::fs::create_dir(&path).expect("把 workspace.json 做成目录，读取必失败");
+
+        let error = read_native_file(&path).expect_err("读不出来的配置文件必须报错");
+
+        assert!(
+            error.starts_with("存储操作失败："),
+            "配置文件读取失败必须走 `StorageError` 的中文框架，实际 {error:?}"
+        );
+        assert!(
+            !error.contains("storage operation failed:"),
+            "`StorageError` 的英文 `Display` 又漏进正文了，它会被直接渲染进状态栏：{error:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

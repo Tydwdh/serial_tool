@@ -1016,6 +1016,128 @@ fn plugin_failures_reach_the_user_in_chinese() {
     let _ = std::fs::remove_file(&root);
 }
 
+/// 导出落盘失败到状态栏的那句话必须是中文（第 25 轮把 `write_exported_content` 从
+/// `StorageError` 的英文 `Display` 改到 `tool_platform::storage::translate_error`）。
+///
+/// 载荷本身（`std::io::Error` 的原文）随机器与 locale 变，所以钉框架、不钉 OS 那半；
+/// 但**框架只许出现一次**：载荷里若再混进一层中文框架，就是「存储操作失败：存储操作失败：…」。
+#[test]
+fn file_export_failures_reach_the_user_in_chinese() {
+    let bus = DataBus::new();
+    let mut wb = Workbench::new(bus);
+
+    // 写不进去的目标：父目录不存在 —— 与用户「选了个已被移走的目录」是同一类失败。
+    let dir = std::env::temp_dir().join(format!(
+        "serial-tool-headless-export-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let target = dir.join("no-such-parent").join("terminal.csv");
+
+    // `spawn_file_export` 由 presentation 直接调用（不经过 `dispatch`），所以这里拿到的
+    // 就是 `CommandOutcome`，`expect_pending` 那条 helper 包不上；同一判定内联一份。
+    let task = match wb
+        .spawn_file_export(
+            "export_terminal",
+            "csv".to_owned(),
+            FileHandle::from_native_path(&target),
+            || Ok("列1,列2\n".to_owned()),
+        )
+        .expect("导出命令必须被接受")
+    {
+        CommandOutcome::Pending { task_id, .. } => task_id,
+        CommandOutcome::Done => panic!("导出必须返回 Pending，而不是同步完成"),
+    };
+    assert_eq!(
+        task_kind(&wb, task).as_deref(),
+        Some("export_terminal"),
+        "导出任务必须带 presentation 传进来的 kind"
+    );
+    assert!(
+        tick_until(&mut wb, Duration::from_secs(10), |wb| matches!(
+            task_state(wb, task),
+            Some(TaskState::Completed | TaskState::Failed)
+        )),
+        "export_terminal 任务必须在超时前结束"
+    );
+    assert_eq!(
+        task_state(&wb, task),
+        Some(TaskState::Failed),
+        "写到不存在的父目录必须失败"
+    );
+
+    let words = task_message(&wb, task).expect("失败任务必须留下一句给用户的话");
+    assert!(
+        words.starts_with("存储操作失败："),
+        "导出失败的正文必须是中文框架，实际 {words:?}"
+    );
+    assert_eq!(
+        words.matches("存储操作失败：").count(),
+        1,
+        "中文框架叠了两层：{words:?}"
+    );
+    assert!(
+        !words.contains("storage operation failed"),
+        "英文 Display 又漏进了用户可见文案：{words:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 回放文件**打不开**（区别于「不存在」）时，用户读到的那半句必须是中文框架。
+///
+/// 为什么用目录而不是不存在的路径：`prepare_load` 第一步就 `metadata`，路径不存在时
+/// 那里先红（那句中文是第 24 轮之前就有的 `获取文件大小失败: `），永远走不到 `File::open`。
+/// 目录能 stat 到、却当不成文件（本机是「拒绝访问」，Linux 是「是目录」），所以它才是
+/// 「打开」这条出口的输入。OS 细节不钉，钉的是「框架在最前、其后一个多余字都没有」。
+#[test]
+fn replay_file_that_cannot_be_opened_reaches_the_user_in_chinese() {
+    let bus = DataBus::new();
+    let mut wb = Workbench::new(bus);
+
+    let dir = std::env::temp_dir().join(format!(
+        "serial-tool-headless-replay-dir-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("创建回放临时目录");
+    let raw = std::fs::File::open(&dir)
+        .expect_err("测试前提：这个目录必须打不开，否则本用例没有在测「打开失败」");
+
+    let task = expect_pending(
+        &mut wb,
+        AppCommand::LoadReplay {
+            file: FileHandle::from_native_path(&dir),
+        },
+    );
+    assert_eq!(task_kind(&wb, task).as_deref(), Some("load_replay"));
+    assert!(
+        tick_until(&mut wb, Duration::from_secs(10), |wb| matches!(
+            task_state(wb, task),
+            Some(TaskState::Completed | TaskState::Failed)
+        )),
+        "load_replay 任务必须在超时前结束"
+    );
+    assert_eq!(
+        task_state(&wb, task),
+        Some(TaskState::Failed),
+        "实际句串: {:?}",
+        task_message(&wb, task)
+    );
+
+    let words = task_message(&wb, task).expect("失败任务必须留下一句给用户的话");
+    assert!(
+        words.starts_with("回放文件打开失败: "),
+        "打开回放文件失败的正文必须是中文框架，实际 {words:?}"
+    );
+    assert_eq!(
+        words,
+        format!("回放文件打开失败: {raw}"),
+        "框架之外还多了别的话（双重框架），或者 OS 细节被改写了"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 重启交接的判定必须来自权威状态（PluginManager 的 stopping 表），不是错误文案。
 ///
 /// 覆盖三个方向，任一处判定「说谎」都会红：

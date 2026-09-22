@@ -838,6 +838,33 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
       > `tool-extension` 不参与 wasm 编译，web 侧插件由用户选文件装载、
       > `crates/app/src/web/plugins.rs` 给面板的 `diagnostics` 恒为 `Vec::new()`，上面写的
       > "两端各自经 `ui/tiles.rs` 与 `web/plugins.rs` 渲染"对 web 那一半是空的（渲染器在，输入永远没有）。
+      > **第 25 轮把用户可见错误正文里的英文清完**（700 → 710）。新增
+      > `tool_platform::storage::translate_error`（3 个变体、穷尽 `match` 不写 `_ =>`，
+      > 逐字契约在 `crates/platform/tests/storage_error_wording.rs`，含"与 `TransportError`
+      > 那句『此平台不支持该**传输**能力』不共用任何句子"的断言）。
+      > **一个反直觉的取舍**：`StorageError::Operation(detail)` 在这里要套一层中文框架，
+      > 而 `tool_transport` 那侧的 `Operation` 是**原样透出**的 —— 差别在载荷：transport 侧的
+      > 载荷进门时已经翻译过，再套就成了「操作失败：串口错误：…」；storage 侧七个生产者
+      > （`native storage worker stopped` / `std::io::Error` 原文 / `file id escapes storage root` /
+      > `window unavailable` / JS 值原文 / `decode settings: ` / `serde_json` 原文）
+      > **一个中文都不是**，所以不套就整句英文。清单与各自语言记在那份新用例的文件头里。
+      > 接了三处：`write_exported_content`（导出失败 → 任务消息 → 状态栏，本机实测从
+      > `storage operation failed: 系统找不到指定的路径。 (os error 3)` 变成
+      > `存储操作失败：系统找不到指定的路径。 (os error 3)`）；`config.rs::read_native_file`
+      > （**本轮新查到的活站点**：设置面板「最近工作区 → 打开」把 Err 正文
+      > **原样** `set_status_force(Error, error)` 渲染，实测前值是
+      > `storage operation failed: 拒绝访问。 (os error 5)`，把 `.map_err` 退回 `to_string()`
+      > 该用例即红）；`write_native_json` 今天到不了用户眼前（`save_config` 十个调用点都只
+      > `log::warn!`），统一它只为"同一个失败只有一种说法"，注释里写明了这点。
+      > 回放那条改在**生产者**而不是接线处：`prepare_load` 里 `File::open(&path)?` 是唯一没框架
+      > 的一处（邻居 `:241` 与 `oversize_file_error` 本来就是中文），在 `workbench` 那侧补会
+      > 把已带框架的路径套成双重框架。**顺带纠一处可达性**：文件"不存在"根本走不到
+      > `File::open`（`metadata` 先失败，用户看到的本就是中文那句），新框架管的是
+      > 目录 / 被独占 / 权限。同形状但不同命令的一处（`create_recording_file` 的
+      > `create_dir_all` / `File::create` 未框架化 → `录制错误：<OS 原文>`）**只记不修**。
+      > **踩过的坑记下来**：`tool-platform` 现在有两个 `translate_error`
+      > （根目录那份管 `TransportError`，`storage` 模块那份管 `StorageError`，各自与自己的
+      > 错误类型同处），从根路径调 storage 那份会直接 E0308 —— 不是重名错误，但引用时要写全模块。
       ⑤ 【本波已闭合】换行后缀表原有 3 份（native `state::LineEnding`、wasm `WebLineEnding`、
       共享面板 `SendLineEnding`），值一致但没有任何断言钉住，两端还各写两份 4 臂 **identity** `match`
       （类型不同才需要转）。现在收进 `tool_core::LineEnding`（`crates/core/src/lib.rs:454`），
@@ -870,6 +897,16 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
       `tool-plugin-runtime`，`tool-extension` 根本不参与 wasm 编译），所以"web 的扫描诊断该由谁产生、
       包含哪些码"是新增行为而不是将现有行为对齐 —— 需要用户定调，且改动会新增用户可见文案，
       不能算进机械收敛。
+      ⑧ 【第 25 轮顺手查到的，与文案不是同一类】**配置读写的失败在两端都被丢掉**，
+      用户看到的症状是"设置没保存上"而**没有任何一句话**：native 侧 `load_config()`
+      （`crates/app/src/config.rs`）用 `if let Ok(..)` 吞掉读取错误后直接落到 legacy 路径，
+      `save_config()` 的十个调用点全部只 `log::warn!`（`app/mod.rs`、`commands.rs`、
+      `runtime/autosave.rs`、`runtime/keys.rs`、`runtime/update.rs`、`ui/device_panel.rs`、`ui/mod.rs`）；
+      web 侧 `WebSettingsStore::from_window(...).ok()` 与 `let _ = store.save("settings.json", …)`
+      两处同样丢弃。本轮只把**已经到达**状态栏的那条（`read_native_file` → 设置面板
+      「最近工作区 → 打开」）换成中文，没动这些丢弃点 —— 动它等于新增用户可见反馈
+      （"启动时配置读不出来要告诉用户吗、要不要退到默认值"），是产品裁决不是机械收敛，
+      且与第 21 轮那条"native 丢弃 enable 失败、web 写状态栏"的不对称是同一个问题的两面。
 
 ### 本轮裁掉项
 

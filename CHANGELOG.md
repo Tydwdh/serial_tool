@@ -6,6 +6,29 @@
 
 ### 调整
 
+- 把用户可见错误正文里最后一段英文清掉（四道门 710 passed / 0 failed / 7 ignored，基线 700 → 710；
+  新增 10 条用例：`storage_error_wording` 6 + 回放/导出/配置三条活路径 + recorder 单元 1）。
+  新增 `tool_platform::storage::translate_error`（3 个变体，穷尽 `match` 不写 `_ =>`，
+  与 `TransportError` 那句"此平台不支持该传输能力"**不共用任何句子**，由新用例断言钉住）。
+  **一个刻意与 transport 相反的取舍**：`StorageError::Operation(detail)` 在这里套一层中文框架，
+  而 transport 那份是原样透出 —— 因为 transport 的载荷进门时已翻译过（再套就是
+  「操作失败：串口错误：…」），而 storage 的七个生产者（worker 退出、`std::io::Error` 原文、
+  `file id escapes storage root`、`window unavailable`、JS 值原文、`decode settings:`、
+  `serde_json` 原文）**一个中文都不是**。
+  接三处并逐字实测（本机 zh-CN Windows）：导出失败 `storage operation failed: 系统找不到指定的路径。 (os error 3)`
+  → `存储操作失败：系统找不到指定的路径。 (os error 3)`；**本轮新查到的活站点** —— 设置面板
+  「最近工作区 → 打开」把 `read_native_file` 的 Err 原样写进状态栏，
+  `storage operation failed: 拒绝访问。 (os error 5)` → `存储操作失败：拒绝访问。 (os error 5)`
+  （把 `.map_err` 退回 `to_string()` 该用例即红，实测过）；`write_native_json` 到不了用户眼前
+  （`save_config` 十个调用点都只 `log::warn!`），统一只为"同一个失败一种说法"，注释里写明。
+  回放那条改在**生产者**：`ReplayManager::prepare_load` 里 `File::open(&path)?` 是唯一没中文框架的
+  一处（邻居与 `oversize_file_error` 本来就是中文），在 `workbench` 侧补会把已带框架的路径套成双重框架；
+  行读取 `line?` 同一处理，由注入失败迭代器的 recorder 用例驱动。**顺带纠一处可达性**：文件
+  "不存在"走不到 `File::open`（`metadata` 先失败，用户看到的本就是中文），新框架管目录/独占/权限。
+  **只记不修**（都写进 `docs/ARCHITECTURE.md`）：`create_recording_file` 的 `create_dir_all` /
+  `File::create` 同样未框架化（`录制错误：<OS 原文>`）；配置读写失败在两端被丢弃（native
+  `if let Ok(..)` + 十个 `log::warn!`，web `.ok()` + `let _ =`），症状是"设置没保存上"而零反馈 ——
+  那类改动等于新增用户可见反馈，是产品裁决（第 12 条⑧）。
 - 去掉夹在中英文之间的 `AppError` 分类前缀，并修好两条插件诊断文案（四道门 700 passed /
   0 failed / 7 ignored，基线 697 → 700；新增三条用例都是建/删临时目录的 fs 用例，故另测失败率：
   `tool-extension` 里匹配 `manifest_` 的那 10 条连跑 12 次 0 红）。

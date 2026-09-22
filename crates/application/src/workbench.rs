@@ -1346,7 +1346,9 @@ impl crate::AppRuntime for Workbench {
 ///
 /// 调用方只剩 `spawn_file_export`：presentation 自己准备好内容交进来，BOM 与文件
 /// 服务的接触都留在这里，也就是 worker 闭包内，不会在 egui 回调里写大文件。
-/// 错误仍是平台服务的字符串形式，由调用方所在的 worker 闭包直接向上抛给任务模型。
+/// 失败文本在这里就翻译成中文：返回的 `String` 会被 worker 闭包原样抛给任务模型，
+/// 也就是 `TaskSnapshot::message`（状态栏就是它），所以不能再是 `StorageError` 的
+/// 英文 `Display`。
 fn write_exported_content(
     file_service: &NativeFileService,
     path: &std::path::Path,
@@ -1369,7 +1371,7 @@ fn write_exported_content(
                 bytes,
             },
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| tool_platform::storage::translate_error(&error))
 }
 
 fn pending(task_id: TaskId, message: impl Into<String>) -> CommandOutcome {
