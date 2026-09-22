@@ -237,21 +237,36 @@ impl ReplayManager {
     /// **从这里出去的每一个 `io::Error` 都自带中文框架**：派发侧（`dispatch_load_replay`）
     /// 只做 `to_string()`，框架少补一处就是英文 OS 原文上状态栏；反过来在派发侧再包一层，
     /// 就成了两重中文框架的同义反复。所以三条出口（取大小、打开、逐行读）各自在生产处
-    /// 补一句，新增出口时照同一条规则办。
+    /// 补一句，新增出口时照同一条规则办。框架里点名**是哪个路径**失败的 —— 用户在手输
+    /// 路径的那一格要改的就是它。
+    ///
+    /// 包装必须用 `io::Error::new(e.kind(), ..)`，不能图省事用 `io::Error::other(..)`：
+    /// `kind()` 在本工作区是承重的（第 9/11 轮的重试判定与 `tool_transport::translate_error`
+    /// 的 `Io` 臂都读它），折成 `Other` 不会让 Display 有任何变化，只会让将来按 kind 分派的
+    /// 分支静默认不出「是权限、是不存在、还是盘没了」。OS 细节原样留在冒号后，不改写、
+    /// 不翻译（与 `recorder.rs` 的 `create_recording_file` 同一个形状、同一份理由）。
     pub fn prepare_load(path: impl AsRef<std::path::Path>) -> io::Result<ReplayLoadData> {
         let path = path.as_ref().to_path_buf();
 
         // 文件大小检查：防止加载超大文件导致 OOM
-        let metadata = std::fs::metadata(&path)
-            .map_err(|e| io::Error::other(format!("获取文件大小失败: {e}")))?;
+        let metadata = std::fs::metadata(&path).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("获取文件大小 {} 失败：{e}", path.display()),
+            )
+        })?;
         if metadata.len() > MAX_FILE_BYTES {
             return Err(oversize_file_error(metadata.len()));
         }
 
         // 走到这里文件是存在的（上一步 `metadata` 已成功），所以这一条管的是
         // 「路径是目录」「被别的进程独占」「权限不够」这三类打开失败。
-        let file =
-            File::open(&path).map_err(|e| io::Error::other(format!("回放文件打开失败: {e}")))?;
+        let file = File::open(&path).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("打开回放文件 {} 失败：{e}", path.display()),
+            )
+        })?;
         Self::prepare_load_lines(path, BufReader::new(file).lines())
     }
 
@@ -263,6 +278,9 @@ impl ReplayManager {
         text: impl Into<String>,
     ) -> io::Result<ReplayLoadData> {
         let mut loader = ReplayTextLoader::new(name, text)?;
+        // 这一条 `other` 是**对的**，别跟着第 43 轮那三处一起改：它底下没有 OS 错误，
+        // 没有 kind 可保（`step(usize::MAX)` 读尽文本后必定返回 `Some`，这里只是把
+        // 「不可能的分支」写成类型）。上面三条出口要保 kind，是因为那里 `e` 是操作系统给的。
         loader
             .step(usize::MAX)?
             .ok_or_else(|| io::Error::other("回放文本解析未完成"))
@@ -277,8 +295,14 @@ impl ReplayManager {
         let mut first_errors: Vec<String> = Vec::new();
         for (line_index, line) in lines.enumerate() {
             // 读行失败（网络盘中途掉线、文件读到一半被收回）也是原样上状态栏的那一个
-            // `?`，所以它同样在生产处补框架，与 `prepare_load` 的另两条出口同一个形状。
-            let line = line.map_err(|e| io::Error::other(format!("回放文件读取失败: {e}")))?;
+            // `?`，所以它同样在生产处补框架，与 `prepare_load` 的另两条出口同一个形状：
+            // 点名路径、kind 照搬（这一条的 kind 是 OS 给的那一个，不是 `Other`）。
+            let line = line.map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("读取回放文件 {} 失败：{e}", path.display()),
+                )
+            })?;
             // 行号 1-based 且包含空行：与浏览器侧 `ReplayTextLoader` 的错误定位一致。
             parse_jsonl_line(
                 &line,
@@ -1103,6 +1127,11 @@ mod tests {
     /// 派发侧（`dispatch_load_replay`）只做 `to_string()`，所以这里少一句，用户就在状态栏
     /// 上读到一句英文 OS 原文。三条出口在本用例里一次驱动到位：任何一条退回裸 `?`，
     /// 对应那一格立刻红。
+    ///
+    /// 冒号一律**全角** `：`（与 `recorder.rs` 的第 40 轮框架一致）。这一条不再单设
+    /// `contains` 断言：三条期望里的字面量就带全角冒号，逐字相等已经把标点钉住了 ——
+    /// 实测只把生产侧退回半角，①② 两格即红（`left: …失败: … / right: …失败：…`），
+    /// 再加一条 `contains(" 失败：")` 只是同一事实的弱重复。
     #[test]
     fn native_load_exits_all_mint_a_chinese_frame() {
         let dir = std::env::temp_dir().join(format!(
@@ -1111,12 +1140,15 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
 
-        // ① 取大小：路径不存在。OS 细节随机器与 locale 变，钉不住，只钉框架。
+        // ① 取大小：路径不存在。OS 细节随机器与 locale 变，钉不住，钉的是
+        // 「框架 + 点名的路径 + 细节逐字原样」这一整个形状。
         let missing = dir.join("nope.jsonl");
+        let raw = std::fs::metadata(&missing).expect_err("测试前提：不存在的路径 stat 不出来");
         let error = ReplayManager::prepare_load(&missing).expect_err("不存在的路径必须失败");
-        assert!(
-            error.to_string().starts_with("获取文件大小失败: "),
-            "① 的框架变了：{error}"
+        assert_eq!(
+            error.to_string(),
+            format!("获取文件大小 {} 失败：{raw}", missing.display()),
+            "① 必须是「一句中文框架 + 点名的路径 + 原样带出的 OS 细节」，多一句少一句都算变"
         );
 
         // ② 打开：目录能 stat 到，却不能当文件打开（Windows 拒绝访问 / Linux 是目录）。
@@ -1124,8 +1156,8 @@ mod tests {
         let error = ReplayManager::prepare_load(&dir).expect_err("目录必须打不开");
         assert_eq!(
             error.to_string(),
-            format!("回放文件打开失败: {raw}"),
-            "② 必须是「一句中文框架 + 原样带出的 OS 细节」，多一句少一句都算变"
+            format!("打开回放文件 {} 失败：{raw}", dir.display()),
+            "② 必须是「一句中文框架 + 点名的路径 + 原样带出的 OS 细节」，多一句少一句都算变"
         );
 
         // ③ 逐行读：读盘中途失败（网络盘掉线一类）驱动不出来，只能注入失败的迭代器。
@@ -1134,9 +1166,74 @@ mod tests {
             .expect_err("读行失败必须冒出来");
         assert_eq!(
             error.to_string(),
-            "回放文件读取失败: 网络磁盘已断开",
+            format!("读取回放文件 {} 失败：网络磁盘已断开", dir.display()),
             "③ 的框架或载荷被改动了"
         );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 三条出口的框架**不得改掉 `kind()`**（第 43 轮）。
+    ///
+    /// 为什么单独钉 kind 而不并入上面的文案用例：`io::Error::other(文案)` 与
+    /// `io::Error::new(kind, 文案)` 的 `Display` **逐字相同**，所以框架全对时文案用例照样全绿，
+    /// 只有 kind 能看出「权限失败」被说成了「别的失败」。而 kind 在本工作区是承重的
+    /// （第 9/11 轮的重试判定、`tool_transport::translate_error` 的 `Io` 臂都按它分派）。
+    ///
+    /// 手法照 `recorder.rs` 的 `create_recording_file_frames_both_io_exits_in_chinese`：
+    /// **同一个用例里先跑一次不加框架的裸操作**，取本机的 kind 再比对 —— 不依赖权限
+    /// （Windows 上 chmod 造不出来）、不分平台 `#[cfg]`、不硬编 OS 原话。
+    #[test]
+    fn native_load_exits_keep_the_kind_of_the_underlying_os_error() {
+        let dir = std::env::temp_dir().join(format!(
+            "replay-kind-test-{}",
+            tool_core::now_timestamp_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // ① 取大小：不存在的路径。这一格的 kind 与平台无关（Windows `ERROR_FILE_NOT_FOUND` /
+        //    POSIX `ENOENT` 都映成 `NotFound`），所以除了"等于裸操作"再钉死一次。
+        let missing = dir.join("nope.jsonl");
+        let raw = std::fs::metadata(&missing).expect_err("测试前提：不存在的路径 stat 不出来");
+        let error = ReplayManager::prepare_load(&missing).expect_err("① 的失败必须冒出来");
+        assert_eq!(error.kind(), raw.kind(), "① 的框架把 kind 折掉了");
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::NotFound,
+            "① 的失败应还是 NotFound，got {:?}",
+            error.kind()
+        );
+
+        // ② 打开（本轮要证明的那一格）：目录能 stat 到却打不开。这一格的 kind **随平台不同**
+        //    （Windows `ERROR_ACCESS_DENIED` ⇒ `PermissionDenied`，Linux `EISDIR` ⇒
+        //    `IsADirectory`），所以只钉"等于裸操作的 kind"与"不是 Other"这两条。
+        let raw = File::open(&dir).expect_err("测试前提：目录不能当文件打开");
+        let error = ReplayManager::prepare_load(&dir).expect_err("② 的失败必须冒出来");
+        assert_eq!(
+            error.to_string(),
+            format!("打开回放文件 {} 失败：{raw}", dir.display()),
+            "② 框架的形状变了（路径没点名 / OS 细节被改写）"
+        );
+        assert_eq!(error.kind(), raw.kind(), "② 的框架把 kind 折掉了");
+        assert_ne!(
+            error.kind(),
+            io::ErrorKind::Other,
+            "② 的 OS 给得出具体 kind，出现 Other 说明框架退回了 `io::Error::other(..)`"
+        );
+
+        // ③ 逐行读：真掉一次网络盘驱动不出来，所以注入 —— 钉的是"迭代器递来什么 kind，
+        // 出口就还什么 kind"。两格而不是一格：只调通一格的写法在这里看不出来。
+        for kind in [io::ErrorKind::TimedOut, io::ErrorKind::UnexpectedEof] {
+            let lines = [Err(io::Error::new(kind, "网络磁盘已断开"))];
+            let error = ReplayManager::prepare_load_lines(dir.clone(), lines.into_iter())
+                .expect_err("③ 的失败必须冒出来");
+            assert_eq!(
+                error.kind(),
+                kind,
+                "③ 的框架把读行递过来的 {kind:?} 折成了 {:?}",
+                error.kind()
+            );
+        }
 
         let _ = std::fs::remove_dir_all(dir);
     }

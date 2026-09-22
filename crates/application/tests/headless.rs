@@ -1094,9 +1094,15 @@ fn file_export_failures_reach_the_user_in_chinese() {
 /// 回放文件**打不开**（区别于「不存在」）时，用户读到的那半句必须是中文框架。
 ///
 /// 为什么用目录而不是不存在的路径：`prepare_load` 第一步就 `metadata`，路径不存在时
-/// 那里先红（那句中文是第 24 轮之前就有的 `获取文件大小失败: `），永远走不到 `File::open`。
-/// 目录能 stat 到、却当不成文件（本机是「拒绝访问」，Linux 是「是目录」），所以它才是
-/// 「打开」这条出口的输入。OS 细节不钉，钉的是「框架在最前、其后一个多余字都没有」。
+/// 那里先红（那句中文是第 24 轮之前就有的 `获取文件大小 <路径> 失败：<OS 细节>`），
+/// 永远走不到 `File::open`。目录能 stat 到、却当不成文件（本机是「拒绝访问」，Linux 是
+/// 「是目录」），所以它才是「打开」这条出口的输入。
+///
+/// 第 43 轮起框架里点名**是哪个路径**（用户在回放面板手输的就是它），所以本用例钉
+/// 「框架在最前 + 整句正好等于框架与 OS 细节的拼接」—— 后者同时钉住了路径、原样带出的
+/// 细节、以及**没有叠第二层框架**。kind 不在这条链上（派发侧只做 `to_string()`），
+/// 它由 `crates/recorder/src/replay.rs` 的
+/// `native_load_exits_keep_the_kind_of_the_underlying_os_error` 钉。
 #[test]
 fn replay_file_that_cannot_be_opened_reaches_the_user_in_chinese() {
     let bus = DataBus::new();
@@ -1133,13 +1139,13 @@ fn replay_file_that_cannot_be_opened_reaches_the_user_in_chinese() {
 
     let words = task_message(&wb, task).expect("失败任务必须留下一句给用户的话");
     assert!(
-        words.starts_with("回放文件打开失败: "),
+        words.starts_with("打开回放文件 "),
         "打开回放文件失败的正文必须是中文框架，实际 {words:?}"
     );
     assert_eq!(
         words,
-        format!("回放文件打开失败: {raw}"),
-        "框架之外还多了别的话（双重框架），或者 OS 细节被改写了"
+        format!("打开回放文件 {} 失败：{raw}", dir.display()),
+        "框架之外还多了别的话（双重框架），或者路径/OS 细节被改写了"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

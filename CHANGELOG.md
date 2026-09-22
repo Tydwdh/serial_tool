@@ -6,6 +6,78 @@
 
 ### 调整
 
+- **回放的三条 io 出口不再把 OS 的 `kind()` 折成 `Other`：框架点名路径、冒号改全角
+  （第 40 轮记下的那笔同类账，本轮平掉）**（本轮动 `crates/recorder/src/replay.rs`
+  的 `prepare_load` 两条出口 + `prepare_load_lines` 一条 + 它的 `#[cfg(test)] mod tests`；
+  签名与 `io::Result<ReplayLoadData>` 不变、不新增类型/trait/宏/模块、不加 `#[allow]`、
+  豁免计数仍 5；**另动了 `crates/application/tests/headless.rs` 里那条逐字钉回放文案的用例**
+  —— 它是第 25 轮立的 crate 外文案契约，生产者改措辞它必红，简报的"只动 recorder"与
+  "四道门全绿"在这里互斥，取"如实更新断言、一条不删"（详见下 (4)）；四道门 fmt /
+  native clippy `-D warnings` / wasm clippy / test 全 **EXIT=0**，**733 passed / 0 failed /
+  7 ignored**、32 条 `test result:` 行 —— 基线 732 **净增 1 条**
+  （新增 `native_load_exits_keep_the_kind_of_the_underlying_os_error`）。**（1）三处的形状**：
+  `获取文件大小失败: {e}` / `回放文件打开失败: {e}` / `回放文件读取失败: {e}` 全部由
+  `io::Error::other(..)` 改成 `io::Error::new(e.kind(), ..)`，框架换成
+  `获取文件大小 {} 失败：{e}` / `打开回放文件 {} 失败：{e}` / `读取回放文件 {} 失败：{e}`
+  （路径来自各自的 `path`，OS 细节原样留在冒号后）—— 半角 `: ` 是同一个 crate 里
+  兄弟文件对同一模式用两种标点，`recorder.rs` 第 40 轮的新框架与 `tool_updater` 全用全角。
+  **（2）用户可见串的前后**（本机中文 Windows，逐字取自两次真跑：改前/改后各跑一次
+  临时探针，跑完即删；探针打的是 `prepare_load` 的返回值，派发侧 `dispatch_load_replay`
+  对它只做 `to_string()`，即任务消息正文本身）：
+  取大小（路径不存在）`获取文件大小失败: 系统找不到指定的文件。 (os error 2)` →
+  `获取文件大小 C:\Users\…\replay-probe-…\nope.jsonl 失败：系统找不到指定的文件。 (os error 2)`；
+  打开（路径是目录）`回放文件打开失败: 拒绝访问。 (os error 5)` →
+  `打开回放文件 C:\Users\…\serial-tool-headless-replay-dir-38420 失败：拒绝访问。 (os error 5)`
+  —— 后一条是从 `Workbench::dispatch(LoadReplay)` 的失败任务消息里抓的，不是推的。
+  **少的那半句正是用户要改的东西**：改前看不出是【哪一步】对【哪个路径】失败。**（3）kind
+  是承重的，且这次的修法与第 40 轮同一个理由**：`io::Error::other(文案)` 与
+  `io::Error::new(kind, 文案)` 的 `Display` **逐字相同**，所以折 kind 不会被任何文案用例抓到，
+  只会让将来按 kind 分派的分支（第 9/11 轮的重试判定、`tool_transport::translate_error` 的
+  `Io` 臂）静默认不出「是权限、是不存在、还是盘没了」；理由写进 `prepare_load` 的文档注释。
+  **同轮的例外，代码里就地写了为什么不动**：`prepare_load_text` 的
+  `io::Error::other("回放文本解析未完成")` 底下没有 OS 错误、没有 kind 可保（`step(usize::MAX)`
+  读尽文本必定返回 `Some`，那是"不可能分支"），`Other` 就是对的 —— 记在这里是为了让下一轮
+  别把它当漏网的顺手改掉。**（4）动手前的三份普查**：(a) **谁读这三条** —— 生产侧只有一个
+  调用者 `crates/application/src/workbench.rs::dispatch_load_replay`（`load_replay` 后台任务，
+  `map_err(|error| error.to_string())`），出去的两条可见路径是任务消息与
+  `AppEvent::TaskFailed` 那句 `后台任务失败: {error}` 系统日志；**没有** `AppError::Replay`
+  那一层（第 24 轮的分类前缀在这条路上收不到，与第 40 轮 ① 的取证同一类纠偏），
+  生产侧**唯一**的调用点就是它；web 走的是 `prepare_load_text`/`ReplayTextLoader`
+  （`AppCommand::LoadReplay` 只出现在 native 的 `workbench.rs:336`，wasm 那份派发的是
+  `LoadReplayText`），这三条出口在浏览器侧结构上跑不到；同步的 `ReplayManager::load`
+  没有生产调用者，只有本 crate 的 `rejects_oversized_file` 用例走它（本轮按范围没动）。(b) **谁钉着** ——
+  `grep -rn "回放文件打开失败\|获取文件大小失败\|回放文件读取失败" crates/ --include=*.rs`
+  只命中**两个文件**：本文件（三条生产者 + 用例里的三条期望）、`crates/application/tests/headless.rs` 的
+  `replay_file_that_cannot_be_opened_reaches_the_user_in_chinese`（一条注释 + 两条断言）。
+  改了 5 处期望、**没删一条断言**：用例 ① 原 `starts_with("获取文件大小失败: ")`（只钉前缀，OS 细节钉不住）→ 逐字
+  `== "获取文件大小 <路径> 失败：<裸操作>"`；② 原 `== "回放文件打开失败: {raw}"` →
+  `== "打开回放文件 <目录> 失败：{raw}"`；③ 原 `== "回放文件读取失败: 网络磁盘已断开"` →
+  `== "读取回放文件 <目录> 失败：网络磁盘已断开"`；headless 那条原
+  `starts_with("回放文件打开失败: ")` + `== "回放文件打开失败: {raw}"` →
+  `starts_with("打开回放文件 ")` + `== "打开回放文件 <目录> 失败：{raw}"`（框架断言与
+  "整句正好等于框架+细节"这条双重框架守卫都留着，OS 细节仍由用例内跑的裸操作提供）。
+  新立的期望之所以**正确**而不是"让它过"：三条都改成与裸操作逐项相等的形状，路径是
+  本轮新增的可见信息，kind 另立一条用例。(c) **没人拿这段文字做判定** ——
+  `contains("回放`/`获取文件`/`读取`、`starts_with`、`==` 三样扫过 `crates/`，命中的两处
+  `starts_with` 全在上面的用例断言里；`crates/app/src/web/replay.rs:49` 的
+  `读取回放文件失败：{error:?}` 是浏览器 `File.text()` 的失败、另一条链，本轮没牵连
+  （也如实记下：它与新框架只差一个路径位，将来若要统一措辞得连着它一起看）。
+  `crates/platform/tests/transport_error_wording.rs` 与 `storage_error_wording.rs` 不含回放
+  句子，一条没动。**（5）三道变异都验过会红**：旧实现原封（`other` + 半角 + 不点名路径）→
+  文案用例与 kind 用例各红（`left: "获取文件大小失败: …" / right: "获取文件大小 …\nope.jsonl
+  失败：…"`、`① 的框架把 kind 折掉了 left: Other / right: NotFound`）；**只把 kind 折回
+  `io::Error::other(..)`、框架一字不改** → 文案用例全绿、kind 用例单独红
+  （`② 的框架把 kind 折掉了 left: Other / right: PermissionDenied`），这就是"只有 kind 看得见"
+  的那格证据；只把三处生产侧框架退回半角（期望不动）→ ①② 两格的红点正是标点那一格
+  （`left: …失败: …` / `right: …失败：…`）。**一度写好的两条 `contains` 冒号断言，量过之后
+  删掉了**：逐字相等的期望里已经带着全角 `：`，再钉一条 `contains(" 失败：")` 是同一事实的
+  弱重复，而 `!contains("失败: ")` 会连 OS 那半句一起读、随本机文案假红 —— 冒号由相等断言钉，
+  这条取舍写进了用例的文档注释，免得下一轮又补回来。用例的可移植性与第 40 轮同一套：
+  **同一个用例里先跑一次不加框架的裸操作**取本机 kind 与文案再比对，不依赖 chmod、不分平台
+  `#[cfg]`、不硬编 OS 原话；② 的 kind 平台不同（Windows `PermissionDenied` / POSIX
+  `IsADirectory`），所以只钉"等于裸操作"与"不是 `Other`"；③ 只能注入（真掉一次网络盘
+  驱动不出来），注入两条不同 kind 钉"迭代器递来什么就还什么"。
+
 - **worker 完成通道的载荷换成 `io::Error` 本体：走过这条通道的失败从此拿得到自己那句
   中文框架，不再一律 `IO 错误：`（第 41 轮如实记下的那处收窄，根因在此闭合）**（本轮只动
   `crates/transport/`：`lib.rs` 的 `SerialCommand`/`wait_for_completion`/`complete_command`/

@@ -1250,9 +1250,21 @@ panic / 置位什么都不做的手工线程，与磁盘和调度无关）·
       > `create_dir_all` / `File::create`）**第 40 轮补上了**（这一条当时只记不修）：两道出口
       > 各一句中文框架、各点名自己的路径 —— `创建录制目录 <父目录> 失败：<OS 原文>` 与
       > `创建录制文件 <目标> 失败：<OS 原文>`，形状取自 `tool_updater` 里同样两处操作。
-      > 两处都按 `io::Error::new(err.kind(), ..)` 包，**不跟**回放那两条的 `io::Error::other(..)`
+      > 两处都按 `io::Error::new(err.kind(), ..)` 包，**不跟**回放那三条的 `io::Error::other(..)`
       > （它们把 kind 折成 `Other` 了，第 25 轮的取舍没写理由）：`kind()` 在本工作区有承重用途
       > （第 9/11 轮的重试判定、`tool_transport::translate_error` 的 `Io` 臂读的都是它）。
+      > **第 43 轮把回放那三处的同一笔账平了**（`replay.rs` 的 `prepare_load` 取大小 /
+      > `File::open` 与 `prepare_load_lines` 逐行读）：三条出口改成
+      > `获取文件大小 <路径> 失败：<OS 原文>` / `打开回放文件 <路径> 失败：<OS 原文>` /
+      > `读取回放文件 <路径> 失败：<OS 原文>`，框架里的冒号由半角 `: ` 换成与
+      > `recorder.rs` 一致的全角 `：`，包装一律 `io::Error::new(e.kind(), ..)`（Display
+      > 逐字不变、kind 却折成 `Other` 的写法有用例单独抓：`Display` 相同 ⇒ 文案用例全绿
+      > 也照样是坏的，只有 `kind()` 看得见）。**这一族在本 crate 已闭合**：
+      > `prepare_load_text` 那句 `io::Error::other("回放文本解析未完成")` **保持不动** ——
+      > 它底下没有 OS 错误、没有 kind 可保，代码里就地写了这句话，别当漏网的顺手改掉。
+      > **还剩一条同类小账，但在别的 crate**：`crates/app/src/runtime/autosave.rs` 里
+      > `format!("录制失败: {e}")` 那一格仍是半角 `:`（同一文件的另一格与 `recorder.rs`
+      > 全用全角 `：`），本轮按要求没动，下一轮的候选。
       > **再纠一处可达性**：这句到用户眼前的路是 native **状态栏**（`commands.rs` 的
       > `start_or_stop_recording` → `set_status_force(Error, error.to_string())` → `AppError::Recording`
       > 的 `录制错误：{0}`），**不是**录制面板那句 `录制错误：{error}`（它读
