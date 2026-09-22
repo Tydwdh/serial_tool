@@ -17,6 +17,7 @@ use tool_platform::{PortDescriptor, PortId};
 use tool_recorder::ReplayLoadData;
 use tool_transport::SerialPortDescriptor;
 
+use crate::task_model::prune_finished_snapshots;
 pub use crate::task_model::{TaskId, TaskSnapshot, TaskState};
 
 /// worker 完成后交给 UI/Workbench 应用的结果。
@@ -298,24 +299,9 @@ impl TaskManager {
         events
     }
 
-    /// 快照数超过保留上限时，按 id 升序淘汰已结束（Completed/Failed/Cancelled）的任务。
-    ///
-    /// 只回收终态快照：仍在 Pending/Running 的任务必须一直可见，否则 UI 的
-    /// 「按 kind 查活跃任务」会把它看成已经结束。
+    /// 快照保留上限的淘汰规则在 `task_model::prune_finished_snapshots`（两端共用一份）。
     fn prune_finished(&mut self) {
-        const MAX_RETAINED_SNAPSHOTS: usize = 256;
-        while self.snapshots.len() > MAX_RETAINED_SNAPSHOTS {
-            let Some(id) = self.snapshots.iter().find_map(|(id, snapshot)| {
-                matches!(
-                    snapshot.state,
-                    TaskState::Completed | TaskState::Failed | TaskState::Cancelled
-                )
-                .then_some(*id)
-            }) else {
-                break;
-            };
-            self.snapshots.remove(&id);
-        }
+        prune_finished_snapshots(&mut self.snapshots);
     }
 
     pub fn snapshots(&self) -> Vec<TaskSnapshot> {

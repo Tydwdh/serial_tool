@@ -6,6 +6,20 @@
 
 ### 调整
 
+- 任务快照的保留规则原有**两份逐字节相同的实现**（各 536 字节）：native 在 `task.rs::prune_finished`、
+  wasm 在 `web.rs::prune_finished`。现在合成一份 —— `task_model::prune_finished_snapshots`，
+  两个结构体（`TaskManager` / `WebTaskRegistry`）各自留一行委托。选 `task_model` 作宿主是因为它是
+  这条规则唯一能活的地方：`task.rs` 是 `cfg(not(wasm32))`、`web.rs` 是 `cfg(wasm32)`，
+  **互斥编译的两份代码没有任何一次构建能同时看见**，所以它们分叉时编译器不会有任何反应；
+  事实也是如此 —— wasm 那一份**连文档注释都没有**，"只回收终态快照、否则 UI 按 kind 查活跃任务会查空"
+  这个理由只写在 native 那份上。**行为变化为零**：两份函数体字节级相同、常量同值 256，
+  合并后类型仍由编译器保证（`BTreeMap<TaskId, TaskSnapshot>` 是 `task_model` 自己的类型）。
+  顺带补上这条规则**此前完全没有的测试覆盖**（改动前 `grep -rn prune_finished crates/` 在所有
+  `tests/` 目录下 0 命中 —— 没有任何一条断言直接钉过它）：
+  `retention_never_touches_live_snapshots_and_stops_exactly_at_the_bound` 两条断言分别钉住
+  文档里那两句话。变异验证：去掉终态过滤 → 红在「全是未结束快照时不得回收」（`left: 256`）；
+  上限判定 `>` 改 `>=` → 红在「回收必须停在上限」（`left: 255`）。两次都改了生产代码的
+  一行、都还原并复跑回绿。
 - 删掉 **36 个编译器永远看不见的死公共项**（5 行增、396 行删，12 个文件；本仓第一次以删除为主的轮次）：
   `dead_code` lint 只看 crate 内可达性，`pub mod` 里的 `pub` 项永远算"可达"，所以这些一条警告都不会发；
   而"零引用 = 不可达"这个推断成立的前提也核实了 —— workspace `publish = false`，且**没有任何工作区外的

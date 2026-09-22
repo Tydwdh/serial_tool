@@ -25,7 +25,7 @@ use crate::replay::{
     ReplayStateView, ReplayStatusView,
 };
 use crate::send_plan::{self, PlannedSend};
-use crate::task_model::{TaskId, TaskSnapshot, TaskState};
+use crate::task_model::{TaskId, TaskSnapshot, TaskState, prune_finished_snapshots};
 use crate::updater::UpdateStatusView;
 use serde::Deserialize;
 use tool_recorder::{ReplayManager, ReplayPolicy, ReplayTextLoader};
@@ -364,20 +364,10 @@ impl WebRecordingService {
 }
 
 impl WebTaskRegistry {
+    /// 与 native 的 `TaskManager` 共用同一份保留规则（`task_model::prune_finished_snapshots`）：
+    /// 两个模块按 `cfg(target_arch)` 互斥编译，谁也看不见谁，所以分叉只能靠"只写一份"来防。
     fn prune_finished(&mut self) {
-        const MAX_RETAINED_SNAPSHOTS: usize = 256;
-        while self.snapshots.len() > MAX_RETAINED_SNAPSHOTS {
-            let Some(id) = self.snapshots.iter().find_map(|(id, snapshot)| {
-                matches!(
-                    snapshot.state,
-                    TaskState::Completed | TaskState::Failed | TaskState::Cancelled
-                )
-                .then_some(*id)
-            }) else {
-                break;
-            };
-            self.snapshots.remove(&id);
-        }
+        prune_finished_snapshots(&mut self.snapshots);
     }
 }
 
