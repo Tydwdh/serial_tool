@@ -698,186 +698,225 @@ impl PluginsPanel {
                 ui.set_min_width(ui.available_width());
 
                 // 标题行
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(
-                        egui::RichText::new(&summary.name)
-                            .strong()
-                            .color(theme::text_primary()),
-                    );
-                    ui.label(
-                        egui::RichText::new(&summary.id)
-                            .monospace()
-                            .color(theme::text_secondary()),
-                    );
-                    ui.label(format!("v{}", summary.version));
-                    design::status_pill(ui, state_color(summary.state), state_label(summary.state));
-                });
+                Self::plugin_title_row(ui, summary);
 
                 ui.separator();
 
                 // 详情行
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("运行时");
-                    ui.label(
-                        egui::RichText::new(&summary.runtime)
-                            .monospace()
-                            .color(theme::text_primary()),
-                    );
-                    ui.label("API");
-                    ui.label(
-                        egui::RichText::new(&summary.api_version)
-                            .monospace()
-                            .color(theme::text_primary()),
-                    );
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("权限");
-                    if summary.permissions.is_empty() {
-                        design::badge(ui, "无额外权限", theme::green());
-                    } else {
-                        for permission in &summary.permissions {
-                            design::badge(ui, permission, theme::orange());
-                        }
-                    }
-                });
-                // 路径控件必须使用标签后的剩余宽度；horizontal_wrapped 配合整行宽度
-                // 会把“路径”标签和路径控件挤成两行。
-                ui.horizontal(|ui| {
-                    ui.label("路径");
-                    let full_path = summary.path.clone();
-                    let available_width = ui.available_width().max(1.0);
-                    let display_path =
-                        crate::compact_middle(&full_path, plugin_path_char_limit(available_width));
-                    ui.add_sized(
-                        egui::vec2(available_width, ui.spacing().interact_size.y),
-                        egui::Label::new(
-                            egui::RichText::new(display_path)
-                                .monospace()
-                                .color(theme::text_primary()),
-                        )
-                        .truncate(),
-                    )
-                    .on_hover_text(full_path);
-                });
-
-                if !summary.contributes.panels.is_empty() {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("面板");
-                        for panel in &summary.contributes.panels {
-                            ui.label(
-                                egui::RichText::new(format!("{} ({})", panel.title, panel.kind))
-                                    .monospace()
-                                    .color(theme::text_primary()),
-                            );
-                        }
-                    });
-                }
+                Self::plugin_detail_rows(ui, summary);
+                Self::plugin_path_row(ui, summary);
+                Self::plugin_panels_row(ui, summary);
 
                 // ── 命令状态（仅 Running 时展示对账结果） ──
-                let declared = &summary.contributes.commands;
-                let registered = &summary.registered_commands;
-                let missing = &summary.missing_commands;
-                let undeclared = &summary.undeclared_commands;
-                let is_running = matches!(summary.state, PluginStateView::Running);
-
-                if !declared.is_empty() || !registered.is_empty() {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("命令");
-                        if is_running {
-                            for cmd in declared {
-                                if registered.iter().any(|r| r == &cmd.id) {
-                                    ui.colored_label(theme::green(), format!("✓ {}", cmd.id));
-                                } else if missing.iter().any(|m| m == &cmd.id) {
-                                    design::badge(ui, &cmd.id, theme::yellow()).on_hover_text(
-                                        "此命令已在 manifest 声明但尚未注册 handler",
-                                    );
-                                } else {
-                                    ui.label(cmd.id.as_str());
-                                }
-                            }
-                            for cmd in undeclared {
-                                design::badge(ui, cmd, theme::text_secondary())
-                                    .on_hover_text("此命令在运行时动态注册，未在 manifest 声明");
-                            }
-                        } else {
-                            for cmd in declared {
-                                ui.label(
-                                    egui::RichText::new(&cmd.id)
-                                        .monospace()
-                                        .color(theme::text_primary()),
-                                );
-                            }
-                        }
-                    });
-                }
+                Self::plugin_commands_row(ui, summary);
 
                 if let Some(error) = &summary.last_error {
                     ui.colored_label(theme::red(), error);
                 }
 
                 // 按钮行
+                // 三个按钮必须在同一个 horizontal_wrapped 里，任一按钮被点中就提前返回事件，
+                // 后面的按钮本帧不再创建。
                 ui.horizontal_wrapped(|ui| -> Option<PluginPanelEvent> {
-                    // 启用/禁用合并为单个按钮：当前正在运行/已启用则显示「禁用」并执行禁用，
-                    // 否则显示「启用」并执行启用。
-                    // 注意：Finished/Failed 视为未启用 —— disable() 对这两个状态是 no-op
-                    // （运行时早已移除），因此把它们归入「启用」分支，保留直接重新启用的入口。
-                    let is_active = matches!(
-                        summary.state,
-                        PluginStateView::Running | PluginStateView::Enabled
-                    );
-                    if is_active {
-                        if design::button(ui, ICON_TOGGLE_OFF, "禁用", ButtonKind::Secondary)
-                            .clicked()
-                        {
-                            return Some(PluginPanelEvent::Disable(summary.id.clone()));
-                        }
-                    } else if design::button(ui, ICON_TOGGLE_ON, "启用", ButtonKind::Primary)
-                        .clicked()
-                    {
-                        return Some(PluginPanelEvent::Enable(summary.id.clone()));
+                    if let Some(event) = Self::plugin_toggle_button(ui, summary) {
+                        return Some(event);
                     }
-                    // 重启语义：Running/Enabled 先 disable 再 enable（走 pending_restart 队列等线程退出）；
-                    // Disabled/Finished/Failed 已无运行时，直接 enable 即可重新拉起。
-                    // 因此「重启」对所有非 Discovered 状态都可点。
-                    let can_restart = !matches!(summary.state, PluginStateView::Discovered);
-                    if ui
-                        .add_enabled_ui(can_restart, |ui| {
-                            design::button(ui, ICON_RESTART_ALT, "重启", ButtonKind::Ghost)
-                        })
-                        .inner
-                        .on_hover_text("禁用后重新启用")
-                        .clicked()
-                    {
-                        if is_active {
-                            self.pending_restart.push(summary.id.clone());
-                            return Some(PluginPanelEvent::Disable(summary.id.clone()));
-                        }
-                        return Some(PluginPanelEvent::Enable(summary.id.clone()));
+                    if let Some(event) = self.plugin_restart_button(ui, summary) {
+                        return Some(event);
                     }
-
-                    // 卸载按钮（两步确认，避免误删）：
-                    // 第一次点「卸载」→ 进入确认态，按钮文案变为「确认卸载?」并伴随「取消」。
-                    // 第二次点「确认卸载?」→ 发出 UninstallPlugin 事件。
-                    let confirming = self.pending_uninstall.as_deref() == Some(&summary.id);
-                    if confirming {
-                        if design::button(ui, ICON_DELETE, "确认卸载?", ButtonKind::Danger)
-                            .clicked()
-                        {
-                            self.pending_uninstall = None;
-                            return Some(PluginPanelEvent::UninstallPlugin(summary.id.clone()));
-                        }
-                        if design::button(ui, ICON_CANCEL, "取消", ButtonKind::Ghost).clicked() {
-                            self.pending_uninstall = None;
-                        }
-                    } else if design::button(ui, ICON_DELETE, "卸载", ButtonKind::Danger).clicked()
-                    {
-                        self.pending_uninstall = Some(summary.id.clone());
-                    }
-                    None
+                    self.plugin_uninstall_button(ui, summary)
                 })
                 .inner
             })
             .inner
+    }
+
+    /// 名称、ID、版本与状态徽标。
+    fn plugin_title_row(ui: &mut egui::Ui, summary: &PluginSummaryView) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                egui::RichText::new(&summary.name)
+                    .strong()
+                    .color(theme::text_primary()),
+            );
+            ui.label(
+                egui::RichText::new(&summary.id)
+                    .monospace()
+                    .color(theme::text_secondary()),
+            );
+            ui.label(format!("v{}", summary.version));
+            design::status_pill(ui, state_color(summary.state), state_label(summary.state));
+        });
+    }
+
+    /// 运行时 / API 版本，以及权限徽标列表。
+    fn plugin_detail_rows(ui: &mut egui::Ui, summary: &PluginSummaryView) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("运行时");
+            ui.label(
+                egui::RichText::new(&summary.runtime)
+                    .monospace()
+                    .color(theme::text_primary()),
+            );
+            ui.label("API");
+            ui.label(
+                egui::RichText::new(&summary.api_version)
+                    .monospace()
+                    .color(theme::text_primary()),
+            );
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("权限");
+            if summary.permissions.is_empty() {
+                design::badge(ui, "无额外权限", theme::green());
+            } else {
+                for permission in &summary.permissions {
+                    design::badge(ui, permission, theme::orange());
+                }
+            }
+        });
+    }
+
+    fn plugin_path_row(ui: &mut egui::Ui, summary: &PluginSummaryView) {
+        // 路径控件必须使用标签后的剩余宽度；horizontal_wrapped 配合整行宽度
+        // 会把“路径”标签和路径控件挤成两行。
+        ui.horizontal(|ui| {
+            ui.label("路径");
+            let full_path = summary.path.clone();
+            let available_width = ui.available_width().max(1.0);
+            let display_path =
+                crate::compact_middle(&full_path, plugin_path_char_limit(available_width));
+            ui.add_sized(
+                egui::vec2(available_width, ui.spacing().interact_size.y),
+                egui::Label::new(
+                    egui::RichText::new(display_path)
+                        .monospace()
+                        .color(theme::text_primary()),
+                )
+                .truncate(),
+            )
+            .on_hover_text(full_path);
+        });
+    }
+
+    /// 插件贡献的面板；未声明面板时不占一行。
+    fn plugin_panels_row(ui: &mut egui::Ui, summary: &PluginSummaryView) {
+        if !summary.contributes.panels.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("面板");
+                for panel in &summary.contributes.panels {
+                    ui.label(
+                        egui::RichText::new(format!("{} ({})", panel.title, panel.kind))
+                            .monospace()
+                            .color(theme::text_primary()),
+                    );
+                }
+            });
+        }
+    }
+
+    /// Running 时逐条对账声明/注册结果，其余状态只列出 manifest 里声明的命令。
+    fn plugin_commands_row(ui: &mut egui::Ui, summary: &PluginSummaryView) {
+        let declared = &summary.contributes.commands;
+        let registered = &summary.registered_commands;
+        let missing = &summary.missing_commands;
+        let undeclared = &summary.undeclared_commands;
+        let is_running = matches!(summary.state, PluginStateView::Running);
+
+        if !declared.is_empty() || !registered.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("命令");
+                if is_running {
+                    for cmd in declared {
+                        if registered.iter().any(|r| r == &cmd.id) {
+                            ui.colored_label(theme::green(), format!("✓ {}", cmd.id));
+                        } else if missing.iter().any(|m| m == &cmd.id) {
+                            design::badge(ui, &cmd.id, theme::yellow())
+                                .on_hover_text("此命令已在 manifest 声明但尚未注册 handler");
+                        } else {
+                            ui.label(cmd.id.as_str());
+                        }
+                    }
+                    for cmd in undeclared {
+                        design::badge(ui, cmd, theme::text_secondary())
+                            .on_hover_text("此命令在运行时动态注册，未在 manifest 声明");
+                    }
+                } else {
+                    for cmd in declared {
+                        ui.label(
+                            egui::RichText::new(&cmd.id)
+                                .monospace()
+                                .color(theme::text_primary()),
+                        );
+                    }
+                }
+            });
+        }
+    }
+
+    /// 启用/禁用合并为单个按钮：当前正在运行/已启用则显示「禁用」并执行禁用，
+    /// 否则显示「启用」并执行启用。
+    fn plugin_toggle_button(
+        ui: &mut egui::Ui,
+        summary: &PluginSummaryView,
+    ) -> Option<PluginPanelEvent> {
+        if plugin_is_active(summary) {
+            if design::button(ui, ICON_TOGGLE_OFF, "禁用", ButtonKind::Secondary).clicked() {
+                return Some(PluginPanelEvent::Disable(summary.id.clone()));
+            }
+        } else if design::button(ui, ICON_TOGGLE_ON, "启用", ButtonKind::Primary).clicked() {
+            return Some(PluginPanelEvent::Enable(summary.id.clone()));
+        }
+        None
+    }
+
+    /// 重启语义：Running/Enabled 先 disable 再 enable（走 pending_restart 队列等线程退出）；
+    /// Disabled/Finished/Failed 已无运行时，直接 enable 即可重新拉起。
+    /// 因此「重启」对所有非 Discovered 状态都可点。
+    fn plugin_restart_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        summary: &PluginSummaryView,
+    ) -> Option<PluginPanelEvent> {
+        let can_restart = !matches!(summary.state, PluginStateView::Discovered);
+        if ui
+            .add_enabled_ui(can_restart, |ui| {
+                design::button(ui, ICON_RESTART_ALT, "重启", ButtonKind::Ghost)
+            })
+            .inner
+            .on_hover_text("禁用后重新启用")
+            .clicked()
+        {
+            if plugin_is_active(summary) {
+                self.pending_restart.push(summary.id.clone());
+                return Some(PluginPanelEvent::Disable(summary.id.clone()));
+            }
+            return Some(PluginPanelEvent::Enable(summary.id.clone()));
+        }
+        None
+    }
+
+    /// 卸载按钮（两步确认，避免误删）：
+    /// 第一次点「卸载」→ 进入确认态，按钮文案变为「确认卸载?」并伴随「取消」。
+    /// 第二次点「确认卸载?」→ 发出 UninstallPlugin 事件。
+    fn plugin_uninstall_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        summary: &PluginSummaryView,
+    ) -> Option<PluginPanelEvent> {
+        let confirming = self.pending_uninstall.as_deref() == Some(&summary.id);
+        if confirming {
+            if design::button(ui, ICON_DELETE, "确认卸载?", ButtonKind::Danger).clicked() {
+                self.pending_uninstall = None;
+                return Some(PluginPanelEvent::UninstallPlugin(summary.id.clone()));
+            }
+            if design::button(ui, ICON_CANCEL, "取消", ButtonKind::Ghost).clicked() {
+                self.pending_uninstall = None;
+            }
+        } else if design::button(ui, ICON_DELETE, "卸载", ButtonKind::Danger).clicked() {
+            self.pending_uninstall = Some(summary.id.clone());
+        }
+        None
     }
 }
 
@@ -895,6 +934,17 @@ fn state_color(state: PluginStateView) -> Color32 {
         PluginStateView::Failed => theme::red(),
         PluginStateView::Disabled => theme::yellow(),
     }
+}
+
+/// 插件当前是否处于「已启用」状态（决定按钮显示启用还是禁用、重启走哪条路径）。
+///
+/// 注意：Finished/Failed 视为未启用 —— disable() 对这两个状态是 no-op
+/// （运行时早已移除），因此把它们归入「启用」分支，保留直接重新启用的入口。
+fn plugin_is_active(summary: &PluginSummaryView) -> bool {
+    matches!(
+        summary.state,
+        PluginStateView::Running | PluginStateView::Enabled
+    )
 }
 
 fn plugin_column_count(available_width: f32) -> usize {

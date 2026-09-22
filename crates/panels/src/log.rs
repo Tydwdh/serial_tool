@@ -266,6 +266,31 @@ struct LogRenderOutcome {
     pending_navigate_to_id: Option<u64>,
 }
 
+/// 主键或次键在本面板矩形内按下（用于抢占复制焦点）。
+fn log_panel_pressed_in(ui: &egui::Ui, panel_rect: egui::Rect) -> bool {
+    ui.input(|input| {
+        let pointer = &input.pointer;
+        (pointer.button_pressed(egui::PointerButton::Primary)
+            || pointer.button_pressed(egui::PointerButton::Secondary))
+            && pointer
+                .hover_pos()
+                .is_some_and(|position| panel_rect.contains(position))
+    })
+}
+
+/// 指针位于本面板内时的滚轮增量；面板外记为 0，让后续的“滚轮向下”判定不受
+/// 其它区域滚轮事件的影响。
+fn log_wheel_scroll_delta_y(ui: &egui::Ui, panel_rect: egui::Rect) -> f32 {
+    let pointer_inside = ui
+        .input(|input| input.pointer.hover_pos())
+        .is_some_and(|pos| panel_rect.contains(pos));
+    if pointer_inside {
+        ui.input(|input| input.smooth_scroll_delta.y)
+    } else {
+        0.0
+    }
+}
+
 impl LogPanel {
     pub fn new(bus: &DataBus) -> Self {
         Self {
@@ -493,97 +518,143 @@ impl LogPanel {
         // 仅当指针位于本面板内时，滚轮向下才触发强制滚到底；
         // 否则全局 smooth_scroll_delta 会误捕获其它区域的滚轮事件。
         let panel_rect = ui.max_rect();
-        let panel_clicked = ui.input(|input| {
-            let pointer = &input.pointer;
-            (pointer.button_pressed(egui::PointerButton::Primary)
-                || pointer.button_pressed(egui::PointerButton::Secondary))
-                && pointer
-                    .hover_pos()
-                    .is_some_and(|position| panel_rect.contains(position))
-        });
-        if panel_clicked {
+        if log_panel_pressed_in(ui, panel_rect) {
             claim_copy_focus(ui, COPY_OWNER);
         }
-        let pointer_inside = ui
-            .input(|input| input.pointer.hover_pos())
-            .is_some_and(|pos| panel_rect.contains(pos));
         // ScrollArea 会消费并清空 smooth_scroll_delta，必须在渲染前保存。
-        let scroll_delta_y = if pointer_inside {
-            ui.input(|input| input.smooth_scroll_delta.y)
-        } else {
-            0.0
-        };
-        let wheel_moves_towards_bottom =
-            pointer_inside && crate::scroll_delta_moves_towards_bottom(scroll_delta_y);
+        let scroll_delta_y = log_wheel_scroll_delta_y(ui, panel_rect);
         let mut force_scroll_to_bottom = self.auto_scroll.take_pending(LOG_SCROLL_ID);
 
-        // ── 第一行：级别过滤 + 自动滚动 + 清空 ──
-        ui.horizontal_wrapped(|ui| {
-            let padding = ui.spacing().button_padding.x * 2.0;
-            let char_w = 10.0;
-            let btn_w = padding + 5.0 * char_w + 4.0;
+        force_scroll_to_bottom |= self.level_filter_toolbar(ui);
+        self.search_filter_toolbar(ui);
 
-            for level in [
-                LogLevel::Trace,
-                LogLevel::Debug,
-                LogLevel::Info,
-                LogLevel::Warn,
-                LogLevel::Error,
-            ] {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(btn_w, 30.0),
-                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-                    |ui| {
-                        if ui
-                            .selectable_label(self.min_level == level, level.as_str())
-                            .clicked()
-                        {
-                            self.min_level = level;
-                        }
-                    },
-                );
-            }
+        force_scroll_to_bottom |=
+            self.auto_scroll.enabled && crate::scroll_delta_moves_towards_bottom(scroll_delta_y);
+
+        ui.separator();
+
+        // ── 构建可见行列表 ──
+        let scroll_to_row = self.begin_pending_navigation(ui);
+        let rows = &self.visible_rows_cache;
+
+        let outcome = render_log_rows(
+            ui,
+            rows,
+            !self.entry_order.is_empty(),
+            scroll_to_row,
+            self.auto_scroll.enabled,
+            force_scroll_to_bottom,
+            scroll_delta_y,
+            self.font_size,
+            self.visible_rows_generation,
+            &mut self.selection,
+            &mut self.text_selection_rows,
+            &mut self.virtual_rows,
+            self.navigate_highlight,
+        );
+
+        if let Some(id) = outcome.pending_navigate_to_id {
+            self.pending_navigate_to_id = Some(id);
+        }
+
+        self.expire_navigate_highlight(ui);
+        self.auto_scroll.update(
+            ui,
+            LOG_SCROLL_ID,
+            outcome.inner_rect,
+            outcome.content_height,
+            outcome.offset_y,
+            scroll_delta_y,
+        );
+    }
+
+    /// ── 第一行：级别过滤 + 自动滚动 + 清空 ──
+    /// 返回自动滚动按钮本帧是否要求强制滚到底。
+    fn level_filter_toolbar(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut force_scroll_to_bottom = false;
+        ui.horizontal_wrapped(|ui| {
+            self.level_filter_buttons(ui);
 
             ui.separator();
 
-            force_scroll_to_bottom |= self.auto_scroll.button(ui);
+            force_scroll_to_bottom = self.auto_scroll.button(ui);
 
-            ui.menu_button("导出", |ui| {
-                for (label, format) in [
-                    ("导出 TXT…", TerminalExportFormat::Txt),
-                    ("导出 CSV…", TerminalExportFormat::Csv),
-                    ("导出 JSON…", TerminalExportFormat::Json),
-                ] {
-                    if ui.button(label).clicked() {
-                        self.export_request = Some(format);
-                        ui.close();
+            self.export_menu_button(ui);
+
+            self.clear_button(ui);
+        });
+        force_scroll_to_bottom
+    }
+
+    /// 级别过滤按钮：按固定字符宽度等宽占位，切换级别时不会把工具栏挤到换行。
+    fn level_filter_buttons(&mut self, ui: &mut egui::Ui) {
+        let padding = ui.spacing().button_padding.x * 2.0;
+        let char_w = 10.0;
+        let btn_w = padding + 5.0 * char_w + 4.0;
+
+        for level in [
+            LogLevel::Trace,
+            LogLevel::Debug,
+            LogLevel::Info,
+            LogLevel::Warn,
+            LogLevel::Error,
+        ] {
+            ui.allocate_ui_with_layout(
+                egui::vec2(btn_w, 30.0),
+                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                |ui| {
+                    if ui
+                        .selectable_label(self.min_level == level, level.as_str())
+                        .clicked()
+                    {
+                        self.min_level = level;
                     }
-                }
-            });
+                },
+            );
+        }
+    }
 
-            // 清空：两步确认（与终端面板一致），避免误触丢失系统日志。
-            // 确认态只换等宽标签，不插入「取消」按钮，窄面板下工具栏不会重新换行；
-            // 取消交给 3 秒超时 / Esc / 点击别处。
-            let clear_armed = design::confirm_armed(ui, LOG_CLEAR_CONFIRM_ID);
-            let clear_label = if clear_armed { "确认" } else { "清空" };
-            let clear_color = if clear_armed {
-                theme::red()
-            } else {
-                theme::text_primary()
-            };
-            let clear_response = ui.add(egui::Button::new(
-                RichText::new(clear_label).color(clear_color),
-            ));
-            let clear_clicked = clear_response.clicked();
-            if clear_armed {
-                clear_response.on_hover_text("再次点击清空，3 秒内有效（Esc 或点击别处取消）");
-            }
-            if design::confirm_click(ui, LOG_CLEAR_CONFIRM_ID, clear_clicked) {
-                self.clear();
+    /// 导出菜单：只记录本次请求的格式，真正的分块导出由调用方驱动。
+    fn export_menu_button(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("导出", |ui| {
+            for (label, format) in [
+                ("导出 TXT…", TerminalExportFormat::Txt),
+                ("导出 CSV…", TerminalExportFormat::Csv),
+                ("导出 JSON…", TerminalExportFormat::Json),
+            ] {
+                if ui.button(label).clicked() {
+                    self.export_request = Some(format);
+                    ui.close();
+                }
             }
         });
+    }
 
-        // ── 第二行：搜索 + 来源过滤 ──
+    fn clear_button(&mut self, ui: &mut egui::Ui) {
+        // 清空：两步确认（与终端面板一致），避免误触丢失系统日志。
+        // 确认态只换等宽标签，不插入「取消」按钮，窄面板下工具栏不会重新换行；
+        // 取消交给 3 秒超时 / Esc / 点击别处。
+        let clear_armed = design::confirm_armed(ui, LOG_CLEAR_CONFIRM_ID);
+        let clear_label = if clear_armed { "确认" } else { "清空" };
+        let clear_color = if clear_armed {
+            theme::red()
+        } else {
+            theme::text_primary()
+        };
+        let clear_response = ui.add(egui::Button::new(
+            RichText::new(clear_label).color(clear_color),
+        ));
+        let clear_clicked = clear_response.clicked();
+        if clear_armed {
+            clear_response.on_hover_text("再次点击清空，3 秒内有效（Esc 或点击别处取消）");
+        }
+        if design::confirm_click(ui, LOG_CLEAR_CONFIRM_ID, clear_clicked) {
+            self.clear();
+        }
+    }
+
+    /// ── 第二行：搜索 + 来源过滤 ──
+    fn search_filter_toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.label("搜索");
             self.search.toolbar(ui, 120.0, "关键词", "区分大小写");
@@ -619,12 +690,10 @@ impl LogPanel {
                 );
             }
         });
+    }
 
-        force_scroll_to_bottom |= self.auto_scroll.enabled && wheel_moves_towards_bottom;
-
-        ui.separator();
-
-        // ── 构建可见行列表 ──
+    /// 双击跳转的收尾：本帧清除搜索与过滤、关闭自动追踪，并算出要滚动到的行索引。
+    fn begin_pending_navigation(&mut self, ui: &egui::Ui) -> Option<usize> {
         // 双击搜索结果 → 下一帧清除搜索、关闭自动追踪、显示全部、跳转到对应行
         if self.pending_navigate_to_id.is_some() && self.search.is_active() {
             self.search.clear();
@@ -637,48 +706,23 @@ impl LogPanel {
 
         // 获取跳转目标的 row 索引
         let taken_id = self.pending_navigate_to_id.take();
-        let scroll_to_row: Option<usize> =
+        let scroll_to_row =
             taken_id.and_then(|target_id| rows.iter().position(|entry| entry.id == target_id));
         if let Some(target_id) = taken_id {
             // 跳转生效：设置目标行高亮（起始时间用 egui 时钟）。
             self.navigate_highlight = Some((target_id, ui.ctx().input(|i| i.time)));
         }
+        scroll_to_row
+    }
 
-        let outcome = render_log_rows(
-            ui,
-            rows,
-            !self.entry_order.is_empty(),
-            scroll_to_row,
-            self.auto_scroll.enabled,
-            force_scroll_to_bottom,
-            scroll_delta_y,
-            self.font_size,
-            self.visible_rows_generation,
-            &mut self.selection,
-            &mut self.text_selection_rows,
-            &mut self.virtual_rows,
-            self.navigate_highlight,
-        );
-
-        if let Some(id) = outcome.pending_navigate_to_id {
-            self.pending_navigate_to_id = Some(id);
-        }
-
-        // 高亮超时清理
+    /// 高亮超时清理
+    fn expire_navigate_highlight(&mut self, ui: &egui::Ui) {
         if let Some((_, start)) = self.navigate_highlight {
             let now = ui.ctx().input(|i| i.time);
             if now - start >= NAV_HIGHLIGHT_DURATION {
                 self.navigate_highlight = None;
             }
         }
-        self.auto_scroll.update(
-            ui,
-            LOG_SCROLL_ID,
-            outcome.inner_rect,
-            outcome.content_height,
-            outcome.offset_y,
-            scroll_delta_y,
-        );
     }
 
     fn ingest(&mut self) -> usize {
@@ -853,15 +897,6 @@ fn render_log_rows(
     let base_row_height = ui.fonts_mut(|f| f.row_height(&font_id));
     selection.sync_rows_with_generation(rows.iter().map(|entry| entry.id), visible_rows_generation);
 
-    // 列宽随字体大小缩放（基准 13px）
-    let scale = font_size / 13.0;
-    let time_col_width = TIME_COL_WIDTH * scale;
-    let level_col_width = LEVEL_COL_WIDTH * scale;
-    let source_col_width = SOURCE_COL_WIDTH * scale;
-    let col_gap = COL_GAP * scale;
-    let row_left_padding = ROW_LEFT_PADDING * scale;
-    let label_to_msg_gap = LABEL_TO_MSG_GAP * scale;
-
     if rows.is_empty() {
         return render_empty_log_rows(ui, has_any_entries);
     }
@@ -872,306 +907,70 @@ fn render_log_rows(
         .stick_to_bottom(stick_to_bottom)
         .id_salt(LOG_SCROLL_ID)
         .show(ui, |ui| {
-            let full_width = ui.available_width().max(0.0);
-            let text_color = ui.style().visuals.text_color();
-            let glyph_width = ui.fonts_mut(|fonts| fonts.glyph_width(&font_id, '0'));
-
-            // 标签列总宽度
-            let desired_label_width = row_left_padding
-                + time_col_width
-                + col_gap
-                + level_col_width
-                + col_gap
-                + source_col_width
-                + label_to_msg_gap;
-            let widths = log_table_widths(full_width, desired_label_width);
-            let label_width = widths.label;
-            let message_width = widths.message;
-            let text_padding = 4.0;
-            let galley_width = (message_width - text_padding).max(0.0).floor();
-
-            let layout_key = log_layout_key(galley_width, font_size, visible_rows_generation);
-            let total_height = sync_log_virtual_rows(
+            let frame = layout_log_row_frame(
+                ui,
                 rows,
                 virtual_rows,
-                layout_key,
+                &font_id,
                 base_row_height,
-                galley_width,
-                glyph_width,
+                visible_rows_generation,
+                navigate_highlight,
             );
-
-            // 分配总区域
-            let (full_rect, _alloc_response) =
-                ui.allocate_exact_size(egui::vec2(full_width, total_height), Sense::hover());
-
-            // 标签区域
-            let label_rect = egui::Rect::from_min_size(
-                full_rect.left_top(),
-                egui::vec2(label_width, total_height),
-            );
-            let label_painter = ui.painter_at(label_rect);
-
-            // 消息区域
-            let message_rect = egui::Rect::from_min_size(
-                egui::pos2(full_rect.left() + label_width, full_rect.top()),
-                egui::vec2(message_width, total_height),
-            );
-            let viewport_rect = ui.clip_rect();
-            let blank_rect = (full_rect.bottom() < viewport_rect.bottom()).then(|| {
-                egui::Rect::from_min_max(
-                    egui::pos2(full_rect.left(), full_rect.bottom()),
-                    egui::pos2(full_rect.right(), viewport_rect.bottom()),
-                )
-            });
-            let blank_response = blank_rect.map(|rect| {
-                ui.interact(
-                    rect,
-                    ui.make_persistent_id(("log-blank", LOG_SCROLL_ID)),
-                    Sense::click(),
-                )
-            });
-
             // 逐行绘制标签 + 可选择的文本
-            let mut hl = RowHighlight::new(ui, LOG_SCROLL_ID);
-
-            let mut ctx_response = ui.interact(
-                label_rect,
-                ui.make_persistent_id(("log-metadata", LOG_SCROLL_ID)),
-                Sense::click_and_drag(),
-            );
-            if let Some(response) = blank_response {
-                ctx_response |= response;
-            }
-            let hovered_idx = ui
-                .input(|input| input.pointer.hover_pos())
-                .filter(|position| label_rect.contains(*position))
-                .and_then(|position| virtual_rows.index_at_offset(position.y - label_rect.top()));
-            let message_pressed = log_primary_pressed_in_rect(ui, Some(message_rect));
-            let blank_pressed = log_primary_pressed_in_rect(ui, blank_rect);
-            if message_pressed || blank_pressed {
-                selection.clear();
-            }
-            let primary_down =
-                ui.input(|input| input.pointer.button_down(egui::PointerButton::Primary));
-            let has_text_selection = refresh_log_text_selection(
+            let mut interaction = begin_log_rows_interaction(
                 ui,
                 rows,
-                hovered_idx,
-                message_pressed,
-                primary_down,
-                text_selection_rows,
-            );
-            let scroll_delta = handle_log_row_selection_input(
-                ui,
-                label_rect,
-                hovered_idx,
-                blank_pressed,
+                &frame,
+                virtual_rows,
                 selection,
                 text_selection_rows,
             );
 
-            let viewport_rect = ui.clip_rect();
-            let scroll_offset = (viewport_rect.top() - label_rect.top()).max(0.0);
-            let visible_range = virtual_rows.visible_range(
-                scroll_offset,
-                viewport_rect.height(),
-                base_row_height * 2.0,
-            );
-            let text_selection_layout_range =
-                text_selection_rows.layout_range(rows.iter().map(|entry| entry.id));
-            let render_start = text_selection_layout_range
-                .as_ref()
-                .map_or(visible_range.start, |range| {
-                    visible_range.start.min(*range.start())
-                });
-            let render_end = text_selection_layout_range
-                .as_ref()
-                .map_or(visible_range.end, |range| {
-                    visible_range.end.max(range.end() + 1)
-                });
-
-            let mut text_drag_response: Option<egui::Response> = None;
+            let (render_range, text_selection_layout_range) =
+                log_rows_render_range(rows, &frame, virtual_rows, text_selection_rows);
             let mut row_heights_changed = false;
-            for row_idx in render_start..render_end.min(rows.len()) {
+            for row_idx in render_range.start..render_range.end.min(rows.len()) {
                 let Some(entry) = rows.get(row_idx) else {
                     continue;
                 };
-                let current_y = label_rect.top() + virtual_rows.row_top(row_idx);
-                let estimated_height = virtual_rows.height(row_idx).max(base_row_height);
-                let in_text_selection = text_selection_layout_range
-                    .as_ref()
-                    .is_some_and(|range| range.contains(&row_idx));
-                let in_viewport = in_text_selection
-                    || (current_y + estimated_height >= viewport_rect.top() - estimated_height
-                        && current_y <= viewport_rect.bottom() + estimated_height);
-                let (message_galley, entry_height) = if in_viewport {
-                    let (galley, height) = layout_log_message_galley(
-                        ui,
-                        entry,
-                        &font_id,
-                        text_color,
-                        galley_width,
-                        base_row_height,
-                    );
-                    row_heights_changed |= virtual_rows.set_height(row_idx, height);
-                    (Some(galley), height)
-                } else {
-                    (None, estimated_height)
-                };
-
-                if !in_viewport {
-                    continue;
-                }
-                hl.record_row_at(row_idx, current_y, entry_height);
-                // 标签对齐第一行中心（和终端面板一致）
-                let label_y = current_y + base_row_height * 0.5;
-
-                // 高亮悬停行（框选模式下跳过）
-                if !selection.has_selection() {
-                    hl.paint_background(ui, full_rect, current_y, entry_height);
-                }
-
-                // 框选高亮
-                if selection.is_selected(row_idx) {
-                    selection.paint(ui, full_rect, current_y, entry_height);
-                }
-
-                // 跳转目标行高亮（叠在 selection/hover 之上，按剩余时间淡出）
-                paint_log_navigate_highlight(
+                let rendered = layout_log_row(
                     ui,
-                    full_rect,
                     entry,
-                    navigate_highlight,
-                    current_y,
-                    entry_height,
+                    row_idx,
+                    &frame,
+                    virtual_rows,
+                    &text_selection_layout_range,
                 );
-
-                // --- 标签列 ---
-                let mut x = label_rect.left() + row_left_padding;
-
-                // 时间戳
-                label_painter.text(
-                    egui::pos2(x, label_y),
-                    egui::Align2::LEFT_CENTER,
-                    &entry.timestamp_label,
-                    font_id.clone(),
-                    theme::text_secondary(),
+                row_heights_changed |= rendered.heights_changed;
+                paint_log_row(
+                    ui,
+                    entry,
+                    &frame,
+                    &mut interaction,
+                    &rendered,
+                    selection,
+                    text_selection_rows,
                 );
-                x += time_col_width + col_gap;
-
-                // 级别
-                label_painter.text(
-                    egui::pos2(x, label_y),
-                    egui::Align2::LEFT_CENTER,
-                    entry.level.as_str(),
-                    font_id.clone(),
-                    crate::level_color(entry.level),
-                );
-                x += level_col_width + col_gap;
-
-                // 来源（裁剪）
-                if x < label_rect.right() {
-                    let source_clip = egui::Rect::from_min_max(
-                        egui::pos2(x, current_y),
-                        egui::pos2(
-                            (x + source_col_width).min(label_rect.right()),
-                            current_y + entry_height,
-                        ),
-                    );
-                    let source_painter = label_painter.with_clip_rect(source_clip);
-                    let source_text = crate::compact_middle(&entry.source, SOURCE_TEXT_MAX_CHARS);
-                    source_painter.text(
-                        egui::pos2(x, label_y),
-                        egui::Align2::LEFT_CENTER,
-                        source_text,
-                        font_id.clone(),
-                        theme::cyan(),
-                    );
-                }
-
-                // --- 可选择的消息文本 ---
-                if let Some(message_galley) = message_galley
-                    && message_width > 0.0
-                {
-                    let msg_row_rect = egui::Rect::from_min_size(
-                        egui::pos2(message_rect.left(), current_y),
-                        egui::vec2(message_width, entry_height),
-                    );
-                    let (response, galley_pos, row_text_rect) = interact_log_message_row(
-                        ui,
-                        entry,
-                        &message_galley,
-                        msg_row_rect,
-                        text_padding,
-                        has_text_selection,
-                        primary_down,
-                    );
-                    handle_log_message_row_click(
-                        ui,
-                        &response,
-                        row_text_rect,
-                        msg_row_rect,
-                        row_idx,
-                        selection,
-                        text_selection_rows,
-                    );
-                    text_drag_response = Some(match text_drag_response.take() {
-                        Some(accumulated) => accumulated | response.clone(),
-                        None => response.clone(),
-                    });
-                    ctx_response |= response.clone();
-                    paint_log_message_text(
-                        ui,
-                        &response,
-                        galley_pos,
-                        &message_galley,
-                        text_color,
-                        selection.is_dragging(),
-                    );
-                }
             }
 
-            finish_log_row_heights(ui, virtual_rows, total_height, row_heights_changed);
-
-            apply_log_selection_scroll(
+            apply_log_row_heights_and_scroll(
                 ui,
-                &text_drag_response,
+                virtual_rows,
+                &frame,
+                row_heights_changed,
+                &interaction,
                 selection,
-                message_rect,
-                viewport_rect,
                 wheel_scroll_delta_y,
-                scroll_delta,
             );
-
-            let (navigate_target, hovered_row) = resolve_log_row_clicks(
+            pending_navigate = resolve_log_row_interactions(
                 ui,
-                &mut hl,
-                &ctx_response,
+                &mut interaction,
+                &frame,
                 rows,
                 selection,
-                full_rect,
                 scroll_to_row,
+                force_scroll_to_bottom,
             );
-            pending_navigate = navigate_target;
-
-            // 框选范围文本（移入 context_menu 闭包内按需构造，避免菜单未打开时每帧构造）
-            let selected_indices: Vec<usize> = if selection.has_selection() {
-                selection.selected_indices().collect()
-            } else {
-                Vec::new()
-            };
-
-            handle_log_copy_shortcuts(ui, rows, selection, &selected_indices);
-
-            ctx_response.context_menu(move |ctx_ui| {
-                show_log_context_menu(ctx_ui, rows, &selected_indices, &hovered_row);
-            });
-
-            if force_scroll_to_bottom {
-                let (rect, _sense) =
-                    ui.allocate_exact_size(egui::vec2(0.0, 0.0), egui::Sense::hover());
-                ui.scroll_to_rect(rect, Some(egui::Align::BOTTOM));
-            }
         });
 
     LogRenderOutcome {
@@ -1179,6 +978,505 @@ fn render_log_rows(
         content_height: scroll_output.content_size.y,
         offset_y: scroll_output.state.offset.y,
         pending_navigate_to_id: pending_navigate,
+    }
+}
+
+/// 一帧内所有日志行共用的排版输入与各列矩形。
+struct LogRowFrame {
+    font_id: egui::FontId,
+    /// 面板字号（即 `font_id.size`）：列宽与 layout 哈希都由它推导。
+    font_size: f32,
+    base_row_height: f32,
+    text_color: egui::Color32,
+    galley_width: f32,
+    text_padding: f32,
+    message_width: f32,
+    total_height: f32,
+    full_rect: egui::Rect,
+    label_rect: egui::Rect,
+    message_rect: egui::Rect,
+    viewport_rect: egui::Rect,
+    blank_rect: Option<egui::Rect>,
+    blank_response: Option<egui::Response>,
+    /// 跳转目标行高亮：(目标行 id, 起始时间秒)，每行都要比对。
+    navigate_highlight: Option<(u64, f64)>,
+}
+
+/// 列宽的基准字号：面板字号除以它得到缩放系数，两处列宽计算共用（不要再写字面的 13.0，
+/// 否则改一处漏一处会让标签列宽度与行内列宽对不上）。
+const LOG_FONT_BASE: f32 = 13.0;
+
+fn log_col_scale(font_size: f32) -> f32 {
+    font_size / LOG_FONT_BASE
+}
+
+/// 标签列总宽度：左内边距 + 时间/级别/来源三列（各带一个列间距）+ 标签到消息列的间距。
+/// 逐项按同一 `scale` 累加，浮点求值顺序决定最终宽度，不能重排。
+fn log_desired_label_width(font_size: f32) -> f32 {
+    let scale = log_col_scale(font_size);
+    ROW_LEFT_PADDING * scale
+        + TIME_COL_WIDTH * scale
+        + COL_GAP * scale
+        + LEVEL_COL_WIDTH * scale
+        + COL_GAP * scale
+        + SOURCE_COL_WIDTH * scale
+        + LABEL_TO_MSG_GAP * scale
+}
+
+/// 度量本帧的行区域：列宽、虚拟列表总高、各列矩形，以及下方空白区的 response。
+fn layout_log_row_frame(
+    ui: &mut egui::Ui,
+    rows: &VecDeque<LogEntry>,
+    virtual_rows: &mut VirtualRowIndex,
+    font_id: &egui::FontId,
+    base_row_height: f32,
+    visible_rows_generation: u64,
+    navigate_highlight: Option<(u64, f64)>,
+) -> LogRowFrame {
+    let font_size = font_id.size;
+    let full_width = ui.available_width().max(0.0);
+    let text_color = ui.style().visuals.text_color();
+    let glyph_width = ui.fonts_mut(|fonts| fonts.glyph_width(font_id, '0'));
+
+    let widths = log_table_widths(full_width, log_desired_label_width(font_size));
+    let label_width = widths.label;
+    let message_width = widths.message;
+    let text_padding = 4.0;
+    let galley_width = (message_width - text_padding).max(0.0).floor();
+
+    let total_height = sync_log_virtual_rows(
+        rows,
+        virtual_rows,
+        log_layout_key(galley_width, font_size, visible_rows_generation),
+        base_row_height,
+        galley_width,
+        glyph_width,
+    );
+
+    // 分配总区域
+    let (full_rect, _alloc_response) =
+        ui.allocate_exact_size(egui::vec2(full_width, total_height), Sense::hover());
+
+    // 标签区域
+    let label_rect =
+        egui::Rect::from_min_size(full_rect.left_top(), egui::vec2(label_width, total_height));
+
+    // 消息区域
+    let message_rect = egui::Rect::from_min_size(
+        egui::pos2(full_rect.left() + label_width, full_rect.top()),
+        egui::vec2(message_width, total_height),
+    );
+    let viewport_rect = ui.clip_rect();
+    let blank_rect = (full_rect.bottom() < viewport_rect.bottom()).then(|| {
+        egui::Rect::from_min_max(
+            egui::pos2(full_rect.left(), full_rect.bottom()),
+            egui::pos2(full_rect.right(), viewport_rect.bottom()),
+        )
+    });
+    let blank_response = blank_rect.map(|rect| {
+        ui.interact(
+            rect,
+            ui.make_persistent_id(("log-blank", LOG_SCROLL_ID)),
+            Sense::click(),
+        )
+    });
+
+    LogRowFrame {
+        font_id: font_id.clone(),
+        font_size,
+        base_row_height,
+        text_color,
+        galley_width,
+        text_padding,
+        message_width,
+        total_height,
+        full_rect,
+        label_rect,
+        message_rect,
+        viewport_rect,
+        blank_rect,
+        blank_response,
+        navigate_highlight,
+    }
+}
+
+/// 本帧的交互状态：标签列与空白区合并出的 response、字符拖选期间累加的 response、
+/// 主键是否按下、是否已有字符选区、框选产生的滚动量，以及逐行的几何记录。
+struct LogRowsInteraction {
+    hl: RowHighlight,
+    ctx_response: egui::Response,
+    text_drag_response: Option<egui::Response>,
+    primary_down: bool,
+    has_text_selection: bool,
+    scroll_delta: f32,
+}
+
+/// 收集本帧的鼠标交互：悬停行、按下清选、字符级拖选端点、标签列的整行框选。
+fn begin_log_rows_interaction(
+    ui: &mut egui::Ui,
+    rows: &VecDeque<LogEntry>,
+    frame: &LogRowFrame,
+    virtual_rows: &VirtualRowIndex,
+    selection: &mut RowSelection,
+    text_selection_rows: &mut TextSelectionRows,
+) -> LogRowsInteraction {
+    let label_rect = frame.label_rect;
+    let hl = RowHighlight::new(ui, LOG_SCROLL_ID);
+    let mut ctx_response = ui.interact(
+        label_rect,
+        ui.make_persistent_id(("log-metadata", LOG_SCROLL_ID)),
+        Sense::click_and_drag(),
+    );
+    if let Some(response) = frame.blank_response.clone() {
+        ctx_response |= response;
+    }
+    let hovered_idx = ui
+        .input(|input| input.pointer.hover_pos())
+        .filter(|position| label_rect.contains(*position))
+        .and_then(|position| virtual_rows.index_at_offset(position.y - label_rect.top()));
+    let message_pressed = log_primary_pressed_in_rect(ui, Some(frame.message_rect));
+    let blank_pressed = log_primary_pressed_in_rect(ui, frame.blank_rect);
+    if message_pressed || blank_pressed {
+        selection.clear();
+    }
+    let primary_down = ui.input(|input| input.pointer.button_down(egui::PointerButton::Primary));
+    let has_text_selection = refresh_log_text_selection(
+        ui,
+        rows,
+        hovered_idx,
+        message_pressed,
+        primary_down,
+        text_selection_rows,
+    );
+    let scroll_delta = handle_log_row_selection_input(
+        ui,
+        label_rect,
+        hovered_idx,
+        blank_pressed,
+        selection,
+        text_selection_rows,
+    );
+
+    LogRowsInteraction {
+        hl,
+        ctx_response,
+        text_drag_response: None,
+        primary_down,
+        has_text_selection,
+        scroll_delta,
+    }
+}
+
+/// 本帧需要布局的行范围，以及字符选区端点所在行范围（后者要在布局期间保活）。
+fn log_rows_render_range(
+    rows: &VecDeque<LogEntry>,
+    frame: &LogRowFrame,
+    virtual_rows: &VirtualRowIndex,
+    text_selection_rows: &mut TextSelectionRows,
+) -> (
+    std::ops::Range<usize>,
+    Option<std::ops::RangeInclusive<usize>>,
+) {
+    let (viewport_rect, label_rect) = (frame.viewport_rect, frame.label_rect);
+    let scroll_offset = (viewport_rect.top() - label_rect.top()).max(0.0);
+    let visible_range = virtual_rows.visible_range(
+        scroll_offset,
+        viewport_rect.height(),
+        frame.base_row_height * 2.0,
+    );
+    let text_selection_layout_range =
+        text_selection_rows.layout_range(rows.iter().map(|entry| entry.id));
+    let render_start = text_selection_layout_range
+        .as_ref()
+        .map_or(visible_range.start, |range| {
+            visible_range.start.min(*range.start())
+        });
+    let render_end = text_selection_layout_range
+        .as_ref()
+        .map_or(visible_range.end, |range| {
+            visible_range.end.max(range.end() + 1)
+        });
+
+    (render_start..render_end, text_selection_layout_range)
+}
+
+/// 单行的排版产物：行索引、纵向几何、消息列矩形与视口内排版的 galley。
+struct LogRenderedRow {
+    row_idx: usize,
+    current_y: f32,
+    entry_height: f32,
+    label_y: f32,
+    msg_row_rect: egui::Rect,
+    /// `None` 表示该行落在视口外且不是选区端点行：只保留估算占位高度，本帧不绘制。
+    message_galley: Option<std::sync::Arc<egui::Galley>>,
+    /// 实测行高与估算值不同，需要请求下一帧重排。
+    heights_changed: bool,
+}
+
+/// 排版一行：视口内实测 galley 并写回行高，视口外沿用虚拟索引里的估算高度。
+fn layout_log_row(
+    ui: &mut egui::Ui,
+    entry: &LogEntry,
+    row_idx: usize,
+    frame: &LogRowFrame,
+    virtual_rows: &mut VirtualRowIndex,
+    text_selection_layout_range: &Option<std::ops::RangeInclusive<usize>>,
+) -> LogRenderedRow {
+    let current_y = frame.label_rect.top() + virtual_rows.row_top(row_idx);
+    let estimated_height = virtual_rows.height(row_idx).max(frame.base_row_height);
+    let in_text_selection = text_selection_layout_range
+        .as_ref()
+        .is_some_and(|range| range.contains(&row_idx));
+    let viewport_rect = frame.viewport_rect;
+    let in_viewport = in_text_selection
+        || (current_y + estimated_height >= viewport_rect.top() - estimated_height
+            && current_y <= viewport_rect.bottom() + estimated_height);
+    // 标签对齐第一行中心（和终端面板一致）
+    let label_y = current_y + frame.base_row_height * 0.5;
+
+    let (message_galley, entry_height, heights_changed) = if in_viewport {
+        let (galley, height) = layout_log_message_galley(
+            ui,
+            entry,
+            &frame.font_id,
+            frame.text_color,
+            frame.galley_width,
+            frame.base_row_height,
+        );
+        let changed = virtual_rows.set_height(row_idx, height);
+        (Some(galley), height, changed)
+    } else {
+        (None, estimated_height, false)
+    };
+    let msg_row_rect = egui::Rect::from_min_size(
+        egui::pos2(frame.message_rect.left(), current_y),
+        egui::vec2(frame.message_width, entry_height),
+    );
+
+    LogRenderedRow {
+        row_idx,
+        current_y,
+        entry_height,
+        label_y,
+        msg_row_rect,
+        message_galley,
+        heights_changed,
+    }
+}
+
+/// 绘制一行：悬停/框选/跳转高亮、标签列与可选择的消息文本。
+fn paint_log_row(
+    ui: &mut egui::Ui,
+    entry: &LogEntry,
+    frame: &LogRowFrame,
+    interaction: &mut LogRowsInteraction,
+    rendered: &LogRenderedRow,
+    selection: &mut RowSelection,
+    text_selection_rows: &mut TextSelectionRows,
+) {
+    let Some(message_galley) = &rendered.message_galley else {
+        return;
+    };
+    let (current_y, entry_height) = (rendered.current_y, rendered.entry_height);
+    interaction
+        .hl
+        .record_row_at(rendered.row_idx, current_y, entry_height);
+
+    // 高亮悬停行（框选模式下跳过）
+    if !selection.has_selection() {
+        interaction
+            .hl
+            .paint_background(ui, frame.full_rect, current_y, entry_height);
+    }
+
+    // 框选高亮
+    if selection.is_selected(rendered.row_idx) {
+        selection.paint(ui, frame.full_rect, current_y, entry_height);
+    }
+
+    // 跳转目标行高亮（叠在 selection/hover 之上，按剩余时间淡出）
+    paint_log_navigate_highlight(
+        ui,
+        frame.full_rect,
+        entry,
+        frame.navigate_highlight,
+        current_y,
+        entry_height,
+    );
+
+    paint_log_row_labels(ui, entry, frame, rendered);
+
+    // --- 可选择的消息文本 ---
+    if frame.message_width > 0.0 {
+        let (response, galley_pos, row_text_rect) = interact_log_message_row(
+            ui,
+            entry,
+            message_galley,
+            rendered.msg_row_rect,
+            frame.text_padding,
+            interaction.has_text_selection,
+            interaction.primary_down,
+        );
+        handle_log_message_row_click(
+            ui,
+            &response,
+            row_text_rect,
+            rendered.msg_row_rect,
+            rendered.row_idx,
+            selection,
+            text_selection_rows,
+        );
+        interaction.text_drag_response = Some(match interaction.text_drag_response.take() {
+            Some(accumulated) => accumulated | response.clone(),
+            None => response.clone(),
+        });
+        interaction.ctx_response |= response.clone();
+        paint_log_message_text(
+            ui,
+            &response,
+            galley_pos,
+            message_galley,
+            frame.text_color,
+            selection.is_dragging(),
+        );
+    }
+}
+
+/// --- 标签列 ---：时间戳 / 级别 / 来源（来源按列宽与标签列右边界裁剪）。
+fn paint_log_row_labels(
+    ui: &egui::Ui,
+    entry: &LogEntry,
+    frame: &LogRowFrame,
+    rendered: &LogRenderedRow,
+) {
+    let scale = log_col_scale(frame.font_size);
+    let time_col_width = TIME_COL_WIDTH * scale;
+    let level_col_width = LEVEL_COL_WIDTH * scale;
+    let source_col_width = SOURCE_COL_WIDTH * scale;
+    let col_gap = COL_GAP * scale;
+    let row_left_padding = ROW_LEFT_PADDING * scale;
+
+    let label_rect = frame.label_rect;
+    let label_painter = ui.painter_at(label_rect);
+    let font_id = &frame.font_id;
+    let (current_y, entry_height, label_y) =
+        (rendered.current_y, rendered.entry_height, rendered.label_y);
+
+    let mut x = label_rect.left() + row_left_padding;
+
+    // 时间戳
+    label_painter.text(
+        egui::pos2(x, label_y),
+        egui::Align2::LEFT_CENTER,
+        &entry.timestamp_label,
+        font_id.clone(),
+        theme::text_secondary(),
+    );
+    x += time_col_width + col_gap;
+
+    // 级别
+    label_painter.text(
+        egui::pos2(x, label_y),
+        egui::Align2::LEFT_CENTER,
+        entry.level.as_str(),
+        font_id.clone(),
+        crate::level_color(entry.level),
+    );
+    x += level_col_width + col_gap;
+
+    // 来源（裁剪）
+    if x < label_rect.right() {
+        let source_clip = egui::Rect::from_min_max(
+            egui::pos2(x, current_y),
+            egui::pos2(
+                (x + source_col_width).min(label_rect.right()),
+                current_y + entry_height,
+            ),
+        );
+        let source_painter = label_painter.with_clip_rect(source_clip);
+        let source_text = crate::compact_middle(&entry.source, SOURCE_TEXT_MAX_CHARS);
+        source_painter.text(
+            egui::pos2(x, label_y),
+            egui::Align2::LEFT_CENTER,
+            source_text,
+            font_id.clone(),
+            theme::cyan(),
+        );
+    }
+}
+
+/// 循环结束后：补齐实测行高，并应用拖选边缘滚动与滚轮滚动。
+fn apply_log_row_heights_and_scroll(
+    ui: &mut egui::Ui,
+    virtual_rows: &mut VirtualRowIndex,
+    frame: &LogRowFrame,
+    row_heights_changed: bool,
+    interaction: &LogRowsInteraction,
+    selection: &RowSelection,
+    wheel_scroll_delta_y: f32,
+) {
+    finish_log_row_heights(ui, virtual_rows, frame.total_height, row_heights_changed);
+
+    apply_log_selection_scroll(
+        ui,
+        &interaction.text_drag_response,
+        selection,
+        frame.message_rect,
+        frame.viewport_rect,
+        wheel_scroll_delta_y,
+        interaction.scroll_delta,
+    );
+}
+
+/// 循环结束后统一解析本帧的行交互：冻结高亮行、右键单选、双击跳转、复制快捷键、
+/// 右键菜单与滚到底。返回双击跳转的目标条目 id。
+fn resolve_log_row_interactions(
+    ui: &mut egui::Ui,
+    interaction: &mut LogRowsInteraction,
+    frame: &LogRowFrame,
+    rows: &VecDeque<LogEntry>,
+    selection: &mut RowSelection,
+    scroll_to_row: Option<usize>,
+    force_scroll_to_bottom: bool,
+) -> Option<u64> {
+    let (navigate_target, hovered_row) = resolve_log_row_clicks(
+        ui,
+        &mut interaction.hl,
+        &interaction.ctx_response,
+        rows,
+        selection,
+        frame.full_rect,
+        scroll_to_row,
+    );
+
+    // 框选范围文本（移入 context_menu 闭包内按需构造，避免菜单未打开时每帧构造）
+    let selected_indices = log_selected_row_indices(selection);
+
+    handle_log_copy_shortcuts(ui, rows, selection, &selected_indices);
+
+    interaction.ctx_response.context_menu(move |ctx_ui| {
+        show_log_context_menu(ctx_ui, rows, &selected_indices, &hovered_row);
+    });
+
+    scroll_log_rows_to_bottom_if_requested(ui, force_scroll_to_bottom);
+
+    navigate_target
+}
+
+/// 框选中的行索引；无框选时为空，避免每帧为菜单构造选区文本。
+fn log_selected_row_indices(selection: &RowSelection) -> Vec<usize> {
+    if selection.has_selection() {
+        selection.selected_indices().collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// 自动跟随生效时，把滚动位置钉到内容末尾。
+fn scroll_log_rows_to_bottom_if_requested(ui: &mut egui::Ui, force_scroll_to_bottom: bool) {
+    if force_scroll_to_bottom {
+        let (rect, _sense) = ui.allocate_exact_size(egui::vec2(0.0, 0.0), egui::Sense::hover());
+        ui.scroll_to_rect(rect, Some(egui::Align::BOTTOM));
     }
 }
 

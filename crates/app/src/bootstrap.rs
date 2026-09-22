@@ -138,6 +138,12 @@ fn set_family(fonts: &mut egui::FontDefinitions, family: egui::FontFamily, names
 }
 
 // ── 主题 ──
+
+/// 应用主题：先把激活主题切到 `selected_theme`，再逐段重建全局 `Style` 并一次性写回。
+///
+/// 顺序约束：`set_active_theme` 必须早于下面所有 `theme::xxx()` 取色，否则取到的
+/// 还是上一个主题的颜色；整份 `Style` 基于开头那次 `global_style()` 克隆构造，
+/// 中途不要再读 ctx，最后统一由 `set_global_style` 写回。
 pub fn apply_theme(ctx: &egui::Context, selected_theme: theme::AppTheme) {
     theme::set_active_theme(selected_theme);
     let is_dark = theme::active_theme_is_dark();
@@ -151,6 +157,17 @@ pub fn apply_theme(ctx: &egui::Context, selected_theme: theme::AppTheme) {
     let is_catppuccin = theme::is_catppuccin();
     let mut s = (*ctx.global_style()).clone();
 
+    apply_spacing_style(&mut s);
+    apply_interaction_style(&mut s);
+    #[cfg(debug_assertions)]
+    disable_debug_overlays(&mut s);
+    apply_text_styles(&mut s);
+    s.visuals = build_visuals(is_dark, is_catppuccin);
+
+    ctx.set_global_style(s);
+}
+
+fn apply_spacing_style(s: &mut egui::Style) {
     // ── 间距 ──
     s.spacing.item_spacing = egui::vec2(10.0, 8.0);
     s.spacing.button_padding = egui::vec2(12.0, 6.0);
@@ -164,7 +181,9 @@ pub fn apply_theme(ctx: &egui::Context, selected_theme: theme::AppTheme) {
         handle_min_length: 30.0,
         ..egui::style::ScrollStyle::solid()
     };
+}
 
+fn apply_interaction_style(s: &mut egui::Style) {
     // ── 交互 ──
     s.interaction.resize_grab_radius_side = 6.0;
     s.interaction.resize_grab_radius_corner = 10.0;
@@ -173,41 +192,57 @@ pub fn apply_theme(ctx: &egui::Context, selected_theme: theme::AppTheme) {
 
     // ── 动画 ──
     s.animation_time = 0.16;
+}
 
-    #[cfg(debug_assertions)]
-    {
-        s.debug.show_interactive_widgets = false;
-        s.debug.show_focused_widget = false;
-        s.debug.show_unaligned = false;
-        s.debug.warn_if_rect_changes_id = false;
-        s.debug.show_resize = false;
-        s.debug.show_widget_hits = false;
-    }
+#[cfg(debug_assertions)]
+fn disable_debug_overlays(s: &mut egui::Style) {
+    s.debug.show_interactive_widgets = false;
+    s.debug.show_focused_widget = false;
+    s.debug.show_unaligned = false;
+    s.debug.warn_if_rect_changes_id = false;
+    s.debug.show_resize = false;
+    s.debug.show_widget_hits = false;
+}
 
+fn apply_text_styles(s: &mut egui::Style) {
     // ── 字体大小 ──
-    let mut text_styles = s.text_styles.clone();
-    text_styles.insert(
+    s.text_styles.insert(
         egui::TextStyle::Body,
         egui::FontId::new(14.5, egui::FontFamily::Proportional),
     );
-    text_styles.insert(
+    s.text_styles.insert(
         egui::TextStyle::Button,
         egui::FontId::new(13.5, egui::FontFamily::Proportional),
     );
-    text_styles.insert(
+    s.text_styles.insert(
         egui::TextStyle::Monospace,
         egui::FontId::new(13.5, egui::FontFamily::Monospace),
     );
-    text_styles.insert(
+    s.text_styles.insert(
         egui::TextStyle::Small,
         egui::FontId::new(12.0, egui::FontFamily::Proportional),
     );
-    text_styles.insert(
+    s.text_styles.insert(
         egui::TextStyle::Heading,
         egui::FontId::new(18.0, egui::FontFamily::Proportional),
     );
-    s.text_styles = text_styles;
+}
 
+/// 顺序不能调：基础配色 → catppuccin 覆盖 → widget 样式 → catppuccin widget 覆盖。
+/// catppuccin 的两个分支必须晚于对应的基础设置，否则会被基础配色重新盖掉。
+fn build_visuals(is_dark: bool, is_catppuccin: bool) -> egui::Visuals {
+    let mut v = base_visuals(is_dark);
+    if is_catppuccin {
+        apply_catppuccin_visuals(&mut v, is_dark);
+    }
+    apply_widget_visuals(&mut v);
+    if is_catppuccin {
+        apply_catppuccin_widget_visuals(&mut v);
+    }
+    v
+}
+
+fn base_visuals(is_dark: bool) -> egui::Visuals {
     // ── Visuals ──
     let mut v = if is_dark {
         egui::Visuals::dark()
@@ -247,20 +282,24 @@ pub fn apply_theme(ctx: &egui::Context, selected_theme: theme::AppTheme) {
     v.button_frame = true;
     v.indent_has_left_vline = false;
 
-    // catppuccin-egui 的官方映射。该 crate 目前只支持到 egui 0.33，
-    // 项目使用 0.35，因此在保持当前 egui 类型一致的前提下移植其 Visuals 规则。
-    if is_catppuccin {
-        v.panel_fill = theme::bg_primary();
-        v.window_fill = theme::bg_primary();
-        v.extreme_bg_color = theme::bg_deep();
-        v.faint_bg_color = theme::bg_tertiary();
-        v.code_bg_color = theme::bg_secondary();
-        v.text_edit_bg_color = Some(theme::bg_secondary());
-        v.window_stroke = egui::Stroke::new(1.0, theme::overlay1());
-        v.selection.bg_fill = theme::blue().linear_multiply(if is_dark { 0.2 } else { 0.4 });
-        v.selection.stroke = egui::Stroke::new(1.0, theme::text_primary());
-    }
+    v
+}
 
+/// catppuccin-egui 的官方映射。该 crate 目前只支持到 egui 0.33，
+/// 项目使用 0.35，因此在保持当前 egui 类型一致的前提下移植其 Visuals 规则。
+fn apply_catppuccin_visuals(v: &mut egui::Visuals, is_dark: bool) {
+    v.panel_fill = theme::bg_primary();
+    v.window_fill = theme::bg_primary();
+    v.extreme_bg_color = theme::bg_deep();
+    v.faint_bg_color = theme::bg_tertiary();
+    v.code_bg_color = theme::bg_secondary();
+    v.text_edit_bg_color = Some(theme::bg_secondary());
+    v.window_stroke = egui::Stroke::new(1.0, theme::overlay1());
+    v.selection.bg_fill = theme::blue().linear_multiply(if is_dark { 0.2 } else { 0.4 });
+    v.selection.stroke = egui::Stroke::new(1.0, theme::text_primary());
+}
+
+fn apply_widget_visuals(v: &mut egui::Visuals) {
     // ── Widget 样式 ──
     let w = &mut v.widgets;
 
@@ -300,32 +339,31 @@ pub fn apply_theme(ctx: &egui::Context, selected_theme: theme::AppTheme) {
     w.open.weak_bg_fill = theme::bg_input();
     w.open.bg_stroke = egui::Stroke::new(1.0, theme::border_light());
     w.open.fg_stroke = egui::Stroke::new(1.0, theme::text_primary());
+}
 
-    if is_catppuccin {
-        let widget_stroke = egui::Stroke::new(1.0, theme::overlay1());
-        let text_stroke = egui::Stroke::new(1.0, theme::text_primary());
-        for widget in [
-            &mut w.noninteractive,
-            &mut w.inactive,
-            &mut w.hovered,
-            &mut w.active,
-            &mut w.open,
-        ] {
-            widget.bg_stroke = widget_stroke;
-            widget.fg_stroke = text_stroke;
-        }
-        w.noninteractive.bg_fill = theme::bg_primary();
-        w.noninteractive.weak_bg_fill = theme::bg_primary();
-        w.inactive.bg_fill = theme::bg_tertiary();
-        w.inactive.weak_bg_fill = theme::bg_tertiary();
-        w.hovered.bg_fill = theme::surface2();
-        w.hovered.weak_bg_fill = theme::surface2();
-        w.active.bg_fill = theme::surface1();
-        w.active.weak_bg_fill = theme::surface1();
-        w.open.bg_fill = theme::bg_tertiary();
-        w.open.weak_bg_fill = theme::bg_tertiary();
+fn apply_catppuccin_widget_visuals(v: &mut egui::Visuals) {
+    let w = &mut v.widgets;
+
+    let widget_stroke = egui::Stroke::new(1.0, theme::overlay1());
+    let text_stroke = egui::Stroke::new(1.0, theme::text_primary());
+    for widget in [
+        &mut w.noninteractive,
+        &mut w.inactive,
+        &mut w.hovered,
+        &mut w.active,
+        &mut w.open,
+    ] {
+        widget.bg_stroke = widget_stroke;
+        widget.fg_stroke = text_stroke;
     }
-
-    s.visuals = v;
-    ctx.set_global_style(s);
+    w.noninteractive.bg_fill = theme::bg_primary();
+    w.noninteractive.weak_bg_fill = theme::bg_primary();
+    w.inactive.bg_fill = theme::bg_tertiary();
+    w.inactive.weak_bg_fill = theme::bg_tertiary();
+    w.hovered.bg_fill = theme::surface2();
+    w.hovered.weak_bg_fill = theme::surface2();
+    w.active.bg_fill = theme::surface1();
+    w.active.weak_bg_fill = theme::surface1();
+    w.open.bg_fill = theme::bg_tertiary();
+    w.open.weak_bg_fill = theme::bg_tertiary();
 }
