@@ -284,6 +284,23 @@ mod tests {
         }
     }
 
+    // 正向步骤（等一条 TX **出现**）的兜底窗口 —— 它是「到不了就该大声失败」的上界，
+    // 不是「期望它这么久内到」。第 36/37 轮量的就是这类固定墙钟预算被当成通过条件的代价。
+    //
+    // 实测环境：16 核空机，`target/r36-load.py` 配方（churn×4 = 64 个每轮再分配 1 MiB 的忙等 hog，
+    // 且跑**整包** libtest —— 16 线程并行，才是这条用例见红的那个环境）；把窗口临时抬到 8000ms
+    // 让每一步都能命中，量「步骤开始 → 命中」的墙钟（churn×4 13 轮 + cpu×2 6 轮）：
+    //   · 派发命令 → 看到该任务第一条 TX：最坏 **3270ms**（cpu×2 最坏 606ms，空载 1ms）；
+    //   · 同一个任务已跑起来的下一拍（fixture 的 `task:sleep_ms(40)` 周期）：最坏 **1000ms+**
+    //     （8000ms 窗口下测得 630ms，空载 40ms；抬到 1000ms 作独立一档时在 churn×4 复红 1/8）。
+    // 两类**共用同一条派发链** —— 命令 → PluginManager 转发 → 插件线程被调度 → 写 →
+    // 端口 worker 发布 → runner 排空订阅，每一环都要抢 CPU —— 所以不分别给数：
+    // 第一版按 1.5 倍把「下一拍」单独压到 1000ms，自己就成了新的红点。
+    // 取 5000ms = 实测最坏 3270ms 的 ≈1.5 倍。抬窗口**不花时间**：`expect_event` 每 1ms 轮询、
+    // 命中即刻返回，空载这两类步骤实际仍是 1ms 与 40ms，整包 `cargo test -p tool-extension --lib`
+    // 仍是 0.26s。反向的缺席检查不继承这个数 —— 它会把 80ms 的有界检查变成 5s 白等。
+    const TX_BACKSTOP_MS: u64 = 5_000;
+
     #[test]
     fn scenario_covers_retry_cancel_and_timeout() {
         let root = std::env::temp_dir().join(format!(
@@ -328,7 +345,8 @@ end)
             name: "retry-cancel-timeout".to_owned(),
             plugin_id: "scenario.fixture".to_owned(),
             port: "TEST".to_owned(),
-            timeout_ms: 500,
+            // 正向 ExpectTx 一律继承这个兜底窗口；反向的缺席检查必须自己写窗口（见下）。
+            timeout_ms: TX_BACKSTOP_MS,
             steps: vec![
                 SerialScenarioStep::Execute {
                     command: "scenario.retry".to_owned(),
@@ -359,6 +377,16 @@ end)
                 SerialScenarioStep::Cancel {
                     command: "scenario.cancel".to_owned(),
                 },
+                // 有界缺席检查：这 80ms 内不得出现任何 TX。两个方向的坑来自同一件事 ——
+                // 取消命令的派发与 TX 事件的送达都要抢 CPU（实测派发最坏 3.3s，端口 worker 还会把
+                // 相隔 40ms 的三次写攒进同一毫秒发布）：
+                //   · 假红（实测抓到）：取消前已写出、还没被前面步骤消费的 PING 留在 backlog 里，
+                //     这一步一进来 0ms 就命中 `等待窗口内出现了意外 TX` —— 改前改后同配方都见红；
+                //   · 假绿（结构性，本次没抓到实例）：3 拍循环经常在取消送达前就跑完（19 轮探测里
+                //     观测到 4 / 5 / 6 条 PING，空载恰好 4 条 = 第一次 3 条 + 第二次 1 条），
+                //     窗口里静悄悄并不等于「循环被取消了」。
+                // 抬高窗口买不到证明力 —— 要越过派发延迟（≈3.3s）才有声音，代价是每次通过都白等
+                // 3.3s。所以维持 80ms，缺的那半条契约与关闭它的代价如实记在 docs/ARCHITECTURE.md。
                 SerialScenarioStep::ExpectNoTx {
                     timeout_ms: Some(80),
                 },
