@@ -6,6 +6,28 @@
 
 ### 调整
 
+- 删掉 `tool-recorder` / `tool-core` 里没人引用的 API（净 −31 行；四道门 710 passed / 0 failed /
+  7 ignored —— **用例数一条没动，这正是"确实无人引用"的最强证据**：整条链上任何一处漏查都会有
+  编译错误或某条测试变红）。删的东西：`JsonlRecorder::set_backpressure_config` +
+  `backpressure_config`、`ReplayManager::publish_next_for_test`、`FrozenClock` 的
+  `new`/`advance`/`set`（本来就在 `#[cfg(test)] impl` 里），以及随之变死的
+  `pub use RecorderBackpressureConfig`（`tool-recorder` 之外 0 处提到这个类型名；类型仍在
+  `pub mod recorder` 里，没有对外破坏）。**一条重要的不对称**：背压字段本身是活的
+  （`tick_backpressure` 每帧读它判软/硬阈值，而 `workbench.rs:201` 每帧调它），只有**写侧**从来没人做
+  —— 删之前 setter 是"可调用但无人调用"，删之后这条能力**不再可表达**，阈值固定在 `Default`。
+  这不是漏接线（没有任何设置/面板/UI 提到过背压，字符串形状也查过：Lua API 表、web host、JSON 键全无），
+  要不要开放给用户调是产品决定；已在类型上写一条注释，免得下一个人把它当成没接完的线重新加回。
+  `publish_next_for_test` 名字里的 `for_test` 是虚构的：全仓没有任何测试调它。
+  **顺带查出扫描器的第 4 条盲区**：`DEAD 8` 少数了 —— 判"用过"靠词边界匹配，而 `set`/`new`
+  这类动词名会撞上全仓无关代码（`new` 还被刻意跳过）。**动词名的死活必须结合接收者看**，
+  光数出现次数会同时产生假阴与假阳。
+  **两条新的后续结论（第 27 轮的靶子）**：① 删掉 `new` 之后 `FrozenClock` 是个**无法构造的 `pub` 类型**
+  （字段私有，只剩 `Clone` 与 `impl Clock`），`dead_code` 与两个扫描脚本都看不见它，证据只有全仓
+  词边界 grep；② `tool_core::Clock` 这个 trait **在 `crates/core` 之外 0 处引用**，且
+  **没有任何多态使用者**（全仓没有 `dyn Clock`、没有 `<C: Clock>`、没有 `: Clock` 约束），
+  两个 impl 之外的唯一活用户是 `now_timestamp_ms` 里那句对具体类型的 `SystemClock.now_ms()`
+  —— 也就是一个"为实现而实现"的抽象。**代价要说清**：删掉它就删掉了"给测试注入假时钟"的接缝
+  （而 64 处调用点全都走全局自由函数，这个接缝至今一个用户也没有），所以这一步该不该走值得先问一句。
 - 把用户可见错误正文里最后一段英文清掉（四道门 710 passed / 0 failed / 7 ignored，基线 700 → 710；
   新增 10 条用例：`storage_error_wording` 6 + 回放/导出/配置三条活路径 + recorder 单元 1）。
   新增 `tool_platform::storage::translate_error`（3 个变体，穷尽 `match` 不写 `_ =>`，

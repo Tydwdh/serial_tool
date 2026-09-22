@@ -871,16 +871,6 @@ impl ReplayManager {
         }
     }
 
-    pub fn publish_next_for_test(&mut self, count: usize) -> usize {
-        let end = (self.cursor + count).min(self.events.len());
-        let mut published = 0;
-        while self.cursor < end {
-            self.publish_cursor_event();
-            published += 1;
-        }
-        published
-    }
-
     fn publish_until(&mut self, target_position_ms: u64) -> usize {
         let Some(base) = self.base_timestamp_ms() else {
             return 0;

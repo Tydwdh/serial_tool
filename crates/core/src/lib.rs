@@ -428,24 +428,6 @@ pub struct FrozenClock {
 }
 
 #[cfg(test)]
-impl FrozenClock {
-    pub fn new(initial_ms: u64) -> Self {
-        Self {
-            now_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(initial_ms)),
-        }
-    }
-
-    pub fn advance(&self, ms: u64) {
-        self.now_ms
-            .fetch_add(ms, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub fn set(&self, ms: u64) {
-        self.now_ms.store(ms, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-#[cfg(test)]
 impl Clock for FrozenClock {
     fn now_ms(&self) -> u64 {
         self.now_ms.load(std::sync::atomic::Ordering::Relaxed)

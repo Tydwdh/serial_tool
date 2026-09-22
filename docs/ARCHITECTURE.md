@@ -564,6 +564,26 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
    > 本轮**没**碰其余候选（`recorder` 的 backpressure 两件套、`core::advance`、`tool-testing` 的
    > 两个计数、`replay::publish_next_for_test`、`lua_host::run_script`），它们分属别的 crate，
    > 按"一轮一个域"排到后面。
+   > **【第 26 轮把这批还了四件】**（710 → 710，**一条用例都没动过就是"确实没人引用"的最强证据**）：
+   > 删 `JsonlRecorder::set_backpressure_config` + `backpressure_config`（**字段本身是活的**，
+   > `tick_backpressure` 每帧读它判定软/硬背压，只有写侧没人做 —— 于是阈值实际固定在 `Default`；
+   > 删之前 setter 是"可调用但无人调用"，删之后这条能力**不再可表达**，是否要开放给用户调是产品问题，
+   > 已在类型上补一条注释免得下一个人当成漏接线重新加回）、`ReplayManager::publish_next_for_test`
+   > （名字里的 `for_test` 是虚构的：全仓没有任何测试调它）、`FrozenClock` 的 `new`/`advance`/`set`
+   > 三个构造与推进方法（本来就在 `#[cfg(test)] impl` 里），连带 `RecorderBackpressureConfig`
+   > 那条**死的 re-export**（`tool-recorder` 之外 0 处提到这个类型名；类型仍在 `pub mod recorder` 里）。
+   > **顺带查出扫描器的第 4 条盲区，值得记**：`DEAD 8` 是**少数**了 —— 判"用过"靠词边界匹配，
+   > 而 `set` / `new` 这类动词名会撞上全仓无关代码（`new` 还刻意被跳过）。这条不是"再修修脚本"
+   > 能解决的：动词名的死活**必须**结合接收者看，不能只数出现次数。
+   > **两条新的后续结论**：① 删掉 `new` 之后 `FrozenClock` 已经是个**无法构造的 `pub` 类型**
+   > （字段私有、只剩 `Clone` 与 `impl Clock`），`dead_code` 看不见它、两个扫描脚本也看不见
+   > （一个只看固有 `pub fn`，一个被 `Clock` 这个常见名糊住），证据只有全仓词边界 grep：
+   > `FrozenClock` 在 `crates/` 里只出现在它自己那三行；② 同一形状的还有 `tool_core::Clock` ——
+   > **`crates/core` 之外 0 处引用**（`SystemClock` 只在 core 内部一处）。两者都是"可以整块拿掉的
+   > 抽象"，但那是删抽象不是删孤儿方法，另开一轮并先确认没有 cfg 之外的字符串引用。
+   > 剩下的 DEAD 只有 `lua_host::run_script`、`testing::failed_count` / `save_latest_json`
+   > （后两个在**专门给测试用的 crate** 里，"仅测试引用"在那儿是设计而非死），
+   > 以及刻意保留的 `app/state::dismiss`。
    > 另：删掉 `PermissionManager::missing_capabilities` 之后，它唯一的消费者
    > `PluginManifest::required_capabilities` 也随之删除，于是 **`tool-extension` 现在有一条
    > 可证明的死 Cargo 边 `tool-plugin-api`**（全 crate 0 处 `use`）。它和第 10 条

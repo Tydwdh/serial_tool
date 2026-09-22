@@ -35,6 +35,11 @@ pub struct RecorderStats {
     pub stop_reason: Option<String>,
 }
 
+/// 录制积压的软/硬阈值。
+///
+/// 阈值只有下面 `Default` 这一个来源：本 crate 之外既读不到也改不了它，
+/// `JsonlRecorder::tick_backpressure` 用的就是这组固定值。
+/// 要不要把它做成用户可配置项是产品决定，不是这里漏掉的接线。
 #[derive(Debug, Clone, Copy)]
 pub struct RecorderBackpressureConfig {
     pub soft_events: u64,
@@ -122,14 +127,6 @@ impl JsonlRecorder {
 
     pub fn set_mode(&mut self, mode: RecordMode) {
         self.mode = mode;
-    }
-
-    pub fn set_backpressure_config(&mut self, config: RecorderBackpressureConfig) {
-        self.backpressure = config;
-    }
-
-    pub fn backpressure_config(&self) -> RecorderBackpressureConfig {
-        self.backpressure
     }
 
     pub fn mode(&self) -> RecordMode {
