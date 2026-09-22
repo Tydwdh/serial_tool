@@ -120,6 +120,14 @@ cargo tree -p tool-application | grep -i egui    # 0 行
     该文件已随 dispatch 拆分移位，按符号找）：`!network.is_some()` → `network.is_none()`，t11 等价重写，无 lint 豁免）；
   * `clippy::let_and_return` @ `crates/app/src/panel_registry.rs:73-79`（整个 wasm-only 的 `web()`；
     收敛后的返回表达式在 `:78`）：t13 去掉中间的 `let registry = …;` 直接返回，无 lint 豁免。
+  > **现存豁免的清单不在本文重复维护** —— 唯一真相是
+  > `crates/app/tests/lint_exemptions.rs` 里钉住的那份（扫描 `crates/**/*.rs`，按
+  > 「文件 + lint → 条数」比对；写下这一段时是 16 条：7 条 clippy + 9 条 `dead_code`，
+  > 后者多数写在 `#[cfg_attr(target_arch = …, allow(dead_code))]` 里，对应下面
+  > Linux / wasm 死代码那张表）。加一条豁免必须显式改那份清单，测试会红；
+  > 摘一条则应同时把清单收紧。本仓第 6 轮一次摘光后发现 3 条早已空转，
+  > 第 8 轮把两处渲染参数墙（`render_rows_view` 20 参、`render_log_rows` 14 参）
+  > 收进命名字段输入结构体后又退掉 2 条 `too_many_arguments`。
   **当前状态（修复后）**：`cargo +1.92.0 fmt --all --check`、
   `cargo +1.92.0 clippy --workspace --all-targets -- -D warnings`、
   `cargo +1.92.0 test --workspace --all-targets` 三条均 **exit 0**。
