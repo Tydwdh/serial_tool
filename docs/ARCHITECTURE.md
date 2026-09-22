@@ -1090,7 +1090,9 @@ panic / 置位什么都不做的手工线程，与磁盘和调度无关）·
       > 各补一份按变体分发的 `translate_error`，要么承认这些是"面向开发者的错误"并写下理由。
       > 第 9 轮那条教训的正确版本：**不能拿"已经翻译过的用户文案"再当判定的输入**（那才是
       > `"would block"` 那个死判定的成因）；映射器自己去读 OS 原始文案是另一回事
-      > （`translate_error` 的 `Serial`/`Io` 两臂本来就这么做，因为它拿到的是 OS 的 `Display`）。
+      > （`translate_error` 的 `Serial`/`Io` 两臂本来就这么做，因为它拿到的是 OS 的 `Display`；
+      > **第 41 轮起这条只对 `Serial` 臂成立** —— `Io` 臂的权限判定改读 `kind()`，见本条末尾的
+      > 第 41 轮记录）。
       >
       > **第 9 轮留下的两个待拍板问题**（都不是机械收敛能定的）：
       > ① 重连那个 3 秒预算的循环，改成类型化判定之后**仍然没有任何生产者**
@@ -1260,6 +1262,29 @@ panic / 置位什么都不做的手工线程，与磁盘和调度无关）·
       > **踩过的坑记下来**：`tool-platform` 现在有两个 `translate_error`
       > （根目录那份管 `TransportError`，`storage` 模块那份管 `StorageError`，各自与自己的
       > 错误类型同处），从根路径调 storage 那份会直接 E0308 —— 不是重名错误，但引用时要写全模块。
+      > **第 41 轮：这条链上「别拿错误文案当判定」的又一处实例，修在了 `Io` 臂**。
+      > `tool_transport::translate_error` 的 `Io` 臂此前先过 `is_permission_denied`（五个英文短语
+      > 的子串）再 `match e.kind()` —— 它匹配的是 OS 的 `Display`，随系统语言本地化：本机（中文
+      > Windows）权限失败实测「拒绝访问。 (os error 5)」，一个短语都不含，Windows 报的码也是 5
+      > 不是 13，权限建议在本地化机器上永不出现（与第 9/11/21 轮同族：判定与翻译共读同一个
+      > String）。修法照本族的规矩：**判定读类型，文案降级为细节** —— 权限格并进同一个
+      > `match e.kind()`（`PermissionDenied => serial_permission_message(&message)`），OS 原话逐字
+      > 留在冒号后。`raw_os_error()` 核实后**不需要**兜底：`from_raw_os_error` 造的错必已过 std
+      > 码表（Windows `ERROR_ACCESS_DENIED`/`WSAEACCES`、POSIX `EACCES`/`EPERM` ⇒
+      > `PermissionDenied`，std 1.92 `pal/unix` 与 `pal/windows` 的 `decode_error_kind`；Windows
+      > 两格另有本机用例实测），`Error::new`/`other` 造的错又没有原始码 —— 补一份码表是永远
+      > 多不出命中的死分支。反向红利：Windows 的 `os error 13` 是 `ERROR_INVALID_DATA`，旧
+      > `"os error 13"` 那格（码抄自 POSIX EACCES）此前把它错包成串口权限建议，现已落回通用框架。
+      > **英文 Windows / Linux 的带 kind 路径逐字不变**（有用例钉「修中文没坏英文」）。
+      > **剩下的更难一半是 `Serial` 臂（可达性已核，本轮按要求未动）**：`sp::Error` 带类型化
+      > `kind`（`ErrorKind::Io(io::ErrorKind)`），serialport 的 POSIX 后端把 EACCES 映射成
+      > `Io(PermissionDenied)`，按 kind 可判定；但 **Windows 后端 `last_os_error` 把
+      > `ERROR_ACCESS_DENIED` 折进 `ErrorKind::NoDevice`**（与 FILE/PATH_NOT_FOUND 共用），权限
+      > 信息在依赖内部就已销毁 —— Windows 半边按 kind 分不出「端口被占用」与「设备不存在」，
+      > 逐平台分叉要把 `serialport::Error` 的两套形状先写进用例，不是 `Io` 臂这一格的事。另一处
+      > 同族病根：worker 完成通道（`report_completion`/`complete_command` → `wait_for_completion`）
+      > 拿 `.to_string()` 把 io kind 折成字符串，到判定处已无类型可读 —— 修法是换通道载荷，
+      > 与 `Serial` 臂一并留给下一轮。
       ⑤ 【本波已闭合】换行后缀表原有 3 份（native `state::LineEnding`、wasm `WebLineEnding`、
       共享面板 `SendLineEnding`），值一致但没有任何断言钉住，两端还各写两份 4 臂 **identity** `match`
       （类型不同才需要转）。现在收进 `tool_core::LineEnding`（`crates/core/src/lib.rs:454`），

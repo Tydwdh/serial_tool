@@ -1398,10 +1398,16 @@ pub fn translate_error(err: &TransportError) -> String {
         }
         TransportError::Io(e) => {
             let message = e.to_string();
-            if is_permission_denied(&message.to_ascii_lowercase()) {
-                return serial_permission_message(&message);
-            }
             match e.kind() {
+                // 权限失败读 kind，不读 OS 文案（第 41 轮）：文案随系统语言本地化
+                // （中文 Windows 实测「拒绝访问。 (os error 5)」，不含任何英文短语，
+                // 且 Windows 报的码是 5 不是 13）。无需再兜 `raw_os_error()`：
+                // `from_raw_os_error` 造的错必然已过 std 的码表（Windows
+                // `ERROR_ACCESS_DENIED`/`WSAEACCES`、POSIX `EACCES`/`EPERM`
+                // ⇒ `PermissionDenied`，std 1.92 pal 源码核过，Windows 两格另有
+                // 本机用例实测），`Error::new`/`other` 造的错又没有原始码 ——
+                // kind 之外再抄一份码表是永远多不出命中的死分支。
+                std::io::ErrorKind::PermissionDenied => serial_permission_message(&message),
                 std::io::ErrorKind::WouldBlock => message, // "正在关闭中" 等业务状态文案已含中文
                 std::io::ErrorKind::TimedOut => format!("操作超时：{message}"),
                 std::io::ErrorKind::InvalidData => message, // HEX 严格模式奇偶校验文案已含中文
@@ -1411,6 +1417,11 @@ pub fn translate_error(err: &TransportError) -> String {
     }
 }
 
+/// 全仓最后一处「读英文文案猜权限」：第 41 轮把 `Io` 臂改读 `kind()` 后，
+/// 只剩 `Serial` 臂还用它 —— `sp::Error::kind` 在 POSIX 后端能给出
+/// `ErrorKind::Io(PermissionDenied)`，但 Windows 后端把 `ERROR_ACCESS_DENIED`
+/// 折进 `ErrorKind::NoDevice`（与「设备不存在」共用），kind 在那半边不可判定；
+/// 逐平台修法见 `docs/ARCHITECTURE.md` 第 ④ 条末尾。
 fn is_permission_denied(message: &str) -> bool {
     message.contains("access is denied")
         || message.contains("access denied")
@@ -1462,6 +1473,132 @@ mod tests {
         let message = translate_error(&error);
         assert!(message.contains("dialout"));
         assert!(message.contains("不要使用 sudo 启动 Hardware Workbench"));
+    }
+
+    // ── 第 41 轮：`Io` 臂的权限分支按 kind 判定，不按 OS 文案 ──
+    //
+    // `serial_permission_message` 的正文按 cfg 分叉（Linux 讲 dialout 用户组，其余
+    // 点名「串口被占用或无权限访问」），所以可移植的断言只有三件：OS 细节原样在场、
+    // 没落到通用 `IO 错误：` 框架、本 cfg 下的区分句在场。与机器 UI 语言无关。
+    fn assert_permission_advice(message: &str, detail: &str) {
+        assert!(
+            message.contains(detail),
+            "OS 原话必须逐字留在建议里，实际: {message}"
+        );
+        assert!(
+            !message.starts_with("IO 错误"),
+            "权限失败不得落到通用 IO 框架，实际: {message}"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(
+            message.contains("dialout"),
+            "Linux 上的权限建议必须点名用户组，实际: {message}"
+        );
+        #[cfg(not(target_os = "linux"))]
+        assert!(
+            message.contains("串口被占用或无权限访问"),
+            "非 Linux 上的权限建议必须点名占用/权限，实际: {message}"
+        );
+    }
+
+    /// 本机（中文 Windows）权限失败的 Display 原话 —— 「拒绝访问。」不含
+    /// `is_permission_denied` 的任何一个英文短语，Windows 报的码也是 5 不是 13，
+    /// 所以旧实现从不进建议分支（红证用例）。kind 仍带着权限信息，按 kind 判定即通。
+    #[test]
+    fn translate_error_routes_a_localised_permission_failure_by_kind() {
+        let message = translate_error(&TransportError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "拒绝访问。 (os error 5)",
+        )));
+        assert_permission_advice(&message, "拒绝访问。 (os error 5)");
+    }
+
+    /// 英文机器上旧文案谓词本来就命中 "access is denied"；改读 kind 后这一句必须
+    /// 逐字不变 —— 这条钉的是「修本地化判定没有弄坏英文行为」。
+    #[test]
+    fn translate_error_keeps_english_permission_wording_on_the_same_advice() {
+        let message = translate_error(&TransportError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Access is denied. (os error 5)",
+        )));
+        assert_permission_advice(&message, "Access is denied. (os error 5)");
+    }
+
+    /// 对照组：`TimedOut` 与未点名 kind 的框架不因权限判定的改动而变。
+    #[test]
+    fn translate_error_keeps_the_timeout_and_generic_frames_for_other_kinds() {
+        assert_eq!(
+            translate_error(&TransportError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "COM3 正在关闭中",
+            ))),
+            "操作超时：COM3 正在关闭中"
+        );
+        assert_eq!(
+            translate_error(&TransportError::Io(std::io::Error::other("连接被拒绝"))),
+            "IO 错误：连接被拒绝"
+        );
+    }
+
+    /// 前提核实（Windows）：std 1.92 `pal/windows` 把 `ERROR_ACCESS_DENIED`(5)
+    /// 映射成 `PermissionDenied`（`WSAEACCES` 同理），所以真 `from_raw_os_error`
+    /// 造的错也直接进建议分支；`(os error 5)` 这半句是 Rust 自己追加的，
+    /// 与系统语言无关，拿来当细节锚点。
+    #[cfg(windows)]
+    #[test]
+    fn windows_raw_access_denied_reaches_the_permission_advice() {
+        let raw = std::io::Error::from_raw_os_error(5);
+        assert_eq!(
+            raw.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "std 的映射前提变了（kind 不再是 PermissionDenied），这一族判定要重写"
+        );
+        let message = translate_error(&TransportError::Io(std::io::Error::from_raw_os_error(5)));
+        assert_permission_advice(&message, "(os error 5)");
+    }
+
+    /// Windows 的 `os error 13` 是 `ERROR_INVALID_DATA`（数据无效），与 POSIX 的
+    /// EACCES 无关 —— 旧实现的 `"os error 13"` 子串（照抄 POSIX 错误码）把它错包成
+    /// 串口权限建议。按 kind 判定后它不得再进建议分支。
+    #[cfg(windows)]
+    #[test]
+    fn windows_os_error_13_is_data_invalid_not_permission() {
+        let raw = std::io::Error::from_raw_os_error(13);
+        assert_ne!(
+            raw.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "std 若把 13 映射成 PermissionDenied，本用例的前提（13≠EACCES）就变了"
+        );
+        let message = translate_error(&TransportError::Io(std::io::Error::from_raw_os_error(13)));
+        assert!(
+            !message.contains("串口被占用"),
+            "非权限的 os error 13 又被文案谓词包成了串口权限建议，实际: {message}"
+        );
+        assert!(
+            message.contains("(os error 13)"),
+            "OS 细节必须原样在场，实际: {message}"
+        );
+    }
+
+    /// 前提核实（POSIX）：std 1.92 `pal/unix` 有 `EACCES | EPERM => PermissionDenied`
+    /// （`sys/pal/unix/mod.rs` 的 `decode_error_kind`），EACCES=13、EPERM=1，
+    /// 旧谓词的 `"operation not permitted"`/`"os error 13"` 两句英文只有在英文
+    /// locale 的机器上才命中（strerror 可被系统语言翻译）。
+    #[cfg(unix)]
+    #[test]
+    fn posix_raw_eacces_and_eperm_reach_the_permission_advice() {
+        for errno in [13, 1] {
+            let raw = std::io::Error::from_raw_os_error(errno);
+            assert_eq!(
+                raw.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "errno {errno} 不再映射成 PermissionDenied，前提变了"
+            );
+            let message = translate_error(&TransportError::Io(std::io::Error::from_raw_os_error(
+                errno,
+            )));
+            assert_permission_advice(&message, &format!("(os error {errno})"));
+        }
     }
 
     #[test]

@@ -6,6 +6,54 @@
 
 ### 调整
 
+- **`tool_transport::translate_error` 的 `Io` 臂改读 `kind()`：中文 Windows 上的权限失败从裸的
+  `IO 错误：` 回到建议分支**（本轮只动 `crates/transport/src/lib.rs` 的 `Io` 一臂 + 它的
+  `#[cfg(test)] mod tests`；`Serial` 臂、重连可重试性与 `WouldBlock`/`TimedOut` 两格逐字未动 ——
+  那两个产品决定仍挂在用户处（第 9/11 轮）；不新增枚举/trait/宏/`pub`、无签名变化；四道门
+  fmt / native clippy `-D warnings` / wasm clippy / test 全 **EXIT=0**，
+  **726 passed / 0 failed / 7 ignored**、32 条 `test result:` 行 —— 基线 721 **净增 5 条**
+  （3 条可移植 + 2 条 `#[cfg(windows)]`；另 1 条 `#[cfg(unix)]` 只在 Unix 机器上编进来；
+  wasm 门与本改动无编译边 —— `cargo tree -i tool-transport --target wasm32-unknown-unknown`
+  实测为空，web 用的是 `tool_platform` 自己的错误枚举）。**（1）改前的判定是
+  `is_permission_denied(&message.to_ascii_lowercase())` —— 拿五个英文短语的子串猜权限**，而 OS
+  文案随系统语言本地化：本机（中文 Windows）权限失败的 `Display` 实测是「拒绝访问。 (os error 5)」，
+  一个英文短语都不含，Windows 报的码也是 5 而不是 13 —— 于是它永远落进兜底框架。**（2）中文
+  Windows 上用户可见串的前后**：`IO 错误：拒绝访问。 (os error 5)` → `串口被占用或无权限访问：
+  拒绝访问。 (os error 5)，请检查是否已被其他程序打开`（OS 原话逐字留在冒号后，只换了判定）。
+  英文 Windows 与 Linux 的**带 kind 路径逐字不变**（"Access is denied. (os error 5)" 此前靠文案
+  命中、现在靠 kind 命中，同一句输出，有用例钉；既有 linux-only 用例一字未动仍绿）。
+  **（3）`raw_os_error()` 不需要兜（核实而非假设）**：`from_raw_os_error` 造的错必然已过 std 码表
+  —— Windows 码表只有 `ERROR_ACCESS_DENIED`(5) 与 `WSAEACCES` ⇒ `PermissionDenied`（std 1.92
+  `pal/windows/mod.rs`，本机两条用例实测）；POSIX `EACCES`(13) | `EPERM`(1) ⇒ `PermissionDenied`
+  （`pal/unix/mod.rs` 的 `decode_error_kind`，用例 `#[cfg(unix)]` 在 Unix 上跑）。而
+  `Error::new`/`other` 造的错 `raw_os_error()` 恒 `None` —— kind 之外再抄一份码表是永远多不出
+  命中的死分支。**顺带治掉一个反向误判**：Windows 的 `os error 13` 是 `ERROR_INVALID_DATA`
+  （本机 Display「数据无效。 (os error 13)」），旧谓词 `"os error 13"` 那格照抄的是 POSIX 的
+  EACCES，把它错包成串口权限建议；现在落回 `IO 错误：`。红证三条（对未改的旧实现跑新用例）：
+  中文格 `IO 错误：拒绝访问。 (os error 5)`、真 `from_raw_os_error(5)` 同框、以及 13 那格的旧输出
+  正是 `串口被占用或无权限访问：数据无效。 (os error 13)，请检查是否已被其他程序打开`。**（4）一处
+  收窄如实记**：kind 被上游折成字符串的 `Io(Error::other(文本))`（worker 完成通道
+  `report_completion`/`complete_command` 的 `.to_string()`，`wait_for_completion` 再包一层），
+  若落在英文 locale 机器上恰好带英文权限文案，改前靠文案命中建议、改后走通用框架 —— 该形状没有
+  任何既有用例钉过文案，真正的修法是上游停止把 kind 折成字符串，与 `Serial` 臂一起记为下轮目标。
+  **（5）`Serial` 臂是剩下的、更难的一半，本轮按要求未动，只报可达性**：`sp::Error` 带类型化
+  `kind`（`ErrorKind::Io(io::ErrorKind)`），POSIX 后端 EACCES ⇒ `Io(PermissionDenied)` 活着
+  （`serialport-4.9/src/posix/error.rs`）；但 **Windows 后端把 `ERROR_ACCESS_DENIED` 折进
+  `ErrorKind::NoDevice`**（与 FILE/PATH_NOT_FOUND 共用，`windows/error.rs::last_os_error`），
+  权限信息在依赖内部就已销毁 —— 按 kind 在 Windows 半边分不出「占用」与「不存在」，这是它比
+  `Io` 臂难的确切原因。**（6）新增 6 条用例**（transport `mod tests`）：可移植
+  `translate_error_routes_a_localised_permission_failure_by_kind`（本机中文原话）、
+  `translate_error_keeps_english_permission_wording_on_the_same_advice`（英文行为不变钉）、
+  `translate_error_keeps_the_timeout_and_generic_frames_for_other_kinds`（对照）；
+  `#[cfg(windows)]` `windows_raw_access_denied_reaches_the_permission_advice`（真
+  `from_raw_os_error(5)` 端到端）、`windows_os_error_13_is_data_invalid_not_permission`；
+  `#[cfg(unix)]` `posix_raw_eacces_and_eperm_reach_the_permission_advice`。可移植断言只钉三件
+  （OS 细节在场、不落 `IO 错误：` 框架、本 cfg 的区分句在场），不依赖机器 UI 语言。
+  动手前普查：`串口被占用…`/`当前用户没有串口访问权限` 两句在测试代码里除本文件 linux-only 用例外
+  零钉点；外仓引用 `IO 错误` 的三处（`headless.rs` 措辞组、`transport_error_wording.rs` 的
+  `Io(TimedOut)` 逐字钉）都不走权限格，一字未动、全绿。`is_permission_denied` 保留 —— `Serial`
+  臂是唯一调用者，函数头已写明它为什么还留着与逐平台修法在哪。
+
 - **录制文件的两道 io 出口各套一句中文框架并点名路径（`create_recording_file`）；「用户可见错误正文
   里的英文」这一类到此清完**（本轮只动 `crates/recorder/src/recorder.rs` 一个函数 + 它的
   `#[cfg(test)] mod tests`，签名与 `io::Result<File>` 不变、不新增错误枚举/trait/模块、不加 `pub`；
