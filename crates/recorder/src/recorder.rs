@@ -778,15 +778,29 @@ mod tests {
         assert!(!rec.is_running());
         assert!(rec.is_stopping());
 
-        // Reap — wait for worker thread to finish
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // 收割 worker：等的是「`reap_stopping()` 真交出结果」这件事，不是时长。
+        // 预算 **30s 是量出来的**：把本文件原先**四处无上界**的收割等待都挂上计时、跑整包
+        // libtest（另外三处只是本来就带 5s 的同一条路径，没单独打点），同一条
+        // start → stop → 收割最坏 **3.34s**（churn×6 = 96 个搅缓存 hog；churn×4 最坏
+        // 1.44s；中位数 100~150ms —— 那 100ms 是 worker 主循环每轮 `recv_timeout(100ms)`
+        // 的结构性下限，见 pump_events）。原先这里的 5s 只剩 1.5 倍余量：一次**通过**的运行
+        // 就能吃掉三分之二，换成 30s 才是 9 倍。抬高不花时间 —— 命中即刻 break，
+        // 空载整包 **0.52s → 0.12s**（那 500ms 白等在 `stats_updated_during_recording` 里，
+        // 本轮一并换成同一条判据）。
+        // 等不到必须大声红：`reap_stopping()` 返回 None 有两条路（线程还没退 /
+        // 压根没有可收割的 worker），`is_stopping()` 正好区分这两条，所以带上它。
+        let budget = Duration::from_secs(30);
+        let started = Instant::now();
         let result = loop {
             if let Some(r) = rec.reap_stopping() {
                 break r;
             }
             assert!(
-                Instant::now() < deadline,
-                "timed out waiting for recorder to stop"
+                started.elapsed() < budget,
+                "录制 worker 应在 {budget:?} 内被收割，实际等了 {:?}，最后观测 is_stopping={}\
+                 （true=线程还没退，false=`stopping` 里根本没有 worker）",
+                started.elapsed(),
+                rec.is_stopping(),
             );
             std::thread::sleep(Duration::from_millis(10));
         };
@@ -822,7 +836,17 @@ mod tests {
         assert!(!rec.stats().paused);
 
         rec.stop();
+        // 无界 spin 换成有界收割：判据、预算与理由见 `start_stop_lifecycle`
+        // （同一条 worker 收尾路径；坏了原本是挂死而不是假红）。
+        let budget = Duration::from_secs(30);
+        let started = Instant::now();
         while rec.reap_stopping().is_none() {
+            assert!(
+                started.elapsed() < budget,
+                "录制 worker 应在 {budget:?} 内被收割，实际等了 {:?}，最后观测 is_stopping={}",
+                started.elapsed(),
+                rec.is_stopping(),
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
 
@@ -852,7 +876,17 @@ mod tests {
 
         // Cleanup: stop the running recorder
         rec.stop();
+        // 同上：这条 spin 以前没有上界，worker 不收尾就是整条测试挂住（预算来源见
+        // `start_stop_lifecycle`）。
+        let budget = Duration::from_secs(30);
+        let started = Instant::now();
         while rec.reap_stopping().is_none() {
+            assert!(
+                started.elapsed() < budget,
+                "录制 worker 应在 {budget:?} 内被收割，实际等了 {:?}，最后观测 is_stopping={}",
+                started.elapsed(),
+                rec.is_stopping(),
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
         remove_recording(&path1);
@@ -883,8 +917,29 @@ mod tests {
                 .publish(test_event(&format!("transport.serial.test.{i}")));
         }
 
-        // Give the worker time to process
-        std::thread::sleep(Duration::from_millis(500));
+        // Give the worker time to process —— 等真条件而不是猜时长：`events_written`
+        // 由 worker 每写一条时与字节数同批递增，它离开 0 就是「worker 已把事件写进
+        // BufWriter」这件事本身，判据逐字取自随后那条断言。原来的无条件 sleep(500)
+        // 在 churn×4 跑整包时十轮里红 **2~3 轮**（`expected some events written, got 0`）。
+        // 正向等待命中即返回：空载这里只花 ~0ms（改前每条白等 500ms，占整包 0.52s 的
+        // 大头）。30s 与收割等待同兜底（本条实测最坏 1.24s 写出首条，见上面的推导）。
+        let budget = Duration::from_secs(30);
+        let started = Instant::now();
+        loop {
+            let observed = rec.stats();
+            if observed.events_written > 0 {
+                break;
+            }
+            assert!(
+                started.elapsed() < budget,
+                "录制 worker 应在 {budget:?} 内写出首条事件，实际等了 {:?}，\
+                 最后观测 events_written=0 running={} last_error={:?}",
+                started.elapsed(),
+                observed.running,
+                observed.last_error,
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
 
         let s = rec.stats();
         assert!(
@@ -894,14 +949,15 @@ mod tests {
         );
 
         rec.stop();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if rec.reap_stopping().is_some() {
-                break;
-            }
+        // 预算与理由见 `start_stop_lifecycle`（同一条 worker 收尾路径）。
+        let budget = Duration::from_secs(30);
+        let started = Instant::now();
+        while rec.reap_stopping().is_none() {
             assert!(
-                Instant::now() < deadline,
-                "timed out waiting for recorder to stop"
+                started.elapsed() < budget,
+                "录制 worker 应在 {budget:?} 内被收割，实际等了 {:?}，最后观测 is_stopping={}",
+                started.elapsed(),
+                rec.is_stopping(),
             );
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -932,7 +988,17 @@ mod tests {
         rec.stop();
         assert!(!rec.is_running());
 
+        // 预算与理由见 `start_stop_lifecycle`。两次 stop 之后 `stopping` 里只有那一个
+        // worker，收割不上就是挂死而不是假红。
+        let budget = Duration::from_secs(30);
+        let started = Instant::now();
         while rec.reap_stopping().is_none() {
+            assert!(
+                started.elapsed() < budget,
+                "录制 worker 应在 {budget:?} 内被收割，实际等了 {:?}，最后观测 is_stopping={}",
+                started.elapsed(),
+                rec.is_stopping(),
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
 
@@ -1038,7 +1104,16 @@ mod tests {
         assert!(rec.is_running());
 
         rec.stop();
+        // 预算与理由见 `start_stop_lifecycle`。
+        let budget = Duration::from_secs(30);
+        let started = Instant::now();
         while rec.reap_stopping().is_none() {
+            assert!(
+                started.elapsed() < budget,
+                "录制 worker 应在 {budget:?} 内被收割，实际等了 {:?}，最后观测 is_stopping={}",
+                started.elapsed(),
+                rec.is_stopping(),
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(
@@ -1237,11 +1312,18 @@ mod tests {
             "装配前提：Stop 之后 `stats.stopping` 置起、`running` 仍等 worker 尾部去清，got {stopping:?}"
         );
 
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // 原先这里的 5s 与本文件其余六处同源，而实测同一条等待在 churn×6 整包里最坏
+        // 已到 3.34s —— 一次通过的运行就能吃掉 2/3 预算，所以一起提到 30s
+        // （推导见 `start_stop_lifecycle`）。本条断言的是收割之后的渲染位，
+        // 上界抬高不改变任何通过路径上的行为。
+        let budget = Duration::from_secs(30);
+        let started = Instant::now();
         while rec.reap_stopping().is_none() {
             assert!(
-                Instant::now() < deadline,
-                "timed out waiting for recorder to stop"
+                started.elapsed() < budget,
+                "录制 worker 应在 {budget:?} 内被收割，实际等了 {:?}，最后观测 is_stopping={}",
+                started.elapsed(),
+                rec.is_stopping(),
             );
             std::thread::sleep(Duration::from_millis(10));
         }

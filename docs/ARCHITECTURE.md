@@ -384,9 +384,11 @@ python target/r36-load.py --runs 2 --load 4 --hog churn --full \
 > cargo 换一次依赖就换一次测试二进制的哈希名：拿旧哈希跑出来的「0 红」是自欺欺人。脚本按 mtime 取最新
 > 并把文件名打在第一行，跑之前先核一眼。
 
-**全仓 `thread::sleep` 55 处的三桶分类**（`grep -rn "thread::sleep" crates/ --include=*.rs`；
-`crates/app/src/runtime/timing.rs:30` 是注释提及，真正的调用 **54 处**，第 37 轮把 `settle` 的一处
-定长睡眠换成 `settle_until` 的 2ms 步长 + 一处去重收尾的短排空，净 +1）：
+**全仓 `thread::sleep` 54 处的三桶分类**（`grep -rn "thread::sleep" crates/ --include=*.rs` 命中
+54 行；`crates/app/src/runtime/timing.rs:30` 是注释提及，真正的调用 **53 处** —— 第 37 轮把 `settle`
+的一处定长睡眠换成 `settle_until` 的 2ms 步长 + 一处去重收尾的短排空，净 **+1**；第 39 轮把
+`natural_runtime_end_also_requests_cleanup` 的 50×5ms 轮数循环并进 `settle_until` 唯一那处步长，
+净 **−1**。`recorder.rs` 的 `sleep(500)` 换成同一条 10ms 轮询步长，不增不减）：
 
 *(a) 生产码 —— 不是 flake，别动*：`application/src/workbench.rs:1255` 重连退避 ·
 `transport/src/lib.rs:881` 关旧 worker 的带 deadline join · `updater/src/lib.rs:604/649/658/680`
@@ -399,7 +401,7 @@ join，超时降级 detach。**两条要盯着的**：`app/src/app/mod.rs:39` �
 
 *(b) 测试里的同类 —— 下一轮队列*（严重度按上面 churn×4 整包 2 次的实测「见红」排；第 38 轮后
 补一句：`scenario_covers_retry_cancel_and_timeout` 的红已经全部挪到下面的 #12，不再是 #1 那类
-窗口到点）：
+窗口到点；第 39 轮关掉 3 与 6，队列里现在剩 4/5/7/8/9/10/11/12 + 本轮新登记的 13）：
 
 1. ~~`extension/src/scenario.rs:398`（用例 `scenario_covers_retry_cancel_and_timeout` 里
    `scenario.timeout_ms = 500`）—— 固定墙钟预算被当成通过条件。~~ **第 38 轮已修**：正向
@@ -416,16 +418,32 @@ join，超时降级 detach。**两条要盯着的**：`app/src/app/mod.rs:39` �
    **第 37 轮已修**：换成按条件有界的 `settle_until(manager, budget, |m| …)`，7 处判据逐字取自各自主断言，
    见下方 (c)；churn×6 改前 4 条依赖 register 事件流的用例见红（8/10/5/4 每 30 轮），改后同一配方 **0/30**。
    同文件里剩下的 `natural_runtime_end_also_requests_cleanup`（下条）与 `scenario.rs` 用例仍不在本轮范围内。
-3. `recorder/src/recorder.rs:887`（`stats_updated_during_recording`）—— `sleep(500)` →
+3. ~~`recorder/src/recorder.rs:887`（`stats_updated_during_recording`）—— `sleep(500)` →
    `assert!(events_written > 0)`，**见红 1/2**（`recorder.rs:890 expected some events written, got 0`）。
-   教科书形状。
+   教科书形状。~~ **第 39 轮已修**：改成轮询 `rec.stats().events_written` 真离开 0（worker 每写一条
+   与字节数同批递增；判据逐字取自随后那条断言，`let s = rec.stats();` 与那条 `assert!` 原样留着），
+   30s 兜底、命中即返回。打点：「发布 → 首条写出」churn×4 跑整包最坏 **1.236s**、中位 52ms。
+   **按轮交替**的背靠背复测（`target/r39-ab.py`，同一批 hog 下改前/改后二进制一轮一轮换着跑，
+   机器抖动两边同摊）：整包 churn×4 改前 **2/10** → 改后 **0/10**、churn×6 **2/8 → 0/8**、
+   cpu×2 **0/10 → 0/10**；单跑本用例两侧 0/20 与 0/30（**见红必须跑整包**，与 1/2 那次的结论同）。
+   顺带：那 500ms 白等一没，`tool-recorder --lib` 空载整包 **0.52s → 0.12s**。
 4. `application/tests/headless.rs:834`（`plugin_enable_disable_transitions_state_and_rejects_unknown_ids`）——
    `for _ in 0..200 { process_plugin_lifecycle(); if 能重新启用 { break } sleep(5) }` → `assert!(reenabled)`
    红在 `:836`，**见红 1/2**。预算是**轮数**不是墙钟。
 5. `application/tests/headless.rs:1199/1240/1271`（`plugin_restart_handoff_…`）—— 同 4 的轮数预算形状，
    其中 `:1271` 那一段轮完并不断言（只是收尾），红的是前两段。
-6. `extension/src/manager.rs:1499`（`natural_runtime_end_also_requests_cleanup`）—— 50×5ms 轮数预算 +
-   事后 `assert_eq!(take_cleanup_requests(), …)`；本轮同配方未单独见红，机制与 4 相同。
+6. ~~`extension/src/manager.rs:1499`（`natural_runtime_end_also_requests_cleanup`）—— 50×5ms 轮数预算 +
+   事后 `assert_eq!(take_cleanup_requests(), …)`；本轮同配方未单独见红，机制与 4 相同。~~
+   **第 39 轮已修**（编排器在 64 个搅缓存 hog 下亲目击红：`manager.rs:1505 left: [] right:
+   ["panel.finished"]`）。复用同文件的 `settle_until` 而不是再写一个 helper：给它加一个 **pump
+   闭包参数**，由调用点说明「推进这条条件的是哪个入口」—— 这里 `reap_finished`，另 7 处仍
+   `process_pending`。**为什么不干脆两种都排**：`process_pending` 不回收运行时，把 `reap_finished`
+   并进 helper 会把 `cmd.notfound` / `cmd.late` 两处「等插件处于 Running」的判据提前踢出 Running，
+   修一处 flake 造两处假红。判据 `!cleanup_requests.is_empty()` 逐字取自随后那条 `assert_eq!`，
+   "恰好一条"没降级（判据成立时该插件已被移出 `lua_runtimes`，不再可能追加）。打点：
+   「enable → 清理请求出现」churn×4 最坏 **1.387s**（旧 250ms 预算连它的零头都不够，这就是红的机制），
+   兜底 30s ≈ 21 倍。整包按轮交替复测：cpu×2 **3/10 → 0/10**、churn×4 **3/10 → 0/10**、
+   churn×6 **1/8 → 0/8**；单跑本用例两侧 0/20 与 0/30。
 7. `lua_host/src/lib.rs:1489/1514/1541/1561/1583/1607/1630/1794` —— `thread::spawn` 里 `sleep(25)` 再发布，
    脚本侧 `ctx.bus.wait(topic, 500)` 用自己的预算接：**赌的是「刺激方一定在 475ms 内被调度到」**。
    2/2 未见红（同族里概率最低，机制一模一样）。
@@ -461,15 +479,42 @@ join，超时降级 detach。**两条要盯着的**：`app/src/app/mod.rs:39` �
     形状是把 fixture 换成**永不自行结束**的循环（`while true` + 取消后写一条终止标记），把「停了」
     变成正向期望 —— 那是重写这条用例，不是改窗口。
 
+13. `recorder/src/replay.rs:1381`（`seek_performance_with_many_events`）—— **第 39 轮在同一批 hog
+    里实测到、没动**。它不是 `sleep(N)` 形状，而是把耗时本身钉成断言：
+    `assert!(elapsed.as_millis() < 1000, "seek_with_replay took {:?} for {event_count} events — should
+    be < 1s")`，1 万个事件 seek 到 5s 位置。实测红点原文
+    `seek_with_replay took 1.1408557s for 10000 events — should be < 1s`：churn×4 跑整包**改前 6/10、
+    改后 3/10**（改后那几轮里红的全是它），churn×6 改前 2/8、改后 3/8。**"改后变少"不是修好了** ——
+    只是 recorder 整包省掉那 500ms 白等、同场竞争变轻；墙钟阈值 + 满载这对组合本身没治。
+    修法与本轮三类都不同（要么把"结果正确"当条件、耗时只记成观测值，要么按机器倍率给尺，要么明确
+    这条就是不允许在满载共享 runner 上跑），留给下一轮判这条性能钉要不要留。
+
 *(c) 有意节奏 / 已经是「真条件 + deadline + 大声失败」，别动*：
 `application/tests/headless.rs:165`（就是 `tick_until` 本体的步长，本轮两条改用它是直接受益者）、
 `:637`（回放推进的 deadline 轮询，预算用尽后仍有 `assert_eq!(published, 20)` 兜着）、
 `:794`（5s deadline + `assert!(script_started, …)`）· `extension/src/manager.rs:954`（本轮新写的 2ms 步长，
 等的是运行时收尾）· `extension/src/manager.rs` 的 `settle_until`（第 37 轮把 7 处固定 500ms 的 `settle`
 收成的条件有界等待：2ms 步长、墙钟 deadline、判据逐字取自各自主断言，等不到带 `elapsed()` + 最后观测红掉；
-形状照搬 `headless.rs:151` 的 `tick_until`）· `recorder/src/recorder.rs:791/906/979/1246`（deadline 里带 `assert!`，红得响亮）·
-`recorder/src/recorder.rs:826/856/936/1042`（`while reap_stopping().is_none() { sleep(10) }` 收尾等待：
-**没有 deadline，坏了是挂死而不是假红** —— 将来要动是加 deadline，不是缩短）·
+形状照搬 `headless.rs:151` 的 `tick_until`；**第 39 轮给它加了一个 pump 闭包参数**
+（`impl FnMut(&mut PluginManager)`，由调用点说明「推进这个条件的是哪个入口」：另 7 处 `process_pending`、
+`natural_runtime_end_also_requests_cleanup` 那处 `reap_finished`）—— 变异探针两侧都做过：pump 传错
+就是 30.00s 红并打印最后观测，不存在"反正都能过"）·
+`recorder/src/recorder.rs` 的**七处收割等待**（按符号找：`while rec.reap_stopping().is_none()` 与
+`start_stop_lifecycle` 里那个 `loop { if let Some(r) = rec.reap_stopping() … }`；**别按行号**，本文件
+测试模块一年内漂了三次。原记的 `:791/:906/:1246` 三处带 5s、`:826/:856/:936/:1042` 四处**完全无上界**，
+都挂在本桶里"别动"。第 39 轮读明白了：`reap_stopping()` 返回 `None` 有两条结构不同的路 ——
+`let s = self.stopping.take()?`（压根没人可收割）与 `!join.is_finished()`（线程还没退），那四处
+`while … is_none()` 把两条都读成"再转一圈"，所以**坏了是挂死而不是假红**；也没有契约保证那条 worker
+必退（它走完 `stop` 要等一轮 `recv_timeout(100ms)`，之后还要 flush + 写 `.summary.json`，那是磁盘与
+调度的性质）—— 照第 38 轮留的话办："加 deadline，不是缩短"。七处统一成同一形状：`budget = 30s` +
+环内 `assert!(started.elapsed() < budget, … is_stopping={})`。**30s 是量出来的**：临时把上界抬到 60s
+打点、跑整包记「`stop()` → 收割到手」的墙钟，churn×4 最坏 **1.435s**、churn×6 最坏 **3.337s**、
+中位 100~150ms（就是 `recv_timeout(100ms)` 那道结构性下限）—— 原来那 5s 只剩 1.5 倍余量，
+**一次通过的运行就能吃掉三分之二**，所以 5s 那三处也一并抬到 30s：抬高上界不改变任何通过路径上的
+断言，只把挂死换成红。变异证词：把 `reap_stopping` 的判活改成恒假，`pause_resume`、`stop_is_idempotent`、
+`start_stop_lifecycle` 各在 **30.0s** 红并带 `is_stopping=true`（前两处原本是永远挂、第三处原本 5s 红）。
+同文件的 `wait_thread_finished`（原 `:979`，10s deadline + 环内 `assert!`）**没动**：它等的是一条除了
+panic / 置位什么都不做的手工线程，与磁盘和调度无关）·
 `transport/src/network.rs:323/357`（deadline 轮询 + `assert!(closed, …)`）· `:336`（Windows 释放端口的
 **物理**宽限，不是赌线程）· `transport/src/lib.rs:1891` `wait_thread_finished`（注释已写明「时限只是兜底、
 不是通过条件」—— 这一族的样板）· `lua_host/src/lib.rs:2206/2212`（5s deadline 循环，超时消息带已收日志）·

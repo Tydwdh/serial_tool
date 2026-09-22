@@ -6,6 +6,75 @@
 
 ### 调整
 
+- **extension 最后那处「轮数预算」与 recorder 的 `sleep(500)` 各换成等真条件的有界等待；recorder 的
+  7 处收割等待一起从无界/5s 提到实测兜底 30s**（本轮**零用户可见变化**：只动 `crates/extension/src/manager.rs`
+  与 `crates/recorder/src/recorder.rs` 两个 `#[cfg(test)] mod tests`，生产代码逐字节未动 —— 两文件
+  `#[cfg(test)]` 以上的整段前缀（**34 324 B** / **27 658 B**）分别与 `HEAD`（`ab213a2`）逐字节相同，
+  脚本比对而非人眼；`git status` 只有这两个 .rs + CHANGELOG.md + ARCHITECTURE.md 四个文件；四道门
+  fmt / native clippy `-D warnings` / wasm clippy / test 全 **EXIT=0**，**720 passed / 0 failed / 7 ignored**、
+  32 条 `test result:` 行，用例数 **0 增减**）。
+  **（1）`manager::tests::natural_runtime_end_also_requests_cleanup`**（队列第 6 项）原来是
+  `for _ in 0..50 { sleep(5ms); reap_finished(); if 非空 { break } }` —— **轮数**用完就红在下面那条
+  `assert_eq!(take_cleanup_requests(), vec![…])`，机器满载时它只是"更早放弃"。改法不新增 helper：
+  第 37 轮的 `settle_until` 加一个 **pump 闭包参数**（"推进这个条件的是哪个入口"由调用点说明），
+  这里传 `reap_finished`、判据 `!cleanup_requests.is_empty()` 逐字取自随后那条断言；其余 7 处照常传
+  `process_pending`。**为什么必须按参数给**：`process_pending` 不回收运行时（`update_runtime_states`
+  是唯一的推进点），把它并进 helper 里会让 `cmd.notfound` / `cmd.late` 那两处"等插件处于 Running"
+  的判据被提前踢出 Running —— 修一处 flake 造两处假红。**没降级成"至少一条"**：判据成立时运行时已被
+  收割、该插件已从 `lua_runtimes` 移走，之后不会再追加条目，所以"恰好这一条"照旧。
+  **（2）`recorder::tests::stats_updated_during_recording`**（队列第 3 项，教科书形状）：
+  `sleep(500)` → `assert!(events_written > 0)` 换成轮询 `rec.stats().events_written` 真离开 0
+  （worker 每写一条与字节数同批递增），原有的 `let s = rec.stats();` + 那条 `assert!` **逐字保留**，
+  等不到带 budget / elapsed / `running` / `last_error` 大声红。
+  **（3）recorder 的 7 处收割等待**：其中 4 处（原 `:826/:856/:936/:1042`）确实**无上界** ——
+  `reap_stopping()` 返回 `None` 有两条结构不同的路（`stopping` 里没人 / 线程还没退），那个 `while`
+  把两条都读成"再转一圈"，所以既可能永远自旋，也没有任何东西把它转成红。判据没有可依赖的契约：
+  worker 走完 `stop` 要等一轮 `recv_timeout(100ms)`，之后还要 flush + 写 `.summary.json`，那是**磁盘
+  与调度**的性质而不是不变量 —— 结论是"加 deadline"（第 38 轮留的话照办）。另外 3 处本来带 5s，
+  实测同一条等待**通过**时最坏已花 **3.34s**（churn×6），5s 只剩 1.5 倍余量，是同一族的假红候选，
+  一并提到 30s：**抬高上界不改变任何通过路径上的断言**，只把"挂死"换成"红"。
+  **预算是量出来的，不是抄的**：临时把 8 处等待的上界抬到 60s 并打点，跑整包 libtest（16 线程并行）
+  记「等待开始 → 条件成立」的墙钟 —— 收割等待 churn×4 最坏 **1.435s**、churn×6 最坏 **3.337s**
+  （中位 100~150ms，就是 `recv_timeout(100ms)` 那道结构性下限）；`events_written` 首次离开 0
+  churn×4 最坏 **1.236s**；`natural_runtime_end` 的清理请求 churn×4 最坏 **1.387s**（旧 250ms 预算
+  连最坏的零头都不够，这就是它红的机制）。取 **30s** = 实测最坏的 9~21 倍，与 `manager.rs` 第 36/37 轮
+  那 8 处同数；正向等待命中即返回，**不白等**（recorder 空载整包 **0.52s → 0.12s**，extension 不变
+  0.28s → 0.28s，各 5 轮同场交替）。
+  **同机背靠背、而且按轮交替**（`target/r39-ab.py`：同一批 hog 下 before / after 二进制一轮一轮换着跑，
+  机器抖动两边同摊；`N/M` = M 轮里目标用例红 N 轮；单跑一条用例两侧都不红，**见红必须跑整包**）：
+  `natural_runtime_end` 整包 cpu×2 **3/10 → 0/10**、churn×4 **3/10 → 0/10**、churn×6 **1/8 → 0/8**；
+  `stats_updated_during_recording` 整包 cpu×2 **0/10 → 0/10**、churn×4 **2/10 → 0/10**、
+  churn×6 **2/8 → 0/8**。**两侧都另测了单跑本用例**（`--filter` 精确一条，脚本会核对"恰好命中 1 条"）：
+  `natural_runtime_end` 两侧 cpu×2 **0/20** · churn×4 **0/30**；`stats_updated_during_recording`
+  两侧同样 **0/20** · **0/30**，而单跑均值 **1.00s → 0.53s** 就是那 500ms 白等的直接体现 ——
+  两句合起来仍是第 36/38 轮的结论：**赌时长的失败面只在 16 线程并行的整包里暴露**。
+  改前红点原文与编排器目击的一致：`manager.rs:1505 assertion left == right
+  failed: left: [] right: ["panel.finished"]`、`recorder.rs:890 expected some events written, got 0`。
+  **变异探针 10 个，全部还原并逐字节核过还原**（脚本会在还原后再建一次二进制并 `snapshot` 比对，
+  不一致就点名）：extension 侧 ① 生产删掉 `update_runtime_states` 的 `request_cleanup` →
+  **30.0s 到点**红在等待上（`运行时自然收尾应在 30s 内产生清理请求，实际等了 30.0020725s，最后观测 []`）；
+  ② 清理请求记到别的插件名下 → 等待通过但 `assert_eq` 红 `left: ["other.plugin"] / right: ["panel.finished"]`
+  （"恰好这一条"仍在）；
+  ③ 多投一条 → 红 `left: ["panel.finished", "extra.plugin"]`（**没有**被"至少一条"悄悄放过）；
+  ④ 夹具换成常驻 `ctx.bus.on`（运行时永不收尾）→ 30.00s 大声红而不是挂死；⑤ 新站点 pump 换回
+  `process_pending` → 30.00s 红，证明 pump 这个参数是**受力构件**；⑥ 反过来把既有 `cmd.tracker` 那处的
+  pump 换成 `reap_finished` → 该处 30.00s 红并打印 `最后观测 Some([])`（两侧都受力：pump 传错就是
+  等不到，不存在"反正都能过"）。
+  recorder 侧 ⑦ 录制判定恒假（worker 一条都不写）→ **30.0s** 红
+  `录制 worker 应在 30s 内写出首条事件，实际等了 30.0032908s，最后观测 events_written=0 running=true
+  last_error=None`；⑧⑨⑩ 把 `reap_stopping` 的判活改成恒假 → 原无界的 `pause_resume`、原无界的
+  `stop_is_idempotent`、原带 5s 的 `start_stop_lifecycle` 各在 **30.0s** 红并带 `is_stopping=true`
+  （同一条 mutation 打在三个点上，逐个证明"挂死"确实被换成了"红"，且三处的消息形状一致）。
+  **本轮明确没做的两件事**：① `scenario.rs` 第 8 步 `ExpectNoTx` 的语义问题（队列第 12 项）按第 38 轮
+  的记录继续等用户拍板 —— 同一批 A/B 里它改前 5/10、改后 4/10 红，量级没变，本轮没有为它写 workaround；
+  ② 顺手实测到 `replay::tests::seek_performance_with_many_events`（`crates/recorder/src/replay.rs:1381`
+  把"1 万条事件 seek < 1s"钉成定长墙钟断言）在同一片负载里改前 **6/10**、改后 **3/10** 红 —— 它**不是**
+  `sleep(N)` 形状而是"拿墙钟当断言"，修法（等条件 + 只把耗时记成观测值，或按机器倍率放宽）与本轮
+  三类都不同，如实登记进 `docs/ARCHITECTURE.md` 的 (b) 桶交给下一轮，不顺手改。
+  **主代理独立复测**：两文件 `#[cfg(test)]` 以上的生产前缀另以脚本逐字节比对 `HEAD` 相同；自带 64 个
+  搅缓存 hog、整包 libtest 各 8 轮的样本里**本轮改过的用例一条都没红** —— extension 3 轮红全在
+  `scenario` 那条第 8 步（上面①），recorder 2 轮红全在 `replay.rs:1381` 的墙钟性能断言（上面②）；
+  四道门重跑仍 0 / 0 / 0 / 0，**720 passed / 0 failed / 7 ignored**。
 - **`scenario_covers_retry_cancel_and_timeout` 的 500ms 固定窗口换成实测兜底 5000ms（顺带量出这条用例
   真正的头号红因在反向步骤，本轮如实记录、不粉饰）**（本轮**零用户可见变化**：只改
   `crates/extension/src/scenario.rs` 的 `#[cfg(test)] mod tests`，生产代码逐字节未动 —— `cmp` 过

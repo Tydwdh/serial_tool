@@ -1226,17 +1226,24 @@ ctx.log.info("registered")
         // 「missing 为空」的合取；少注册任一条就等不到，超时带最后观测红掉。
         let budget = std::time::Duration::from_secs(30);
         let started = std::time::Instant::now();
-        let settled = settle_until(&mut manager, budget, |m| {
-            m.summaries()
-                .iter()
-                .find(|s| s.id == "cmd.tracker")
-                .is_some_and(|s| {
-                    s.registered_commands
-                        .contains(&"cmd.tracker.run".to_owned())
-                        && s.registered_commands
-                            .contains(&"cmd.tracker.stop".to_owned())
-                })
-        });
+        let settled = settle_until(
+            &mut manager,
+            budget,
+            |m| {
+                m.process_pending();
+            },
+            |m| {
+                m.summaries()
+                    .iter()
+                    .find(|s| s.id == "cmd.tracker")
+                    .is_some_and(|s| {
+                        s.registered_commands
+                            .contains(&"cmd.tracker.run".to_owned())
+                            && s.registered_commands
+                                .contains(&"cmd.tracker.stop".to_owned())
+                    })
+            },
+        );
         assert!(
             settled,
             "registered_commands 应在 {budget:?} 内同时含 cmd.tracker.run 与 cmd.tracker.stop，\
@@ -1304,12 +1311,19 @@ ctx.log.info("registered")
         // 运行时，状态不会中途离开 Running）—— 判据就是随后那条断言本身，一成立即返回。
         let budget = std::time::Duration::from_secs(30);
         let started = std::time::Instant::now();
-        let settled = settle_until(&mut manager, budget, |m| {
-            m.summaries()
-                .iter()
-                .find(|s| s.id == "cmd.missing")
-                .is_some_and(|s| s.missing_commands.contains(&"cmd.missing.apply".to_owned()))
-        });
+        let settled = settle_until(
+            &mut manager,
+            budget,
+            |m| {
+                m.process_pending();
+            },
+            |m| {
+                m.summaries()
+                    .iter()
+                    .find(|s| s.id == "cmd.missing")
+                    .is_some_and(|s| s.missing_commands.contains(&"cmd.missing.apply".to_owned()))
+            },
+        );
         assert!(
             settled,
             "missing_commands 应在 {budget:?} 内含 cmd.missing.apply，实际等了 {:?}，最后观测 {:?}",
@@ -1362,15 +1376,22 @@ ctx.log.info("registered dynamic")
         // 判据就是随后那条断言本身。事件没到就等不到，超时红。
         let budget = std::time::Duration::from_secs(30);
         let started = std::time::Instant::now();
-        let settled = settle_until(&mut manager, budget, |m| {
-            m.summaries()
-                .iter()
-                .find(|s| s.id == "cmd.dynamic")
-                .is_some_and(|s| {
-                    s.undeclared_commands
-                        .contains(&"cmd.dynamic.secret".to_owned())
-                })
-        });
+        let settled = settle_until(
+            &mut manager,
+            budget,
+            |m| {
+                m.process_pending();
+            },
+            |m| {
+                m.summaries()
+                    .iter()
+                    .find(|s| s.id == "cmd.dynamic")
+                    .is_some_and(|s| {
+                        s.undeclared_commands
+                            .contains(&"cmd.dynamic.secret".to_owned())
+                    })
+            },
+        );
         assert!(
             settled,
             "undeclared_commands 应在 {budget:?} 内含 cmd.dynamic.secret，实际等了 {:?}，最后观测 {:?}",
@@ -1428,9 +1449,14 @@ ctx.log.info("registered")
         // 不依赖后台线程，所以无需再等。
         let budget = std::time::Duration::from_secs(30);
         let started = std::time::Instant::now();
-        let settled = settle_until(&mut manager, budget, |m| {
-            m.registered_commands.contains_key("cmd.cleanup")
-        });
+        let settled = settle_until(
+            &mut manager,
+            budget,
+            |m| {
+                m.process_pending();
+            },
+            |m| m.registered_commands.contains_key("cmd.cleanup"),
+        );
         assert!(
             settled,
             "registered_commands 应在 {budget:?} 内出现 cmd.cleanup，实际等了 {:?}，最后观测 {:?}",
@@ -1495,13 +1521,27 @@ ctx.log.info("registered")
         let mut manager = PluginManager::new(bus.clone(), TransportManager::new(bus));
         manager.discover_roots([root.clone()]).unwrap();
         manager.enable("panel.finished").unwrap();
-        for _ in 0..50 {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            manager.reap_finished();
-            if !manager.cleanup_requests.is_empty() {
-                break;
-            }
-        }
+
+        // 等真条件而不是轮数：原先的 50×5ms 在满载时只是"更早放弃"，轮数用完就红在
+        // 下面那条 assert（churn×4 跑整包十轮里红 3~4 轮，`left: [] right: ["panel.finished"]`）。
+        // 判据直接取自随后那条断言：cleanup_requests 非空 ⟺ 运行时已被收割并 request_cleanup；
+        // 收割同时把该插件从 lua_runtimes 移走，之后不会再追加条目，所以"恰好这一条"
+        // 没有被降级成"至少一条"。pump 传 reap_finished 而不是 process_pending：
+        // 这条状态只在 update_runtime_states 里推进，排事件排不出清理请求。
+        let budget = std::time::Duration::from_secs(30);
+        let started = std::time::Instant::now();
+        let settled = settle_until(
+            &mut manager,
+            budget,
+            |m| m.reap_finished(),
+            |m| !m.cleanup_requests.is_empty(),
+        );
+        assert!(
+            settled,
+            "运行时自然收尾应在 {budget:?} 内产生清理请求，实际等了 {:?}，最后观测 {:?}",
+            started.elapsed(),
+            manager.cleanup_requests,
+        );
         assert_eq!(manager.take_cleanup_requests(), vec!["panel.finished"]);
         let _ = fs::remove_dir_all(root);
     }
@@ -1538,9 +1578,14 @@ ctx.log.info("registered")
         // 之外的状态（那时诊断根本不该出现，红得对）。
         let budget = std::time::Duration::from_secs(30);
         let started = std::time::Instant::now();
-        let settled = settle_until(&mut manager, budget, |m| {
-            matches!(m.plugin_state("cmd.notfound"), Some(PluginState::Running))
-        });
+        let settled = settle_until(
+            &mut manager,
+            budget,
+            |m| {
+                m.process_pending();
+            },
+            |m| matches!(m.plugin_state("cmd.notfound"), Some(PluginState::Running)),
+        );
         assert!(
             settled,
             "cmd.notfound 应在 {budget:?} 内处于 Running（手动 process_event 才会诊断），\
@@ -1613,16 +1658,23 @@ ctx.log.info("registered twice")
         // 去重正常恒为 1，去重坏掉恒为 2 —— 精确性完整保留。
         let budget = std::time::Duration::from_secs(30);
         let started = std::time::Instant::now();
-        let settled = settle_until(&mut manager, budget, |m| {
-            m.summaries()
-                .iter()
-                .find(|s| s.id == "cmd.dedup")
-                .is_some_and(|s| {
-                    s.registered_commands
-                        .iter()
-                        .any(|c| c.as_str() == "cmd.dedup.run")
-                })
-        });
+        let settled = settle_until(
+            &mut manager,
+            budget,
+            |m| {
+                m.process_pending();
+            },
+            |m| {
+                m.summaries()
+                    .iter()
+                    .find(|s| s.id == "cmd.dedup")
+                    .is_some_and(|s| {
+                        s.registered_commands
+                            .iter()
+                            .any(|c| c.as_str() == "cmd.dedup.run")
+                    })
+            },
+        );
         assert!(
             settled,
             "registered_commands 应在 {budget:?} 内含 cmd.dedup.run，实际等了 {:?}，最后观测 {:?}",
@@ -1685,9 +1737,14 @@ ctx.log.info("started")
         // 同形 —— 反应不来自后台事件流，Running 一到就等够，不再白付 500ms。
         let budget = std::time::Duration::from_secs(30);
         let started = std::time::Instant::now();
-        let settled = settle_until(&mut manager, budget, |m| {
-            matches!(m.plugin_state("cmd.late"), Some(PluginState::Running))
-        });
+        let settled = settle_until(
+            &mut manager,
+            budget,
+            |m| {
+                m.process_pending();
+            },
+            |m| matches!(m.plugin_state("cmd.late"), Some(PluginState::Running)),
+        );
         assert!(
             settled,
             "cmd.late 应在 {budget:?} 内处于 Running（手动 process_event 才会诊断/清除），\
@@ -1744,20 +1801,26 @@ ctx.log.info("started")
         PluginManager::new(bus.clone(), TransportManager::new(bus))
     }
 
-    /// 反复 `process_pending` 直到 `done` 成立或墙钟预算耗尽，返回 `done` 是否成立。
+    /// 反复 `pump` 直到 `done` 成立或墙钟预算耗尽，返回 `done` 是否成立。
     /// 取代原先无条件睡满 20×25ms 的 `settle`：每处调用把「随后要断言的那件事」本身当
     /// 判据，条件一成立立刻返回（不再每条白付 500ms），等不到由调用方带实际耗时与最后
     /// 观测值大声红掉，既不静默通过也不挂死。形状照搬本仓已有的
     /// `crates/application/tests/headless.rs:151` 的 `tick_until`：墙钟 deadline + `Fn` 判据，
     /// 不新增抽象、不把预算写成轮数。步长 2ms 同 `manager.rs` 第 36 轮那条与 `tick_until`。
+    ///
+    /// `pump` 由调用点说明「推进这个条件的是哪个入口」：既有 7 处等的是事件流，排的是
+    /// `process_pending`；等运行时自然收尾那处排的是 `reap_finished`（状态只在
+    /// `update_runtime_states` 里推进，排事件排不出清理请求）。把两者一并塞进 helper
+    /// 会把「等插件处于 Running」那几处提前踢出 Running，变成假红 —— 所以按参数给。
     fn settle_until(
         manager: &mut PluginManager,
         budget: std::time::Duration,
+        mut pump: impl FnMut(&mut PluginManager),
         mut done: impl FnMut(&PluginManager) -> bool,
     ) -> bool {
         let deadline = std::time::Instant::now() + budget;
         loop {
-            manager.process_pending();
+            pump(manager);
             if done(manager) {
                 return true;
             }
