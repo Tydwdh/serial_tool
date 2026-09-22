@@ -6,6 +6,35 @@
 
 ### 调整
 
+- **修掉「sleep 完就断言异步结果」这一类测试随机红里的两条**（本轮**零用户可见变化**：只换两个用例
+  的等待方式，生产代码一个字节都没动 —— `git status` 只有 `crates/extension/src/manager.rs` 与
+  `crates/application/tests/headless.rs` 两个文件；四道门 fmt / clippy / wasm clippy / test 全
+  **EXIT=0**，**720 passed / 0 failed / 7 ignored**、32 条 `test result:` 行，与 `a5e0eae` 基线逐位相同，
+  用例数 **0 增减**）。**失效模式先量出来再改**（round 16 立的规矩）：负载配方 = 起 `cores×N` 个 python
+  忙等进程（本机 16 核），再把两个测试二进制各跑 N 次记录红绿。改前：
+  `headless_workbench_can_dispatch_and_query` 红在 `headless.rs:58`（`assert!(… connect_serial … Failed)`）
+  **12/20**（32 个纯 CPU hog）· **27/30**（64 个 CPU+缓存 hog）；
+  `manager::tests::discovers_manifest_and_enables_lua_plugin` 红在 `manager.rs:947`
+  （`assert_eq!(rx.drain().len(), 1)` → `left: 0, right: 1`）**7/30**（64 个 CPU+缓存 hog）——
+  **纯 CPU hog 下它 0/90 不红**，只有把缓存一起搅浑才复现，两处 panic 原文与编排器目击的一致。
+  改法不引新抽象：headless 复用本文件已有的 `tick_until(…, timeout: Duration, |wb| …)`（`:151`，另有
+  30 处调用），把「tick 满 100 轮」换成「等到 `connect_serial` 真的落 `Failed`」；extension 等到
+  `reap_finished()` 之后 `plugin_state` 离开 `Running` —— Lua 线程跑完脚本才置 `alive=false`，收割时
+  顺带 `join` 那条线程，`join` 就是「脚本里的 publish 已全部可见」的边界。**两处都保留真上界 30s、
+  条件一成立立即返回、等不到就带着 `elapsed()` 和最后一轮观测红掉**，不挂死也不静默过。
+  **「恰好 1 条」没有被悄悄放宽成「至少 1 条」**：等的是运行时收尾，收尾之后一次性 `rx.drain().len()`
+  拿到的就是脚本发布过的全部。**变异探针五条，全部还原并 `cmp` 逐字节核过**：① `ctx.bus.publish`
+  发两遍 → `manager.rs:968 left: 2 right: 1` 红；② 脚本根本不执行（`lua.load("")`）→ `left: 0 right: 1` 红；
+  ③ 运行时永远不收尾（脚本挂一个 `ctx.bus.on`）→ **30.00s 到点**红在等待断言上（消息含耗时与
+  `Some(Running)`），证明的是「响不出来就大声失败」而不是赌时长；④ 连接错误被吞成成功 → headless 红并打印
+  `[("refresh_ports", Completed), ("connect_serial", Completed)]`；⑤ 任务 kind 改成 `open_serial` → 红并打印
+  `[("refresh_ports", Completed), ("open_serial", Failed)]`。**同配方（同样的 hog、同样的 N、二进制重建）复测**：
+  churn×4 30 轮 **0/30 + 0/30**，cpu×2 20 轮 **0/20 + 0/20**，再加一档 churn×6（96 个 hog）20 轮
+  **0/20 + 0/20**。其余 `thread::sleep` 站点（全仓 **54 处**，其中 1 处是 `timing.rs:30` 的注释提及）
+  按「生产码 / 同类队列 / 有意节奏」三桶记进 `docs/ARCHITECTURE.md`「验证」一节，配方也写在那里；
+  下一轮的排队者已用同一配方实测见红：`scenario::tests::scenario_covers_retry_cancel_and_timeout`
+  （整包 2/2 红）、三条依赖 `settle()` 的 manager 用例、`recorder::tests::stats_updated_during_recording`
+  （1/2 红）、`plugin_enable_disable_transitions_state_and_rejects_unknown_ids`（1/2 红）。
 - **删掉已被游标路径取代、却仍各存一份的整座快照导出域**（`tool-panels` 净 **−306 行**：
   `terminal.rs` 3593 → 3441、`log.rs` 2400 → 2281、`manager.rs` 1683 → 1663（步骤 B）、
   `table.rs` 1340 → 1325（级联）、`lib.rs` 只改两条 `pub use`；四道门

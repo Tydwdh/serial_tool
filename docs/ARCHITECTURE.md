@@ -340,6 +340,106 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
 # 全仓 grep：平台相关 cfg 站点只出现在 app / transport / updater，且没有任何 cfg(unix) 代码
 ```
 
+### 测试随机红的一类：`sleep(N)` 之后断言「后台线程已经赶到」
+
+**形状**：`enable` / `dispatch` / `thread::spawn` → `thread::sleep(N ms)` → 断言后台线程的效果此刻已经可见。
+N 是「本机通常够快」的猜测，不是任何契约：机器被别的 cargo 作业占满时先红的是断言，看起来像产品 bug。
+第 36 轮把这条**先量出来再改**（本机 16 核，配方见下），改前改后同配方复跑：
+
+| 用例（改前的红点） | cpu×2 · churn×4 | 改后（cpu×2 · churn×4 · churn×6） |
+| --- | --- | --- |
+| `headless_workbench_can_dispatch_and_query` @ `crates/application/tests/headless.rs:58` | **12/20** · **27/30** | **0/20** · **0/30** · **0/20** |
+| `manager::tests::discovers_manifest_and_enables_lua_plugin` @ `crates/extension/src/manager.rs:947` | 0/20 · **7/30** | **0/20** · **0/30** · **0/20** |
+
+`cpu` = 纯忙等 hog，`churn` = 每轮再分配 1 MiB 的忙等 hog，数量是 `cores × 倍数`；`N/M` = M 轮里红 N 轮。
+两条红点原文都与编排器目击的一致（`assertion left == right failed: left: 0 right: 1` /
+`assertion failed: wb.task_snapshots().iter().any(...)`）。**第二条在纯 CPU hog 下 20/30/40 三轮共 90 次都不红**，
+只有把缓存一起搅浑才复现 —— 说明「赌时长」的失败面比「CPU 慢」更宽，只按纯 CPU 配方下结论会漏。
+
+**规矩**（这两条用的判据，下一轮照抄）：
+
+- 等**真条件**，不等时长：条件必须是「被断言的那件事本身」（任务落到 `Failed`、插件运行时被收割），
+  而不是「轮数用完」或「睡完了」。
+- 上界必须是**墙钟 deadline**，并且**等不到要大声失败**：消息里带 `Instant::now().elapsed()` 与最后一轮
+  观测到的值。既不静默通过，也不无限挂。
+- 断言异步**数量**时「恰好 N」不许降级成「至少 N」：先等生产者**已经收尾**（extension 那把钥匙是
+  `reap_finished()` → 线程 `join`，`join` 本身就是「脚本里所有 `publish` 都可见」的边界），收尾之后
+  一次性 `drain()` 再计数。轮询到第 1 条就停会悄悄放过重复发布。
+- **不新增共享 helper**：headless 复用本文件已有的 `tick_until`（`crates/application/tests/headless.rs:151`，
+  另有 30 处调用），extension 就地写 `while cond && elapsed < budget`（同仓 `headless.rs:637/794` 已是这形状）。
+- 改完必须**证明它还能红**：两条用例共 5 个变异（重复发布 / 脚本根本不执行 / 运行时永不收尾 /
+  连接错误被吞成成功 / 任务 kind 改名），全部还原并 `cmp` 逐字节核过 —— 消息见 CHANGELOG 同轮条目。
+
+**复现配方**（脚本只在 `target/` 下，不入库、不加 dev-dependency；`--full` 跑整包并列出红的用例名）：
+
+```bash
+cargo +1.92.0 test -p tool-extension --lib -p tool-application --test headless --no-run
+# 先 --runs 1 --load 0 确认名字过滤只命中 1 条用例（`--exact` 配部分名会跑 0 条还 exit 0）
+python target/r36-load.py --runs 30 --load 4 --hog churn --phase before
+python target/r36-load.py --runs 20 --load 2 --hog cpu   --targets extension,headless
+python target/r36-load.py --runs 2 --load 4 --hog churn --full \
+       --targets extension,lua_host,recorder,application,headless
+```
+
+> cargo 换一次依赖就换一次测试二进制的哈希名：拿旧哈希跑出来的「0 红」是自欺欺人。脚本按 mtime 取最新
+> 并把文件名打在第一行，跑之前先核一眼。
+
+**全仓 `thread::sleep` 54 处的三桶分类**（`grep -rn "thread::sleep" crates/ --include=*.rs`；
+`crates/app/src/runtime/timing.rs:30` 是注释提及，真正的调用 **53 处**）：
+
+*(a) 生产码 —— 不是 flake，别动*：`application/src/workbench.rs:1255` 重连退避 ·
+`transport/src/lib.rs:881` 关旧 worker 的带 deadline join · `updater/src/lib.rs:604/649/658/680`
+helper 启动重试 / 等主程序退出的宽限 / 替换重试 · `app/src/runtime/timing.rs:60` 帧节拍
+`wait_until_deadline`（睡眠就是它要实现的机制本身）· `app/src/app/mod.rs:39` Drop 里 2s deadline 的
+join，超时降级 detach。**两条要盯着的**：`app/src/app/mod.rs:39` 目前没有任何断言依赖「线程真的退了」，
+一旦将来有，它就从 (a) 掉进 (b)；`extension/src/scenario.rs:204/223` 是**产品码**
+（`SerialPluginScenarioRunner`，`examples/plugin_scenario.rs` 在用），`pump(窗口)` 是场景 DSL
+「等 N 毫秒」这一步的语义本身，不能改成「等条件」。
+
+*(b) 测试里的同类 —— 下一轮队列*（严重度按上面 churn×4 整包 2 次的实测「见红」排）：
+
+1. `extension/src/scenario.rs:370`（用例 `scenario_covers_retry_cancel_and_timeout`）—— **2/2 见红**，
+   `Some("step 2: 未收到预期 TX: PING\n")`。根因不在那两处 sleep，而在 `scenario.timeout_ms = 500` 这个
+   **固定墙钟预算被当成通过条件**：插件定时器要在 500ms 内被调度到。
+2. `extension/src/manager.rs:1599` `settle()` —— **无条件**睡满 20×25ms 再 `process_pending()`，7 处调用
+   共用；**见红 3 条**：`tracks_registered_commands_after_enable`（`manager.rs:1226`
+   `registered_commands should contain cmd.tracker.run, got []`）、`command_dedup_on_repeated_register`、
+   `clears_registered_commands_on_disable`。同一失效面，另外每条白付 500ms。
+3. `recorder/src/recorder.rs:887`（`stats_updated_during_recording`）—— `sleep(500)` →
+   `assert!(events_written > 0)`，**见红 1/2**（`recorder.rs:890 expected some events written, got 0`）。
+   教科书形状。
+4. `application/tests/headless.rs:834`（`plugin_enable_disable_transitions_state_and_rejects_unknown_ids`）——
+   `for _ in 0..200 { process_plugin_lifecycle(); if 能重新启用 { break } sleep(5) }` → `assert!(reenabled)`
+   红在 `:836`，**见红 1/2**。预算是**轮数**不是墙钟。
+5. `application/tests/headless.rs:1199/1240/1271`（`plugin_restart_handoff_…`）—— 同 4 的轮数预算形状，
+   其中 `:1271` 那一段轮完并不断言（只是收尾），红的是前两段。
+6. `extension/src/manager.rs:1410`（`natural_runtime_end_also_requests_cleanup`）—— 50×5ms 轮数预算 +
+   事后 `assert_eq!(take_cleanup_requests(), …)`；本轮同配方未单独见红，机制与 4 相同。
+7. `lua_host/src/lib.rs:1489/1514/1541/1561/1583/1607/1630/1794` —— `thread::spawn` 里 `sleep(25)` 再发布，
+   脚本侧 `ctx.bus.wait(topic, 500)` 用自己的预算接：**赌的是「刺激方一定在 475ms 内被调度到」**。
+   2/2 未见红（同族里概率最低，机制一模一样）。
+8. `lua_host/src/lib.rs:1346/1348` —— `sleep(250)` → `inject_rx` → `wait_for_log(…)`：注入要落在插件正
+   `expect` 的窗口里，机器慢就错过。未见红。
+9. `app/src/runtime/timing.rs:182`（`wait_until_deadline_returns_early_on_cancel`）—— 另一线程 `sleep(10)`
+   置 cancel，断言 `elapsed < 500ms`：把「响应延迟」钉成断言时，负载直接吃掉余量。未见红。
+10. `application/src/task.rs:342/369/394` —— `for _ in 0..100/200 { drain_events(); if 到位 { return/break }
+    sleep(1) }`，预算用尽后 `panic!("task did not complete")`：**已经大声**，但预算仍是轮数。
+    （`:355` 是任务体里「我在干活」的模拟，不是等待。）
+11. `transport/src/lib.rs:1735` —— `sleep(50)` → `stop` → `join`，注释自己写明「主要验证不 panic」：
+    没有断言依赖这次睡眠，所以不会假红，但这条用例也没钉住任何行为 —— 属于「待加强」，不是 flake。
+
+*(c) 有意节奏 / 已经是「真条件 + deadline + 大声失败」，别动*：
+`application/tests/headless.rs:165`（就是 `tick_until` 本体的步长，本轮两条改用它是直接受益者）、
+`:637`（回放推进的 deadline 轮询，预算用尽后仍有 `assert_eq!(published, 20)` 兜着）、
+`:794`（5s deadline + `assert!(script_started, …)`）· `extension/src/manager.rs:954`（本轮新写的 2ms 步长，
+等的是运行时收尾）· `recorder/src/recorder.rs:791/906/979/1246`（deadline 里带 `assert!`，红得响亮）·
+`recorder/src/recorder.rs:826/856/936/1042`（`while reap_stopping().is_none() { sleep(10) }` 收尾等待：
+**没有 deadline，坏了是挂死而不是假红** —— 将来要动是加 deadline，不是缩短）·
+`transport/src/network.rs:323/357`（deadline 轮询 + `assert!(closed, …)`）· `:336`（Windows 释放端口的
+**物理**宽限，不是赌线程）· `transport/src/lib.rs:1891` `wait_thread_finished`（注释已写明「时限只是兜底、
+不是通过条件」—— 这一族的样板）· `lua_host/src/lib.rs:2206/2212`（5s deadline 循环，超时消息带已收日志）·
+`updater/src/lib.rs:1400`（测试桩 HTTP 服务的 accept 轮询，带 deadline）。
+
 ## 剩余工作（原「朝 todo.txt §69 全量达标」）
 
 > **依据核对提示**：本条原引用 `todo.txt §39/§69` 作为验收依据，但 `todo.txt`

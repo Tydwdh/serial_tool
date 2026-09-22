@@ -941,9 +941,30 @@ ctx.bus.publish('protocol.pid.sample', { t = 1, target = 50, actual = 43, output
 
         manager.enable("builtin.pid-tuner").unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        // 等的是真条件而不是 50ms 猜测：Lua 线程跑完脚本才把 alive 置假，
+        // `reap_finished` 收割之后状态才离开 Running，而脚本里的 publish 都发生在
+        // 那之前（收割时顺带 join 那条线程，join 就是可见性边界）。机器满载时
+        // 「sleep 完就断言」会把「还没跑到」当成 bug —— 此前在 64 个占满 CPU 的
+        // 进程下 30 次红 7 次。30s 只是给饱和 CI 留余量的**真上界**：条件一成立
+        // 立即返回，等不到就带实际耗时和最后状态红掉，既不静默通过也不挂死。
+        let started = std::time::Instant::now();
+        let budget = std::time::Duration::from_secs(30);
+        let mut state = manager.plugin_state("builtin.pid-tuner");
+        while state == Some(PluginState::Running) && started.elapsed() < budget {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            manager.reap_finished();
+            state = manager.plugin_state("builtin.pid-tuner");
+        }
+        assert!(
+            state != Some(PluginState::Running),
+            "插件运行时应在 {budget:?} 内自然收尾，实际等了 {:?}，最后状态 {state:?}",
+            started.elapsed(),
+        );
 
         assert_eq!(manager.count(), 1);
+        // 「恰好 1 条」的两个方向都保住了：运行时已经收尾 ⇒ 脚本不会再发第二条，
+        // 此刻 drain 拿到的就是它发布过的全部。所以没启动/没发布读到 0、重复发布
+        // 读到 2 都照样红，不会被「等到 1 条就停」的轮询悄悄放宽成「至少 1 条」。
         assert_eq!(rx.drain().len(), 1);
 
         let _ = fs::remove_dir_all(root);

@@ -46,20 +46,27 @@ fn headless_workbench_can_dispatch_and_query() {
 
     // Tick 必须能回收后台任务；无效连接最终应落到 Failed，而不是在 dispatch
     // 阶段阻塞或直接把硬件错误同步抛回 UI。
-    for i in 0..100 {
-        wb.tick(i as f64 * 0.01);
-        if wb.task_snapshots().iter().any(|snapshot| {
+    //
+    // 这里等的是「任务真的落到 Failed」这个终态本身，不是「tick 满 100 轮」：
+    // 连接 worker 是后台线程，机器满载时它什么时候拿到 CPU 无人能猜（此前在
+    // 64 个占满 CPU 的进程下 30 次红 27 次）。tick_until 每轮真的 tick + 查快照，
+    // 条件一成立立即返回；30s 只是给饱和 CI 留余量的**真上界**，等不到就带着
+    // 实际耗时和最后一轮看到的快照红掉，既不静默通过也不挂死。
+    let started = Instant::now();
+    let budget = Duration::from_secs(30);
+    let reached_failed = tick_until(&mut wb, budget, |workbench| {
+        workbench.task_snapshots().iter().any(|snapshot| {
             snapshot.kind == "connect_serial" && matches!(snapshot.state, TaskState::Failed)
-        }) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
+        })
+    });
     assert!(
+        reached_failed,
+        "无效串口连接应在 {budget:?} 内落到 Failed，实际等了 {:?}，最后一轮看到 {:?}",
+        started.elapsed(),
         wb.task_snapshots()
             .iter()
-            .any(|snapshot| snapshot.kind == "connect_serial"
-                && matches!(snapshot.state, TaskState::Failed))
+            .map(|snapshot| (snapshot.kind.clone(), snapshot.state))
+            .collect::<Vec<_>>(),
     );
 }
 
