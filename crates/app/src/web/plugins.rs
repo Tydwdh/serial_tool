@@ -9,7 +9,7 @@ use super::{
     WebPluginSetting, web_connected_port, web_file_input, web_file_input_from_event,
     web_open_file_picker,
 };
-use crate::web_plugin_host::{WebPluginData, WebPluginHost};
+use crate::web_plugin_host::{WebPluginData, WebPluginHost, event_to_plugin_value};
 use crate::workbench_app::WorkbenchApp;
 use eframe::egui;
 use egui_material_icons::icons::ICON_APPS;
@@ -392,7 +392,7 @@ impl WorkbenchApp {
             Vec::new()
         };
         for event in events {
-            let event_value = web_event_to_plugin_value(&event);
+            let event_value = event_to_plugin_value(&event);
             for record in &self.plugins.records {
                 if !record.persisted.enabled {
                     continue;
@@ -1158,40 +1158,6 @@ pub(crate) fn plugin_setting_view(setting: &WebPluginSetting) -> PluginSettingVi
 /// 贡献点的展示名：标题缺省时回落到 id。排序与渲染必须用同一个名字。
 fn contribution_title(item: &PluginUiContributionView) -> &str {
     item.title.as_deref().unwrap_or(&item.id)
-}
-
-pub(crate) fn web_event_to_plugin_value(event: &Event) -> PluginValue {
-    let payload = match &event.payload {
-        Payload::Empty => PluginValue::Null,
-        Payload::Bytes(bytes) => PluginValue::String(String::from_utf8_lossy(bytes).into_owned()),
-        Payload::Text(text) => PluginValue::String(text.clone()),
-        Payload::Json(value) => PluginValue::from_json(value),
-    };
-    PluginValue::Object(
-        [
-            ("id".to_owned(), PluginValue::Integer(event.id as i64)),
-            (
-                "timestamp_ms".to_owned(),
-                PluginValue::Integer(event.timestamp_ms as i64),
-            ),
-            ("topic".to_owned(), PluginValue::String(event.topic.clone())),
-            (
-                "source".to_owned(),
-                PluginValue::String(event.source.clone()),
-            ),
-            (
-                "direction".to_owned(),
-                PluginValue::String(format!("{:?}", event.direction).to_lowercase()),
-            ),
-            ("payload".to_owned(), payload),
-            (
-                "metadata".to_owned(),
-                PluginValue::from_json(&event.metadata),
-            ),
-        ]
-        .into_iter()
-        .collect(),
-    )
 }
 
 /// 取浏览器 `File.name` 的叶子名（去掉目录前缀）。清单与入口脚本都只按叶子名匹配。

@@ -233,7 +233,13 @@ fn normalize_ui_payload(plugin_id: &str, command: &str, payload: PluginValue) ->
     PluginValue::Object(object)
 }
 
-fn event_to_plugin_value(event: &Event) -> PluginValue {
+/// 把一条 bus 事件折成 Lua 侧的 `PluginValue`。
+///
+/// 这是全仓**唯一**一份这个转换：`crates/app/src/web/plugins.rs` 里曾有一份逐字节相同
+/// 的副本（33 行，只有签名不同）。两份意味着以后新增一种 `Payload` 或事件字段时，
+/// 只改一份就有一条静默漏掉它 —— 而这两份分别喂给插件事件与回放分析器，
+/// 漏掉的那条只在其中一条路上表现出来。
+pub(crate) fn event_to_plugin_value(event: &Event) -> PluginValue {
     let payload = match &event.payload {
         Payload::Empty => PluginValue::Null,
         Payload::Bytes(bytes) => PluginValue::String(String::from_utf8_lossy(bytes).into_owned()),

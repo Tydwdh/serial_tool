@@ -117,6 +117,14 @@
   `cfg_attr` 里的 `dead_code`，对应 Linux / wasm 死代码那张表），断言直接把差集打在失败输出里。
   清单按**次数**比而不是按 (文件, lint) 去重 —— 否则在已登记文件里再加一条会溜过去；
   这一点也单独探过（往 `gauge.rs` 再加一条 `dead_code` → 红，报"多了 1 条"）。
+- 事件 → `PluginValue` 的转换从两份收成一份：`crates/app/src/web/plugins.rs` 的
+  `web_event_to_plugin_value` 与 `crates/app/src/web_plugin_host.rs` 的 `event_to_plugin_value`
+  是同一个 33 行函数的两份实现，逐行 diff **只差签名那一行**。两份分别喂插件事件派发与
+  回放分析器，于是"新增一种 `Payload` 或一个事件字段"时只改一份就有一条静默漏掉它，
+  而且两条路径不会同时出问题。保留宿主侧那份并设为 `pub(crate)`，删掉副本与别名
+  （不留"一个东西两个名字"，那是下一次复制的起点）。
+  **判据是 wasm 侧**：这两个文件 native 根本不编译，所以用
+  `cargo check -p hardware-workbench-app --target wasm32-unknown-unknown`（exit 0、零告警）。
 
 ### 修复
 

@@ -5,9 +5,9 @@
 //! `web/mod.rs`：它们唯一的调用方是设置的加载与持久化。
 
 use super::{
-    WebReplayAnalyzerState, plugins::web_event_to_plugin_value, web_file_input,
-    web_file_input_from_event, web_open_file_picker,
+    WebReplayAnalyzerState, web_file_input, web_file_input_from_event, web_open_file_picker,
 };
+use crate::web_plugin_host::event_to_plugin_value;
 use crate::workbench_app::WorkbenchApp;
 use eframe::egui;
 use std::collections::BTreeMap;
@@ -240,7 +240,7 @@ impl WorkbenchApp {
             for event in events {
                 if let Err(error) = self
                     .web_lua
-                    .replay_event(replay_instance, web_event_to_plugin_value(&event))
+                    .replay_event(replay_instance, event_to_plugin_value(&event))
                 {
                     self.fail_web_replay_analyzer(error.to_string(), ctx);
                     return;
