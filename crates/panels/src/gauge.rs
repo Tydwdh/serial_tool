@@ -193,12 +193,14 @@ impl GaugePanel {
         // 先画整圈灰色底轨道，确保色区未覆盖的区段（如 zones 未延伸到 max）也有底色
         draw_arc(
             &painter,
-            center,
-            radius,
-            start_angle_deg,
-            sweep_deg,
-            0.0,
-            1.0,
+            &ArcSpec {
+                center,
+                radius,
+                start_deg: start_angle_deg,
+                sweep_deg,
+                from_t: 0.0,
+                to_t: 1.0,
+            },
             arc_steps,
             Stroke::new(6.0, theme::gauge_arc()),
         );
@@ -209,12 +211,14 @@ impl GaugePanel {
             let to_t = value_to_fraction(zone.to, self.min, self.max) as f32;
             draw_arc(
                 &painter,
-                center,
-                radius,
-                start_angle_deg,
-                sweep_deg,
-                from_t,
-                to_t,
+                &ArcSpec {
+                    center,
+                    radius,
+                    start_deg: start_angle_deg,
+                    sweep_deg,
+                    from_t,
+                    to_t,
+                },
                 arc_steps,
                 Stroke::new(6.0, zone.color),
             );
@@ -225,12 +229,14 @@ impl GaugePanel {
         let value_color = self.value_color();
         draw_arc(
             &painter,
-            center,
-            radius,
-            start_angle_deg,
-            sweep_deg,
-            0.0,
-            value_t,
+            &ArcSpec {
+                center,
+                radius,
+                start_deg: start_angle_deg,
+                sweep_deg,
+                from_t: 0.0,
+                to_t: value_t,
+            },
             arc_steps,
             Stroke::new(10.0, value_color),
         );
@@ -340,32 +346,46 @@ fn gauge_radius(rect: Rect) -> f32 {
     by_width.min(by_height)
 }
 
-/// `start_deg` 是弧起始角度，`sweep_deg` 是顺时针扫过的角度。
-/// `from_t` 和 `to_t` 是 [0, 1] 的归一化位置（0 = 起始角，1 = 终止角）。
-#[allow(clippy::too_many_arguments)]
-fn draw_arc(
-    painter: &egui::Painter,
+/// 一段弧的纯几何输入，与画笔和线宽无关 —— 拆出来是为了让折点这步能被单测直接驱动。
+///
+/// **两套单位混在一起，务必按字段名对齐**：`start_deg` / `sweep_deg` 是**角度（度）**，
+/// `from_t` / `to_t` 是 [0, 1] 的**归一化位置**（0 = 起始角，1 = 终止角）。
+/// 两者同为 `f32`，换位编译照过；把 `sweep_deg`（270.0）当成 `from_t` 送进去，
+/// 弧度会退化成反向的一小段，图上完全走形。
+pub(crate) struct ArcSpec {
+    /// 圆心（屏幕坐标）。
     center: Pos2,
+    /// 半径（像素），即弧上每一点到 `center` 的距离。
     radius: f32,
+    /// 弧起始角度（度）。egui 屏幕坐标 y 向下，故角度递增 = 顺时针。
     start_deg: f32,
+    /// 从起始角顺时针扫过的角度（度），不是终止角本身。
     sweep_deg: f32,
+    /// 本段弧起点在整条弧上的归一化位置，[0, 1]。
     from_t: f32,
+    /// 本段弧终点在整条弧上的归一化位置，[0, 1]。
     to_t: f32,
-    steps: usize,
-    stroke: Stroke,
-) {
-    let from_deg = start_deg + sweep_deg * from_t;
-    let to_deg = start_deg + sweep_deg * to_t;
+}
+
+/// 按 `steps` 段把 `spec` 描述的弧折成屏幕坐标点列（共 `steps + 1` 个点）。
+pub(crate) fn arc_points(spec: &ArcSpec, steps: usize) -> Vec<Pos2> {
+    let from_deg = spec.start_deg + spec.sweep_deg * spec.from_t;
+    let to_deg = spec.start_deg + spec.sweep_deg * spec.to_t;
     let span = to_deg - from_deg;
     let mut points = Vec::with_capacity(steps + 1);
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
         let angle = (from_deg + span * t).to_radians();
         points.push(Pos2::new(
-            center.x + radius * angle.cos(),
-            center.y + radius * angle.sin(),
+            spec.center.x + spec.radius * angle.cos(),
+            spec.center.y + spec.radius * angle.sin(),
         ));
     }
+    points
+}
+
+fn draw_arc(painter: &egui::Painter, spec: &ArcSpec, steps: usize, stroke: Stroke) {
+    let points = arc_points(spec, steps);
     if points.len() >= 2 {
         painter.line(points, stroke);
     }
@@ -586,5 +606,203 @@ mod tests {
 
         gauge.set_value(-1.0); // 低于首个 zone
         assert_eq!(gauge.value_color(), theme::red()); // 取首个 zone 颜色
+    }
+
+    // ── 弧线几何：把 arc_points 的字段语义逐个钉死 ────────────────────────────
+    //
+    // `paint` 里三条弧共用同一组常量：满轨从 135° 起、顺时针扫 270°，底部
+    // 45°..135° 留 90° 缺口。下面每个期望角度/期望距离都是**手算写死**的字面量，
+    // 不从 spec 现推 —— 否则字段接错会连期望值一起改掉，测试就跟着错下去。
+
+    /// 断言容差。量级权衡（四条变异实测）：
+    /// - f32 在 ~1e2 像素这个量级上的舍入噪声不超过 1e-5；
+    /// - 而字段换位造成的最小偏差是 **90° 弧度偏移**（`from_t`↔`to_t` 把满轨端点
+    ///   从 45° 挪到 135°）与 **105 像素半径偏差**（`radius`↔`start_deg` 让弧上
+    ///   的点到圆心 135 而非 30）。
+    ///
+    /// 两边相差约六个数量级：取 1e-4 既不会被浮点噪声误触发，也不会放过任一种换位。
+    const EPS: f32 = 1e-4;
+
+    /// 把折出来的点换算回「相对圆心的角度（度，归一到 [0, 360)）」。
+    /// 走 atan2，与被测实现的 cos/sin 方向相反，不共享它的中间量。
+    fn angle_at(p: Pos2, center: Pos2) -> f32 {
+        (p.y - center.y)
+            .atan2(p.x - center.x)
+            .to_degrees()
+            .rem_euclid(360.0)
+    }
+
+    /// 点到圆心的距离 —— 也就是 `radius` 的定义本身。
+    fn distance_at(p: Pos2, center: Pos2) -> f32 {
+        ((p.x - center.x).powi(2) + (p.y - center.y).powi(2)).sqrt()
+    }
+
+    /// 满轨：`from_t = 0.0`、`to_t = 1.0`，首尾点必须落在仪表盘真正使用的
+    /// 两个角度上（min 左下 135°、max 右下 405°）。
+    #[test]
+    fn full_track_runs_from_the_min_angle_to_the_max_angle() {
+        let center = Pos2::new(40.0, 60.0);
+        let points = arc_points(
+            &ArcSpec {
+                center,
+                radius: 25.0,
+                start_deg: 135.0,
+                sweep_deg: 270.0,
+                from_t: 0.0,
+                to_t: 1.0,
+            },
+            8,
+        );
+        assert_eq!(points.len(), 9);
+
+        let first = angle_at(points[0], center);
+        assert!(
+            (first - 135.0).abs() < EPS,
+            "起点应是起始角 135°（min，屏幕左下），实测 {first}"
+        );
+        let last = angle_at(points[points.len() - 1], center);
+        assert!(
+            (last - 45.0).abs() < EPS,
+            "终点应是 135+270=405° 即 45°（max，屏幕右下），实测 {last}"
+        );
+        // 角度不能整体偏移，也不能越过底部 90° 缺口。
+        for point in &points {
+            let deg = angle_at(*point, center);
+            assert!(
+                deg <= 45.0 + EPS || deg >= 135.0 - EPS,
+                "折点 {deg}° 落进了底部缺口 45°..135°，弧线不该经过这里"
+            );
+        }
+    }
+
+    /// 局部色区弧：`from_t`/`to_t` 都严格落在 (0, 1) 内，角度与距离双重约束。
+    #[test]
+    fn partial_zone_stays_inside_its_own_swept_sector() {
+        let center = Pos2::new(-12.5, 30.0);
+        let points = arc_points(
+            &ArcSpec {
+                center,
+                radius: 33.0,
+                start_deg: 135.0,
+                sweep_deg: 270.0,
+                from_t: 0.25,
+                to_t: 0.60,
+            },
+            6,
+        );
+        assert_eq!(points.len(), 7);
+
+        // 期望值按定义手算：135 + 270*0.25 = 202.5，135 + 270*0.60 = 297。
+        let start_deg = 202.5;
+        let end_deg = 297.0;
+        let first = angle_at(points[0], center);
+        let last = angle_at(points[points.len() - 1], center);
+        assert!(
+            (first - start_deg).abs() < EPS,
+            "25% 处应是 {start_deg}°，实测 {first}"
+        );
+        assert!(
+            (last - end_deg).abs() < EPS,
+            "60% 处应是 {end_deg}°，实测 {last}"
+        );
+        // 逐点：距离恒为 radius，角度在 [202.5, 297] 内顺时针严格推进。
+        // `sweep_deg`(270.0) 若占了 `from_t` 的槽位，to_deg 退化成
+        // 135 + 0.25*0.60 = 135.15，弧会倒扫回满轨起点之外，这里立刻越界。
+        for window in points.windows(2) {
+            let a = angle_at(window[0], center);
+            let b = angle_at(window[1], center);
+            assert!(b > a, "折点应顺时针严格推进，实测 {a} -> {b}");
+            assert!(
+                (start_deg - EPS..=end_deg + EPS).contains(&a),
+                "折点 {a}° 越出色区自己的扇形 [{start_deg}, {end_deg}]"
+            );
+        }
+        for point in &points {
+            let d = distance_at(*point, center);
+            assert!((d - 33.0).abs() < EPS, "色区弧的半径应保持 33，实测 {d}");
+        }
+    }
+
+    /// `radius` 只由「到圆心的距离」定义，与任何角度无关。
+    #[test]
+    fn every_point_sits_exactly_radius_from_the_center() {
+        let center = Pos2::new(7.0, -3.0);
+        let points = arc_points(
+            &ArcSpec {
+                center,
+                radius: 30.0,
+                start_deg: 135.0,
+                sweep_deg: 270.0,
+                from_t: 0.0,
+                to_t: 1.0,
+            },
+            12,
+        );
+        assert_eq!(points.len(), 13);
+        for point in &points {
+            let d = distance_at(*point, center);
+            assert!(
+                (d - 30.0).abs() < EPS,
+                "radius=30 的弧上出现了距圆心 {d} 的点：radius 被当成角度用了"
+            );
+        }
+    }
+
+    /// `steps` 的形状：点列长度恒为 `steps + 1`，首尾正好是 `from_t`/`to_t`。
+    #[test]
+    fn point_count_is_always_steps_plus_one() {
+        let center = Pos2::new(0.0, 0.0);
+        let spec = ArcSpec {
+            center,
+            radius: 10.0,
+            start_deg: 135.0,
+            sweep_deg: 270.0,
+            from_t: 0.25,
+            to_t: 0.60,
+        };
+        for steps in [1usize, 2, 7, 60, 101] {
+            let points = arc_points(&spec, steps);
+            assert_eq!(points.len(), steps + 1, "steps={steps} 的点列长度变了");
+            assert!(
+                (angle_at(points[0], center) - 202.5).abs() < EPS,
+                "steps={steps} 时起点漂了"
+            );
+            let last = points.len() - 1;
+            assert!(
+                (angle_at(points[last], center) - 297.0).abs() < EPS,
+                "steps={steps} 时终点漂了"
+            );
+        }
+    }
+
+    /// `steps = 0` 的既有形状：`t = 0/0 = NaN`，只折出一个非有限点。
+    ///
+    /// 本轮**刻意不修**它。这是抽取之前就有的算术，而 `paint` 里三条弧传的都是
+    /// `let arc_steps = 60`（函数内唯一绑定、非 cfg 分支、没有再赋值），
+    /// 所以 0 到今天都不可达；即便将来有调用者传 0，`draw_arc` 的
+    /// `points.len() >= 2` 会让它什么都不画，NaN 坐标也漏不到画笔上。
+    /// 改它属于未被要求的运行时行为变更，因此这里只把现状钉住：
+    /// 谁要加保护（或放行 0 段），都会先撞上这条断言，被提醒做一次权衡。
+    #[test]
+    fn zero_steps_folds_a_single_non_finite_point() {
+        let spec = ArcSpec {
+            center: Pos2::new(0.0, 0.0),
+            radius: 10.0,
+            start_deg: 135.0,
+            sweep_deg: 270.0,
+            from_t: 0.0,
+            to_t: 1.0,
+        };
+        let points = arc_points(&spec, 0);
+        assert_eq!(
+            points.len(),
+            1,
+            "steps=0 的点列长度变了，0/0 的形状被改动了"
+        );
+        assert!(
+            !points[0].x.is_finite() && !points[0].y.is_finite(),
+            "steps=0 仍应折出非有限点（现状），实测 {:?}",
+            points[0]
+        );
     }
 }

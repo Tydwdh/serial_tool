@@ -213,6 +213,27 @@ cargo tree -p tool-application | grep -i egui    # 0 行
   > 所以"无悬停"那一帧要**换一个新 `Context`**，在同一 ctx 上再跑一次 `RawInput::default()`
   > 读到的是上一帧的位置。每帧一个新 `Context` 还有个好处：`update` 只读指针、只写自己那份
   > map/set，帧间连续性全在 `AutoScrollState` 里，断言就不依赖 egui 的重绘调度了。
+  >
+  > **第 32 轮把 `gauge.rs::draw_arc` 的弧线几何抽成可测函数，棘轮 7 → 6**（718 → 723）。
+  > 原先 9 个位置参数里有 `radius`/`start_deg`/`sweep_deg`/`from_t`/`to_t` **五个相邻 f32**，
+  > 而"前两个是角度、后两个是 [0,1] 归一化位置"只写在签名上方那句注释里。改动前逐对普查：
+  > **4/4 编译零告警，且 `tool-panels` 209 条测试全绿**（gauge 原有 11 条用例只管取值/分区/配色/
+  > 状态文字，一条都不碰弧线）。做法是把纯计算抽出来：`ArcSpec{center,radius,start_deg,sweep_deg,
+  > from_t,to_t}` + `arc_points(&ArcSpec, steps) -> Vec<Pos2>`，`draw_arc` 只剩"取点 +
+  > `len() >= 2` 才 `painter.line`"四个参数，`#[allow]` 删除。
+  > **渲染等价不靠"能编译"糊过去**：临时逐字符抄了一份 `git show HEAD` 的旧实现，在
+  > 3×4×5×4×6×6×5 的输入网格上按 `to_bits()` **逐位**比了 **1,520,640 个点、0 处不等**，
+  > 随后把这份临时用例删掉（公式在测试里留第二份，早晚和实现各说各话）；事后我独立复核过，
+  > 新函数体与旧循环**逐行同序**，只差 `spec.` 前缀。新增 5 条用例每对相邻字段至少被一条抓到
+  > （把 `arc_points` 内的字段读法改成对调来验，最小偏离 90° 弧度 / 105 px 半径，
+  > 而浮点噪声 ≤1e-5，所以不是踩 epsilon 边界蒙过的）。`steps == 0` 那个 `0/0 = NaN` 的形状
+  > **没有偷偷"修"**：三处调用点共用同一个 `arc_steps = 60` 绑定，0 不可达，真到 0 也不画，
+  > 现状用一条用例钉住并注明"要改是有意的决定"。
+  > **本轮明确没有做到的**：危险没消失，它**搬了家**。用一个合法的 `ArcSpec` 字面量把
+  > `sweep_deg` 的 270.0 塞进底轨的 `from_t` 槽位 ⇒ clippy 零告警、214 条测试照旧全绿。
+  > 新用例钉的是**字段名在 `arc_points` 里的含义**，没有东西钉 `paint` 往这些字段**填了什么**；
+  > 那一层要 `Painter`/`Ui` 驱动，第 31 轮那套事件注入只对纯判定管用，所以停手而不是再造一层抽象。
+  > 结论要说准：`from_t: sweep_deg` 如今在源码里自我暴露，但**"参数墙收掉"≠"调用点有覆盖"**。
   **当前状态（修复后）**：`cargo +1.92.0 fmt --all --check`、
   `cargo +1.92.0 clippy --workspace --all-targets -- -D warnings`、
   `cargo +1.92.0 test --workspace --all-targets` 三条均 **exit 0**。
