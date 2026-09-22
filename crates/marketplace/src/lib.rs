@@ -245,8 +245,15 @@ pub async fn install_plugin(
     Ok(())
 }
 
-/// 若目录已存在，追加数字后缀直到不冲突（用于 .old 暂存目录命名）。
-fn ensure_unique_dir(base: &Path) -> PathBuf {
+/// 若目录已存在，追加数字后缀直到不冲突（用于 `.old` 暂存目录命名）。
+///
+/// `pub` 是给 `crates/app` 的卸载回退路径用的：那里此前养着一份**逐字节相同**的私有副本，
+/// 理由写在它自己的注释里 —— "避免跨 crate 暴露"。这个理由在本仓不成立：workspace 是
+/// `publish = false`，工作区外没有任何 Rust 消费者（`plugins/` 全是 Lua），而 `crates/app`
+/// 本来就依赖本 crate，所以这里的 `pub` 只意味着"工作区内可链接"，正是想要的共享。
+/// 两份副本会在同一个地方出错：后缀用尽时返回**仍冲突**的原路径，改一份忘一份就会去覆盖
+/// 一个已经存在的目录。
+pub fn ensure_unique_dir(base: &Path) -> PathBuf {
     if !base.exists() {
         return base.to_path_buf();
     }
@@ -486,5 +493,27 @@ mod tests {
             assert_eq!(manifest["id"], plugin.id);
             assert_eq!(manifest["version"], plugin.version);
         }
+    }
+
+    /// `ensure_unique_dir` 此前**没有任何测试**（原生与 app 两份副本各 14 行，一起零覆盖）。
+    /// 它服务的是卸载失败时的 rename 暂存：算错名字不会崩，只会把已经存在的目录覆盖掉，
+    /// 所以这三条钉的是"避开已存在的目录"与"只算名字、不碰文件系统"。
+    #[test]
+    fn stash_dir_name_avoids_existing_directories_without_creating_one() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let taken = root.path().join("plug.old.1");
+        std::fs::create_dir(&taken).expect("create taken dir");
+
+        // ① 不冲突时原样返回，并且不顺手把目录建出来。
+        let free = root.path().join("plug.old.2");
+        assert_eq!(ensure_unique_dir(&free), free);
+        assert!(!free.exists(), "只该算名字，不该创建目录");
+
+        // ② 被占用时加 .1 后缀。
+        assert_eq!(ensure_unique_dir(&taken), root.path().join("plug.old.1.1"));
+
+        // ③ .1 也被占用时往后走一位（后缀从 1 起算，且沿用同一个父目录）。
+        std::fs::create_dir(root.path().join("plug.old.1.1")).expect("create .1");
+        assert_eq!(ensure_unique_dir(&taken), root.path().join("plug.old.1.2"));
     }
 }

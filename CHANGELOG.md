@@ -6,6 +6,24 @@
 
 ### 调整
 
+- 卸载插件时算暂存目录名的 `ensure_unique_dir` 也有两份**逐字节相同**的实现（各 14 行）：
+  `tool-marketplace` 里一份私有的，`crates/app/src/runtime/marketplace.rs` 里一份带 `&self`
+  （形参根本没用上）的私有副本。现在只剩 `tool_marketplace::ensure_unique_dir`（`pub`），
+  app 侧调用它。
+  **这次重复是有理由的，而且理由写在代码里** —— app 那份的注释写着"与
+  `marketplace::ensure_unique_dir` 同语义，避免跨 crate 暴露"。本轮没有悄悄推翻它，而是把这段
+  理由连同"为什么不成立了"一起写进函数自己的文档：本仓 `publish = false`、工作区外没有任何 Rust
+  消费者（`plugins/` 全是 Lua），而 `crates/app` 本来就依赖 `tool-marketplace`，所以这里的 `pub`
+  只意味着"工作区内可链接"，正是想要的共享。同时留下重复的真实代价：后缀用尽时这个函数返回的是
+  **仍然冲突**的原路径，两份副本改一份忘一份，就会去覆盖一个已存在的目录。
+  **这条函数此前两份都是零覆盖**（`grep` 全仓没有任何测试引用它）。新增
+  `stash_dir_name_avoids_existing_directories_without_creating_one` 钉住三件事：不冲突时原样返回
+  且**不顺手创建目录**、被占用时加 `.1`、`.1` 也在时走到 `.2`（同父目录、后缀从 1 起算）。
+  变异验证：让不冲突分支也创建目录 → 红在「只该算名字，不该创建目录」；后缀忘了编号
+  （`{stem}.{i}` → `{stem}`）→ 红在第 ② 条（`left` 就是那个仍被占用的原路径）。均还原复跑回绿。
+  **仍未覆盖的一支**：`1..1000` 后缀全部被占用后的兜底（返回冲突的原路径）。要钉它得先造出 999 个
+  目录，本轮没做，也没有假装做过 —— 这个兜底本身是不是好选择（覆盖 vs 报错）留作下一次判断。
+  app 侧被这次删除腾出两个空 import（`Path`/`PathBuf`），一并去掉。
 - `parse_gcode_response` 原有**两份逐字节相同的实现**（各 12 行、370 字节，按函数体 diff 确认相同）：
   native 在 `tool-transport::network`、wasm 在 `tool-platform::web_network`。合成一份落到
   `tool_core::parse_gcode_response`（`crates/core/src/lib.rs:600`），两个调用点改用它。

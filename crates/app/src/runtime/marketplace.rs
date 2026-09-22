@@ -1,13 +1,12 @@
 use crate::app::WorkbenchApp;
 use crate::bootstrap::user_plugins_dir;
 use crate::state::StatusLevel;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tool_application::AppCommand;
 use tool_application::marketplace::MarketplaceView;
 use tool_application::query::PluginStateView;
 use tool_core::LogLevel;
-use tool_marketplace::{Registry, RegistryFetch, RegistryPlugin};
+use tool_marketplace::{Registry, RegistryFetch, RegistryPlugin, ensure_unique_dir};
 
 /// 市场索引 + 安装任务的运行时状态。
 ///
@@ -265,7 +264,7 @@ impl WorkbenchApp {
         {
             log::warn!("marketplace: 直接删除 {plugin_id} 失败（{e}），改用 rename 暂存");
             let old_dir = plugin_dir.join(format!("{plugin_id}.old.{}", std::process::id()));
-            let old_dir = self.ensure_unique_dir(&old_dir);
+            let old_dir = ensure_unique_dir(&old_dir);
             if let Err(e) = std::fs::rename(&target, &old_dir) {
                 self.set_status(
                     StatusLevel::Error,
@@ -287,21 +286,5 @@ impl WorkbenchApp {
         }
 
         self.set_status(StatusLevel::Info, format!("插件 {plugin_id} 已卸载"));
-    }
-
-    /// 生成不冲突的暂存目录名（与 marketplace::ensure_unique_dir 同语义，避免跨 crate 暴露）。
-    fn ensure_unique_dir(&self, base: &Path) -> PathBuf {
-        if !base.exists() {
-            return base.to_path_buf();
-        }
-        let parent = base.parent().unwrap_or_else(|| Path::new(""));
-        let stem = base.file_name().and_then(|n| n.to_str()).unwrap_or("old");
-        for i in 1..1000 {
-            let candidate = parent.join(format!("{stem}.{i}"));
-            if !candidate.exists() {
-                return candidate;
-            }
-        }
-        base.to_path_buf()
     }
 }
