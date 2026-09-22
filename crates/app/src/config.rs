@@ -172,6 +172,12 @@ fn parse_persisted_config(text: &str) -> Result<(PersistedConfig, bool), String>
         "schema_version".to_owned(),
         serde_json::Value::from(CURRENT_SCHEMA_VERSION),
     );
+    // 历史键名 `version` 与 `schema_version` 在 `PersistedConfig` 上是同一个字段
+    // （`#[serde(default, alias = "version")]`），所以归一化之后必须把旧键删掉：
+    // 两个键同时留在 map 里会让 serde 报 `duplicate field`，而 `load_config` 把解析失败
+    // 当作"配置损坏"处理 —— 结果是升级后第一次开机就把用户的 workspace.json 隔离掉、
+    // 回落到默认设置。`migrate_theme_file` 对同一件事用的是同一手 `remove("version")`。
+    object.remove("version");
 
     let mut config = serde_json::from_value::<PersistedConfig>(value)
         .map_err(|error| format!("配置字段无效：{error}"))?;
@@ -511,6 +517,25 @@ mod tests {
                 "配置版本 {version} 高于当前程序支持的 {CURRENT_SCHEMA_VERSION}"
             ))
         );
+    }
+
+    /// 从 `schema_version` 改名之前的版本升级上来时，磁盘上的配置只有历史键 `version`。
+    /// 这样的文件必须**照常读出来**：`load_config` 在解析失败时会直接
+    /// `quarantine_corrupt_file(primary)` 把用户的工作台配置挪走并回落到默认值，
+    /// 所以这里不是"报错文案不好"，而是升级后第一次开机就丢设置。
+    #[test]
+    fn legacy_version_only_config_still_loads() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&legacy_workspace_json()).expect("valid test JSON");
+        value["version"] = serde_json::json!(CURRENT_SCHEMA_VERSION);
+        let text = value.to_string();
+
+        let (config, migrated) = parse_persisted_config(&text)
+            .unwrap_or_else(|error| panic!("只用历史键声明版本的配置必须能读出来，实际: {error}"));
+        assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
+        assert!(!migrated, "版本已经是当前值，不该被当成需要迁移");
+        // 设置本身没被吃掉：挑一个有代表性的字段核对。
+        assert_eq!(config.baud_rate, "115200");
     }
 
     // ── ensure_jsonl_extension ──

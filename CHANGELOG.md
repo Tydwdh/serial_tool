@@ -279,6 +279,26 @@
 
 ### 修复
 
+- **修掉一个"从旧版本升级上来、第一次开机就丢设置"的缺陷**：`schema_version` 改名之前写的
+  `workspace.json` 只用历史键 `version` 声明版本，这样的文件在本版本读不出来 ——
+  `parse_persisted_config` 会无条件往 map 里 `insert("schema_version", …)`，而
+  `PersistedConfig.schema_version` 上写的是 `#[serde(default, alias = "version")]`，
+  旧键又没被删掉，于是 serde 在同一字段上看到两个键，报
+  「配置字段无效：duplicate field `schema_version`」。真正严重的是后果：`load_config`
+  把解析失败当作"配置损坏"，下一步就是 `quarantine_corrupt_file(primary)` **把用户的工作台
+  配置挪走**并回落到默认值 —— 面板布局、选中端口、波特率、主题全部回到初始状态。
+  修法与 `theme.rs` 里已有的做法一致：归一化时 `insert` 之后补一句 `object.remove("version")`。
+  **同一形状都查过**：`crates/panels/src/theme.rs` 早就这样处理（所以它没这个坑）；
+  `crates/lua_host/src/config.rs` 的插件配置文档同样带 `alias = "version"`，但它是手工读字段、
+  再从 Rust 值构造文档，不反序列化被改过的 map，因此不受影响 —— 这条差异也写进了注释，
+  免得后来人以为"三处都改过"。
+  **证据是先红后绿**：新用例 `legacy_version_only_config_still_loads` 在改之前红在
+  `只用历史键声明版本的配置必须能读出来，实际: 配置字段无效：duplicate field `schema_version``，
+  改之后连同该模块全部 14 条用例一起绿。它也与第 18 轮的
+  `legacy_version_key_is_a_version_for_both_config_readers` 配成对：那条只能钉"未来版本"的
+  历史键文档（它在插入之前就被拒绝、绕不到这个坑），这条钉 `<= 当前版本` 的那一半。
+  本轮不动 serde 形状：磁盘上仍接受两个键、写出的仍是 `schema_version`。
+  四道门 exit 0（682 passed / 0 failed / 7 ignored，+1 条用例）。
 - **浏览器端「网络串口」那一行原先四件事全坏**（连接、重连、断开、发送），桌面端不受影响。
   根因是一个端口名有两种写法（`display_name()` = `host:port`，`port_id()` =
   `network://host:port`），而 `workbench.rs` 里"这个名字是不是已注册网络端口"的判定散在
