@@ -10,7 +10,6 @@ mod log;
 mod manager;
 mod network;
 mod plugin_settings;
-mod plugin_view;
 mod plugins;
 mod recording;
 mod replay;
@@ -49,14 +48,13 @@ pub use manager::{
 };
 pub use network::{NetworkSerialAction, NetworkSerialFormView, network_serial_form_ui};
 pub use plugin_settings::{PluginSettingsView, plugin_settings_ui};
-pub use plugin_view::{InstalledPluginRow, PluginUiCommand, PluginViewState};
 pub use plugins::{
     MarketplaceState, PluginPanelEvent, PluginPanelOptions, PluginTab, PluginsPanel,
 };
 pub use recording::{RecordingAction, RecordingMode, RecordingView, recording_ui};
 pub use replay::ReplayPanel;
 pub use replay_policy::{ReplayPolicyOption, replay_policy_ui};
-pub use replay_view::{ReplayUiCommand, ReplayView};
+pub use replay_view::ReplayUiCommand;
 pub use search::SearchQuery;
 pub use sender::{
     SEND_LAYOUT_BREAKPOINT, SendAction, SendLayout, SendLineEnding, SendPortItem,

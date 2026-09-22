@@ -6,6 +6,33 @@
 
 ### 调整
 
+- 删掉 **36 个编译器永远看不见的死公共项**（5 行增、396 行删，12 个文件；本仓第一次以删除为主的轮次）：
+  `dead_code` lint 只看 crate 内可达性，`pub mod` 里的 `pub` 项永远算"可达"，所以这些一条警告都不会发；
+  而"零引用 = 不可达"这个推断成立的前提也核实了 —— workspace `publish = false`，且**没有任何工作区外的
+  Rust 消费者**（`plugins/` 与 `plugin-marketplace/` 是 11 个 Lua 文件、0 个 `.rs`，Lua 只能经宿主注册的
+  名字触达 Rust，而那会表现为一次标识符引用）。判据是**词边界**的整仓 token 计数，注释行不算引用：
+  子串搜索会把 `widget_active` 与活着的 `widget_active_weak` 混为一谈。
+  - `panels/theme.rs` 的 22 个配色垫片（1090 → 1010 行；这个文件 25% 的公开面从来没人读过）。
+  - 8 个零调用方法：`SerialPanel::top_bar_ui`（4 行死包装，两个活调用点自己做了 `horizontal_wrapped`）、
+    `web_serial::start_receive`（一行死重载）、`DockStack::add_inactive`、`DockLayout::insert_panel_at`、
+    `JsonlRecorder::clear_completed_path`（body 本身也近乎无效：只在 `worker.is_none()` 时清一次）、
+    `PermissionManager::missing_capabilities`、`Workbench::query_transport_capability`、
+    native `Workbench::validate_hex`。
+  - 连带删除（每一样的"没有别人"都单独查过）：`PluginManifest::required_capabilities`（唯一消费者就是
+    上面那条）、3 条随之失效的 `use`、`tool_core::hex_preview` 连同它自己的 3 条用例（675 → 672）。
+  - ARCHITECTURE 第 9 条记了一轮的那批 `pub struct` 死导出：`plugin_view.rs` 整文件、`ReplayView`
+    及其两个 impl（同文件活着的 `ReplayUiCommand` 保留）。**这批为什么漏了一轮**：死代码扫描按
+    `pub fn` 找，`pub struct`/`pub enum` 不在它的形态里 —— 工具已补上，重跑后全仓只剩 3 项待看。
+  两条**与代码不符的文档陈述**随条目消失（`query_transport_capability` 自称"used by shared
+  presentation code"、`required_capabilities` 自称"used by Native/Web hosts"，实测都是零调用）；
+  `recorder.rs` 那句"调用者需在读取后调用 `clear_completed_path()`"改写成现状描述，并按
+  `replay_error`/`stop`/`start` 的实际行为逐条核对过（出错时 `reap_error` 已就地清、否则由下一次
+  `start()` 覆盖或被 `stop()` 取走）。
+  **这一轮的"证明会红"不需要变异测试**：删除的判据是编译期事实 —— 任何一个还有引用，native 或 wasm
+  构建立刻 E0425/E0433，两道 clippy 门（含 wasm 目标）本身就是检查。四道门 exit 0
+  （672 passed / 0 failed / 7 ignored）。
+  **新发现（等拍板，本轮不动）**：删掉 `missing_capabilities` 后 `tool-extension → tool-plugin-api`
+  成为可证明的死 Cargo 边（该 crate 已 0 处 `use`），与第 10 条 `egui_extras` 同类 —— 要动 `Cargo.lock`。
 - 拆掉工作区里最长的四个函数（纯提取，不改行为）：终端 `render_rows_view` 760 → 183 行、日志
   `render_log_rows` 664 → 348 行、native `Workbench::dispatch` 353 → 158 行、wasm
   `WebApplication::dispatch` 531 → 174 行，合计新增 74 个同文件私有函数（无新 trait/泛型/宏）。

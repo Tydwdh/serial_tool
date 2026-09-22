@@ -197,16 +197,6 @@ impl WebSerialTransport {
             .ok_or_else(|| TransportError::PortNotKnown(id.clone()))
     }
 
-    /// Start the browser read loop. The callback is invoked for each
-    /// `Uint8Array` chunk and must forward bytes into DataBus.
-    pub fn start_receive(
-        &self,
-        id: PortId,
-        sink: Rc<dyn Fn(Vec<u8>)>,
-    ) -> Result<(), TransportError> {
-        self.start_receive_with_disconnect(id, sink, Rc::new(|_| {}))
-    }
-
     /// Start the browser read loop and notify the application when the stream
     /// ends or reports an error (including a device unplug).
     pub fn start_receive_with_disconnect(

@@ -153,16 +153,6 @@ impl DockStack {
         self.active = Some(kind);
     }
 
-    /// 添加标签但不切换焦点（后台创建面板时使用）
-    pub fn add_inactive(&mut self, kind: PanelId) {
-        if !self.tabs.contains(&kind) {
-            self.tabs.push(kind.clone());
-        }
-        if self.active.is_none() {
-            self.active = Some(kind);
-        }
-    }
-
     /// 关闭标签，并在它正是激活标签时把焦点交给相邻标签。
     pub fn close(&mut self, kind: &PanelId) {
         // 找到关闭位置，优先选择相邻的 tab 而非最后一个
@@ -966,16 +956,6 @@ impl DockLayout {
     pub fn move_panel(&mut self, kind: PanelId, to: DockArea) {
         self.remove_from_all_areas(&kind);
         self.stack_mut(to).open(kind);
-        self.reveal_area(to);
-    }
-
-    /// 移动面板到目标停靠区的指定位置。
-    pub fn insert_panel_at(&mut self, kind: PanelId, to: DockArea, index: usize) {
-        self.remove_from_all_areas(&kind);
-        let stack = self.stack_mut(to);
-        let idx = index.min(stack.tabs.len());
-        stack.tabs.insert(idx, kind.clone());
-        stack.active = Some(kind);
         self.reveal_area(to);
     }
 

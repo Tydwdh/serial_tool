@@ -5,7 +5,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use tool_plugin_api::PluginPermissions;
 
 pub const CURRENT_PLUGIN_API_VERSION: &str = "0.1";
 pub const SUPPORTED_PLUGIN_API_VERSIONS: &[&str] = &[CURRENT_PLUGIN_API_VERSION];
@@ -222,13 +221,6 @@ impl PluginManifest {
             .as_ref()
             .map(|replay| replay.outputs.as_slice())
             .unwrap_or(&[])
-    }
-
-    /// Platform-neutral capability projection used by Native/Web hosts.
-    /// Unknown legacy permissions remain validated by `PermissionManager`,
-    /// but are not silently presented as a platform capability.
-    pub fn required_capabilities(&self) -> PluginPermissions {
-        PluginPermissions::from_permission_names(self.live_permissions())
     }
 }
 

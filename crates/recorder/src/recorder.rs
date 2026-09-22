@@ -677,7 +677,8 @@ impl JsonlRecorder {
 
     /// 检查 worker 线程是否已结束，返回 error。UI 每帧调用。
     /// 返回 None 表示 worker 未完成或已完成且无错误。
-    /// 正常完成时保留 current_path 供调用者读取，调用者需在读取后调用 clear_completed_path()。
+    /// 正常完成时保留 current_path 供调用者经 `current_path()` 读取：出错时上面已就地
+    /// 清除，否则它由下一次 `start()` 覆盖（或被 `stop()` 取走），调用方读取后无需自己清理。
     pub fn reap_error(&mut self) -> Option<String> {
         let finished = self
             .worker
@@ -695,13 +696,6 @@ impl JsonlRecorder {
             self.current_path = None;
         }
         error
-    }
-
-    /// 录制正常完成后，调用此方法清除保留的路径信息
-    pub fn clear_completed_path(&mut self) {
-        if self.worker.is_none() {
-            self.current_path = None;
-        }
     }
 
     pub fn current_path(&self) -> Option<&Path> {

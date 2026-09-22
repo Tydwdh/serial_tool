@@ -6,13 +6,10 @@ use tool_extension::PluginManager;
 use tool_lua_host::{DialogRequest, FileAccessBroker};
 use tool_platform::native::{NativeTransportBackend, block_on_transport};
 use tool_platform::storage::{FileBlob, FileHandle, native::NativeFileService};
-use tool_platform::{
-    PortDescriptor, PortId, PortKind, SerialParity, SerialSettings, TransportBackend,
-};
+use tool_platform::{PortDescriptor, PortId, SerialParity, SerialSettings, TransportBackend};
 use tool_recorder::{JsonlRecorder, ReplayManager};
 use tool_transport::{SerialPortDescriptor, TransportManager};
 
-use crate::TransportView as ApplicationTransportView;
 use crate::command::{AppCommand, CommandOutcome};
 use crate::error::AppError;
 use crate::query::{
@@ -439,34 +436,6 @@ impl Workbench {
             },
             auto_reconnect: self.app_config.auto_reconnect,
         }
-    }
-
-    /// Platform-neutral transport projection used by shared presentation
-    /// code. The legacy `query_transport` above remains available to Native
-    /// controls that still need per-port status and reconnect metadata.
-    pub fn query_transport_capability(&self) -> ApplicationTransportView {
-        let open_ports = self.transport.open_ports();
-        let mut view = ApplicationTransportView::new(self.transport_backend.capabilities());
-        view.ports = self
-            .ports
-            .iter()
-            .map(|port| PortDescriptor {
-                id: PortId::new(port.port_name.clone()),
-                label: port.port_name.clone(),
-                kind: PortKind::Serial,
-                vendor_id: None,
-                product_id: None,
-                authorized: true,
-            })
-            .collect();
-        view.connected = open_ports.first().cloned().map(PortId::new);
-        view.connecting = self
-            .transport
-            .status_all()
-            .into_iter()
-            .any(|status| status.connecting);
-        view.settings = self.serial_settings();
-        view
     }
 
     pub fn query_recording(&self) -> RecordingStatusView {
@@ -1109,23 +1078,6 @@ impl Workbench {
                 _ => SerialParity::None,
             },
         }
-    }
-
-    /// presentation 只做输入校验，规则与真正发送时完全一致：两者都走
-    /// `send_plan::decode_hex` → `tool_core`。
-    ///
-    /// 但别把这句读成「native 的按钮门禁与本函数同源」——**本函数在本平台没有任何调用点**：
-    /// 原有的两个调用点在 `crates/app/src/ui/bottom_panel.rs` 的 `legacy_send_panel_body`
-    /// 死子树里（全工作区 0 调用，且都传 `strict = false`），已随该子树一并被删除；
-    /// 全仓唯一活着的调用点在 wasm 侧，走的是 `WebApplication::validate_hex`。
-    /// **活着**的门禁是两平台共用的 `crates/panels/src/sender.rs` 的 `render_actions` →
-    /// 该 crate 自己的 `hex_error`（第三份规则实现，`0x` 只剥一层），所以
-    /// 「不再有第二个判定来源」只对 `dispatch`/发送路径成立，对按钮门禁不成立；
-    /// 差异的实测记录见 `docs/ARCHITECTURE.md`「发送路径的残留差异」。
-    pub fn validate_hex(&self, hex: &str, strict: bool) -> Result<Vec<u8>, AppError> {
-        send_plan::decode_hex(hex, strict).map_err(|error| {
-            AppError::Transport(send_plan::SendPlanError::InvalidHex(error).to_string())
-        })
     }
 
     /// 「这条命令的端口是不是已注册的网络端口」—— 结论只作为 `plan_send` 的 `is_network`

@@ -726,61 +726,12 @@ pub fn orange() -> Color32 {
     colors().peach
 }
 
-pub fn red_bg() -> Color32 {
-    translucent(red(), 70)
-}
-pub fn green_bg() -> Color32 {
-    translucent(green(), 70)
-}
-pub fn yellow_bg() -> Color32 {
-    translucent(yellow(), 70)
-}
-pub fn blue_bg() -> Color32 {
-    translucent(blue(), 70)
-}
-pub fn purple_bg() -> Color32 {
-    translucent(purple(), 70)
-}
-pub fn cyan_bg() -> Color32 {
-    translucent(cyan(), 70)
-}
-pub fn orange_bg() -> Color32 {
-    translucent(orange(), 70)
-}
-
 // 卡片、控件、边框
-pub fn card_accent_device() -> Color32 {
-    blue()
-}
-pub fn card_accent_record() -> Color32 {
-    red()
-}
-pub fn card_accent_port() -> Color32 {
-    green()
-}
-pub fn card_accent_replay() -> Color32 {
-    cyan()
-}
-pub fn card_accent_plugin() -> Color32 {
-    purple()
-}
-pub fn card_accent_settings() -> Color32 {
-    orange()
-}
-pub fn widget_bg() -> Color32 {
-    bg_tertiary()
-}
 pub fn widget_hover() -> Color32 {
     bg_hover()
 }
-pub fn widget_active() -> Color32 {
-    blue()
-}
 pub fn widget_active_weak() -> Color32 {
     ui().active.unwrap_or_else(|| translucent(blue(), 95))
-}
-pub fn widget_active_strong() -> Color32 {
-    ui().active.unwrap_or_else(|| translucent(blue(), 135))
 }
 pub fn widget_open() -> Color32 {
     bg_hover()
@@ -791,14 +742,6 @@ pub fn scrollbar() -> Color32 {
         colors.surface0
     } else {
         colors.surface1
-    }
-}
-pub fn scrollbar_hover() -> Color32 {
-    let colors = colors();
-    if active_theme() == AppTheme::Latte {
-        colors.overlay0
-    } else {
-        colors.surface2
     }
 }
 pub fn border() -> Color32 {
@@ -816,9 +759,6 @@ pub fn border_light() -> Color32 {
     } else {
         colors.overlay0
     }
-}
-pub fn border_dark() -> Color32 {
-    colors().crust
 }
 pub fn separator() -> Color32 {
     colors().overlay0
@@ -876,9 +816,6 @@ pub fn toggle_selected_border() -> Color32 {
 pub fn chart_colors() -> [Color32; 6] {
     [green(), blue(), yellow(), red(), purple(), cyan()]
 }
-pub fn chart_bg() -> Color32 {
-    bg_secondary()
-}
 pub fn chart_grid() -> Color32 {
     colors().surface1
 }
@@ -887,9 +824,6 @@ pub fn chart_crosshair() -> Color32 {
 }
 pub fn chart_tooltip_bg() -> Color32 {
     colors().mantle
-}
-pub fn attitude_bg() -> Color32 {
-    bg_secondary()
 }
 pub fn attitude_body() -> Color32 {
     yellow()
@@ -906,25 +840,11 @@ pub fn attitude_axis_y() -> Color32 {
 pub fn attitude_axis_z() -> Color32 {
     blue()
 }
-pub fn gauge_bg() -> Color32 {
-    bg_secondary()
-}
 pub fn gauge_arc() -> Color32 {
     colors().surface2
 }
 pub fn gauge_value() -> Color32 {
     cyan()
-}
-
-/// 绘制带左边框色彩指示器的卡片标题行。
-pub fn card_accent_bar(ui: &mut egui::Ui, color: Color32) {
-    let rect = ui.available_rect_before_wrap();
-    let accent_rect = egui::Rect::from_min_size(
-        rect.left_top(),
-        egui::vec2(3.0, rect.height().max(ui.spacing().interact_size.y)),
-    );
-    ui.painter().rect_filled(accent_rect, 2.0, color);
-    ui.add_space(6.0);
 }
 
 #[cfg(test)]

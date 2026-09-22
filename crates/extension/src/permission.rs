@@ -3,7 +3,6 @@
 use crate::manifest::PluginManifest;
 use crate::{ExtensionError, ExtensionResult};
 use std::collections::BTreeSet;
-use tool_plugin_api::{PluginCapability, PluginPermissions};
 
 /// 权限管理器：维护一组允许权限，校验插件清单。未列入白名单的权限一律拒绝。
 #[derive(Debug, Clone)]
@@ -39,19 +38,6 @@ impl PermissionManager {
         }
 
         Ok(())
-    }
-
-    /// Resolve manifest permissions against a platform capability set. This
-    /// is intentionally separate from `check`: a permission can be valid in
-    /// the plugin specification while the current platform still cannot
-    /// provide it (for example `process` in a browser).
-    pub fn missing_capabilities(
-        &self,
-        manifest: &PluginManifest,
-        available: impl IntoIterator<Item = PluginCapability>,
-    ) -> Vec<PluginCapability> {
-        let requested: PluginPermissions = manifest.required_capabilities();
-        requested.missing_from(available)
     }
 }
 

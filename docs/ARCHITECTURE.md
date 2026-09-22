@@ -350,11 +350,11 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
 
      **所需 application 能力（下一轮候选，本轮不做）**：re-export `RepaintWaker`、暴露 `event_bus()`
      共享总线句柄、以及端口自然排序能力（`natural_sort_key` 或等价 DTO 排序）。
-   - **HEX 判定的残留重复（实测，刻意未收敛）**：判定的唯一真相已在 `tool_core::{parse_hex,
-     parse_hex_strict, hex_preview}`（native 与 wasm 共用），但仍有 3 处各自实现：
+   - **HEX 判定的残留重复（实测，刻意未收敛）**：判定与解码的唯一真相已在 `tool_core::{parse_hex,
+     parse_hex_strict}`（native 与 wasm 共用），但仍有 3 处各自实现：
      | 位置 | 为什么留 |
      |---|---|
-     | `crates/panels/src/sender.rs:539` `hex_preview` | 与 `tool_core::hex_preview` **渲染不同**：空输入返回 `""` 而非 `"—"`、无 `|ASCII|` 列、无 32 字节截断、报错带具体原因。二者谁都不该被悄悄替换 —— 那会改变界面输出。**但两者的现状不对称**（本轮按调用点核对）：活着的渲染只有 panels 这一份（`sender.rs:434` 调的是本文件 `:539` 的局部函数），`tool_core::hex_preview` 在生产代码里**已无调用点**，只剩自身三条用例（`core/src/lib.rs:792`、`:798`、`:804`）—— 要删它就得先确认没有插件/文档依赖，本轮不动它。 |
+     | `crates/panels/src/sender.rs:539` `hex_preview` | 与**曾经存在的** `tool_core::hex_preview` **渲染不同**：空输入返回 `""` 而非 `"—"`、无 `|ASCII|` 列、无 32 字节截断、报错带具体原因。二者当时谁都不该被悄悄替换 —— 那会改变界面输出。**第 11 轮已把 `tool_core::hex_preview` 连同它的三条用例删掉**（它当时在生产代码里已无调用点，"要删它就得先确认没有插件/文档依赖"这条前置已核实：全仓 `.rs` 里除 `sender.rs` 那份同名局部函数外零 token 命中，`plugins/` 与 `plugin-marketplace/` 是 11 个 Lua 文件、0 个 `.rs`，Lua 侧只能经宿主注册名触达 Rust，而没有任何宿主注册过它）。**`sender.rs` 这一份是活的，名字也一样，别照抄上面那句当成"它也没人用"**：按调用点核，`sender.rs:434` 调的就是本文件 `:539`。 |
      | `crates/panels/src/sender.rs:519` `hex_error` | 同上：它只判「能不能发」并渲染红色标签文案（`"HEX 中包含无效字符：{token}"`），文案本身是渲染结果。它是**校验器**而非解码器，不被 `grep parse_hex` 命中，容易被漏数。**测试覆盖是本轮补的**：此前该文件 `#[test]` 数为 0，把严格档的 `len() != 2` 放松成 `len() > 2` 全套 585 条仍全绿；现在 `sender.rs` 的 `mod tests` 钉着整张真值表（`gate_has_exactly_one_verdict_per_input_and_mode`、`strict_mode_rejects_every_length_except_two`）与那个分裂格（`gate_and_decoder_disagree_on_repeated_0x_prefix`），上述变异实测打红 2 条。 |
      | `crates/plugin_runtime/src/web_lua.rs:2508` `parse_hex` | wasm 插件 Lua API `ctx.serial.send_hex_to` 的后端，语义与 `tool_core::parse_hex` 不同（要求偶数长度、不认 `0x` 前缀），收敛即改动已发布文档（`docs/lua-plugin-api.md`）承诺的插件行为；且 `tool-plugin-runtime` 目前不依赖 `tool-core`，新增该边会改写 `Cargo.lock`（本轮约束为锁文件不变）。 |
      另：`crates/lua_host/src/codec.rs` 的 `from_hex` 是**有意**独立的 Lua 侧解析器，其归一化规则与
@@ -476,26 +476,38 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
    `hex_precheck_hint`、`response_id_for_send_input`、旧历史弹窗、重复的本地 `SendLayout`
    枚举，以及 native 侧那两个 `Workbench::validate_hex` 调用点一并消失。
    （他们分支上的 CHANGELOG 记的是 1429 → 257：那是相对**他们**基线的数，本树以 1467 → 242 为准。）
-   **连带事实（本树实测）**：native 的 `Workbench::validate_hex`（def
-   `crates/application/src/workbench.rs:1125`）现在**一个调用点都没有**；全仓唯一的
-   `.validate_hex(` 调用点是 `crates/app/src/web/mod.rs` 的 `web_hex_error` 内部那一处（按符号定位），而 `WebRuntime` 只是
+   **连带事实（第 11 轮更新）**：native 的 `Workbench::validate_hex` 已删（它当时**一个调用点
+   都没有**，`strict` 形参既没有 `true` 的调用者也没有测试）；现在全仓只剩 wasm 那份
+   `WebApplication::validate_hex`，唯一的 `.validate_hex(` 调用点是 `crates/app/src/web/mod.rs`
+   的 `web_hex_error` 内部那一处（按符号定位），而 `WebRuntime` 只是
    `WebApplication` 的别名（`crates/application/src/web.rs:37`），故它走 wasm 那份实现。
    **本条留下的方法论（这才是它值钱的部分）**：可达性只能用**调用点形式**核对，
    ```bash
-   grep -rn '\.validate_hex(' crates/          # 唯一调用点 + 两份定义（native/wasm）
+   grep -rn '\.validate_hex(' crates/          # 恰好 1 行：web_hex_error 里那次调用
+   grep -rn 'fn validate_hex' crates/          # 恰好 1 行：wasm 那份定义（native 的已删）
    grep -rn 'legacy_send_panel_body' crates/   # 0 命中：符号随代码一起没了
    ```
    裸符号计数**不是证据**：它随"提到这个符号的次数"增长，改一次注释就变一次 ——
    本条此前的版本曾把自己写的计数当成实测值。
-9. **`crates/panels` 有一组已被 application DTO 取代、但仍导出的死符号（实测，未删）**：
-   `replay_view.rs` 的 `ReplayView`（`:7`，含 `:55 impl From<&ReplayStatusView> for ReplayView`）
-   与 `plugin_view.rs` 的 `InstalledPluginRow`（`:6`）/ `PluginViewState`（`:14`）/
-   `PluginUiCommand`（`:21`）—— 工作区内**除自身定义与 `lib.rs` 的 `pub use` 外 0 引用**。
-   注意 `PluginUiCommand` 存在**同名不同类型**：`tool_panels::plugin_view::PluginUiCommand`（死）vs
-   `plugin_api::host::PluginUiCommand`（在 `web_plugin_host.rs`、`mlua_engine.rs`、`web_lua.rs` 中大量使用）。
-   清理时不要误删后者活的那组。核对：
+9. **`crates/panels` 那组已被 application DTO 取代、但仍导出的死符号：第 11 轮已删**：
+   原记的站点实测确认后才动手 —— `plugin_view.rs` **整文件删掉**（`InstalledPluginRow` /
+   `PluginViewState` / 该文件的 `PluginUiCommand`，48 行），连同 `lib.rs` 的 `mod plugin_view;`
+   与那条 `pub use`；`replay_view.rs` 只删 `ReplayView` 与它的 `Default`、`From<&ReplayStatusView>`
+   两个 impl（106 → 26 行），**同文件的 `ReplayUiCommand` 是活的**（native `runtime/replay.rs`
+   与 wasm `web/replay.rs` 都在消费），于是文件名 `replay_view.rs` 现在只剩一个命令枚举 ——
+   刻意不顺手改名，改名是另一次搬运的账。
+   > 为什么这类死符号是**这一轮才被发现**的：`dead_code` 看不见 `pub` 项，而本仓的死代码扫描按
+   > `pub fn` 找，`pub struct` 根本不在它的形态里。这两条盲区叠在一起 = 四个符号在文档里记了
+   > 一轮"实测未删"。扫描脚本要同时覆盖 `pub fn` / `pub struct` / `pub enum`。
+   > 另：删掉 `PermissionManager::missing_capabilities` 之后，它唯一的消费者
+   > `PluginManifest::required_capabilities` 也随之删除，于是 **`tool-extension` 现在有一条
+   > 可证明的死 Cargo 边 `tool-plugin-api`**（全 crate 0 处 `use`）。它和第 10 条
+   > `egui_extras` 是同一类决定（要动 `Cargo.lock`），等用户拍板，本轮不动。
+   注意 `PluginUiCommand` 存在**同名不同类型**（这条对删完的现状仍然成立）：
+   `plugin_api::host::PluginUiCommand` 是活着的那组（在 `web_plugin_host.rs`、`mlua_engine.rs`、
+   `web_lua.rs` 中大量使用）。核对：
    ```bash
-   grep -rn 'tool_panels::PluginUiCommand' crates/   # 0 行（死的那个没有消费者）
+   grep -rn 'tool_panels::PluginUiCommand' crates/   # 0 行（panels 那份已随文件删除）
    ```
    > 早期文档曾称这些文件为"已占位"（即待用），实测是"已被取代、可直接删除"，属相反结论。
 10. **`egui_extras` 是可证明的死依赖（实测，本轮裁决不做）**：
@@ -621,10 +633,12 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
       > 两条连接、两条发送、DTR/RTS）已全部接上两个中文映射器，其中 6 处由 `headless.rs` 真造出
       > 失败并逐字钉住，3 处（`spawn_refresh_ports` / `spawn_request_port` / `open_network_serial`）
       > 在 native 驱动不出失败，改由 `crates/application/tests/transport_error_sites.rs` 钉形状。
-      > 剩余的 `to_string()` 转换**恰好 12 处**，按"会不会真的到用户眼前"分开算（按符号定位，
+      > 剩余的 `to_string()` 转换当时是 12 处、**第 11 轮删掉 native `Workbench::validate_hex`
+      > 之后是 11 处**，按"会不会真的到用户眼前"分开算（按符号定位，
       > 这个文件的行号每轮拆分都会漂）：
-      > - 正文本来就是中文，只是换个类型装着：`TransportEndpoint::send`、`validate_hex`、
-      >   `dispatch_send`（三处都是 `SendPlanError`，它自己的 `Display` 就是中文句子）。
+      > - 正文本来就是中文，只是换个类型装着：`TransportEndpoint::send`、
+      >   `dispatch_send`（两处都是 `SendPlanError`，它自己的 `Display` 就是中文句子；
+      >   第三处 `Workbench::validate_hex` 已随第 11 轮的死代码清理删除）。
       > - 只是把错误塞进 `AppError` 的某个具名变体，用户读到的是那个变体的框架：
       >   `dispatch` 的两处插件分支与 `set_plugin_setting`（`Plugin`）、`dispatch_start_recording`
       >   （`Recording`）、`AppRuntime::dispatch`（浏览器 composition root；它给已中文化的正文

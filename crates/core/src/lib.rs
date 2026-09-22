@@ -589,43 +589,6 @@ fn parse_byte(token: &str) -> Result<u8, String> {
     u8::from_str_radix(token, 16).map_err(|_| format!("'{token}' is not hex"))
 }
 
-/// HEX 预览：将输入解析为 HEX 字节并显示 ASCII 预览。
-pub fn hex_preview(input: &str) -> String {
-    if input.trim().is_empty() {
-        return "—".to_owned();
-    }
-    const MAX_PREVIEW: usize = 32;
-    match parse_hex(input) {
-        Ok(bytes) if !bytes.is_empty() => {
-            let count = bytes.len();
-            let shown = &bytes[..count.min(MAX_PREVIEW)];
-            let hex = shown
-                .iter()
-                .map(|b| format!("{b:02X}"))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let ascii: String = shown
-                .iter()
-                .map(|&b| {
-                    if b.is_ascii_graphic() || b == b' ' {
-                        b as char
-                    } else {
-                        '.'
-                    }
-                })
-                .collect();
-            let truncated = if count > MAX_PREVIEW {
-                format!("… (共{count}B)")
-            } else {
-                String::new()
-            };
-            format!("{hex}{truncated}  |{ascii}|")
-        }
-        Ok(_) => "空".to_owned(),
-        Err(_) => "解析失败".to_owned(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -830,39 +793,6 @@ mod tests {
     fn parse_hex_strict_rejects_odd_long_token() {
         // 三字符 token "ABC" 严格模式应报错（不能自动补0）。
         assert!(parse_hex_strict_line("ABC").is_err());
-    }
-
-    // ── 预览渲染：presentation 侧 HEX 预览只此一份实现 ──
-    #[test]
-    fn hex_preview_renders_bytes_and_ascii() {
-        assert_eq!(hex_preview("48 69"), "48 69  |Hi|");
-        assert_eq!(hex_preview("AB CD"), "AB CD  |..|");
-    }
-
-    #[test]
-    fn hex_preview_distinguishes_empty_and_invalid() {
-        assert_eq!(hex_preview("   "), "—");
-        assert_eq!(hex_preview("gg"), "解析失败");
-    }
-
-    #[test]
-    fn hex_preview_truncates_beyond_32_bytes() {
-        let input = vec!["41"; 40].join(" ");
-        let preview = hex_preview(&input);
-        assert!(
-            preview.contains("… (共40B)"),
-            "超过 32 字节必须截断并标注总长，实际: {preview}"
-        );
-        assert_eq!(
-            preview.matches("41").count(),
-            32,
-            "十六进制列必须恰好渲染 32 字节，实际: {preview}"
-        );
-        assert_eq!(
-            preview.split('|').nth(1).unwrap().chars().count(),
-            32,
-            "ASCII 列同样必须截到 32 字节，实际: {preview}"
-        );
     }
 
     // ── 换行符表：持久化形状取证 ──

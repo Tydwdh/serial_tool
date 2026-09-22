@@ -122,11 +122,6 @@ pub struct SerialPortMetadata<'a> {
 pub struct SerialPanel;
 
 impl SerialPanel {
-    pub fn top_bar_ui(ui: &mut Ui, view: &mut SerialTopBarView<'_>) -> Vec<SerialTopBarAction> {
-        ui.horizontal_wrapped(|ui| Self::top_bar_contents_ui(ui, view))
-            .inner
-    }
-
     pub fn top_bar_contents_ui(
         ui: &mut Ui,
         view: &mut SerialTopBarView<'_>,
