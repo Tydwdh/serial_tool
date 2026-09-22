@@ -6,7 +6,38 @@
 
 ### 调整
 
-- **修掉「sleep 完就断言异步结果」这一类测试随机红里的两条**（本轮**零用户可见变化**：只换两个用例
+- **把 `settle()` 的固定 500ms 换成按条件有界的 `settle_until()`（7 处调用逐条等真条件）**（本轮
+  **零用户可见变化**：只改 `crates/extension/src/manager.rs` 的 `#[cfg(test)] mod tests`，生产代码逐字节
+  未动 —— `git diff` 的每个 hunk 都在第 920 行 `#[cfg(test)]` 之后，`cmp` 过 `#[cfg(test)]` 以上的整段
+  前缀与 `5f4a78f` 逐字节相同；四道门 fmt / native clippy -D warnings / wasm clippy / test 全 **EXIT=0**，
+  **720 passed / 0 failed / 7 ignored**、32 条 `test result:` 行，用例数 **0 增减**）。
+  `settle()` 原先对 7 条用例**无条件**睡满 20×25ms 再 `process_pending()`，既不看过随后要断言的那件事
+  有没有发生，每条又白付 500ms。改法是第 36 轮立的形状：一个就地 helper `settle_until(manager, budget, |m| …)`
+  （墙钟 deadline + `FnMut` 判据，照搬本仓 `crates/application/tests/headless.rs:151` 的 `tick_until`），
+  每处判据**逐字取自紧随其后的断言**，条件一成立立即返回、等不到就带 `elapsed()` 和最后观测红掉。
+  **先量再改**（配方同 `docs/ARCHITECTURE.md`，本机 16 核，`--full` 跑整包列红名，同机背靠背复测消机器抖动）：
+  churn×6 30 轮，改前 4 条依赖 register 事件流的用例见红 —— `tracks_registered_commands_after_enable` **8/30**、
+  `clears_registered_commands_on_disable` **10/30**、`detects_undeclared_dynamic_commands` **5/30**、
+  `command_dedup_on_repeated_register` **4/30**；另 3 条（`detects_missing_declared_commands`、
+  `diagnoses_command_not_found_on_execute`、`command_not_found_cleared_on_register`）本就 0/30（它们断的是
+  同步 `process_event` 的反应，旧 `settle` 对它们纯属白等）。churn×4 30 轮见红 7 / 8 / 1 / 4。
+  **改后同一配方两条 hog 全部 0/30**，空闲整包 wall time **1.63s → 0.26s**（7×500ms 的固定等待没了）。
+  同配方里不碰 `settle` 的两条（`natural_runtime_end_also_requests_cleanup` 桶 (b)#6、
+  `scenario_covers_retry_cancel_and_timeout` 桶 (b)#1）前后都随机器负载在 5~23/30 抖动 —— 与本轮无关，
+  仍是后续轮次的活。**「恰好 1 条」没被悄悄降级成「至少 1 条」**：判据只能停在「已注册 cmd.dedup.run」
+  （去重后恒 1），所以判据成立后再 `process_pending()` 干排几轮把第二条 register 事件也排干才计数 ——
+  两条 publish 是脚本相邻两行、中间无 timer/wait，第一条可观测时第二条已在队列里，去重坏掉会稳定读到 2。
+  **4 个生产变异、覆盖全部 7 条 + 3 个数量/形状敏感位，全部还原并 `cmp` 核过**：① `handle_command_registered`
+  直接 return（不记录）→ 4 条 register 类用例 30.00s 到点红，消息带 `实际等了 30.0001695s，最后观测 Some([])`；
+  ② 把命令记到错的 plugin key 下（`{plugin_id}!wrong`）→ `tracks` / `detects_undeclared` 仍红（有数据到达
+  但判据绑死 plugin_id+命令名，错数据不认，超时 `Some([])`）；③ 去掉去重守卫（`if true`）→ `command_dedup`
+  红在 `manager.rs:1650 left: 2 right: 1`（收尾排干后精确计数抓到重复），`tracks` 在此变异下仍绿（注册的是不同命令，
+  去重无关，证明变异是定点的）；④ `enable_lua` 不把状态置 `Running` → `detects_missing_declared_commands`
+  红（`missing_commands 应在 30s 内含 …，最后观测 Some([])`）、`diagnoses_command_not_found_on_execute` /
+  `command_not_found_cleared_on_register` 红（`应在 30s 内处于 Running，最后状态 Some(Disabled)`）——
+  后两条断的是同步反应，前置只是 Running，等不到只会是 Running 之外的真坏状态。
+- **修掉「sleep 完就断言异步结果」这一类测试随机红里的两条**（本轮
+  **零用户可见变化**：只换两个用例
   的等待方式，生产代码一个字节都没动 —— `git status` 只有 `crates/extension/src/manager.rs` 与
   `crates/application/tests/headless.rs` 两个文件；四道门 fmt / clippy / wasm clippy / test 全
   **EXIT=0**，**720 passed / 0 failed / 7 ignored**、32 条 `test result:` 行，与 `a5e0eae` 基线逐位相同，

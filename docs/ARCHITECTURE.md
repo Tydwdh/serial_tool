@@ -384,8 +384,9 @@ python target/r36-load.py --runs 2 --load 4 --hog churn --full \
 > cargo 换一次依赖就换一次测试二进制的哈希名：拿旧哈希跑出来的「0 红」是自欺欺人。脚本按 mtime 取最新
 > 并把文件名打在第一行，跑之前先核一眼。
 
-**全仓 `thread::sleep` 54 处的三桶分类**（`grep -rn "thread::sleep" crates/ --include=*.rs`；
-`crates/app/src/runtime/timing.rs:30` 是注释提及，真正的调用 **53 处**）：
+**全仓 `thread::sleep` 55 处的三桶分类**（`grep -rn "thread::sleep" crates/ --include=*.rs`；
+`crates/app/src/runtime/timing.rs:30` 是注释提及，真正的调用 **54 处**，第 37 轮把 `settle` 的一处
+定长睡眠换成 `settle_until` 的 2ms 步长 + 一处去重收尾的短排空，净 +1）：
 
 *(a) 生产码 —— 不是 flake，别动*：`application/src/workbench.rs:1255` 重连退避 ·
 `transport/src/lib.rs:881` 关旧 worker 的带 deadline join · `updater/src/lib.rs:604/649/658/680`
@@ -401,10 +402,10 @@ join，超时降级 detach。**两条要盯着的**：`app/src/app/mod.rs:39` �
 1. `extension/src/scenario.rs:370`（用例 `scenario_covers_retry_cancel_and_timeout`）—— **2/2 见红**，
    `Some("step 2: 未收到预期 TX: PING\n")`。根因不在那两处 sleep，而在 `scenario.timeout_ms = 500` 这个
    **固定墙钟预算被当成通过条件**：插件定时器要在 500ms 内被调度到。
-2. `extension/src/manager.rs:1599` `settle()` —— **无条件**睡满 20×25ms 再 `process_pending()`，7 处调用
-   共用；**见红 3 条**：`tracks_registered_commands_after_enable`（`manager.rs:1226`
-   `registered_commands should contain cmd.tracker.run, got []`）、`command_dedup_on_repeated_register`、
-   `clears_registered_commands_on_disable`。同一失效面，另外每条白付 500ms。
+2. ~~`extension/src/manager.rs` `settle()` —— 无条件睡满 20×25ms，7 处调用共用，每条白付 500ms。~~
+   **第 37 轮已修**：换成按条件有界的 `settle_until(manager, budget, |m| …)`，7 处判据逐字取自各自主断言，
+   见下方 (c)；churn×6 改前 4 条依赖 register 事件流的用例见红（8/10/5/4 每 30 轮），改后同一配方 **0/30**。
+   同文件里剩下的 `natural_runtime_end_also_requests_cleanup`（下条）与 `scenario.rs` 用例仍不在本轮范围内。
 3. `recorder/src/recorder.rs:887`（`stats_updated_during_recording`）—— `sleep(500)` →
    `assert!(events_written > 0)`，**见红 1/2**（`recorder.rs:890 expected some events written, got 0`）。
    教科书形状。
@@ -413,7 +414,7 @@ join，超时降级 detach。**两条要盯着的**：`app/src/app/mod.rs:39` �
    红在 `:836`，**见红 1/2**。预算是**轮数**不是墙钟。
 5. `application/tests/headless.rs:1199/1240/1271`（`plugin_restart_handoff_…`）—— 同 4 的轮数预算形状，
    其中 `:1271` 那一段轮完并不断言（只是收尾），红的是前两段。
-6. `extension/src/manager.rs:1410`（`natural_runtime_end_also_requests_cleanup`）—— 50×5ms 轮数预算 +
+6. `extension/src/manager.rs:1499`（`natural_runtime_end_also_requests_cleanup`）—— 50×5ms 轮数预算 +
    事后 `assert_eq!(take_cleanup_requests(), …)`；本轮同配方未单独见红，机制与 4 相同。
 7. `lua_host/src/lib.rs:1489/1514/1541/1561/1583/1607/1630/1794` —— `thread::spawn` 里 `sleep(25)` 再发布，
    脚本侧 `ctx.bus.wait(topic, 500)` 用自己的预算接：**赌的是「刺激方一定在 475ms 内被调度到」**。
@@ -432,7 +433,9 @@ join，超时降级 detach。**两条要盯着的**：`app/src/app/mod.rs:39` �
 `application/tests/headless.rs:165`（就是 `tick_until` 本体的步长，本轮两条改用它是直接受益者）、
 `:637`（回放推进的 deadline 轮询，预算用尽后仍有 `assert_eq!(published, 20)` 兜着）、
 `:794`（5s deadline + `assert!(script_started, …)`）· `extension/src/manager.rs:954`（本轮新写的 2ms 步长，
-等的是运行时收尾）· `recorder/src/recorder.rs:791/906/979/1246`（deadline 里带 `assert!`，红得响亮）·
+等的是运行时收尾）· `extension/src/manager.rs` 的 `settle_until`（第 37 轮把 7 处固定 500ms 的 `settle`
+收成的条件有界等待：2ms 步长、墙钟 deadline、判据逐字取自各自主断言，等不到带 `elapsed()` + 最后观测红掉；
+形状照搬 `headless.rs:151` 的 `tick_until`）· `recorder/src/recorder.rs:791/906/979/1246`（deadline 里带 `assert!`，红得响亮）·
 `recorder/src/recorder.rs:826/856/936/1042`（`while reap_stopping().is_none() { sleep(10) }` 收尾等待：
 **没有 deadline，坏了是挂死而不是假红** —— 将来要动是加 deadline，不是缩短）·
 `transport/src/network.rs:323/357`（deadline 轮询 + `assert!(closed, …)`）· `:336`（Windows 释放端口的

@@ -1219,7 +1219,35 @@ ctx.log.info("registered")
         assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
         manager.enable("cmd.tracker").unwrap();
 
-        settle(&mut manager);
+        // 等真条件（原 `settle` 无条件睡满 500ms）：脚本里两次 ctx.commands.register 各发
+        // 一条 PLUGIN_COMMAND_REGISTERED，两条都被 process_pending 排干后 registered_commands
+        // 才同时含 run 与 stop —— 判据取随后三条断言里最强的一条：声明集就是 {run, stop}，
+        // 二者都注册后 missing 必为空，所以「含 run 且含 stop」不松于「含 run」「含 stop」
+        // 「missing 为空」的合取；少注册任一条就等不到，超时带最后观测红掉。
+        let budget = std::time::Duration::from_secs(30);
+        let started = std::time::Instant::now();
+        let settled = settle_until(&mut manager, budget, |m| {
+            m.summaries()
+                .iter()
+                .find(|s| s.id == "cmd.tracker")
+                .is_some_and(|s| {
+                    s.registered_commands
+                        .contains(&"cmd.tracker.run".to_owned())
+                        && s.registered_commands
+                            .contains(&"cmd.tracker.stop".to_owned())
+                })
+        });
+        assert!(
+            settled,
+            "registered_commands 应在 {budget:?} 内同时含 cmd.tracker.run 与 cmd.tracker.stop，\
+             实际等了 {:?}，最后观测 {:?}",
+            started.elapsed(),
+            manager
+                .summaries()
+                .iter()
+                .find(|s| s.id == "cmd.tracker")
+                .map(|s| s.registered_commands.clone()),
+        );
 
         let summaries = manager.summaries();
         let s = summaries.iter().find(|s| s.id == "cmd.tracker").unwrap();
@@ -1271,7 +1299,27 @@ ctx.log.info("registered")
         assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
         manager.enable("cmd.missing").unwrap();
 
-        settle(&mut manager);
+        // 等真条件：manifest 声明了 cmd.missing.apply 而脚本不注册，missing 由 summaries()
+        // 在插件 Running 时对账得出（enable 已同步置 Running、且 process_pending 不回收
+        // 运行时，状态不会中途离开 Running）—— 判据就是随后那条断言本身，一成立即返回。
+        let budget = std::time::Duration::from_secs(30);
+        let started = std::time::Instant::now();
+        let settled = settle_until(&mut manager, budget, |m| {
+            m.summaries()
+                .iter()
+                .find(|s| s.id == "cmd.missing")
+                .is_some_and(|s| s.missing_commands.contains(&"cmd.missing.apply".to_owned()))
+        });
+        assert!(
+            settled,
+            "missing_commands 应在 {budget:?} 内含 cmd.missing.apply，实际等了 {:?}，最后观测 {:?}",
+            started.elapsed(),
+            manager
+                .summaries()
+                .iter()
+                .find(|s| s.id == "cmd.missing")
+                .map(|s| s.missing_commands.clone()),
+        );
 
         let summaries = manager.summaries();
         let s = summaries.iter().find(|s| s.id == "cmd.missing").unwrap();
@@ -1309,7 +1357,30 @@ ctx.log.info("registered dynamic")
         assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
         manager.enable("cmd.dynamic").unwrap();
 
-        settle(&mut manager);
+        // 等真条件：脚本注册了未声明的 cmd.dynamic.secret，须等它的 register 事件被
+        // process_pending 排干、出现在 undeclared_commands（registered 减 declared）里 ——
+        // 判据就是随后那条断言本身。事件没到就等不到，超时红。
+        let budget = std::time::Duration::from_secs(30);
+        let started = std::time::Instant::now();
+        let settled = settle_until(&mut manager, budget, |m| {
+            m.summaries()
+                .iter()
+                .find(|s| s.id == "cmd.dynamic")
+                .is_some_and(|s| {
+                    s.undeclared_commands
+                        .contains(&"cmd.dynamic.secret".to_owned())
+                })
+        });
+        assert!(
+            settled,
+            "undeclared_commands 应在 {budget:?} 内含 cmd.dynamic.secret，实际等了 {:?}，最后观测 {:?}",
+            started.elapsed(),
+            manager
+                .summaries()
+                .iter()
+                .find(|s| s.id == "cmd.dynamic")
+                .map(|s| s.undeclared_commands.clone()),
+        );
 
         let summaries = manager.summaries();
         let s = summaries.iter().find(|s| s.id == "cmd.dynamic").unwrap();
@@ -1351,7 +1422,25 @@ ctx.log.info("registered")
         assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
         manager.enable("cmd.cleanup").unwrap();
 
-        settle(&mut manager);
+        // 等真条件：cmd.cleanup.run 的 register 事件被 process_pending 排干后，
+        // registered_commands 才出现该插件的键 —— 判据就是紧随的 `contains_key` 断言。
+        // 之后的 disable 直接同步删键（manager.rs 里 disable 走 registered_commands.remove），
+        // 不依赖后台线程，所以无需再等。
+        let budget = std::time::Duration::from_secs(30);
+        let started = std::time::Instant::now();
+        let settled = settle_until(&mut manager, budget, |m| {
+            m.registered_commands.contains_key("cmd.cleanup")
+        });
+        assert!(
+            settled,
+            "registered_commands 应在 {budget:?} 内出现 cmd.cleanup，实际等了 {:?}，最后观测 {:?}",
+            started.elapsed(),
+            manager
+                .registered_commands
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
 
         // 确认注册了
         assert!(manager.registered_commands.contains_key("cmd.cleanup"));
@@ -1442,7 +1531,23 @@ ctx.log.info("registered")
         assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
         manager.enable("cmd.notfound").unwrap();
 
-        settle(&mut manager);
+        // 等真条件而非时长：command_not_found 由下面手动的 process_event(&event) **同步**产出，
+        // 其前置只是插件处于 Running（check_command_registered 只对 Running 的插件诊断）。
+        // 脚本不注册任何命令，cmd.notfound.run 始终未注册，所以 Running 一到就等够，
+        // 不再白付原来的 500ms；enable 未 unwrap 失败已保证 Running，等不到只会是 Running
+        // 之外的状态（那时诊断根本不该出现，红得对）。
+        let budget = std::time::Duration::from_secs(30);
+        let started = std::time::Instant::now();
+        let settled = settle_until(&mut manager, budget, |m| {
+            matches!(m.plugin_state("cmd.notfound"), Some(PluginState::Running))
+        });
+        assert!(
+            settled,
+            "cmd.notfound 应在 {budget:?} 内处于 Running（手动 process_event 才会诊断），\
+             实际等了 {:?}，最后状态 {:?}",
+            started.elapsed(),
+            manager.plugin_state("cmd.notfound"),
+        );
 
         // 模拟触发一个未注册的命令
         let event = Event::new(
@@ -1500,7 +1605,38 @@ ctx.log.info("registered twice")
         assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
         manager.enable("cmd.dedup").unwrap();
 
-        settle(&mut manager);
+        // 等真条件 + 收尾静默：判据停在「已注册 cmd.dedup.run」，但「恰好 1 条」不许降级成
+        // 「至少 1 条」。脚本连发两条同命令的 register 事件，去重发生在 handle_command_registered，
+        // 第一条到就 count==1，若此时就断言会漏掉「去重失效→第二条追加→count==2」这条真 bug。
+        // 两条 publish 是脚本里相邻两行、中间没有 timer/wait，第一条能被 process_pending 观测到时
+        // 第二条已在（或至多再一次排空之间）订阅队列里；故再额外排干几轮让队列彻底干涸后再数：
+        // 去重正常恒为 1，去重坏掉恒为 2 —— 精确性完整保留。
+        let budget = std::time::Duration::from_secs(30);
+        let started = std::time::Instant::now();
+        let settled = settle_until(&mut manager, budget, |m| {
+            m.summaries()
+                .iter()
+                .find(|s| s.id == "cmd.dedup")
+                .is_some_and(|s| {
+                    s.registered_commands
+                        .iter()
+                        .any(|c| c.as_str() == "cmd.dedup.run")
+                })
+        });
+        assert!(
+            settled,
+            "registered_commands 应在 {budget:?} 内含 cmd.dedup.run，实际等了 {:?}，最后观测 {:?}",
+            started.elapsed(),
+            manager
+                .summaries()
+                .iter()
+                .find(|s| s.id == "cmd.dedup")
+                .map(|s| s.registered_commands.clone()),
+        );
+        for _ in 0..5 {
+            manager.process_pending();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
 
         let summaries = manager.summaries();
         let s = summaries.iter().find(|s| s.id == "cmd.dedup").unwrap();
@@ -1543,7 +1679,22 @@ ctx.log.info("started")
         assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 1);
         manager.enable("cmd.late").unwrap();
 
-        settle(&mut manager);
+        // 等真条件而非时长：command_not_found 的产生与随后经注册事件的清除都由下面两次手动
+        // process_event **同步**完成（check_command_registered 只对 Running 的插件诊断、
+        // handle_command_registered 同步清除），其前置只是 cmd.late 处于 Running。与 :1445
+        // 同形 —— 反应不来自后台事件流，Running 一到就等够，不再白付 500ms。
+        let budget = std::time::Duration::from_secs(30);
+        let started = std::time::Instant::now();
+        let settled = settle_until(&mut manager, budget, |m| {
+            matches!(m.plugin_state("cmd.late"), Some(PluginState::Running))
+        });
+        assert!(
+            settled,
+            "cmd.late 应在 {budget:?} 内处于 Running（手动 process_event 才会诊断/清除），\
+             实际等了 {:?}，最后状态 {:?}",
+            started.elapsed(),
+            manager.plugin_state("cmd.late"),
+        );
 
         // 模拟触发未注册命令 → 产生诊断
         let exec_event = Event::new(
@@ -1593,11 +1744,27 @@ ctx.log.info("started")
         PluginManager::new(bus.clone(), TransportManager::new(bus))
     }
 
-    /// 等待 Lua 线程执行 + registered 事件到达 + process_pending 处理。
-    fn settle(manager: &mut PluginManager) {
-        for _ in 0..20 {
-            std::thread::sleep(std::time::Duration::from_millis(25));
+    /// 反复 `process_pending` 直到 `done` 成立或墙钟预算耗尽，返回 `done` 是否成立。
+    /// 取代原先无条件睡满 20×25ms 的 `settle`：每处调用把「随后要断言的那件事」本身当
+    /// 判据，条件一成立立刻返回（不再每条白付 500ms），等不到由调用方带实际耗时与最后
+    /// 观测值大声红掉，既不静默通过也不挂死。形状照搬本仓已有的
+    /// `crates/application/tests/headless.rs:151` 的 `tick_until`：墙钟 deadline + `Fn` 判据，
+    /// 不新增抽象、不把预算写成轮数。步长 2ms 同 `manager.rs` 第 36 轮那条与 `tick_until`。
+    fn settle_until(
+        manager: &mut PluginManager,
+        budget: std::time::Duration,
+        mut done: impl FnMut(&PluginManager) -> bool,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
             manager.process_pending();
+            if done(manager) {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }
 
