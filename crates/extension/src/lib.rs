@@ -63,15 +63,18 @@ pub type ExtensionResult<T> = Result<T, ExtensionError>;
 ///
 /// 各变体到用户眼前的实际路径（决定哪句文案真的会被读到）：
 /// - `NotFound` / `AlreadyEnabled` / `Stopping` 由 `Workbench` 的 Enable/Disable 派发带出。
-/// - `Io` 有两条活路：插件目录缺 `main.lua` 时的启用失败，以及 `scan_roots` 的
-///   `read_dir` 失败后经 `discover_plugins` / `reload_plugins` 的任务消息到达状态栏。
+/// - `Io` 有三条活路：插件目录缺 `main.lua` 时的启用失败，`scan_roots` 的 `read_dir` 失败
+///   经 `discover_plugins` / `reload_plugins` 的任务消息到达状态栏，以及第 24 轮起
+///   `plugin.json` 读不出来时的那条 `manifest_parse_error` 诊断（此前它被内插成
+///   「解析失败」，是一句谎报）。
 /// - `UnsupportedRuntime` 的分支是活的，但输入进不来：`scan_roots` 先跑
 ///   `manifest.validate()`，而 `spec::RUNTIMES` 只有 `lua`，非法 runtime 在登记成
 ///   record 之前就被折成中文诊断了。留文案是因为这条判定仍然写在那里。
-/// - `Manifest` 不会从派发路径逃出来：`load_manifest` 唯一的调用点把它折成
-///   `manifest_parse_error` 诊断就 `continue` 了。这里仍配文案，因为该诊断直接内插
-///   它的 `Display`，改这一臂的措辞要有测试兜着。
-/// - `PermissionDenied` 同理：它只出现在 `permission_denied` 诊断里，那条也用 `Display`。
+/// - `Manifest` 到用户眼前只有一条路：`scan_roots` 把它折成 `manifest_parse_error` 诊断，
+///   第 24 轮起那条诊断的正文正是本函数的返回值（此前它内插 `Display`，用户读到的是一句
+///   套在中文框架里的英文）。派发路径上它逃不出来，因为 `load_manifest` 只被那里调。
+/// - `PermissionDenied` 同理：它只出现在 `permission_denied` 诊断里，那条也从第 24 轮起
+///   调本函数（此前是裸 `to_string()`，整句英文直接渲染进面板）。
 /// - `Lua` 目前只能由 `enable_lua` 里那句 `run_plugin(..)?` 产生，而 `run_plugin` 现在
 ///   一律返回 `Ok`（脚本错误走运行时状态与诊断），所以这一臂还没有活的用户路径。
 pub fn translate_error(err: &ExtensionError) -> String {

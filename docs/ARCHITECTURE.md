@@ -413,15 +413,23 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
      > `transport: invalid hex input: <原因>`。任务内两步各有其责：Part A（`25d2c38`）把
      > `tool_transport::parse_hex*` 换成 `tool_core::*` 并用 `format!("HEX 解析失败：{原因}")`
      > 重新包装（`transport: ` 前缀之外的中文串就是那时换的），Part B（`74719a6`）又把这句话
-     > 搬进 `SendPlanError: Display`。今天渲染为 `transport: HEX 解析失败：<原因>`
+     > 搬进 `SendPlanError: Display`。那时渲染为 `transport: HEX 解析失败：<原因>`
      > （`transport: ` 前缀来自 `AppError`）。判定不变，变的是披露与措辞。
-     > **本轮发布的证据原文**（native 输入 `"AB C"` + `strict: true` 经 `dispatch` 的完整渲染）：
-     > `transport: HEX 解析失败：严格模式: "C" 规范化后为 1 个字符，必须恰为 2（偶数 hex 长度），请补0或关闭严格模式`
+     > **本轮发布的证据原文**（native 输入 `"AB C"` + `strict: true` 经 `dispatch` 的完整渲染，
+     > 第 24 轮起如下）：
+     > `传输错误：HEX 解析失败：严格模式: "C" 规范化后为 1 个字符，必须恰为 2（偶数 hex 长度），请补0或关闭严格模式`
      > **这句有测试钉着**：`crates/application/tests/headless.rs::
      > send_routing_dispatches_by_port_kind_and_rejects_invalid_hex` 除断言变体外，还断言
      > 该输入的 `strict_error.to_string()` 逐字等于上面这整行 —— 改 `SendPlanError` 的
-     > `Display`、改 `AppError::Transport` 的 `#[error("transport: {0}")]` 前缀、或改
-     > `tool_core` 严格模式的文案，都会让该用例变红（两条变异均实测过，见 task-6 报告 M7/M7b）。
+     > `Display`、改 `AppError::Transport` 的 `#[error("传输错误：{0}")]` 前缀、或改
+     > `tool_core` 严格模式的文案，都会让该用例变红（两条变异均实测过，见 task-6 报告 M7/M7b；
+     > 第 24 轮换掉前缀时该用例实测变红一次）。
+     > **【第 24 轮更正】**上面那句里的分类前缀已从英文 `transport: ` 换成中文 `传输错误：`：
+     > `application/src/error.rs` 七个 `#[error(...)]` 全部换成中文分类标签（`录制错误：`
+     > `回放错误：` `存储错误：` `插件错误：` `当前状态不允许：` `命令不支持：`），因为它们是
+     > 夹在 UI 那句中文框架与已中文化正文之间的最后一段英文。**换语言不等于闭合两端差异**：
+     > `AppError` 被 `cfg(not(target_arch = "wasm32"))` 挡在 wasm 之外，web 侧仍然 `to_string()`
+     > 出不带任何分类前缀的那句，"native 有一层分类框架、web 没有" 这条按设计仍在。
      > **本节原有的两处 hover 文案（`hex_precheck_hint`）已随死子树一起删除**：它当时
      > 仅有的两个应用点就在 `legacy_send_panel_body` 内（详见本文件第 8 条），所以 round-1
      > 记录的「用户在看板里读到带前缀的句子」那半条 UX 回归**从未到达过用户**，如今连
@@ -431,7 +439,7 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
      > 把 `dispatch` 的错误 `.to_string()` 写进 `self.send.error`（另两处 `:186`、`:191` 是
      > 本文件自己造的定长文案，不含 `AppError` 前缀），它经 `SendView.error` 由
      > `crates/panels/src/sender.rs:155` 的 `ui.colored_label(theme::red(), error)` 渲染，
-     > 按设计**仍带 `transport: ` 分类前缀**（`#[error("transport: {0}")]`）。
+     > 按设计**仍带 `传输错误：` 分类前缀**（`#[error("传输错误：{0}")]`，第 24 轮之前是 `transport: `）。
      > **状态栏与 HEX 无关**（round-2 把两者并列是错的）：活着的状态栏错误站点全是
      > DTR/RTS —— `sender.rs:417`、`:425` 产出 `SendAction::SetDtr` / `SetRts`，由
      > `bottom_panel.rs:140`、`:152` 消费后写状态栏，没有一条来自 HEX。本条目里原先记的
@@ -801,6 +809,35 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
       > （请先重新扫描插件目录）` —— 正文已中文化，`AppError` 那句英文 `plugin: ` 前缀还在
       > （已核实全仓没有任何判定读 `AppError` 的 `Display`，所以换掉它是安全的，只是范围另开一轮）。
       > `dispatch_load_replay` 与 `write_exported_content` 仍未接映射器。
+      > **【第 24 轮：上面三样一起闭合】**
+      > ① `application/src/error.rs` 七个 `#[error(...)]` 的英文分类标签全部改成中文：
+      > `传输错误：` / `录制错误：` / `回放错误：` / `存储错误：` / `插件错误：` /
+      > `当前状态不允许：` / `命令不支持：`（变体名与载荷类型不动，那是对外 API）。
+      > 用户点「启用」现在读到 `启用插件 demo.x 失败：插件错误：未找到插件 demo.x（请先重新扫描插件目录）`。
+      > **但两端差异没有因此关掉**：`AppError` 被 `cfg(not(target_arch = "wasm32"))` 挡在 wasm
+      > 之外，web 侧仍是**不带任何分类前缀**的那句 —— "native 有一层分类框架、web 没有"这条
+      > 按设计仍在，别把本轮记成"两侧错误文案已一致"。动手前按第 21 轮的教训逐个查过
+      > `.contains`/`.starts_with`/`==` 对七个旧前缀的读取：零命中（`replay:` / `plugin:` 的
+      > 命中全在 DataBus 事件的 `source` 上，与 `AppError::Display` 无关）；唯一的逐字钉是
+      > `headless.rs::send_routing_dispatches_by_port_kind_and_rejects_invalid_hex`，改前缀实测
+      > 让它变红（`left: "串口错误：HEX …"` vs `right: "传输错误：HEX …"`）。
+      > ② `scan_roots` 的 `manifest_parse_error` 诊断改走 `translate_error(&error)`：双重框架
+      > `manifest 解析失败: manifest parse error: <serde 原文>` 没了，**而且标签本身此前在说谎** ——
+      > `load_manifest` 会同时抛 `Io`（文件读不出来）与 `Manifest`（JSON 不合法），此前两种都被
+      > 冠以「解析失败」；现在读不出来那句是 `插件文件访问失败：拒绝访问。 (os error 5)`（本机实测，
+      > 细节跟随 OS）。③ `permission_denied` 诊断正文从裸 `error.to_string()` 改走同一个映射器，
+      > 面板不再直接渲染 `permission 'filesystem' is not allowed for plugin 'x'`。两条各配用例
+      > （`manager.rs` 的 `unreadable_manifest_is_diagnosed_as_io_not_as_parse_failure` /
+      > `malformed_manifest_gets_exactly_one_chinese_frame` /
+      > `undeclared_permission_diagnostic_is_the_chinese_sentence_not_the_display`；三处变异实测：
+      > 退回内插形式 → 前两格红，把「解析失败」写成无条件 → 仍红且打印出重复框架，退回裸
+      > `to_string()` → 第三格红）。诊断码 `manifest_parse_error` / `permission_denied` 一字未动。
+      > **两条顺手查出来的、与上面记录不符的事实**：(a) 「plugin.json **缺失**」根本到不了这条
+      > 诊断 —— `scan_roots` 在 `load_manifest` 之前先 `manifest_path.exists()` 判空并 `continue`，
+      > 所以谎报只发生在「文件在、读不出来」这一格；(b) 这两条诊断实际**只有 native 看得到** ——
+      > `tool-extension` 不参与 wasm 编译，web 侧插件由用户选文件装载、
+      > `crates/app/src/web/plugins.rs` 给面板的 `diagnostics` 恒为 `Vec::new()`，上面写的
+      > "两端各自经 `ui/tiles.rs` 与 `web/plugins.rs` 渲染"对 web 那一半是空的（渲染器在，输入永远没有）。
       ⑤ 【本波已闭合】换行后缀表原有 3 份（native `state::LineEnding`、wasm `WebLineEnding`、
       共享面板 `SendLineEnding`），值一致但没有任何断言钉住，两端还各写两份 4 臂 **identity** `match`
       （类型不同才需要转）。现在收进 `tool_core::LineEnding`（`crates/core/src/lib.rs:454`），
@@ -823,6 +860,16 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
       修法方向：保存时过滤掉无法稳定重算的键（或改用能跨载入稳定的身份做键）。
       这是持久化行为变化（会清掉用户已有的、本来就不生效的条目），需要配套测试与
       一条"重新载入后别名仍在"的断言，故未与本轮的机械改动混做。
+      ⑦ 【第 24 轮查出来的】web 的插件面板**永远不会显示任何扫描诊断**：共享渲染器是接好的
+      （`crates/app/src/web/plugins.rs` 把 `plugin_view.diagnostics` 交给面板），但喂进去的那份
+      被写死成空 —— `set_plugins_view(PluginView { summaries:…, diagnostics: Vec::new() })`。
+      于是同一件"插件清单坏了"的事：native 在面板里给一条中文诊断（本轮刚把它修成不说谎的
+      `插件文件访问失败：…`），web **什么反馈都没有**，用户只会看到插件莫名其妙不在列表里。
+      这不是文案问题也不是死代码，而是"渲染器在、输入永远为空"的半接线路。
+      收它需要先回答一个产品问题：浏览器侧的插件来源与 native 不同（web 走 marketplace /
+      `tool-plugin-runtime`，`tool-extension` 根本不参与 wasm 编译），所以"web 的扫描诊断该由谁产生、
+      包含哪些码"是新增行为而不是将现有行为对齐 —— 需要用户定调，且改动会新增用户可见文案，
+      不能算进机械收敛。
 
 ### 本轮裁掉项
 

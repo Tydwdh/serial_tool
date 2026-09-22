@@ -17,7 +17,7 @@ use crate::manifest::{
     ReplayAnalyzerEntry, SUPPORTED_PLUGIN_API_VERSIONS,
 };
 use crate::permission::PermissionManager;
-use crate::{ExtensionError, ExtensionResult};
+use crate::{ExtensionError, ExtensionResult, translate_error};
 
 const MAX_PLUGIN_EVENTS_PER_FRAME: usize = 500;
 
@@ -172,12 +172,17 @@ impl PluginManager {
                 let manifest = match load_manifest(&manifest_path) {
                     Ok(manifest) => manifest,
                     Err(error) => {
+                        // 走映射器而不是内插 `error`：`load_manifest` 既可能抛 `Manifest`
+                        // （JSON 不合法）也可能抛 `Io`（文件读不出来），内插的 `Display` 一面
+                        // 叠成「manifest 解析失败: manifest parse error: …」双重框架，一面把
+                        // 读不出来那格谎报成「解析失败」。`manifest_parse_error` 是机器码
+                        // （用例按它匹配、面板原样显示它），不是散文，保持原样。
                         diagnostics.push(PluginDiagnostic::new(
                             PluginDiagnosticSeverity::Error,
                             "manifest_parse_error",
                             None,
                             path,
-                            format!("manifest 解析失败: {error}"),
+                            translate_error(&error),
                         ));
                         continue;
                     }
@@ -210,12 +215,14 @@ impl PluginManager {
                 }
 
                 if let Err(error) = permission_manager.check(&manifest) {
+                    // 裸 `Display` 是一整句英文，而插件面板把这条正文原样渲染给用户。
+                    // `permission_denied` 是机器码（面板显示它，不匹配它），不是散文，不动。
                     diagnostics.push(PluginDiagnostic::new(
                         PluginDiagnosticSeverity::Error,
                         "permission_denied",
                         Some(manifest.id.clone()),
                         path,
-                        error.to_string(),
+                        translate_error(&error),
                     ));
                     continue;
                 }
@@ -1001,6 +1008,130 @@ ctx.bus.publish('protocol.pid.sample', { t = 1, target = 50, actual = 43, output
         let _ = fs::remove_dir_all(root);
     }
 
+    // ── 诊断正文的措辞（第 24 轮：两条 scan 诊断改走 `translate_error`）──
+    //
+    // 前两格只钉**框架**与**不许出现的英文**，不钉第三方原文：`Io` / `Manifest` 两臂是
+    // 「中文框架 + 外来细节」，那半句细节跟随机器与系统语言（同一取舍与理由见
+    // `crates/extension/tests/error_wording.rs` 的文件头）。第三格整句都是自己写的，逐字钉。
+
+    /// `plugin.json` 在、却读不出来：这是 `Io`，不是解析失败。
+    ///
+    /// 形状选「同名目录」而不是改权限位：`exists()` 拦不住它、`read_to_string` 必失败，
+    /// 且不依赖 chmod/ACL（Windows 上没有可移植的权限位可改）。
+    #[test]
+    fn unreadable_manifest_is_diagnosed_as_io_not_as_parse_failure() {
+        let (root, plugin_root) = empty_plugin_dir("unreadable.manifest");
+        fs::create_dir(plugin_root.join("plugin.json")).expect("把 plugin.json 做成目录");
+
+        let mut manager = new_test_manager();
+
+        assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 0);
+        let diagnostics = manager.diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "manifest_parse_error");
+        let message = &diagnostics[0].message;
+
+        assert!(
+            message.starts_with("插件文件访问失败："),
+            "读不出来的 plugin.json 必须报 `Io` 那句中文框架，实际 {message:?}"
+        );
+        assert!(
+            !message.contains("解析失败"),
+            "读不出来被谎报成「解析失败」，用户会去改 JSON 而不是查文件本身：{message:?}"
+        );
+        assert!(
+            !message.contains("io error:"),
+            "`ExtensionError::Io` 的英文 `Display` 又漏进正文了：{message:?}"
+        );
+        assert!(
+            !message.contains("manifest parse error:"),
+            "非解析失败被冠上了 parse error 那句英文：{message:?}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 畸形 JSON：中文框架只许一层，英文 `Display` 一个字都不许跟着进来。
+    #[test]
+    fn malformed_manifest_gets_exactly_one_chinese_frame() {
+        let root = create_broken_plugin("malformed.manifest", "{ not json");
+
+        let mut manager = new_test_manager();
+
+        assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 0);
+        let diagnostics = manager.diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "manifest_parse_error");
+        let message = &diagnostics[0].message;
+
+        assert!(
+            message.starts_with("manifest 解析失败："),
+            "解析失败必须走 `translate_error` 的中文框架，实际 {message:?}"
+        );
+        assert!(
+            !message.contains("manifest parse error:"),
+            "双重框架回来了（中文框架里又内插了英文 `Display`）：{message:?}"
+        );
+        assert!(
+            !message.contains("io error:"),
+            "`Io` 臂的英文框架跟着漏了进来：{message:?}"
+        );
+        assert_eq!(
+            message.matches("解析失败").count(),
+            1,
+            "中文框架本身也不许重复：{message:?}"
+        );
+        assert!(
+            message.contains("line 1 column"),
+            "serde 的位置线索被吞掉了，用户将无法排查：{message:?}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 白名单外的权限声明：正文此前是裸 `error.to_string()`（整句英文直接渲染进面板）。
+    /// 整句都是自己写的，所以逐字钉；顺带钉它与 Web Serial 那句授权失败不撞 —— 两个概念。
+    #[test]
+    fn undeclared_permission_diagnostic_is_the_chinese_sentence_not_the_display() {
+        let root = create_custom_plugin(
+            "greedy.plugin",
+            r#"{
+  "id": "greedy.plugin",
+  "name": "Greedy",
+  "version": "0.1.0",
+  "runtime": "lua",
+  "main": "main.lua",
+  "permissions": ["log", "filesystem"]
+}"#,
+            "",
+        );
+
+        let mut manager = new_test_manager();
+
+        assert_eq!(manager.discover_roots([root.clone()]).unwrap(), 0);
+        let diagnostics = manager.diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity, PluginDiagnosticSeverity::Error);
+        assert_eq!(diagnostics[0].code, "permission_denied");
+        assert_eq!(diagnostics[0].plugin_id.as_deref(), Some("greedy.plugin"));
+        let message = &diagnostics[0].message;
+
+        assert_eq!(
+            message,
+            "插件 greedy.plugin 声明了宿主不允许的权限 filesystem（请检查 plugin.json 的 permissions 字段）"
+        );
+        assert!(
+            !message.contains("permission 'filesystem' is not allowed"),
+            "英文 `Display` 又被当成正文渲染进面板了：{message:?}"
+        );
+        assert!(
+            !message.contains("浏览器拒绝了串口授权请求"),
+            "插件声明了越权权限，被写成用户取消了浏览器授权弹窗：{message:?}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn skips_invalid_manifest_with_diagnostic() {
         let root = create_custom_plugin(
@@ -1459,6 +1590,22 @@ ctx.log.info("started")
 
     fn create_broken_plugin(id: &str, manifest_text: &str) -> PathBuf {
         create_custom_plugin(id, manifest_text, "")
+    }
+
+    /// 只搭出「扫描根 + 一个空插件目录」的骨架，`plugin.json` 该长成什么样由用例自己填。
+    /// 返回 `(root, root/<id>)`；`root` 才是要交给 `discover_roots` 的那个。
+    fn empty_plugin_dir(id: &str) -> (PathBuf, PathBuf) {
+        let safe_id = id.replace(['.', ':', '\\', '/'], "-");
+        let root = std::env::temp_dir().join(format!(
+            "hardware-workbench-plugin-test-{}-{}",
+            safe_id,
+            tool_core::now_timestamp_ms()
+        ));
+        let plugin_root = root.join(id);
+
+        fs::create_dir_all(&plugin_root).unwrap();
+
+        (root, plugin_root)
     }
 
     fn create_custom_plugin(id: &str, manifest_text: &str, main_lua: &str) -> PathBuf {

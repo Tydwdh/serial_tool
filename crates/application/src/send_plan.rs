@@ -317,10 +317,11 @@ mod tests {
 
     /// `SendPlanError` 的 `Display` 是两平台错误句串的**共同来源**，但它**不是**用户在两侧
     /// 看到的同一行字：native 把它包进 `AppError::Transport`，后者的
-    /// `#[error("transport: {0}")]` 会再加一层 `transport: ` 分类前缀（活的红字标签与状态栏
-    /// 渲染的就是带前缀的那句，见 `docs/ARCHITECTURE.md`「发送路径的残留差异 → 错误文案」），
+    /// `#[error("传输错误：{0}")]` 会再加一层 `传输错误：` 分类前缀（第 24 轮之前那层是英文
+    /// `transport: `；活的红字标签与状态栏渲染的就是带前缀的那句，见
+    /// `docs/ARCHITECTURE.md`「发送路径的残留差异 → 错误文案」），
     /// wasm 侧 `to_string()` 出来的才是不带前缀的本句。
-    /// 本用例钉的是**不带前缀**的那句；带 `transport: ` 的原文由
+    /// 本用例钉的是**不带前缀**的那句；带 `传输错误：` 的原文由
     /// `tests/headless.rs::send_routing_dispatches_by_port_kind_and_rejects_invalid_hex`
     /// 的句串断言钉住。
     #[test]

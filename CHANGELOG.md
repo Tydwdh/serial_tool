@@ -6,6 +6,44 @@
 
 ### 调整
 
+- 去掉夹在中英文之间的 `AppError` 分类前缀，并修好两条插件诊断文案（四道门 700 passed /
+  0 failed / 7 ignored，基线 697 → 700；新增三条用例都是建/删临时目录的 fs 用例，故另测失败率：
+  `tool-extension` 里匹配 `manifest_` 的那 10 条连跑 12 次 0 红）。
+  `crates/application/src/error.rs` 七个 `#[error(...)]` 的英文分类标签换成中文：`传输错误：`
+  `录制错误：` `回放错误：` `存储错误：` `插件错误：` `当前状态不允许：` `命令不支持：`
+  （变体名与载荷类型不动，那是对外 API；标点跟三个既有映射器同一形状 —— 全角冒号）。
+  桌面用户点「启用」一个不存在的插件，从前读
+  `启用插件 demo.x 失败：plugin: 未找到插件 demo.x（请先重新扫描插件目录）`，现在那句英文前缀没了。
+  **没有因此宣称两端一致**：`pub mod error` 被 `cfg(not(target_arch = "wasm32"))` 挡在 wasm 之外
+  （`lib.rs:19-20`），web 侧 `to_string()` 出来仍是**不带任何分类前缀**的那句，"native 有一层框架、
+  web 没有" 这条按设计仍在。动手前按第 21 轮的教训逐个查了七个旧前缀有没有被判定读取
+  （`.contains`/`.starts_with`/`==` 全仓扫）：**零命中** —— 命中的 `replay:` / `plugin:` 全是 DataBus
+  事件的 `source` 前缀（`panels/src/dynamic/ingest.rs`、`recorder/src/replay.rs`），与 `Display` 无关。
+  逐字钉只有 `headless.rs:277` 那一格，它原本就写着"改 `transport: ` 前缀会让本断言变红"，
+  本轮把期望值与那句注释一起换成中文（另两处引用该字面量的注释 —— `send_plan.rs` 的双前缀
+  说明、`crates/extension/tests/error_wording.rs` —— 同步换掉，理由保留）。
+  `scan_roots` 的两条诊断改走 `tool_extension::translate_error`：`manifest_parse_error` 此前内插整个
+  `ExtensionError`，插件面板渲染成 `manifest 解析失败: manifest parse error: <serde 原文>` 双重框架；
+  `permission_denied` 正文干脆是裸 `error.to_string()`（整句英文）。**顺带纠了一处谎报**：
+  `load_manifest` 既抛 `Manifest` 也抛 `Io`，"解析失败"那个标签对读不出来的文件根本不成立 ——
+  现在这种情形用户读到的是 `插件文件访问失败：<OS 原文>`（本机实测 `插件文件访问失败：拒绝访问。 (os error 5)`）。
+  三个新用例（同名目录造 `Io`、畸形 JSON 造 `Manifest`、白名单外权限造 `PermissionDenied`）
+  只钉框架与"不许出现的英文"，第三方细节跟随系统语言不钉；`PermissionDenied` 整句是自己写的，
+  逐字钉，并钉它不与 `浏览器拒绝了串口授权请求` 撞（两个概念）。诊断码
+  `manifest_parse_error` / `permission_denied` 一字未动（查过：面板只显示它，`command_not_found` 那条才被匹配）。
+  **四道变异实测**（都在本机跑过、看过原文再改回）：① 改 `error.rs` 的一个前缀 ⇒
+  `headless.rs` 那格红（`left: "串口错误：HEX …"` / `right: "传输错误：HEX …"`）；② 把诊断退回
+  `format!("manifest 解析失败: {error}")` ⇒ 新两格红，其中读不出来那格打印出
+  `"manifest 解析失败: io error: 拒绝访问。 (os error 5)"`，正是谎报 + 双重框架的现场；
+  ③ 只把「解析失败」写成无条件（`format!("manifest 解析失败：{}", translate_error(&error))`）⇒
+  仍红且报出重复框架 `manifest 解析失败：manifest 解析失败：…`，证明 ② 的功劳不只是"少了英文"；
+  ④ 退回裸 `to_string()` ⇒ 第三格红（`left: "permission 'filesystem' is not allowed for plugin 'greedy.plugin'"`）。
+  **两处与第 22 轮记录不符、按本轮实测更正**：(a)「缺失的 plugin.json 被报成解析失败」只对了
+  一半 —— `scan_roots` 在 `load_manifest` 之前先 `manifest_path.exists()` 判空并 `continue`，
+  缺失那格压根不产生诊断，谎报只在"文件在、读不出来"；(b) 这两条诊断实际**只有 native 看得到** ——
+  `tool-extension` 不参与 wasm 编译，而 `crates/app/src/web/plugins.rs:43` 给面板的 `diagnostics`
+  恒为 `Vec::new()`（渲染器在，输入永远没有），上一轮记的"两端各自经 tiles.rs 与 web/plugins.rs 渲染"
+  对 web 那一半是空的。
 - 删掉 `tool-panels` 里没人调用的面板 API（净 −95 行、7 个方法；四道门 697 passed / 0 failed /
   7 ignored，基线 698 → 697 —— 少的那一条是"只测自己"的用例，见下）。
   **起点是我自己的结论错了**：先前记的"死代码已见底（481 个 pub 项零引用者为 0）"其实只覆盖到

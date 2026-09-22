@@ -272,11 +272,11 @@ fn send_routing_dispatches_by_port_kind_and_rejects_invalid_hex() {
     );
     // 这句话是 `docs/ARCHITECTURE.md`「发送路径的残留差异 → 错误文案」一栏作为证据发布的
     // 原文，所以在这里钉住它：改 `SendPlanError::Display`、改 `AppError::Transport` 的
-    // `transport: ` 分类前缀、或改 `tool_core` 严格模式的文案，都会让本断言变红，
-    // 而不是留下一份与代码无关的文档句子。
+    // `传输错误：` 分类前缀（第 24 轮之前是英文 `transport: `）、或改 `tool_core` 严格模式的
+    // 文案，都会让本断言变红，而不是留下一份与代码无关的文档句子。
     assert_eq!(
         strict_error.to_string(),
-        "transport: HEX 解析失败：严格模式: \"C\" 规范化后为 1 个字符，必须恰为 2（偶数 hex 长度），请补0或关闭严格模式",
+        "传输错误：HEX 解析失败：严格模式: \"C\" 规范化后为 1 个字符，必须恰为 2（偶数 hex 长度），请补0或关闭严格模式",
         "native 非法 HEX 的渲染句串与 docs/ARCHITECTURE.md 发布的证据不一致（文档在说谎）"
     );
     let garbage_error = wb
@@ -860,7 +860,9 @@ fn plugin_enable_disable_transitions_state_and_rejects_unknown_ids() {
 /// 跟随机器与系统语言（本机实测 `"read_dir"` 失败给的是「目录名称无效。 (os error 267)」），
 /// 钉死它会让本用例变成一台机器的快照 —— 与 `crates/transport` 的 `Io` 臂同一取舍。
 ///
-/// 这里刻意不写 `AppError` 那句的完整形状：`plugin: ` 前缀仍属英文，那是下一轮的事。
+/// 第 24 轮之后这里也钉 `AppError` 那句的完整形状：`plugin: ` 前缀换成中文 `插件错误：` 之后，
+/// 桌面状态栏内插的那半句（`ui/tiles.rs` 把它接在 `启用插件 {id} 失败：` 之后）已无英文，
+/// 那半句由本用例第一格逐字钉住。
 ///
 /// 本文件**没有**驱动的三格，如实记下原因（逐字中文都在 `crates/extension/tests/error_wording.rs`）：
 /// - `AlreadyEnabled` / `Stopping` 要一个真在跑的 Lua 探针，其行为已由本文件另外两条用例
@@ -886,6 +888,12 @@ fn plugin_failures_reach_the_user_in_chinese() {
     assert_eq!(
         enable_words.as_str(),
         "未找到插件 __no_such_plugin__（请先重新扫描插件目录）"
+    );
+    // 整句（分类前缀 + 正文）：这一行就是 `ui/tiles.rs` 接在「启用插件 X 失败：」后面
+    // 交给状态栏的东西，前缀在第 24 轮之前是英文 `plugin: `。
+    assert_eq!(
+        enable_error.to_string(),
+        "插件错误：未找到插件 __no_such_plugin__（请先重新扫描插件目录）"
     );
 
     let disable_error = wb

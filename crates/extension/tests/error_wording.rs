@@ -133,8 +133,8 @@ fn io_failure_keeps_the_os_detail_behind_a_chinese_frame() {
 
 #[test]
 fn manifest_failure_keeps_the_serde_detail_behind_a_chinese_frame() {
-    // 这一臂当前不会经状态栏到达用户（`scan_roots` 把它折成 `manifest_parse_error`
-    // 诊断），但那条诊断内插的正是它的 `Display`，所以措辞同样要有测试兜着。
+    // 这一臂不经状态栏到达用户（`scan_roots` 把它折成 `manifest_parse_error` 诊断），
+    // 但第 24 轮起那条诊断的正文就是本函数的返回值，所以措辞同样要有测试兜着。
     assert_eq!(
         translate_error(&ExtensionError::Manifest(manifest_failure())),
         "manifest 解析失败：EOF while parsing an object at line 1 column 1"
