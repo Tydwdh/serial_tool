@@ -641,7 +641,15 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
       按 `ALL` 顺序渲染出「无 / LF / CR / CRLF」，而那次运行写回的
       `%APPDATA%\HardwareWorkbench\workspace.json` 里是 `"line_ending": "None"` ——
       持久化形状在真实读写路径上保持裸变体名，不只是单测里成立。
-      ⑥ web 把 `webserial:session:N` 会话别名键一起持久化。
+      ⑥ web 把 `webserial:session:N` 会话别名键一起持久化 —— **本轮把机制追出来了**：
+      `platform/src/web_serial.rs::allocate_session_id` 每次页面载入都从 `next_session_id = 0`
+      重新发号，而别名表 `serial.port_aliases` 是**按端口 id 存键**的
+      （读写见 `web/mod.rs` 的 `settings.port_aliases ↔ serial.port_aliases` 与
+      `state.rs:342` 的 `port_aliases.get(port)`）。于是给一个"已授权但没配对到持久描述符"的
+      端口起的别名，下一次载入键名就变了：别名永远不生效，而旧条目在浏览器设置里**只增不减**。
+      修法方向：保存时过滤掉无法稳定重算的键（或改用能跨载入稳定的身份做键）。
+      这是持久化行为变化（会清掉用户已有的、本来就不生效的条目），需要配套测试与
+      一条"重新载入后别名仍在"的断言，故未与本轮的机械改动混做。
 
 ### 本轮裁掉项
 
