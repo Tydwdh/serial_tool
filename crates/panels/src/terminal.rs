@@ -99,7 +99,6 @@ pub struct TerminalPanel {
 
     search: MessageSearch,
     port_filter: Option<String>,
-    bookmarked_entry_ids: BTreeSet<u64>,
 
     pub max_entries: usize,
 
@@ -492,7 +491,6 @@ impl TerminalPanel {
 
             search: MessageSearch::default(),
             port_filter: None,
-            bookmarked_entry_ids: BTreeSet::new(),
 
             max_entries: 50_000,
 
@@ -555,16 +553,11 @@ impl TerminalPanel {
         self.detail_entry_id = None;
         self.search.clear();
         self.port_filter = None;
-        self.bookmarked_entry_ids.clear();
         self.virtual_rows.clear();
         // 清空后重置为自动滚动，与 LogPanel::clear() 保持一致
         self.show_raw = false;
         self.selection.clear();
         self.text_selection_rows.clear();
-    }
-
-    pub fn is_bookmarked(&self, entry_id: u64) -> bool {
-        self.bookmarked_entry_ids.contains(&entry_id)
     }
 
     pub fn take_dropped_events(&self) -> u64 {
@@ -601,13 +594,6 @@ impl TerminalPanel {
             if self.detail_entry_id == Some(id) {
                 self.detail_entry_id = None;
             }
-            self.bookmarked_entry_ids.remove(&id);
-        }
-    }
-
-    pub fn toggle_bookmark(&mut self, entry_id: u64) {
-        if !self.bookmarked_entry_ids.remove(&entry_id) {
-            self.bookmarked_entry_ids.insert(entry_id);
         }
     }
 

@@ -194,28 +194,6 @@ impl DockStack {
             self.active = self.tabs.last().cloned();
         }
     }
-
-    pub fn reorder(&mut self, kind: &PanelId, mut insert_index: usize) -> bool {
-        let Some(source_index) = self.tabs.iter().position(|tab| tab == kind) else {
-            return false;
-        };
-
-        insert_index = insert_index.min(self.tabs.len());
-
-        if insert_index > source_index {
-            insert_index -= 1;
-        }
-
-        if insert_index == source_index {
-            return false;
-        }
-
-        let item = self.tabs.remove(source_index);
-        let insert_index = insert_index.min(self.tabs.len());
-        self.tabs.insert(insert_index, item);
-
-        true
-    }
 }
 
 fn default_true() -> bool {
@@ -919,14 +897,6 @@ impl Default for DockLayout {
 }
 
 impl DockLayout {
-    pub fn stack_mut(&mut self, area: DockArea) -> &mut DockStack {
-        match area {
-            DockArea::Center => &mut self.center,
-            DockArea::Bottom => &mut self.bottom,
-            DockArea::Right => &mut self.right,
-        }
-    }
-
     pub fn stack(&self, area: DockArea) -> &DockStack {
         match area {
             DockArea::Center => &self.center,
@@ -935,28 +905,12 @@ impl DockLayout {
         }
     }
 
-    /// 从三个停靠区同时摘掉面板：跨区移动与关闭都必须先做这一步，
-    /// 否则同一个面板会在两个 stack 里同时出现。
+    /// 关闭面板时要从三个停靠区同时摘掉它，否则同一个面板可能在两个 stack
+    /// 里同时出现。
     fn remove_from_all_areas(&mut self, kind: &PanelId) {
         self.center.remove(kind);
         self.bottom.remove(kind);
         self.right.remove(kind);
-    }
-
-    /// 面板落到隐藏区域时要把它重新展开，否则用户会以为移动失败。
-    /// Center 常驻可见，无需处理。
-    fn reveal_area(&mut self, area: DockArea) {
-        match area {
-            DockArea::Center => {}
-            DockArea::Bottom => self.bottom_visible = true,
-            DockArea::Right => self.right_visible = true,
-        }
-    }
-
-    pub fn move_panel(&mut self, kind: PanelId, to: DockArea) {
-        self.remove_from_all_areas(&kind);
-        self.stack_mut(to).open(kind);
-        self.reveal_area(to);
     }
 
     pub fn all_tabs(&self) -> Vec<PanelId> {
@@ -1171,16 +1125,6 @@ impl PanelManager {
             .add_to_plugin_tabs(kind, plugin_id);
     }
 
-    /// 同步 active_tab 到 Center 当前激活面板（Center 渲染后调用）。
-    pub fn sync_active_tab_from_center(&mut self) {
-        self.active_tab = self
-            .dock
-            .center
-            .active_or_first()
-            .or_else(|| self.dock.all_tabs().first().cloned())
-            .unwrap_or_else(|| PanelId::builtin(PANEL_DEVICES));
-    }
-
     pub fn is_panel_visible(&self, kind: &PanelId) -> bool {
         if let Some(tiles) = self.tiles.as_ref() {
             return tiles.is_pane_visible(kind);
@@ -1257,18 +1201,6 @@ impl PanelManager {
                 .unwrap_or_else(|| PanelId::builtin(PANEL_DEVICES));
         }
         self.dock.discard_dynamic_tabs();
-    }
-
-    /// 在 dock.move_panel() 调用后同步 active_tab
-    pub fn sync_tabs_from_dock(&mut self) {
-        let all_tabs = self.dock.all_tabs();
-        if !all_tabs.contains(&self.active_tab) {
-            self.active_tab = all_tabs
-                .first()
-                .cloned()
-                .unwrap_or_else(|| PanelId::builtin(PANEL_DEVICES));
-        }
-        self.sync_active_tab_from_center();
     }
 }
 
@@ -1544,19 +1476,6 @@ mod tests {
 
         assert!(!manager.tabs().iter().any(|k| k.is_dynamic()));
         assert!(manager.active_dynamic_id().is_none());
-    }
-
-    #[test]
-    fn sync_tabs_from_dock_uses_center_active_panel() {
-        let mut manager = PanelManager {
-            active_tab: PanelId::builtin(PANEL_DEVICES),
-            ..Default::default()
-        };
-        manager.dock.center.open(PanelId::builtin(PANEL_SETTINGS));
-
-        manager.sync_tabs_from_dock();
-
-        assert_eq!(manager.active_tab, PanelId::builtin(PANEL_SETTINGS));
     }
 
     #[test]

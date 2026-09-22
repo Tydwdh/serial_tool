@@ -522,6 +522,40 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
    > 为什么这类死符号是**这一轮才被发现**的：`dead_code` 看不见 `pub` 项，而本仓的死代码扫描按
    > `pub fn` 找，`pub struct` 根本不在它的形态里。这两条盲区叠在一起 = 四个符号在文档里记了
    > 一轮"实测未删"。扫描脚本要同时覆盖 `pub fn` / `pub struct` / `pub enum`。
+   >
+   > **第 23 轮又发现同一族的第三条盲区，而且更隐蔽**：那条扫描的正则是 `^pub (fn|struct|…)`，
+   > **锚在零列** —— 于是它扫过的 481 个"pub 项"全是顶层条目，**`impl` 块里的方法一个都没看过**。
+   > 触发点是 `LuaHost::run_script`（全仓只有它自己那一行，`dead_code` 因为它是 `pub` 而沉默）。
+   > 补的 `impl` 方法扫描（`target/` 下，不入库）在 731 个固有 `pub` 方法里查出候选，并且它自己
+   > 一开始还带第二个盲区：**测试里的引用也算"用过"**，所以"只被自己那条单测调用"的方法会隐身
+   > （`PanelManager::sync_tabs_from_dock` 就是这样混过第一遍的）。现在按
+   > **生产引用 / 仅测试引用** 分桶：`DEAD 8` + `TEST_ONLY 25`。
+   > **两个桶不能混为一谈**：`TEST_ONLY` 不等于可删 —— `TerminalExportJob::render_chunk` 与
+   > `LogExportJob::render_chunk` 存在的意义就是被"分块导出 == 整块导出"那条等价用例调用，
+   > 删掉是拆自己的测试能力。反过来 `DEAD 8` 那批里也有刻意留着的（`NotificationQueue::dismiss`
+   > 带 `#[allow(dead_code)]` 与一条写明"Toast 得先带上 source"的理由 —— 那是暂停不是遗漏）。
+   >
+   > **第 23 轮删掉的（`tool-panels` 一个 crate，净 −95 行）**：
+   > ① 终端书签那条**整支死支路** —— `TerminalPanel::bookmarked_entry_ids` 字段加它的 5 个操作点
+   > 与两个访问器（`is_bookmarked`/`toggle_bookmark`）。可证零行为变化：唯一的写入者是
+   > `toggle_bookmark`，而它零调用者，所以这个集合在每一个 `TerminalPanel` 的整个生命周期里
+   > **恒为空**；`TerminalPanel` 没有任何 `#[derive]`（不是序列化形状）；该文件测试数 33 → 33
+   > （这支特性本来就没被测过，与"从没接上过"互相印证）。
+   > `crates/panels/src/replay.rs` 那套**活着的**书签（`bookmark_controls` + `status.bookmarks`）
+   > 是另一个概念，没动。② `DockLayout::move_panel` + 随之变孤儿的 `stack_mut`/`reveal_area`
+   > （`remove_from_all_areas` 仍被 `close_tab` 用着，留着并把已经变成假话的"跨区移动与关闭都必须
+   > 先做这一步"改成只说关闭）。③ `DockStack::reorder`。④ `PanelManager::sync_tabs_from_dock`
+   > 连它那条只测它自己的单测（它的存在理由就是"在 `dock.move_panel()` 之后同步"，而那个调用者
+   > 本轮没了；删代码时把它留下的假 doc 一起删，别留个谎）。
+   > **两个只记不删的疑问（下一轮的取证项）**：
+   > (a) `PanelManager::select_center_panel` doc 自称是"左侧栏点击"的处理器，实际生产零调用 ——
+   > 组合根 `crates/app/src/ui/tiles.rs:12` 直接写 `self.panels.active_tab = id.clone()` 绕过了它
+   > （`app` 侧也完全没人调 `open_tab`）。于是"该收敛成字段还是该走 setter"是个方向问题，
+   > 不是机械删除。(b) `Workbench::query_terminal_since` 有 **8 处测试引用、0 处生产引用** ——
+   > 终端数据的活读路径是别的那一条（本轮没查是哪条），先记着。
+   > 本轮**没**碰其余候选（`recorder` 的 backpressure 两件套、`core::advance`、`tool-testing` 的
+   > 两个计数、`replay::publish_next_for_test`、`lua_host::run_script`），它们分属别的 crate，
+   > 按"一轮一个域"排到后面。
    > 另：删掉 `PermissionManager::missing_capabilities` 之后，它唯一的消费者
    > `PluginManifest::required_capabilities` 也随之删除，于是 **`tool-extension` 现在有一条
    > 可证明的死 Cargo 边 `tool-plugin-api`**（全 crate 0 处 `use`）。它和第 10 条

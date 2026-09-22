@@ -6,6 +6,31 @@
 
 ### 调整
 
+- 删掉 `tool-panels` 里没人调用的面板 API（净 −95 行、7 个方法；四道门 697 passed / 0 failed /
+  7 ignored，基线 698 → 697 —— 少的那一条是"只测自己"的用例，见下）。
+  **起点是我自己的结论错了**：先前记的"死代码已见底（481 个 pub 项零引用者为 0）"其实只覆盖到
+  **顶层条目** —— 那条扫描的正则 `^pub (fn|struct|…)` 锚在零列，**`impl` 里的方法一个都没看过**；
+  `dead_code` lint 又因为它们是 `pub` 而沉默。触发点是 `LuaHost::run_script`（全仓只有它自己一行）。
+  补的 `impl` 方法扫描在 731 个固有 `pub` 方法里查候选，且它第一版还带第二条盲区：
+  **测试里的引用也算"用过"**，于是"只被自己那条单测调用"的方法会隐身（`sync_tabs_from_dock` 就这么混过）；
+  改成按生产引用/仅测试引用分桶后是 `DEAD 8` + `TEST_ONLY 25`。**两桶不能混**：
+  `render_chunk` 那两姊妹存在的意义就是被"分块导出 == 整块导出"等价用例调用，删它是拆自己的测试能力；
+  `NotificationQueue::dismiss` 虽在 DEAD 桶里，但它带着 `#[allow(dead_code)]` 和一条写明
+  "Toast 得先携带 source"的理由，那是刻意暂停，保留。
+  本轮删的四组：① 终端书签整支死支路（`TerminalPanel::bookmarked_entry_ids` 字段 + 5 个操作点 +
+  `is_bookmarked`/`toggle_bookmark`）—— **恒为空**是可证的：唯一的写入者 `toggle_bookmark` 零调用者，
+  其余四处都是 clear/remove；`TerminalPanel` 无任何 `#[derive]`（不是 serde 形状）；该文件测试数
+  33 → 33（这支特性本来就没被测过，与"从没接上过"互相印证）。`replay.rs` 那套**活着的**书签是另一个
+  概念，没动。② `DockLayout::move_panel` 与随之变孤儿的 `stack_mut`/`reveal_area`
+  （`remove_from_all_areas` 仍被 `close_tab` 用着；它 doc 里"跨区移动与关闭都必须先做这一步"已经变成
+  假话，改成只说关闭）。③ `DockStack::reorder`。④ `PanelManager::sync_tabs_from_dock` 连同它那条形同
+  虚设的单测 —— 它存在的理由写在 doc 里："在 `dock.move_panel()` 调用后同步 active_tab"，而那个调用者
+  本轮没了，删代码就把它留下的假 doc 一起删。
+  漂移审计确认**一个用户可见字符串都没消失**（manager.rs 91 个、terminal.rs 337 个逐字保留），
+  消失的只有一个数字字面量 `1`（在被删的 `reorder` 体内）与 6 条随代码一起走的注释。
+  两个查到但**只记不删**的疑问排到下一轮：`PanelManager::select_center_panel` 的 doc 自称是左侧栏
+  点击的处理器却生产零调用（组合根 `ui/tiles.rs:12` 直接赋 `active_tab` 字段绕过了它），
+  以及 `Workbench::query_terminal_since` 有 8 处测试引用、0 处生产引用。
 - 插件错误到用户眼前改走中文映射器（四道门 698 passed / 0 failed / 7 ignored，基线 685 → 698）：
   新增 `tool_extension::translate_error(&ExtensionError) -> String`，按**变体**分发且**不写 `_ =>`**
   （`crates/extension/tests/error_wording.rs` 的 `variant_name` 同样不写兜底 ⇒ 以后加变体忘了配中文
