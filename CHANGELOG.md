@@ -6,6 +6,25 @@
 
 ### 调整
 
+- 清掉最后 **3 个零引用的 `pub` 项**，于是这一类取证到底了：把扫描形态铺开到
+  `pub fn` / `struct` / `enum` / `trait` / `const` / `static` / `type` / `union` 之后重跑，
+  **481 个候选里 0 个还有"只出现在自己定义行"的项**（第 11 轮是 28 个，全部 `pub fn`）。
+  删的是：`tool_application::NativeRuntime`（`cfg(not(wasm32))` 下与 wasm 侧 `WebRuntime`
+  对称的别名；`Workbench` 本身已由上面那条 `pub use` 导出，原生调用方也一律直呼 `Workbench`，
+  这个别名什么都没带上）、
+  `tool_testing::TestManager`（`= TestReportStore` 的同义别名，零引用）、
+  以及 `tool_platform::TransportEvent`（25 行、5 个变体的"后端向上传事件"枚举）。
+  `TransportEvent` 不是随手漏的小函数，而是**同一件事的第二套模型**：它的文档写着
+  "backend can surface to Application/DataBus"，但全仓没有一个构造点、没有一个匹配点 ——
+  真正在跑的通道是 DataBus 上的 `tool_core::Event`（同文件上面那组 `serial_*_event` 构造器）。
+  留着它的代价不是 25 行，而是读者要花时间猜哪一套是活的；删它时在原位留了一条**普通注释**
+  （不是 `///`：这里与下一个条目之间隔着空行和另一段 `///`，写成文档注释会被并进
+  `TransportBackend` 的 rustdoc 里）。
+  判据与第 11 轮同一套：词边界计数、注释行不算引用、`plugins/` 与 `plugin-marketplace/`
+  是 11 个 Lua 文件 0 个 `.rs`（Lua 只能经宿主注册名触达 Rust，那会表现为一次标识符引用）。
+  本轮 3 项在删前逐一复核过动态可达性（`wasm_bindgen` 属性、JS 侧、serde 持久化形状、
+  文档承诺）：三者都不是 `#[wasm_bindgen]` 导出、`.md` 文档里 0 次提及、也没有任何
+  `pub use` 把它们再导出去 —— 所以删它们不改任何外部可见形状。
 - 卸载插件时算暂存目录名的 `ensure_unique_dir` 也有两份**逐字节相同**的实现（各 14 行）：
   `tool-marketplace` 里一份私有的，`crates/app/src/runtime/marketplace.rs` 里一份带 `&self`
   （形参根本没用上）的私有副本。现在只剩 `tool_marketplace::ensure_unique_dir`（`pub`），

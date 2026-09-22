@@ -274,28 +274,9 @@ pub fn serial_tx_event(port: &PortId, bytes: Vec<u8>) -> tool_core::Event {
     )
 }
 
-/// Events that a backend can surface to Application/DataBus.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TransportEvent {
-    Connected {
-        port: PortId,
-    },
-    Disconnected {
-        port: PortId,
-    },
-    Rx {
-        port: PortId,
-        bytes: Vec<u8>,
-    },
-    Tx {
-        port: PortId,
-        bytes: Vec<u8>,
-    },
-    Error {
-        port: Option<PortId>,
-        message: String,
-    },
-}
+// 后端向上层报事的唯一通道是 DataBus 上的 `tool_core::Event`（本文件上面那组
+// `serial_*_event` 构造器），所以这里不再另立一套"传输事件"枚举 —— 曾经有过的
+// `TransportEvent` 从零构造点、零消费点，只会让读者不确定哪一套是活的。
 
 /// Common asynchronous transport capability.
 ///

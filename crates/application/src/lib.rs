@@ -46,5 +46,3 @@ pub use transport::TransportView;
 pub use workbench::{
     ApplicationConfig, EventSink, TransportEndpoint, UiEventSubscriptions, Workbench,
 };
-#[cfg(not(target_arch = "wasm32"))]
-pub type NativeRuntime = Workbench;

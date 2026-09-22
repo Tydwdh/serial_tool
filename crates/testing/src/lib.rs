@@ -78,8 +78,6 @@ pub struct TestReportStore {
     last_error: Option<String>,
 }
 
-pub type TestManager = TestReportStore;
-
 /// 串口插件的端到端场景。JSON 文件可直接交给
 /// `tool-extension` 的 `plugin_scenario` 示例运行。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
