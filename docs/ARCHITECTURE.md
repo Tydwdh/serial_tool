@@ -649,7 +649,9 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
    >
    > **第 23 轮又发现同一族的第三条盲区，而且更隐蔽**：那条扫描的正则是 `^pub (fn|struct|…)`，
    > **锚在零列** —— 于是它扫过的 481 个"pub 项"全是顶层条目，**`impl` 块里的方法一个都没看过**。
-   > 触发点是 `LuaHost::run_script`（全仓只有它自己那一行，`dead_code` 因为它是 `pub` 而沉默）。
+   > 触发点是 `LuaHost::run_script`（当时全仓只有它自己那一行，`dead_code` 因为它是 `pub` 而沉默）。
+   > **【第 34 轮：这颗还了 —— 整座 `LuaHost` 死岛已删除，见本条末尾】**触发它的符号没了，
+   > 但这条盲区结论**一个字都不作废**：漏看 `impl` 块是扫描器的性质，与某个符号还在不在无关。
    > 补的 `impl` 方法扫描（`target/` 下，不入库）在 731 个固有 `pub` 方法里查出候选，并且它自己
    > 一开始还带第二个盲区：**测试里的引用也算"用过"**，所以"只被自己那条单测调用"的方法会隐身
    > （`PanelManager::sync_tabs_from_dock` 就是这样混过第一遍的）。现在按
@@ -679,7 +681,7 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
    > 终端数据的活读路径是别的那一条（本轮没查是哪条），先记着。
    > 本轮**没**碰其余候选（`recorder` 的 backpressure 两件套、`core::advance`、`tool-testing` 的
    > 两个计数、`replay::publish_next_for_test`、`lua_host::run_script`），它们分属别的 crate，
-   > 按"一轮一个域"排到后面。
+   > 按"一轮一个域"排到后面。**【`lua_host::run_script` 那一颗由第 34 轮还掉，见本条末尾】**
    > **【第 26 轮把这批还了四件】**（710 → 710，**一条用例都没动过就是"确实没人引用"的最强证据**）：
    > 删 `JsonlRecorder::set_backpressure_config` + `backpressure_config`（**字段本身是活的**，
    > `tick_backpressure` 每帧读它判定软/硬背压，只有写侧没人做 —— 于是阈值实际固定在 `Default`；
@@ -707,8 +709,25 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
    > 运行时行为，语义等价的改写（比如抽个常量）也会红，那时该连同文档一起重新审。
    > 一个真实的坑顺带记下：**本仓源文件里有 CRLF**，文本类守卫若按 `"}"` 判函数结束就会切片越界、
    > 把后文当成函数体（本条第一版就是这么悄悄红了又"看起来像变异生效"），**先归一化换行再切**。
-   > 剩下的 DEAD 只有 `lua_host::run_script`、`testing::failed_count` / `save_latest_json`
-   > （后两个在**专门给测试用的 crate** 里，"仅测试引用"在那儿是设计而非死），
+   > **【第 34 轮：还掉 `lua_host` 那颗 —— 整座 `LuaHost` 死岛删除】**
+   > `crates/lua_host/src/lib.rs` 删 `pub struct LuaHost` + 它的 `impl`（`new`/`run_script`/`stop`/
+   > `state`/`reap_finished` 五个方法）+ `impl Drop for LuaHost` + 只有它一个用户的 `struct LuaWorker`，
+   > 净 **−143 行**（2792 → 2649），**四道门 725 → 725 passed / 0 failed / 7 ignored**（一条用例都没丢，
+   > 与第 26 轮同一式的最强证据）。判据是同形 grep，不是"没搜到"：
+   > ```bash
+   > grep -rnw 'LuaHost'  crates/   # 删前恰好 3 行：结构体 / impl / impl Drop，全在同一文件
+   > grep -rnw 'LuaWorker' crates/  # 恰好 3 行：定义 + LuaHost 的字段与构造点
+   > ls crates/lua_host/            # 无 tests/ 目录：本 crate 的单测只有 lib.rs 的 #[cfg(test)] mod
+   > grep -rn 'LuaHost' plugins/ --include=*.lua   # 0 命中：插件侧不知道这个名字
+   > ```
+   > **`LuaHost::` 的调用点 repo-wide 为 0**（连它自己那条单测都没有）。活路径不在这座岛上：
+   > 插件走 `run_plugin` / `LuaPluginRuntime`（`crates/extension/src/manager.rs:11`），测试走自由函数
+   > `run_script_blocking` / `run_script_for_test` —— 三者都不是本轮的对象，全部保留。
+   > 岛外唯一受影响的下游是 `LuaHostError::AlreadyRunning`：它随之**失去最后一个生产者**，
+   > 是否连变体带 `ExtensionError::Lua` 一起收掉是**待用户拍板**的决定（判据是"`run_plugin`
+   > 还要不要返回 `Result`"，不是死代码本身），本轮两条臂都没动。
+   > 剩下的 DEAD 只有 `testing::failed_count` / `save_latest_json`
+   > （这两个在**专门给测试用的 crate** 里，"仅测试引用"在那儿是设计而非死），
    > 以及刻意保留的 `app/state::dismiss`。
    > 另：删掉 `PermissionManager::missing_capabilities` 之后，它唯一的消费者
    > `PluginManifest::required_capabilities` 也随之删除，于是 **`tool-extension` 现在有一条
@@ -944,6 +963,15 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
       > **没有生产者**：`run_plugin` 一律返回 `Ok`（脚本错误走运行时状态与诊断），
       > 全仓唯一的 `Err(LuaHostError::…)` 是 `LuaHost::run_script` 里的 `AlreadyRunning`，
       > 而 `run_script` 零调用者。⇒ 这两臂是下一轮的死代码候选，别当成"已覆盖的用户路径"。
+      > **【第 34 轮把这条判据收紧了：`AlreadyRunning` 现在全仓零生产者】**那座岛已随 `LuaHost`
+      > 一起删除（见上面第 9 条末尾的延烧清单），于是 `grep -rn 'Err(LuaHostError' crates/` **0 命中**。
+      > 两个变体的形状从此**不同，别混为一谈**：`Lua` 臂经 `#[from] mlua::Error` 隐式产生，落点仍有
+      > **8 处 `?`**（`run_script_blocking` 4 + `replay::run_replay_analyzer_with_cancel` 4），是活的；
+      > `AlreadyRunning` 只剩**读侧**三处 —— `crates/extension/src/lib.rs:103` 的中文映射臂，
+      > 以及 `crates/extension/tests/error_wording.rs:99` 与 `:190` 两条**手工构造**的文案钉。
+      > ⇒ 上面那句"别当成已覆盖的用户路径"如今更硬：这条臂连运行时入口都没有了。
+      > **仍按未拍板处理**：删 `AlreadyRunning` 要不要连带 `ExtensionError::Lua`、`run_plugin`
+      > 今后还返不返回 `Result`，是同一个决定的两面，本轮两条臂与其中文措辞一个字都没动。
       > **同一轮新查出的两处英文到用户眼前**（在 `scan_roots` 的诊断里，不在派发路径上，
       > 所以本轮的四条接线没覆盖它们）：`manager.rs` 里
       > `format!("manifest 解析失败: {error}")` 的 `error` **就是** `ExtensionError`，于是插件面板

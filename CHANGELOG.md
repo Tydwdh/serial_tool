@@ -6,6 +6,45 @@
 
 ### 调整
 
+- **删掉 `LuaHost` 整座零使用者的死岛**（`crates/lua_host/src/lib.rs` 净 **−143 行**，2792 → 2649；
+  四道门 **725 passed / 0 failed / 7 ignored —— 与基线逐字相同，一条用例都没丢**）。删的四组符号：
+  `pub struct LuaHost` + 它的 `impl`（`new`/`run_script`/`stop`/`state`/`reap_finished` 五个方法）+
+  `impl Drop for LuaHost` + 只有它一个用户的 `struct LuaWorker` —— 第 23 轮记下、第 26 轮没还的那颗，
+  本轮按"一轮一个域"还掉。**零使用者是按调用点形式证的，不是"grep 没搜到"**：
+  ```bash
+  grep -rnw 'LuaHost'   crates/   # 删前恰好 3 行，全在 lib.rs：结构体 / impl / impl Drop
+  grep -rnw 'LuaWorker' crates/   # 恰好 3 行：定义 + LuaHost 的字段与构造点
+  grep -rn  'LuaHost::' crates/   # 删前就 0 命中：一个调用点都没有（含它自己 crate 的单测）
+  ls crates/lua_host/             # 无 tests/ 目录；本 crate 的测试只有 lib.rs 里那个 #[cfg(test)] mod
+  grep -rn 'LuaHost' plugins/ --include=*.lua   # 0 命中：插件侧不知道这个名字
+  ```
+  岛外只剩三个**同前缀但活着**的名字（`LuaHostError` / `LuaHostResult` / `LuaHostServices`）和另一个
+  类型 `LuaPluginRuntime`，它们都不是本轮对象。插件事件循环走 `run_plugin` / `LuaPluginRuntime`
+  （`crates/extension/src/manager.rs:11`），测试走自由函数 `run_script_blocking` / `run_script_for_test`
+  （两个 crate 的测试在用），**两条活路径原样保留**。
+  **用户可见行为一处都没变，理由是这条路径从来没人走过**：全仓没有任何地方构造过 `LuaHost`，那 5 个
+  方法一次也没被调用，它们写的日志（`正在运行 {}` / `{} 已完成` / `{} 已停止：{error}` /
+  `{} 失败：{error}` / `请求停止`）在这台机器上从没可能到达用户。字面量层面也审计了，不是推的：
+  改动前后字符串字面量 **509 → 503**，消失的 6 条（上面 5 条中文日志 + 那条 `"lua"` source 标签）
+  **全部位于被删的函数体内**，新增 **0** 条。
+  **留下的尾巴逐个查过而不是假设**：① 两处删除边界（`LuaRunState` → `LuaPluginRuntime`、
+  `impl Drop for LuaPluginRuntime` → `pub fn run_plugin`）都重读过 —— `LuaWorker` 与 `LuaHost` 本来
+  就没有 doc，所以没复发第 23 轮那种"doc 落到下一个条目头上"的事故；`lib.rs` 没有 `//!` 模块 doc、
+  `pub use` 清单里也没有被删类型，两者都不需改。② imports 逐个核：`ParkingMutex`/`AtomicBool`/
+  `thread`/`JoinHandle`/`Receiver`/`DataBus`/`TransportManager`/`LogLevel` 全都另有使用者
+  （`run_plugin`、`plugin_event_loop`、`fail_startup`、`join_with_timeout`、测试），
+  **所以一条 `use` 都没删** —— `clippy --workspace --all-targets -- -D warnings` exit 0 是这件事的机器验证。
+  **本轮刻意没做的两件事**：① `LuaHostError::AlreadyRunning` 随删除**跌到全仓零生产者**
+  （`grep -rn 'Err(LuaHostError' crates/` 现在 0 命中；只剩 `crates/extension/src/lib.rs:103` 的映射臂
+  与 `crates/extension/tests/error_wording.rs:99` / `:190` 两条手工构造），而 `Lua` 臂经
+  `#[from] mlua::Error` 仍有 8 处 `?` 生产者（`run_script_blocking` 4 + `replay` 分析器入口 4）——
+  两个变体的形状从此不同。**收不收它们是同一个未做的决定**（"是否让 `run_plugin` 继续返回 `Result`"），
+  故两条臂、`extension/src/lib.rs:103` 的中文措辞与 `tests/error_wording.rs` 全部一字未动，
+  只把这条事实变化记进 `docs/ARCHITECTURE.md`（改了 4 处：第 23 轮盲区那条的触发点、它的延烧清单、
+  "剩下的 DEAD"状态行，以及第 22 轮那条待决判据）；② `plugin_event_loop` 上那条
+  `#[allow(clippy::too_many_arguments)]` 连同它写明理由的注释原样留着 —— 那是下一轮的靶子，
+  **豁免棘轮因此仍是 5 条**。另：`docs/architecture-refactor-baseline.md` 里那个 `LuaHost{…}` 形状描述
+  没改，它是钉在 `0fc66b3` 的 Phase 0 只读快照（同文件至今还写着第 27 轮删掉的 `Clock`），改它等于伪造取证。
 - 串口分组编辑器里那段**只为"未来调用者"兜底的同步块删掉**，参数墙收掉、**棘轮再降一条（6 → 5）**；
   四道门 **725 passed / 0 failed / 7 ignored**（723 → 725；`tool-panels` lib 的用例数 215 → 217，
   新增的 2 条全是那条形状守卫拆出来的两个用例）。**用户侧一处都没变**：删的是恒等价的重复写入，别名输入与分组
