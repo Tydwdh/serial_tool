@@ -544,6 +544,15 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
       **本条的验证方式要说清**：依据是两份字体族列表的逐项比对，**没有**截图证据 ——
       内置浏览器面板不可见时 `take_screenshot` 直接拒绝（`visibilityState=hidden`），
       而 kittest 跑不了 wasm 侧那个函数。
+      > **本波把这条限制做实了**（免得下一轮再花时间去试）：用 `application/wasm` MIME 正确
+      > 的本地静态服务器（`python -m http.server` 不注册 `.wasm`，会把"wasm 没跑起来"和
+      > "字体没生效"混在一起）投 `dist-web/`，页面确实加载完成（`document.title` 已是
+      > "Hardware Workbench"），截图仍被拒：`visible=false, attached=true, cdpAttached=true,
+      > visibilityState=hidden`。再用 `evaluate_script` 查 DOM：`<canvas>` 仍是 **300x150 默认尺寸、
+      > 无内联样式** —— 说明隐藏页里 `requestAnimationFrame` 被挂起，eframe 连一帧都没画过。
+      > 所以这不是"重试一次就好"的问题：**像素级验证需要一个可见的浏览器表面**（用户打开内置
+      > Browser 面板，或用 OS 级窗口控制驱动真实浏览器），而配置级验证（族序逐项比对、
+      > 以及下面提到的可测部分）不需要。
       ⑥ 发送器「历史」弹层的排版退化：v1.2.0 删 `legacy_send_panel_body` 时，旧弹层的
       标题+条数/占满宽过滤框/定高行/固定删除列/两步清空**没有**搬进共享 `render_history`，
       留下的是一版"每条一个 `ui.button`"的弹层（按钮宽度=内容宽度，长中文条目把弹层拉到
