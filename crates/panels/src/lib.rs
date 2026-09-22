@@ -117,17 +117,53 @@ pub(crate) fn scroll_is_at_bottom(
     offset_y >= bottom_offset - AUTO_SCROLL_BOTTOM_EPSILON
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn next_auto_scroll_state(
-    auto_scroll: bool,
-    pointer_inside: bool,
-    primary_down: bool,
-    scroll_delta_y: f32,
-    previous_offset_y: f32,
-    offset_y: f32,
-    content_height: f32,
-    viewport_height: f32,
-) -> bool {
+/// 判定自动跟随是否继续所需的全部输入：一次开关状态 + 指针位置 + 本帧滚动几何。
+///
+/// 收拢之前这里是 3 个相邻 bool 紧跟 4 个相邻 f32：七对相邻参数里有六对同型，
+/// 那六对任意对调都编译得过且零告警（第 30 轮逐对普查）；而唯一的调用点
+/// `AutoScrollState::update` 没有任何用例覆盖 —— 实参顺序排错，`tool-panels` 的
+/// 202 条测试照样全绿。
+///
+/// 与 `transport` 的 `NetworkWorkerContext` 同一式子（无 trait、无泛型、无 builder），
+/// 也受同一条限度约束：命名字段拦的是**写法**不是**取值**。位置排错在结构体字面量上
+/// 没有语法，漏字段 E0063、类型不对 E0308；但 `previous_offset_y: offset_y` 这种同型
+/// 对调照样编译得过，它只是要求把矛盾写在字段名旁边，不是类型层的保证。
+pub(crate) struct AutoScrollInputs {
+    /// 进入本帧时的自动跟随开关：true = 跟随底部。
+    pub(crate) auto_scroll: bool,
+    /// 指针是否悬停在该视图的可视区内；不在就原样保留开关，不做任何判定。
+    pub(crate) pointer_inside: bool,
+    /// 鼠标左键是否按下：用来区分“用户拖着滚动条离开底部”与“内容高度自己变了”。
+    pub(crate) primary_down: bool,
+    /// 本帧滚轮增量，符号照 egui：正 = 向上（看历史），负 = 向下（追最新）。
+    pub(crate) scroll_delta_y: f32,
+    /// 上一帧记下的偏移，只用来和本帧比较方向，不参与“是否到底”的判断。
+    pub(crate) previous_offset_y: f32,
+    /// 本帧的偏移，与 `previous_offset_y` 是同一物理量的两个时刻。两者对调会同时翻转
+    /// `moved_away_from_bottom` 与 `moved_towards_bottom`，自动跟随的进出因此整个反过来。
+    pub(crate) offset_y: f32,
+    /// 内容总高。**本轮普查里唯一没有任何用例抓到的一对**就是它与 `viewport_height`
+    /// 的对调：换过来后 `bottom_offset` 被 `.max(0.0)` 钳成 0，“是否到底”恒为真，
+    /// 而这七条用例的期望值全都照样成立 —— 这一对只剩字段名在拦。
+    pub(crate) content_height: f32,
+    /// 可视区高度：调用方传的是 `inner_rect.height()`，不是内容能显示多少行。
+    pub(crate) viewport_height: f32,
+}
+
+pub(crate) fn next_auto_scroll_state(inputs: AutoScrollInputs) -> bool {
+    // 解构回原来的名字：下面的判定只是读这八个值各一次，
+    // 收拢参数不该把每一次读取都改成结构体字段访问。
+    let AutoScrollInputs {
+        auto_scroll,
+        pointer_inside,
+        primary_down,
+        scroll_delta_y,
+        previous_offset_y,
+        offset_y,
+        content_height,
+        viewport_height,
+    } = inputs;
+
     if !pointer_inside {
         return auto_scroll;
     }
@@ -261,14 +297,32 @@ mod tests {
 
     #[test]
     fn auto_scroll_stays_enabled_when_scroll_input_moves_towards_bottom() {
-        let next = next_auto_scroll_state(true, true, false, -24.0, 96.0, 100.0, 200.0, 100.0);
+        let next = next_auto_scroll_state(AutoScrollInputs {
+            auto_scroll: true,
+            pointer_inside: true,
+            primary_down: false,
+            scroll_delta_y: -24.0,
+            previous_offset_y: 96.0,
+            offset_y: 100.0,
+            content_height: 200.0,
+            viewport_height: 100.0,
+        });
 
         assert!(next);
     }
 
     #[test]
     fn auto_scroll_disables_after_view_moves_away_from_bottom() {
-        let next = next_auto_scroll_state(true, true, false, 24.0, 100.0, 80.0, 200.0, 100.0);
+        let next = next_auto_scroll_state(AutoScrollInputs {
+            auto_scroll: true,
+            pointer_inside: true,
+            primary_down: false,
+            scroll_delta_y: 24.0,
+            previous_offset_y: 100.0,
+            offset_y: 80.0,
+            content_height: 200.0,
+            viewport_height: 100.0,
+        });
 
         assert!(!next);
     }
@@ -276,14 +330,33 @@ mod tests {
     #[test]
     fn auto_scroll_disables_immediately_on_upward_wheel_input() {
         // 滚动容器尚未更新 offset，或内容正在追加时，向上滚动也必须立即暂停。
-        let next = next_auto_scroll_state(true, true, false, 24.0, 100.0, 100.0, 200.0, 100.0);
+        // previous_offset_y == offset_y：本帧偏移一点没变，只有滚轮增量能说明意图。
+        let next = next_auto_scroll_state(AutoScrollInputs {
+            auto_scroll: true,
+            pointer_inside: true,
+            primary_down: false,
+            scroll_delta_y: 24.0,
+            previous_offset_y: 100.0,
+            offset_y: 100.0,
+            content_height: 200.0,
+            viewport_height: 100.0,
+        });
 
         assert!(!next);
     }
 
     #[test]
     fn auto_scroll_reenables_when_manual_scroll_reaches_bottom() {
-        let next = next_auto_scroll_state(false, true, false, -24.0, 80.0, 100.0, 200.0, 100.0);
+        let next = next_auto_scroll_state(AutoScrollInputs {
+            auto_scroll: false,
+            pointer_inside: true,
+            primary_down: false,
+            scroll_delta_y: -24.0,
+            previous_offset_y: 80.0,
+            offset_y: 100.0,
+            content_height: 200.0,
+            viewport_height: 100.0,
+        });
 
         assert!(next);
     }
@@ -298,14 +371,34 @@ mod tests {
 
     #[test]
     fn auto_scroll_pause_is_not_immediately_reenabled_without_bottomward_motion() {
-        let next = next_auto_scroll_state(false, true, false, 0.0, 100.0, 100.0, 200.0, 100.0);
+        let next = next_auto_scroll_state(AutoScrollInputs {
+            auto_scroll: false,
+            pointer_inside: true,
+            primary_down: false,
+            scroll_delta_y: 0.0,
+            previous_offset_y: 100.0,
+            offset_y: 100.0,
+            content_height: 200.0,
+            viewport_height: 100.0,
+        });
 
         assert!(!next);
     }
 
     #[test]
     fn passive_height_correction_does_not_disable_auto_scroll() {
-        let next = next_auto_scroll_state(true, true, false, 0.0, 100.0, 80.0, 200.0, 100.0);
+        // 偏移自己离开了底部（previous_offset_y > offset_y），但既没有滚轮增量也没按着键：
+        // 这就是测试名说的“被动修正”，没有用户动作就不该退出跟随。
+        let next = next_auto_scroll_state(AutoScrollInputs {
+            auto_scroll: true,
+            pointer_inside: true,
+            primary_down: false,
+            scroll_delta_y: 0.0,
+            previous_offset_y: 100.0,
+            offset_y: 80.0,
+            content_height: 200.0,
+            viewport_height: 100.0,
+        });
 
         assert!(next);
     }

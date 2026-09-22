@@ -6,6 +6,24 @@
 
 ### 调整
 
+- 收掉自动滚动的参数墙，棘轮再降一条（8 → 7 条豁免）：`panels/lib.rs::next_auto_scroll_state`
+  收 3 个相邻 bool + 4 个相邻 f32，全部相邻同型对调里 5 组零告警编译得过（只有 `bool`↔`f32`
+  那组被 `E0308` 拦住）。四道门 711 passed / 0 failed / 7 ignored（与基线逐字相同，纯重构）。
+  沿用第 29 轮式子：一个 `pub(crate) struct AutoScrollInputs`（字段名与原参数逐字相同，六个字段
+  第一次有自己的注释），函数只剩一个参数，`#[allow]` 删除；函数体差异**只有一个空行**
+  （解构那行之后），那条"滚轮向上不等 offset 同帧变化"的长注释原样保留。
+  **普查在改动前的树上做、并且分两层**（A 换调用点实参、B 换签名形参），结论有两处和我原本的判断相反：
+  ① A 层六行**全静默**，原因是全仓没有任何用例驱动过这个唯一的生产调用点
+  （`table.rs` 的 `AutoScrollState::update`）—— 命名巧合连测试兜底都没有，比我以为的更严重；
+  ② 真正会静默上线的一对**不是** `offset_y`↔`previous_offset_y`（那对至少有一条用例能区分），
+  而是 **`content_height`↔`viewport_height`**：换过之后 `at_bottom` 恒真，
+  而现有每条期望值**照旧成立**。另记一处结构保护不到的重复：`table.rs:241` 为算"该不该修复贴底"
+  又独立按同一顺序把三个 f32 传给 `scroll_is_at_bottom`（3 参不触发该 lint，故无豁免亦无命名保护）。
+  下一轮的补法已经查好：`table.rs` 测试模块本就用 `ctx.run_ui(RawInput::default(), …)` 驱动真 `Ui`，
+  照此喂一个合成 hover 位置 + 滚轮增量，可把那六行从"静默"变成"对调即红"。
+  守卫同步收到 7 条（4 clippy + 3 `dead_code`，计数从清单本身重数而不是从注释抄），
+  探针仍是"在被移除那一行所在的文件里加一条 clippy 看不见的 `#[allow]`" ⇒ 实测报
+  "清单 7 条，实际 8 条"后移除。
 - 把网络 worker 的参数墙收进命名字段，**退掉 2 条 `too_many_arguments` 豁免（棘轮 10 → 8）**；
   四道门 711 passed / 0 failed / 7 ignored（与基线逐字相同 —— 纯重构，不新增用例也不删用例）。
   `transport/src/network.rs` 的 `spawn_network_worker` 与 `network_worker_loop` 收同一串 8 个

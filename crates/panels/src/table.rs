@@ -226,16 +226,16 @@ impl AutoScrollState {
             .is_some_and(|position| inner_rect.contains(position));
         let primary_down = ui.input(|input| input.pointer.primary_down());
         let previous_offset_y = self.previous_offsets.get(key).copied().unwrap_or(offset_y);
-        let next_enabled = crate::next_auto_scroll_state(
-            self.enabled,
+        let next_enabled = crate::next_auto_scroll_state(crate::AutoScrollInputs {
+            auto_scroll: self.enabled,
             pointer_inside,
             primary_down,
             scroll_delta_y,
             previous_offset_y,
             offset_y,
             content_height,
-            inner_rect.height(),
-        );
+            viewport_height: inner_rect.height(),
+        });
         let should_repair_stick_to_bottom = next_enabled
             && !crate::scroll_delta_moves_away_from_bottom(scroll_delta_y)
             && !crate::scroll_is_at_bottom(offset_y, content_height, inner_rect.height());

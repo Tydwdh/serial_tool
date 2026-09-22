@@ -182,6 +182,23 @@ cargo tree -p tool-application | grep -i egui    # 0 行
   > 免得后来人把它读成类型层的保证。
   > 顺带：那三个标记各自第一次有了自己的注释（关闭请求 / `AliveGuard` 负责的存活位 /
   > 握手完成或失败后置假的连接位），原先它们只存在于名字里。
+  >
+  > **第 30 轮同法收掉 `panels/lib.rs::next_auto_scroll_state`，棘轮 8 → 7**（3 个相邻 bool +
+  > 4 个相邻 f32；6 组相邻同型对调里 **5 组零告警编译得过**，唯一的例外是 `bool`↔`f32` 那组）。
+  > 普查（在改动前的树上做，且**分两层**：A 换调用点实参、B 换签名形参）出来两条**比我原判断更严重**
+  > 与**和我原判断相反**的结论，都记下来：
+  > ① **A 层六行全静默** —— 因为全仓没有任何用例驱动过那个唯一的生产调用点
+  > （`table.rs` 的 `AutoScrollState::update`），所以"命名巧合"连一层测试兜底都没有；
+  > ② **真正会静默上线的那一对不是我以为的 `offset_y`↔`previous_offset_y`**（它至少有
+  > 1 个用例能区分，虽然另有两条用例两值都是 `100.0`、构造上永远分辨不出 —— 与第 29 轮
+  > "初值救测试"同一形状），而是 **`content_height`↔`viewport_height`**：换过之后
+  > `(content - viewport).max(0.0)` 钳成 0，`at_bottom` 恒真，**现有全部期望值照旧成立**。
+  > 另记一处结构管不到的重复：`table.rs:241` 为了算"该不该修复贴底"又**独立**按同一顺序
+  > 把 `(offset_y, content_height, viewport_height)` 传给 `scroll_is_at_bottom` 一次
+  > （3 参，不触发 `too_many_arguments`，所以那处没有豁免也没有本轮的命名保护）。
+  > **下一轮该补的**：`table.rs` 的测试模块已经能用 `ctx.run_ui(RawInput::default(), …)`
+  > 驱动真 `Ui`，照那个式子喂给 `AutoScrollState::update` 一个合成 hover 位置 + 滚轮增量，
+  > 就能把 A 层那六行从"静默"变成"对调即红"，并顺手收掉上面那处三参重复。
   **当前状态（修复后）**：`cargo +1.92.0 fmt --all --check`、
   `cargo +1.92.0 clippy --workspace --all-targets -- -D warnings`、
   `cargo +1.92.0 test --workspace --all-targets` 三条均 **exit 0**。
