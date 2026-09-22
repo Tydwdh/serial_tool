@@ -6,6 +6,26 @@
 
 ### 调整
 
+- 删掉一个从未被注入过的抽象：`tool_core` 的 `Clock` trait、`SystemClock`、`FrozenClock`
+  （含两个 `impl`）整组移除（净 −20 行；四道门 711 passed / 0 failed / 7 ignored，基线 710 → 711
+  —— 多的那条是新的形状守卫）。**它文档写着"时间源抽象，使依赖时间戳的代码可测试"，而这句话
+  从未成立**：全仓没有任何函数接收过时钟 —— 没有 `dyn Clock`、没有 `<C: Clock>`、没有 `: Clock`
+  约束，trait 在 `crates/core` 之外 0 处引用，`FrozenClock` 也从来没有任何用户（第 26 轮删掉它的
+  `new` 之后就彻底无法构造了）。没有注入点就谈不上接缝，留着只会让下一个人以为可测性是接好的。
+  `SystemClock::now_ms()` 的函数体**逐字搬进** `now_timestamp_ms()`：两个 cfg 分支、wasm 侧
+  "没有 OS 支撑的 `SystemTime`，改用浏览器挂钟"那条英文理由注释、`.min(u64::MAX)` 钳制、
+  以及系统时钟落在 `UNIX_EPOCH` 之前时 `log::warn!` 后**返回 `1`** 的兜底（刻意不是 `0`），
+  签名不动、60 来处调用点无感。搬运是机器核的而不是目测：去掉空白逐行比对后，消失的实现行
+  只剩脚手架（trait/struct/impl 头、`fn now_ms`、`#[cfg(test)]`、`Arc<AtomicU64>` 字段）；
+  `now_timestamp_ms_is_plausible` **一字未改**继续绿，wasm clippy 重新对 wasm32 类型检查过这个
+  crate，是那条 cfg 分支两边都编译得过的实证。
+  **仍然跑不到的那条兜底臂**（删之前也跑不到）配了一条形状守卫
+  `clock_before_epoch_fallback_is_pinned_to_a_nonzero_literal`：函数文档向调用方承诺"时间戳非零"，
+  而没有接缝时唯一能机器检查的办法就是钉实现文本。**限度写在注释里**：钉的是文本不是运行时行为，
+  语义等价的改写也会红（那时应连同文档一起重新审）。变异实测：把 `1` 改成 `0` 用例即红并打印出
+  被切的函数体，改回即绿。
+  踩到的坑也记下来，属于所有文本类守卫的通用问题：**本仓源文件含 CRLF**，按 `"}"` 判函数结束会
+  切片越界、把后文当成函数体（第一版就是这么"看着像变异生效"地红了）—— 先归一化换行再切。
 - 删掉 `tool-recorder` / `tool-core` 里没人引用的 API（净 −31 行；四道门 710 passed / 0 failed /
   7 ignored —— **用例数一条没动，这正是"确实无人引用"的最强证据**：整条链上任何一处漏查都会有
   编译错误或某条测试变红）。删的东西：`JsonlRecorder::set_backpressure_config` +

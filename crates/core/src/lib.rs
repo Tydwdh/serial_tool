@@ -363,8 +363,32 @@ pub fn mark_derived_event(
     event.meta_set("recordable", Value::Bool(false));
 }
 
+/// 跨平台挂钟时间，单位为毫秒。
+///
+/// Native 读系统时钟并把毫秒数钳制到 `u64`；`wasm32-unknown-unknown` 没有
+/// OS 支撑的 `std::time::SystemTime`，改用浏览器挂钟。系统时钟落在 `UNIX_EPOCH`
+/// 之前时记一条 warning 并返回 `1`——刻意不返回 `0`，调用方可以假定时间戳非零。
+///
+/// 这里曾有 `Clock`/`SystemClock`/`FrozenClock`，但没有任何函数接收过时钟，它不是
+/// 可注入的接缝，故整组删除；真要冻结时间，给那几个必须确定性的函数加一个时钟入参。
 pub fn now_timestamp_ms() -> u64 {
-    SystemClock.now_ms()
+    #[cfg(target_arch = "wasm32")]
+    {
+        // `wasm32-unknown-unknown` has no OS-backed implementation of
+        // `std::time::SystemTime`.  Use the browser wall clock instead.
+        js_sys::Date::now().max(0.0) as u64
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+            .unwrap_or_else(|e| {
+                log::warn!("system clock before UNIX_EPOCH: {e}");
+                1
+            })
+    }
 }
 
 /// 返回用于计算耗时的跨平台时钟，单位为纳秒。
@@ -387,50 +411,6 @@ pub fn monotonic_now_nanos() -> u64 {
             .elapsed()
             .as_nanos()
             .min(u128::from(u64::MAX)) as u64
-    }
-}
-
-/// 时间源抽象，使依赖时间戳的代码可测试。
-pub trait Clock: Send + Sync {
-    fn now_ms(&self) -> u64;
-}
-
-/// 生产实现：使用系统时钟。
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now_ms(&self) -> u64 {
-        #[cfg(target_arch = "wasm32")]
-        {
-            // `wasm32-unknown-unknown` has no OS-backed implementation of
-            // `std::time::SystemTime`.  Use the browser wall clock instead.
-            js_sys::Date::now().max(0.0) as u64
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-                .unwrap_or_else(|e| {
-                    log::warn!("system clock before UNIX_EPOCH: {e}");
-                    1
-                })
-        }
-    }
-}
-
-/// 测试用冻结时钟。
-#[cfg(test)]
-#[derive(Clone)]
-pub struct FrozenClock {
-    now_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
-}
-
-#[cfg(test)]
-impl Clock for FrozenClock {
-    fn now_ms(&self) -> u64 {
-        self.now_ms.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -666,6 +646,49 @@ mod tests {
         assert!(
             ts > 1_700_000_000_000,
             "timestamp should be after 2023: {ts}"
+        );
+    }
+
+    /// 系统时钟落在 `UNIX_EPOCH` 之前那一条兜底臂：文档承诺"时间戳非零"，
+    /// 而这条分支**跑不到** —— 第 27 轮删掉 `Clock` 之后（此前也没有任何函数接收过时钟）
+    /// 没有任何地方能把系统时钟拨到 epoch 之前，所以钉形状是这里唯一可用的机器检查。
+    ///
+    /// 做法：只取 `now_timestamp_ms` 的函数体、丢掉注释行、压掉空白，再看那条
+    /// `log::warn!(…); 1 }` 的字面值。压空白让它对 rustfmt 的重新缩进不敏感。
+    ///
+    /// **这条断言的限度要如实说**：它钉的是文本，不是运行时行为 —— 把 `1` 换成
+    /// `nonzero_const` 这类语义等价的写法它也会红（那时应连同文档一起重新审），
+    /// 反过来它也证明不了那一支真能返回非零。
+    #[test]
+    fn clock_before_epoch_fallback_is_pinned_to_a_nonzero_literal() {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+            .expect("读得到自己的源码，这条用例与实现同文件")
+            // 本仓的源文件里有 CRLF：不归一化 `}` 那行的收尾就对不上，
+            // 切片会一路跑到文件末尾，把后面的代码当成"函数体"。
+            .replace("\r\n", "\n");
+        let head = "pub fn now_timestamp_ms() -> u64 {";
+        let start = src
+            .find(head)
+            .unwrap_or_else(|| panic!("找不到 `{head}`，实现被改名或搬走时这条用例要一起挪"));
+        let body = &src[start + head.len()..];
+        let body = body
+            .split('\n')
+            .take_while(|line| *line != "}")
+            // 注释行不算实现：函数自己的文档里同时写着 `1` 和 `0`。
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<String>()
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>();
+
+        assert!(
+            body.contains(r#");1})"#),
+            "`now_timestamp_ms` 的 epoch 之前兜底臂不再是「记 warning 后返回 1」，\
+             而函数文档仍然向调用方承诺时间戳非零：{body}"
+        );
+        assert!(
+            !body.contains(r#");0})"#),
+            "实现里出现了返回 0 的兜底臂？那就是把非零承诺改成了返回 0"
         );
     }
 

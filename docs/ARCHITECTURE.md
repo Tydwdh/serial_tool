@@ -575,12 +575,22 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
    > **顺带查出扫描器的第 4 条盲区，值得记**：`DEAD 8` 是**少数**了 —— 判"用过"靠词边界匹配，
    > 而 `set` / `new` 这类动词名会撞上全仓无关代码（`new` 还刻意被跳过）。这条不是"再修修脚本"
    > 能解决的：动词名的死活**必须**结合接收者看，不能只数出现次数。
-   > **两条新的后续结论**：① 删掉 `new` 之后 `FrozenClock` 已经是个**无法构造的 `pub` 类型**
-   > （字段私有、只剩 `Clone` 与 `impl Clock`），`dead_code` 看不见它、两个扫描脚本也看不见
-   > （一个只看固有 `pub fn`，一个被 `Clock` 这个常见名糊住），证据只有全仓词边界 grep：
-   > `FrozenClock` 在 `crates/` 里只出现在它自己那三行；② 同一形状的还有 `tool_core::Clock` ——
-   > **`crates/core` 之外 0 处引用**（`SystemClock` 只在 core 内部一处）。两者都是"可以整块拿掉的
-   > 抽象"，但那是删抽象不是删孤儿方法，另开一轮并先确认没有 cfg 之外的字符串引用。
+   > **两条新的后续结论 → 第 27 轮都收了**：① `FrozenClock`（删掉 `new` 后已无法构造）与
+   > ② `tool_core::Clock` —— 后者在 `crates/core` 之外 **0 处引用**，且**没有任何多态使用者**
+   > （全仓无 `dyn Clock`、无 `<C: Clock>`、无 `: Clock` 约束、没有任何函数接收过时钟），
+   > 所以它文档里那句"时间源抽象，使依赖时间戳的代码可测试"**从未成立过**：没有注入点，
+   > 谈不上接缝，`FrozenClock` 也从来没有任何用户。第 27 轮把 `Clock` / `SystemClock` /
+   > `FrozenClock`（含两个 `impl`）整组删掉，`SystemClock::now_ms()` 的函数体**逐字搬进**
+   > `now_timestamp_ms()`（两个 cfg 分支、wasm 那句"没有 OS 支撑的 SystemTime，改用浏览器挂钟"的
+   > 英文理由注释、`.min(u64::MAX)` 钳制、以及 `UNIX_EPOCH` 之前 `log::warn!` 后**返回 `1`**
+   > 的兜底，一个字没改；签名不动，60 来处调用点无感）。搬完后用"去掉空白后逐行比对"证明
+   > 消失的实现行只剩脚手架（trait/struct/impl 头、`fn now_ms`、`#[cfg(test)]`、`Arc<AtomicU64>` 字段）。
+   > **那条兜底臂仍然跑不到**（删之前也跑不到 —— 没有注入点就拨不动系统时钟），所以给它加了一条
+   > **形状**守卫 `clock_before_epoch_fallback_is_pinned_to_a_nonzero_literal`：文档向调用方承诺
+   > "时间戳非零"，而唯一能机器检查的办法就是钉实现文本。**它的限度写在注释里**：钉的是文本不是
+   > 运行时行为，语义等价的改写（比如抽个常量）也会红，那时该连同文档一起重新审。
+   > 一个真实的坑顺带记下：**本仓源文件里有 CRLF**，文本类守卫若按 `"}"` 判函数结束就会切片越界、
+   > 把后文当成函数体（本条第一版就是这么悄悄红了又"看起来像变异生效"），**先归一化换行再切**。
    > 剩下的 DEAD 只有 `lua_host::run_script`、`testing::failed_count` / `save_latest_json`
    > （后两个在**专门给测试用的 crate** 里，"仅测试引用"在那儿是设计而非死），
    > 以及刻意保留的 `app/state::dismiss`。
