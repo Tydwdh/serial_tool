@@ -12,6 +12,7 @@ use std::rc::Rc;
 
 use futures_channel::oneshot;
 use js_sys::{ArrayBuffer, Uint8Array};
+use tool_core::parse_gcode_response;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
@@ -249,41 +250,6 @@ fn websocket_url(config: &NetworkSerialConfig) -> String {
     format!("{scheme}://{}:{}/websocket", config.host, config.port)
 }
 
-fn parse_gcode_response(text: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(text).ok()?;
-    if value.get("method").and_then(serde_json::Value::as_str) != Some("notify_gcode_response") {
-        return None;
-    }
-    value
-        .get("params")?
-        .as_array()?
-        .first()?
-        .as_str()
-        .map(str::to_owned)
-}
-
 fn js_error(value: &JsValue) -> String {
     value.as_string().unwrap_or_else(|| format!("{value:?}"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_gcode_response;
-
-    #[test]
-    fn parses_only_gcode_notifications() {
-        assert_eq!(
-            parse_gcode_response(
-                r#"{"jsonrpc":"2.0","method":"notify_gcode_response","params":["ok"]}"#
-            )
-            .as_deref(),
-            Some("ok")
-        );
-        assert_eq!(
-            parse_gcode_response(
-                r#"{"jsonrpc":"2.0","method":"notify_status_update","params":[]}"#
-            ),
-            None
-        );
-    }
 }

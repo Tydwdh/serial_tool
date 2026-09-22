@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use tool_core::{Event, LogLevel};
+use tool_core::{Event, LogLevel, parse_gcode_response};
 use tool_databus::DataBus;
 use tungstenite::Message;
 
@@ -44,21 +44,6 @@ impl NetworkSerialConfig {
     pub fn display_name(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
-}
-
-/// 从 JSON-RPC 文本中提取 gcode 响应内容。
-/// 只处理 `notify_gcode_response` 推送，其余 notify（状态/进程统计等）一律忽略。
-fn parse_gcode_response(text: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(text).ok()?;
-    if value.get("method").and_then(serde_json::Value::as_str) != Some("notify_gcode_response") {
-        return None;
-    }
-    value
-        .get("params")?
-        .as_array()?
-        .first()?
-        .as_str()
-        .map(str::to_owned)
 }
 
 /// 网络串口的错误一律以 `transport.network` 为来源、以端口名为前缀发布日志。
@@ -258,32 +243,12 @@ fn network_worker_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_gcode_response;
     use crate::{NetworkSerialConfig, TransportManager, serial_topics};
     use std::thread;
     use std::time::Duration;
     use tool_core::Payload;
     use tool_databus::{DataBus, TopicFilter};
     use tungstenite::Message;
-
-    #[test]
-    fn extracts_gcode_response() {
-        let msg = r#"{"jsonrpc":"2.0","method":"notify_gcode_response","params":["ok BED_SIZE"]}"#;
-        assert_eq!(parse_gcode_response(msg).as_deref(), Some("ok BED_SIZE"));
-    }
-
-    #[test]
-    fn ignores_status_update() {
-        let msg = r#"{"jsonrpc":"2.0","method":"notify_status_update","params":[{"print_stats":{"state":"printing"}}]}"#;
-        assert_eq!(parse_gcode_response(msg), None);
-    }
-
-    #[test]
-    fn ignores_plain_responses_and_non_json() {
-        let msg = r#"{"jsonrpc":"2.0","result":"ok","id":1}"#;
-        assert_eq!(parse_gcode_response(msg), None);
-        assert_eq!(parse_gcode_response("not json"), None);
-    }
 
     /// 端到端：本地 WebSocket 服务器模拟 Nexus Prime，验证
     /// 发送 → printer.gcode.script 请求、notify_gcode_response → RX 事件 的完整链路。

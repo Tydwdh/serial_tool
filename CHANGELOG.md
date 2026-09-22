@@ -6,6 +6,29 @@
 
 ### 调整
 
+- `parse_gcode_response` 原有**两份逐字节相同的实现**（各 12 行、370 字节，按函数体 diff 确认相同）：
+  native 在 `tool-transport::network`、wasm 在 `tool-platform::web_network`。合成一份落到
+  `tool_core::parse_gcode_response`（`crates/core/src/lib.rs:600`），两个调用点改用它。
+  **为什么这组重复是结构性的、不是偷懒**：`crates/platform/Cargo.toml` 把 `tool-transport` 放在
+  `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]` 下 —— wasm 构建里 platform 根本链接不到
+  transport，所以那份代码除了再抄一遍没有别处可去。`tool-core` 是两端都无条件依赖的唯一点，
+  这个理由写进了函数自己的文档，免得下一个人"顺手改成引用 `tool_transport`"直接把 wasm 构建弄坏。
+  与第 13 轮同一类漂移：native 那份带着文档（"只处理 `notify_gcode_response`，其余 notify 一律忽略"），
+  wasm 那份一个字都没有。唯一的公开面扩大是必需的：跨 crate 共享只能 `pub`（两份旧实现都是私有），
+  没有新增依赖，`Cargo.toml`/`Cargo.lock` 一字未动。
+  **两处测试合并时更正了一个错误判断**（主代理原本的描述是错的，子代理用对照运行证伪）：
+  wasm 副本的 `parses_only_gcode_notifications` 里"`notify_status_update` + 空 `params`"那条
+  并不比其他用例多走一个分支 —— method 守卫就在前面返回，`.first()?` 根本没执行；transport 那
+  三条里的对象 `params` 同理。所以"照搬合并"会让删除 `.first()?` 或删掉 method 守卫这两个变异
+  **全都无人变红**（对照运行实测：exit 0、27/26 passed）。最终：wasm 那条用例的两条断言按形状并入
+  迁移后的用例（它本来不计进原生测试数 —— `web_network` 整个模块被 `#[cfg(target_arch = "wasm32")]`
+  挡着），并净新增 `ignores_gcode_notification_with_no_text_params` 钉住守卫放行之后的
+  `.first()?`（空数组）与 `.as_str()`（首元素非字符串）两行，外加一条"非 gcode 推送但首元素是
+  字符串"来钉 method 守卫本身。**这是本轮唯一改变测试语义的地方，方向是变严。**
+  变异验证（各改生产代码一行）：删掉 method 守卫 → 红在 `ignores_status_update`
+  （`Some("printing")` vs `None`）；把 `.first()?` 改坏 → 红在
+  `ignores_gcode_notification_with_no_text_params`（`Some("")` vs `None`）。均还原复跑回绿。
+  四道门 exit 0（676 passed / 0 failed / 7 ignored；等式 = 675 + core 新增 4 条 − transport 迁走 3 条）。
 - 任务快照的保留规则原有**两份逐字节相同的实现**（各 536 字节）：native 在 `task.rs::prune_finished`、
   wasm 在 `web.rs::prune_finished`。现在合成一份 —— `task_model::prune_finished_snapshots`，
   两个结构体（`TaskManager` / `WebTaskRegistry`）各自留一行委托。选 `task_model` 作宿主是因为它是
