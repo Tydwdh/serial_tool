@@ -17,17 +17,27 @@ use std::path::{Path, PathBuf};
 /// 用单字符串而不是元组，是为了让清单留在 rustfmt 的列宽内（元组会被拆成
 /// 四行一组，反而看不出"这是一张清单"）。
 ///
-/// 这份清单是**扫出来的**，不是记出来的：`dead_code` 那 3 条写在
-/// `#[cfg_attr(not(target_arch = …), allow(dead_code))]` 里（某个 target 上整块关掉时，
-/// 剩下的引用会变死），对应 `docs/ARCHITECTURE.md` 里 Linux / wasm 死代码那张表。
+/// 这份清单是**扫出来的**，不是记出来的。`dead_code` 那 3 条分两种形状：
+/// `crates/app/src/shared_keymap.rs` 的 2 条写在
+/// `#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]` 里 —— 那些项只有 wasm 侧的
+/// `web` 模块会读（`mod web` 是 `cfg(target_arch = "wasm32")`），所以 native 构建里它们必然报死；
+/// 剩下 1 条是 `crates/app/src/state.rs` 里普通的 `#[allow(dead_code)]`，护着一个刻意暂停、
+/// 尚无调用者的方法（该模块本身是 `cfg(not(target_arch = "wasm32"))`）。前者对应
+/// `docs/ARCHITECTURE.md` 里 Linux / wasm 死代码那张表。
 /// `cfg_attr` 形式也算豁免 —— 它同样只是让告警静默，所以一起钉住。
 ///
-/// **判"某条豁免是不是空转"的正确做法**（第 9 轮与第 17 轮都用它，第 17 轮据此删掉 6 条）：
+/// **判"某条豁免是不是空转"的正确做法**（第 9 轮与第 17 轮都用它，第 17 轮据此删掉 6 条；
+/// 第 28 轮再跑一次，10 条全部复发、一条没删）：
 /// 把 `crates/` 下的豁免一次摘光，然后**分别**跑两条 clippy ——
 /// `--workspace --all-targets`（native）与 `--target wasm32-unknown-unknown -p hardware-workbench-app`
 /// （wasm）—— 谁点名谁就还需要，两边都不点名的才是死的。只看并集不够：
 /// `cfg_attr(target_arch = "wasm32", …)` 护着的东西在 native 构建里本来就活着，
 /// native 永远不会抱怨它，只在 wasm 那半边才测得出来。
+///
+/// 还有个坑：`-D warnings` 下某个 crate 一失败，依赖它的 crate 就**根本不会被编译**，
+/// 于是这一条只报了最前面那几个站点就收工（第 28 轮 native 只跑到 `tool-transport` 停下，
+/// `crates/app` 那 4 条完全没被检查到）。要把每条豁免都点到位，得把这两条命令
+/// **去掉 `-D warnings` 再各跑一遍**收集全部告警 —— 否则"没复发"可能只是"没检查"。
 const EXPECTED: &[&str] = &[
     // clippy 豁免（7 条）
     "crates/app/src/config.rs clippy::large_enum_variant",

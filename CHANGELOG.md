@@ -6,6 +6,32 @@
 
 ### 调整
 
+- 重查这 10 条 lint 豁免是否空转 —— **负向结论：10 条全部复发，一条没删**（四道门 711 / 0 / 7，
+  与基线逐字相同；本轮只改了守卫测试自己的文档注释，零生产代码变动）。做法沿用第 17 轮：
+  一次摘光、native 与 wasm **分别**跑（只跑一条会得出相反结论）。逐站点的新证据：
+  `transport/network.rs` 两处 8 参、`lua_host` `plugin_event_loop` 9 参、`gauge.rs::draw_arc` 9 参、
+  `panels/lib.rs::next_auto_scroll_state` 8 参、`serial.rs::render_port_editor` 8 参、
+  `config.rs` 的 `ConfigLoadResult` 两臂体积差 ≥1089B vs ≥88B、`shared_keymap.rs` 两条是
+  `cfg_attr(not(wasm32), allow(dead_code))`（只有 wasm 的 `web` 模块读它们）、`state.rs` 那条是
+  刻意暂停的 `NotificationQueue::dismiss`（全仓 grep 只命中定义行）。
+  **三处把我自己的前提纠正了，记下来免得下轮再引**：① "每个被豁免文件自第 17 轮以来都改了"
+  是**错的** —— 我用 `git log --grep=… | tail -1` 取基线，结果抓到的是一个更早的、正文里提到"豁免"
+  的旧提交（`d58af5c`，9-19），于是把 round 17 之前的历史也算进来了。按真正的第 17 轮提交
+  `a6dfb3a` 数：**只有 `config.rs` 变了（3 次）**，其余 7 个文件 0 次 —— 也就是说它们根本没有
+  漂移的机会，这也正好和"10 条全部照旧必要"的结果对上。教训：取"自某轮以来"的计数要用
+  `git rev-list --count <该轮的提交>..HEAD`，别用 `--grep | tail -1` 猜基线。
+  ② 第 17 轮记的"最少 9 参"**不是它记的**（它只记了 `draw_arc` 9 参）；本轮实测最小是 **8 参**
+  （四处），仍高于阈值 7，所以不影响结论，但别再把"最低 9"传下去。
+  ③ **我写的审计步骤本身有个危险的坑**：`-D warnings` 下一个 crate 编译失败，依赖它的 crate
+  **就不会被编译**，于是"摘光全部豁免"只报出最前面几个站点就收工（本轮 native 停在
+  `tool-transport`，`crates/app` 那 4 条完全没被看到）。照字面执行会得出"那 7 条没复发 = 空转"，
+  正是第 17 轮那个"只跑 native"错误的镜像。要收集全部告警必须**去掉 `-D warnings` 再各跑一遍**。
+  这条已经写进守卫测试的文档注释（连同 `dead_code` 那 3 条真实的 2+1 形状区分 —— 原文案说
+  三条都在 `cfg_attr` 里，其实 `state.rs` 那条是普通 `#[allow]`）。
+  棘轮仍然咬得住：探针换成了**在已登记文件里再加一条**（`panels/lib.rs` 上给一个 3 参函数加
+  `too_many_arguments` 豁免，两条 clippy 都不会报它，只有守卫能看见），实测报
+  "清单 10 条，实际 11 条"后移除 —— 比第 17 轮"重新加一整行"的探针更强，因为它压的是
+  按 (位置, lint) → 次数 的比较而不是集合。
 - 删掉一个从未被注入过的抽象：`tool_core` 的 `Clock` trait、`SystemClock`、`FrozenClock`
   （含两个 `impl`）整组移除（净 −20 行；四道门 711 passed / 0 failed / 7 ignored，基线 710 → 711
   —— 多的那条是新的形状守卫）。**它文档写着"时间源抽象，使依赖时间戳的代码可测试"，而这句话

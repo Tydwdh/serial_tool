@@ -135,8 +135,8 @@ cargo tree -p tool-application | grep -i egui    # 0 行
   > **现存豁免的清单不在本文重复维护** —— 唯一真相是
   > `crates/app/tests/lint_exemptions.rs` 里钉住的那份（扫描 `crates/**/*.rs`，按
   > 「文件 + lint → 条数」比对；第 17 轮重测后是 10 条：7 条 clippy + 3 条 `dead_code`，
-  > 后者写在 `#[cfg_attr(not(target_arch = …), allow(dead_code))]` 里，对应下面
-  > Linux / wasm 死代码那张表）。加一条豁免必须显式改那份清单，测试会红；
+  > 三条各自的形状（两种 `cfg_attr` + 一条普通 `#[allow]`）写在那份守卫的注释里，
+  > 对应下面 Linux / wasm 死代码那张表）。加一条豁免必须显式改那份清单，测试会红；
   > 摘一条则应同时把清单收紧。本仓第 6 轮一次摘光后发现 3 条早已空转，
   > 第 8 轮把两处渲染参数墙（`render_rows_view` 20 参、`render_log_rows` 14 参）
   > 收进命名字段输入结构体后又退掉 2 条 `too_many_arguments`，
@@ -151,6 +151,17 @@ cargo tree -p tool-application | grep -i egui    # 0 行
   > "wasm32", …)` 护着的东西在 native 构建里本来就活着，native 永远不会抱怨它。
   > 另外**别把同文件的另一条豁免顺手带走**：`gauge.rs` 那条 `too_many_arguments` 在 wasm
   > 侧仍被点名，摘光时它必须回来，否则 wasm 门直接红。
+  > **第 28 轮按这套流程重查了一次：10 条全部复发，一条没删**（各站点的新证据：参数最少 8 个 ——
+  > 不是这里曾写过的"最少 9 个"，`ConfigLoadResult` 两臂体积差 ≥1089B vs ≥88B）。
+  > 同一个坑的**第三种形状，比"只跑 native"更阴**：`-D warnings` 下某个 crate 编译失败，
+  > 依赖它的 crate **根本不会被编译**，所以"摘光全部豁免"可能只报出最前面几个站点就收工
+  > （第 28 轮 native 停在 `tool-transport`，`crates/app` 那 4 条完全没被看到）。
+  > 照字面执行会把"没检查"读成"没复发"，正好是"只跑 native"那个错误的镜像。
+  > **必须再去掉 `-D warnings` 各跑一遍**收集全部告警，才谈得上判空转。
+  > 顺带一条取数的教训：想数"自第 N 轮以来某文件改了几次"，用
+  > `git rev-list --count <第 N 轮的提交>..HEAD -- <文件>`；`git log --grep=… | tail -1`
+  > 抓到的可能是更早的、正文里偶然提到同一词的提交，于是把历史全算进去
+  > （第 28 轮就是这么得到"每个被豁免文件都改过"这个假前提的 —— 实际只有 `config.rs` 变了 3 次）。
   **当前状态（修复后）**：`cargo +1.92.0 fmt --all --check`、
   `cargo +1.92.0 clippy --workspace --all-targets -- -D warnings`、
   `cargo +1.92.0 test --workspace --all-targets` 三条均 **exit 0**。
