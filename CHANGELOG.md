@@ -6,6 +6,72 @@
 
 ### 调整
 
+- **worker 完成通道的载荷换成 `io::Error` 本体：走过这条通道的失败从此拿得到自己那句
+  中文框架，不再一律 `IO 错误：`（第 41 轮如实记下的那处收窄，根因在此闭合）**（本轮只动
+  `crates/transport/`：`lib.rs` 的 `SerialCommand`/`wait_for_completion`/`complete_command`/
+  `finish_signal_command`/`execute_serial_command` + 它的 `mod tests`、`windows_native.rs` 的
+  `report_completion`/`drain_commands`、`network.rs` 的两处 `send`；无新类型（不加结构体/枚举/
+  trait/宏/模块）、无 `pub` API 变化（`SerialCommand` 仍是 `pub(crate)`，载荷类型不出 crate）、
+  不加 `#[allow]`、豁免计数仍 5；四道门 fmt / native clippy `-D warnings` / wasm clippy /
+  test 全 **EXIT=0**，**732 passed / 0 failed / 7 ignored**、32 条 `test result:` 行 ——
+  基线 726 **净增 6 条**（4 条可移植 + 2 条 `#[cfg(windows)]`）。wasm 门与本改动无编译边：
+  `cargo tree -p hardware-workbench-app --target wasm32-unknown-unknown -i tool-transport`
+  实测回 `nothing to print`，这道门有效但空转）。**（1）根因**：`completion` 原语
+  `Sender<Result<(), String>>` 加等待方那句"拿文案再造一条 `Error::other`"，
+  等于把 worker 侧那条 `io::Error` 先渲染成文案、再重新造一条 kind 恒为 `Other` 的错 ——
+  第 41 轮改读 `kind()` 之后，那几臂对**任何走过通道的失败**都不可达（不只是权限格）。
+  现在载荷是 `Sender<io::Result<()>>`，`wait_for_completion` 只做 `.map_err(TransportError::Io)`，
+  kind 与原始码一路到底。**（2）用户可见串的前后**（worker 侧失败，本机中文 Windows）：
+  `IO 错误：拒绝访问。 (os error 5)` → `串口被占用或无权限访问：拒绝访问。 (os error 5)，
+  请检查是否已被其他程序打开`；`IO 错误：serial write timed out` → `操作超时：serial write
+  timed out`（后者的出处就是本 crate：`windows_native::wait_overlapped_timeout` 的写超时造的
+  是 `io::Error::new(TimedOut, …)`）。本轮普查：这条通道今天的**外部接线**只有平台后端的
+  `set_dtr_blocking`/`set_rts_blocking`（`crates/platform/src/native.rs`，5 秒预算），
+  `send_to_blocking` 除本 crate 用例外没有 crate 外调用者 —— 即先修好的是信号线那一格的
+  用户可见句；写臂与网络臂共用同一份载荷，四处生产者一次改到位（网络臂那条本来就没有 kind
+  可丢，见下）。**逐字不变的**：kind 落兜底臂的那些（`IO 错误：<文案>`、
+  Windows 上 `Uncategorized` 的「数据无效。 (os error 13)」「另一个程序正在使用此文件…
+  (os error 32)」）、`open_serial` 那句 `Io(WouldBlock)` 的「… 正在关闭中，请稍后重试」、
+  `close_port_blocking` 的 `操作超时：{端口} 正在关闭中`、网络串口两句（`IO 错误：网络串口
+  不支持 DTR/RTS`、`IO 错误：{ws 发送失败文案}` —— tungstenite 的错误本来就不是 `io::Error`，
+  这里的 `other` 是第一次造错，不是本轮删掉的那种重包）、以及 `WorkerClosed`/`QueueFull`/
+  `InvalidHex`/`Serial` 四臂。既有措辞用例一条没改：`transport_error_wording.rs` 的
+  `操作超时：read timed out`（直接造 `Io(TimedOut)`，不经通道）与 `headless.rs` 的
+  `操作超时：{端口} 正在关闭中`、`reconnect_failure_words_are_translated_…` 全绿。**（3）
+  一处按值搬不过去的例外（如实记）**：`drain_commands` 的写臂有**两个**消费者 —— 等待方与
+  `NativeWorker::run`（它读 `raw_os_error()` 抑制"关闭中被取消"的噪声日志，1.92 实测该码 995
+  的 kind 恰是 `TimedOut`，所以丢了原始码就会多打一条日志），而 `io::Error` 不是 `Clone`：
+  原件留给 `result?`，通道拿 `completion_copy` 造的**同 kind 同 `Display`** 副本（另有用例
+  逐字钉这份一致）。简报里"按值、别重包"在这臂只能满足一半，是简报没算到的一处双消费者。
+  其余三处生产者（`complete_command`、`finish_signal_command`、`report_completion` 的信号线两臂）
+  全是"先记日志、后交给通道"的 reorder —— 副作用是 worker 侧失败时系统日志那一行现在**早于**
+  完成通知发布（原来晚于），文案与 topic 逐字未变。**（4）顺手删掉两处装饰性 `Result`**：
+  `finish_signal_command` 永远返回 `Ok(())`、`execute_serial_command` 的 `Err` 载荷只被
+  `is_err()` 用一次，两者现在分别返回 `()` 与"worker 是否继续运行"的 `bool`（错误本体已交给
+  通道，留个假错误反而是噪声）；`wait_for_completion` 改 `pub(crate)` 只为让 Windows worker
+  模块的用例驱动同一个消费端。**（5）`WouldBlock` 那条注释的前提核过了，简报的怀疑在这一格
+  不成立**：`Io(WouldBlock)` 全仓唯一生产者 = `open_serial` 直接 `return Err`，**从不经过完成
+  通道**，正文「… 正在关闭中，请稍后重试」确实已含中文 ⇒ 注释准确、本轮改动不牵连它（重连
+  可重试性那两个第 9/11 轮的产品决定按要求未动）。同一趟普查发现的**另一格**才真的没人生产：
+  `InvalidData` 臂的注释说"HEX 严格模式奇偶校验文案已含中文"，而 HEX 判定早已下沉到
+  `tool_core::parse_hex`（失败走 `InvalidHex`），本 crate 无任何 `Io(InvalidData)` 出口，
+  且在 1.92 实测遍历 Win32 码 0..4000：**没有任何一格映射成 `InvalidData` 或 `WouldBlock`** ——
+  两臂按原样透出文案的取舍没动（删臂是产品决定），注释改成写实测结论并明说不编造用例。
+  **（6）新增 6 条用例**：可移植 `worker_side_permission_failure_reaches_the_advice_through_the_channel`
+  （写臂 + 中文 OS 原话 → 建议分支）、`worker_side_write_timeout_keeps_the_timeout_frame_through_the_channel`
+  （写臂 + `TimedOut` → `操作超时：`，逐字钉整句）、`worker_side_signal_failure_keeps_its_kind_through_the_channel`
+  （DTR 臂 = reorder 后的 `finish_signal_command`，kind 选真有出处的 `PermissionDenied`）、
+  `a_dropped_completion_sender_still_reports_worker_closed`（钉"发送方先消失 ⇒ `WorkerClosed`"
+  这条**改前就绿**的行为没被牵连）；`#[cfg(windows)]` `report_completion_keeps_the_error_kind_for_the_waiting_caller`
+  （Windows 生产路径：`report_completion` → `wait_for_completion` → `translate_error`）、
+  `completion_copy_keeps_kind_and_display_of_the_original_error`（副本与原件同 kind 同 `Display`，
+  用真 `from_raw_os_error(5)`）。四条"应红"用例在旧载荷语义下（把两个 producer 改回
+  `Error::new(Other, 文案)` 跑一遍）确实全红，红证与逐字输出记在报告里；两条钉行为不变的用例
+  改前改后同绿。既有用例只改了一处的**形状**：`worker_loop_preserves_write_and_signal_fifo`
+  的三句 `assert_eq!(rx.recv().unwrap(), Ok(()))` 在 `io::Error` 上没有 `PartialEq`（1.92 实测
+  E0369），换成同断言义的 `expect_completed(…, "write:A")` 助手 —— 钉的仍是"三条命令按 FIFO
+  各自回报成功"，措辞用例一字未动。
+
 - **`tool_transport::translate_error` 的 `Io` 臂改读 `kind()`：中文 Windows 上的权限失败从裸的
   `IO 错误：` 回到建议分支**（本轮只动 `crates/transport/src/lib.rs` 的 `Io` 一臂 + 它的
   `#[cfg(test)] mod tests`；`Serial` 臂、重连可重试性与 `WouldBlock`/`TimedOut` 两格逐字未动 ——

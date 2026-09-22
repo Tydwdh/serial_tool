@@ -9,6 +9,7 @@
 use crate::{RepaintWaker, SerialCommand, TransportResult, serial_rx_event, serial_tx_event};
 use crossbeam_channel::Receiver;
 use serde::{Deserialize, Serialize};
+use std::io;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -187,7 +188,10 @@ fn network_worker_loop(context: NetworkWorkerContext) {
                     SerialCommand::Write { .. } => unreachable!(),
                 };
                 if let Some(completion) = completion {
-                    let _ = completion.send(Err("网络串口不支持 DTR/RTS".to_owned()));
+                    // 这里的 `other` 不是第 42 轮删掉的那种"重新包装"：网络串口从来没有
+                    // 过 io::Error 可丢，文案就是它的全部信息，等待方看到的仍是
+                    // `IO 错误：网络串口不支持 DTR/RTS`。
+                    let _ = completion.send(Err(io::Error::other("网络串口不支持 DTR/RTS")));
                 }
                 continue;
             };
@@ -215,7 +219,11 @@ fn network_worker_loop(context: NetworkWorkerContext) {
                 }
                 Err(error) => {
                     if let Some(completion) = completion {
-                        let _ = completion.send(Err(error.to_string()));
+                        // `tungstenite::Error` 本身不是 `io::Error`：这里第一次造出错误，
+                        // kind 一直是 `Other`，等待方那句 `IO 错误：…` 逐字不变。
+                        // 想再进一步（`tungstenite::Error::Io(inner)` 时把 inner 的 kind 交给
+                        // 等待方）会改动用户可见的框架句，属于产品决定，本轮不顺手做。
+                        let _ = completion.send(Err(io::Error::other(error.to_string())));
                     }
                     publish_network_error(&bus, &port_name, format_args!("发送失败：{error}"));
                     return;

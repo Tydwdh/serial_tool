@@ -26,18 +26,24 @@ mod windows_native;
 /// The optional completion channel is used by the platform backend when its
 /// async operation must mean "the worker has completed the command", rather
 /// than merely "the command was accepted into a queue".
+///
+/// 载荷是 `io::Result<()>` —— **错误本体，不是它的 `Display`**。通道另一头的
+/// `wait_for_completion` 把结果原样包成 `TransportError::Io`，而 `translate_error`
+/// 按 `kind()` 决定给用户哪句可执行提示（第 41 轮）；这里一旦降级成字符串，
+/// kind 就在通道上被抹掉，等待方只能重新造一条 `ErrorKind::Other`。
+/// `SerialCommand` 是 `pub(crate)`，这个载荷类型不出 crate。
 pub(crate) enum SerialCommand {
     Write {
         bytes: Vec<u8>,
-        completion: Option<Sender<Result<(), String>>>,
+        completion: Option<Sender<std::io::Result<()>>>,
     },
     SetDtr {
         value: bool,
-        completion: Option<Sender<Result<(), String>>>,
+        completion: Option<Sender<std::io::Result<()>>>,
     },
     SetRts {
         value: bool,
-        completion: Option<Sender<Result<(), String>>>,
+        completion: Option<Sender<std::io::Result<()>>>,
     },
 }
 
@@ -388,8 +394,14 @@ fn status_for(handle: &PortHandle) -> TransportStatus {
 /// 等待 worker 回投的完成通知（"命令已被执行"，而非"命令已入队"）。
 /// 超时与断连各映射到固定错误变体；`timed_out_message` 只是区分写入/控制信号
 /// 两类超时的中文文案，不改变错误类型。
-fn wait_for_completion(
-    result: crossbeam_channel::Receiver<Result<(), String>>,
+///
+/// 通道里那条 `io::Error` **原样进 `TransportError::Io`**：不再 `Error::other(文本)`
+/// 重新包装（第 42 轮）。旧写法把 worker 侧的 kind 一律抹成 `ErrorKind::Other`，
+/// `translate_error` 按 kind 分派的那几臂（这条通道实际喂到的是 `PermissionDenied`
+/// 与 `TimedOut`）对走过这条通道的失败因此全部不可达 —— 也就是第 41 轮记录的那处
+/// 收窄的根因。`pub(crate)` 只为让 Windows worker 模块的用例能驱动同一个消费端。
+pub(crate) fn wait_for_completion(
+    result: crossbeam_channel::Receiver<std::io::Result<()>>,
     timeout: Duration,
     timed_out_message: &str,
 ) -> TransportResult<()> {
@@ -401,7 +413,7 @@ fn wait_for_completion(
             ),
             crossbeam_channel::RecvTimeoutError::Disconnected => TransportError::WorkerClosed,
         })?
-        .map_err(|error| TransportError::Io(std::io::Error::other(error)))
+        .map_err(TransportError::Io)
 }
 
 impl TransportManager {
@@ -1179,8 +1191,9 @@ fn serial_worker_loop_impl(
 
     while !stop.load(Ordering::Acquire) {
         while let Ok(command) = command_rx.try_recv() {
-            if execute_serial_command(&mut port, command, &bus, &source, &port_name, &wake).is_err()
-            {
+            let keep_running =
+                execute_serial_command(&mut port, command, &bus, &source, &port_name, &wake);
+            if !keep_running {
                 return;
             }
         }
@@ -1225,22 +1238,26 @@ fn serial_worker_loop_impl(
     }
 }
 
+/// 把 worker 侧的执行结果回填给等待方：**错误按值搬进通道**，kind 与原始码都跟着走。
+/// `io::Error` 不是 `Clone`，所以调用点此后不能再用它 —— 需要先记日志的（写失败、
+/// 信号线设置失败）都在此之前记完。发送句柄在本行析构，与原内联写法同一个丢弃点。
 #[cfg(any(not(windows), test))]
-fn complete_command(completion: Option<Sender<Result<(), String>>>, result: &std::io::Result<()>) {
+fn complete_command(completion: Option<Sender<std::io::Result<()>>>, result: std::io::Result<()>) {
     if let Some(completion) = completion {
-        let _ = completion.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+        let _ = completion.send(result);
     }
 }
 
+/// 收尾一条 DTR/RTS 命令：失败只记日志，不让 worker 退出（与写入不同）。
+/// 顺序是"先记日志、后交给通道"—— `io::Error` 不是 `Clone`，反过来就没有原件可发了。
 #[cfg(any(not(windows), test))]
 fn finish_signal_command(
     bus: &DataBus,
     port_name: &str,
     label: &str,
     result: std::io::Result<()>,
-    completion: Option<Sender<Result<(), String>>>,
-) -> std::io::Result<()> {
-    complete_command(completion, &result);
+    completion: Option<Sender<std::io::Result<()>>>,
+) {
     if let Err(error) = &result {
         bus.publish(Event::system_log(
             LogLevel::Error,
@@ -1248,9 +1265,12 @@ fn finish_signal_command(
             format!("{port_name} 设置 {label} 失败：{error}"),
         ));
     }
-    Ok(())
+    complete_command(completion, result);
 }
 
+/// 执行一条命令，返回 **worker 是否继续运行**：只有写失败会终止 worker。
+/// 这里不用 `io::Result<()>`：那条错误的两个消费者（系统日志、完成通道）都在本函数
+/// 内用掉它了（`io::Error` 不是 `Clone`），循环要的只是"该不该退出"这一个事实。
 #[cfg(any(not(windows), test))]
 fn execute_serial_command(
     port: &mut impl SerialIo,
@@ -1259,42 +1279,47 @@ fn execute_serial_command(
     source: &str,
     port_name: &str,
     wake: &impl Fn(),
-) -> std::io::Result<()> {
+) -> bool {
     match command {
-        SerialCommand::Write { bytes, completion } => {
-            let result = port.write_all(&bytes);
-            complete_command(completion, &result);
-            match result {
-                Ok(()) => {
-                    bus.publish(serial_tx_event(source.to_owned(), bytes));
-                    wake();
-                    Ok(())
-                }
-                Err(error) => {
-                    bus.publish(Event::system_log(
-                        LogLevel::Error,
-                        "transport.serial",
-                        format!("{port_name} 写入失败：{error}"),
-                    ));
-                    Err(error)
-                }
+        SerialCommand::Write { bytes, completion } => match port.write_all(&bytes) {
+            Ok(()) => {
+                complete_command(completion, Ok(()));
+                bus.publish(serial_tx_event(source.to_owned(), bytes));
+                wake();
+                true
             }
-        }
+            Err(error) => {
+                // 与完成通道同理：日志先借用错误出，错误本体最后交给等待方。
+                bus.publish(Event::system_log(
+                    LogLevel::Error,
+                    "transport.serial",
+                    format!("{port_name} 写入失败：{error}"),
+                ));
+                complete_command(completion, Err(error));
+                false
+            }
+        },
         // 与写入不同：信号线设置失败只记日志，不让 worker 退出。
-        SerialCommand::SetDtr { value, completion } => finish_signal_command(
-            bus,
-            port_name,
-            "DTR",
-            port.write_data_terminal_ready(value),
-            completion,
-        ),
-        SerialCommand::SetRts { value, completion } => finish_signal_command(
-            bus,
-            port_name,
-            "RTS",
-            port.write_request_to_send(value),
-            completion,
-        ),
+        SerialCommand::SetDtr { value, completion } => {
+            finish_signal_command(
+                bus,
+                port_name,
+                "DTR",
+                port.write_data_terminal_ready(value),
+                completion,
+            );
+            true
+        }
+        SerialCommand::SetRts { value, completion } => {
+            finish_signal_command(
+                bus,
+                port_name,
+                "RTS",
+                port.write_request_to_send(value),
+                completion,
+            );
+            true
+        }
     }
 }
 
@@ -1407,10 +1432,23 @@ pub fn translate_error(err: &TransportError) -> String {
                 // ⇒ `PermissionDenied`，std 1.92 pal 源码核过，Windows 两格另有
                 // 本机用例实测），`Error::new`/`other` 造的错又没有原始码 ——
                 // kind 之外再抄一份码表是永远多不出命中的死分支。
+                // 第 42 轮起这条对**worker 侧的失败**也成立：端口 worker 的完成通道
+                // 载荷已是 `io::Error` 本体（旧载荷是它的 `ToString`，等待方只能重包
+                // 成 `ErrorKind::Other` —— 第 41 轮如实记下的那处收窄，根因在此）。
                 std::io::ErrorKind::PermissionDenied => serial_permission_message(&message),
-                std::io::ErrorKind::WouldBlock => message, // "正在关闭中" 等业务状态文案已含中文
+                // 「COM3 正在关闭中，请稍后重试」那句中文由 `open_serial` 直接 return
+                // （本轮普查：它是全仓唯一造出 `TransportError::Io(WouldBlock)` 的出口 ——
+                // `crates/recorder` 那句 WouldBlock 是 recorder 自己的 `io::Error`，进不来
+                // 这个变体），从不经过完成通道 —— 所以"文案已含中文"这个前提没有被
+                // 本轮换载荷牵连。
+                std::io::ErrorKind::WouldBlock => message,
                 std::io::ErrorKind::TimedOut => format!("操作超时：{message}"),
-                std::io::ErrorKind::InvalidData => message, // HEX 严格模式奇偶校验文案已含中文
+                // 原注释说的"HEX 严格模式奇偶校验文案"已不存在：HEX 判定下沉到
+                // `tool_core::parse_hex`，失败走 `TransportError::InvalidHex`。本轮普查
+                // （1.92 实测 Win32 码 0..4000）没有任何 os 码映射成 `InvalidData`，
+                // 本 crate 也没有造它的出口 —— 这一臂当前无生产者，按原样透出的取舍
+                // 与 `WouldBlock` 同族（正文已是给人看的句子），留着但不编造用例。
+                std::io::ErrorKind::InvalidData => message,
                 _ => format!("IO 错误：{message}"),
             }
         }
@@ -1922,15 +1960,182 @@ mod tests {
             );
         });
 
-        assert_eq!(a_rx.recv_timeout(Duration::from_secs(1)).unwrap(), Ok(()));
-        assert_eq!(dtr_rx.recv_timeout(Duration::from_secs(1)).unwrap(), Ok(()));
-        assert_eq!(b_rx.recv_timeout(Duration::from_secs(1)).unwrap(), Ok(()));
+        expect_completed(
+            a_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            "write:A",
+        );
+        expect_completed(
+            dtr_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            "dtr:false",
+        );
+        expect_completed(
+            b_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            "write:B",
+        );
         stop.store(true, Ordering::Release);
         handle.join().unwrap();
 
         assert_eq!(
             *operations.lock().unwrap(),
             vec!["write:A", "dtr:false", "write:B"]
+        );
+    }
+
+    /// 完成通知的"成功"侧断言。载荷换成 `io::Result<()>` 之后 `assert_eq!` 用不上了
+    /// （`io::Error` 没有 `PartialEq`），失败时把 kind 与文案都打出来，一眼看出是哪条命令。
+    fn expect_completed(received: std::io::Result<()>, what: &str) {
+        if let Err(error) = received {
+            panic!(
+                "{what} 的完成通知应为 Ok，实际 kind={:?} 文案={error}",
+                error.kind()
+            );
+        }
+    }
+
+    // ── 第 42 轮：worker 侧的 `io::Error` 走完成通道回来时，kind 必须还在 ──
+    //
+    // portable 路径上 `complete_command` 只有一个调用者 `execute_serial_command`
+    // （Windows 的对应物是 `windows_native::drain_commands`，它另有用例），等待方是
+    // `wait_for_completion` —— 两个都是本 crate 的私有项，所以这几条用例把
+    // 「假端口造错 → 完成通道 → 等待方 → `translate_error`」整段跑完，
+    // 不需要线程，用例里也没有任何等待或调度假设。
+    // 改前的共同症状：通道发的是 `ToString` 文案，等待方再包成 `ErrorKind::Other`，
+    // 于是第 41 轮那几臂按 kind 的分派对走过通道的失败全部不可达。
+
+    /// 每条 I/O 都返回同一条错误的假端口。`io::Error` 不是 `Clone`，故存 kind + 文案，
+    /// 每次调用现造一条同形状的 —— 等价于生产里 OS 每次都吐同一条错误。
+    struct AlwaysFailingPort {
+        kind: std::io::ErrorKind,
+        detail: &'static str,
+    }
+
+    impl AlwaysFailingPort {
+        fn error(&self) -> std::io::Error {
+            std::io::Error::new(self.kind, self.detail)
+        }
+    }
+
+    impl SerialIo for AlwaysFailingPort {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(self.error())
+        }
+        fn write_all(&mut self, _buf: &[u8]) -> std::io::Result<()> {
+            Err(self.error())
+        }
+        fn write_data_terminal_ready(&mut self, _value: bool) -> std::io::Result<()> {
+            Err(self.error())
+        }
+        fn write_request_to_send(&mut self, _value: bool) -> std::io::Result<()> {
+            Err(self.error())
+        }
+    }
+
+    /// 让 worker 执行一条必然失败的**写入**命令，站在等待方的位置取回错误 ——
+    /// 与 `send_to_blocking` 走同一对生产者/消费者。
+    fn write_failure_from_worker(kind: std::io::ErrorKind, detail: &'static str) -> TransportError {
+        let (completion, result) = bounded(1);
+        let mut port = AlwaysFailingPort { kind, detail };
+        let keep_running = execute_serial_command(
+            &mut port,
+            SerialCommand::Write {
+                bytes: b"abc".to_vec(),
+                completion: Some(completion),
+            },
+            &DataBus::new(),
+            "serial:FAIL42",
+            "FAIL42",
+            &|| {},
+        );
+        assert!(
+            !keep_running,
+            "装配前提：写失败的命令必须让 worker 退出，否则本用例没在测那条路径"
+        );
+        wait_for_completion(result, Duration::from_secs(5), "串口写入超时")
+            .expect_err("worker 侧的写失败必须以错误回到等待方")
+    }
+
+    /// 同上，但命令是 **DTR** —— portable 路径上信号线那一格的生产者
+    /// `finish_signal_command`（本轮改成"先记日志、后交给通道"）。信号线失败不终止 worker。
+    fn signal_failure_from_worker(
+        kind: std::io::ErrorKind,
+        detail: &'static str,
+    ) -> TransportError {
+        let (completion, result) = bounded(1);
+        let mut port = AlwaysFailingPort { kind, detail };
+        let keep_running = execute_serial_command(
+            &mut port,
+            SerialCommand::SetDtr {
+                value: true,
+                completion: Some(completion),
+            },
+            &DataBus::new(),
+            "serial:FAIL42",
+            "FAIL42",
+            &|| {},
+        );
+        assert!(
+            keep_running,
+            "装配前提：信号线失败只记日志，worker 必须继续运行"
+        );
+        wait_for_completion(result, Duration::from_secs(5), "串口控制信号超时")
+            .expect_err("worker 侧的信号线失败必须以错误回到等待方")
+    }
+
+    /// 中文 Windows 上权限失败的 Display 原话，从端口写路径出来后仍要拿到
+    /// 第 41 轮那句可执行提示，而不是通用的 `IO 错误：`。
+    #[test]
+    fn worker_side_permission_failure_reaches_the_advice_through_the_channel() {
+        let error = write_failure_from_worker(
+            std::io::ErrorKind::PermissionDenied,
+            "拒绝访问。 (os error 5)",
+        );
+        assert!(
+            matches!(&error, TransportError::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied),
+            "完成通道又把 kind 抹掉了，实际: {error:?}"
+        );
+        assert_permission_advice(&translate_error(&error), "拒绝访问。 (os error 5)");
+    }
+
+    /// 第二种 kind 也要成立（不能只把一格调通）：`TimedOut` 必须拿到 `操作超时：`
+    /// 框架。真实来源就在本 crate —— `windows_native::wait_overlapped_timeout` 的写超时
+    /// 给的正是 `io::Error::new(TimedOut, "serial write timed out")`，旧通道到等待方
+    /// 只剩 `IO 错误：serial write timed out`。
+    #[test]
+    fn worker_side_write_timeout_keeps_the_timeout_frame_through_the_channel() {
+        let error =
+            write_failure_from_worker(std::io::ErrorKind::TimedOut, "serial write timed out");
+        assert_eq!(translate_error(&error), "操作超时：serial write timed out");
+    }
+
+    /// 第二个生产者也要成立（不是只把写臂调通）：DTR 走的是 `finish_signal_command` ——
+    /// 本轮按"先记日志、后交给通道"重排过的那一处 portable 生产者。kind 选
+    /// `PermissionDenied` 有真实出处：Windows 的 `EscapeCommFunction`、POSIX 的
+    /// `TIOCMBIS` 都会给 EACCES。改前这一格同样只剩 `IO 错误：`。
+    #[test]
+    fn worker_side_signal_failure_keeps_its_kind_through_the_channel() {
+        let error = signal_failure_from_worker(
+            std::io::ErrorKind::PermissionDenied,
+            "拒绝访问。 (os error 5)",
+        );
+        assert!(
+            matches!(&error, TransportError::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied),
+            "完成通道又把 kind 抹掉了，实际: {error:?}"
+        );
+        assert_permission_advice(&translate_error(&error), "拒绝访问。 (os error 5)");
+    }
+
+    /// 本轮只换载荷，没碰"发送方先消失"那一侧：worker 在回填前退出 ⇒ 发送句柄被
+    /// drop ⇒ 等待方拿 `WorkerClosed`（既不是超时，也不是 `Io`）。**改前就是绿的**，
+    /// 记在这里是钉住它改后仍绿。
+    #[test]
+    fn a_dropped_completion_sender_still_reports_worker_closed() {
+        let (completion, result) = bounded(1);
+        drop(completion);
+        let error = wait_for_completion(result, Duration::from_secs(5), "串口写入超时")
+            .expect_err("通道已断开，等待方不得当作成功");
+        assert!(
+            matches!(error, TransportError::WorkerClosed),
+            "断连的定性变了，实际: {error:?}"
         );
     }
 }

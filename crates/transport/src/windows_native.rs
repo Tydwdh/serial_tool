@@ -287,12 +287,26 @@ fn cancel_pending_read(handle: HANDLE, overlapped: &OVERLAPPED) {
     }
 }
 
-/// 把命令的执行结果回填给等待方：成功只报 `Ok(())`，失败只带错误的 `ToString` 文案。
-/// 按值接管 `completion`，发送句柄就在本行析构 —— 与原内联写法同一个丢弃点。
-fn report_completion(completion: Option<Sender<Result<(), String>>>, result: &io::Result<()>) {
+/// 把命令的执行结果回填给等待方：**错误按值搬进通道**，kind 与原始码都跟着走
+/// （第 42 轮）。旧写法发的是 `ToString` 文案，等待方只能重新包一条
+/// `ErrorKind::Other`，`translate_error` 按 kind 分派的那几臂因此永不命中。
+/// `io::Error` 不是 `Clone`，所以调用点此后不能再用它 —— 需要先记日志的都在此之前记完，
+/// 只有写失败那一臂还要把原件交给 `NativeWorker::run`，那里发的是同 kind 同文案的副本
+/// （见 `drain_commands`）。按值接管 `completion`，发送句柄就在本行析构 ——
+/// 与原内联写法同一个丢弃点。
+fn report_completion(completion: Option<Sender<io::Result<()>>>, result: io::Result<()>) {
     if let Some(completion) = completion {
-        let _ = completion.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+        let _ = completion.send(result);
     }
+}
+
+/// 给等待方的"同一条错误"：kind 与 `Display` 与原件逐字一致，只有 `raw_os_error()`
+/// 不再带上。通道另一头（`wait_for_completion` → `TransportError::Io` →
+/// `translate_error`）只读 kind 与文案，第 41 轮已核实原始码在那条路上不多出任何命中；
+/// 反过来 `NativeWorker::run` 要读 `raw_os_error()` 来抑制"关闭中被取消"的噪声日志，
+/// 所以那份保留原件。一个非 `Clone` 的值、两个消费者，只能有一个拿到本体。
+fn completion_copy(error: &io::Error) -> io::Error {
+    io::Error::new(error.kind(), error.to_string())
 }
 
 /// 发布一条 `transport.serial` 系统错误日志。端口名用 `trim_start_matches`，它会去掉
@@ -316,7 +330,14 @@ fn drain_commands(
         match command {
             SerialCommand::Write { bytes, completion } => {
                 let result = port.write_all(&bytes);
-                report_completion(completion, &result);
+                // 两个消费者、一个 `io::Error`（不是 Clone）：原件要跟着 `result?` 交给
+                // `NativeWorker::run`（它读 `raw_os_error()` 抑制"关闭中被取消"的噪声日志），
+                // 所以这里给通道发同 kind 同文案的副本 —— 等待方要的按 kind 判定不再
+                // 被抹成 `ErrorKind::Other`。
+                report_completion(
+                    completion,
+                    result.as_ref().map(|_| ()).map_err(completion_copy),
+                );
                 result?;
                 bus.publish(serial_tx_event(source.to_owned(), bytes));
                 if let Some(w) = repaint_waker {
@@ -325,17 +346,18 @@ fn drain_commands(
             }
             SerialCommand::SetDtr { value, completion } => {
                 let result = port.set_dtr(value);
-                report_completion(completion, &result);
-                if let Err(error) = result {
+                // 先记日志再按值交给通道（反过来就没有原件可发了）。
+                if let Err(error) = &result {
                     publish_port_error(bus, source, format_args!("设置 DTR 失败：{error}"));
                 }
+                report_completion(completion, result);
             }
             SerialCommand::SetRts { value, completion } => {
                 let result = port.set_rts(value);
-                report_completion(completion, &result);
-                if let Err(error) = result {
+                if let Err(error) = &result {
                     publish_port_error(bus, source, format_args!("设置 RTS 失败：{error}"));
                 }
+                report_completion(completion, result);
             }
         }
     }
@@ -691,5 +713,49 @@ mod tests {
             !alive.load(Ordering::Acquire),
             "`NativeWorker::run`（Windows 上唯一的生产 worker）返回后 alive 必须为 false"
         );
+    }
+
+    /// Windows 生产路径的这一半：`report_completion` 按值搬错误，等待方
+    /// （`crate::wait_for_completion`）拿到的 kind 必须与 worker 侧一致，
+    /// `translate_error` 才给得出第 41 轮那句可执行提示。
+    ///
+    /// 旧实现发的是 `ToString` 文案、等待方再包 `Error::other`，这一格改前只会得到
+    /// `IO 错误：拒绝访问。 (os error 5)`。`drain_commands` 的三个臂都只经由
+    /// `report_completion` 回填，故这里不需要真句柄（写失败那一臂发的是
+    /// `completion_copy` 的副本，另有用例钉住它与原件同 kind 同文案）。
+    #[test]
+    fn report_completion_keeps_the_error_kind_for_the_waiting_caller() {
+        let (completion, result) = crossbeam_channel::bounded(1);
+        report_completion(
+            Some(completion),
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "拒绝访问。 (os error 5)",
+            )),
+        );
+        let error =
+            crate::wait_for_completion(result, std::time::Duration::from_secs(5), "串口写入超时")
+                .expect_err("worker 侧的失败必须以错误回到等待方");
+        assert!(
+            matches!(&error, crate::TransportError::Io(io) if io.kind() == io::ErrorKind::PermissionDenied),
+            "完成通道又把 kind 抹掉了，实际: {error:?}"
+        );
+        let words = crate::translate_error(&error);
+        assert!(
+            words.contains("串口被占用或无权限访问") && words.contains("拒绝访问。 (os error 5)"),
+            "权限失败又被当成通用 IO 错误了，实际: {words}"
+        );
+    }
+
+    /// 写失败那一臂交给通道的是副本（原件要跟着 `result?` 交给 `NativeWorker::run`，
+    /// 它读 `raw_os_error()` 来抑制"关闭中被取消"的噪声日志）：kind 与 `Display`
+    /// 必须逐字一致，否则用户看到的框架句又会跑偏。用真的 `from_raw_os_error(5)`
+    /// （本机中文 Windows 的「拒绝访问。 (os error 5)」）来量这件事。
+    #[test]
+    fn completion_copy_keeps_kind_and_display_of_the_original_error() {
+        let original = io::Error::from_raw_os_error(5);
+        let copy = completion_copy(&original);
+        assert_eq!(copy.kind(), original.kind());
+        assert_eq!(copy.to_string(), original.to_string());
     }
 }

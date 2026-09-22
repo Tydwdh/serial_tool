@@ -1091,8 +1091,9 @@ panic / 置位什么都不做的手工线程，与磁盘和调度无关）·
       > 第 9 轮那条教训的正确版本：**不能拿"已经翻译过的用户文案"再当判定的输入**（那才是
       > `"would block"` 那个死判定的成因）；映射器自己去读 OS 原始文案是另一回事
       > （`translate_error` 的 `Serial`/`Io` 两臂本来就这么做，因为它拿到的是 OS 的 `Display`；
-      > **第 41 轮起这条只对 `Serial` 臂成立** —— `Io` 臂的权限判定改读 `kind()`，见本条末尾的
-      > 第 41 轮记录）。
+      > **第 41 轮起这条只对 `Serial` 臂成立** —— `Io` 臂的权限判定改读 `kind()`，第 42 轮
+      > 又让 worker 完成通道把 `io::Error` 本体（而不是它的文案）送到这一臂，见本条末尾的
+      > 第 41/42 轮记录）。
       >
       > **第 9 轮留下的两个待拍板问题**（都不是机械收敛能定的）：
       > ① 重连那个 3 秒预算的循环，改成类型化判定之后**仍然没有任何生产者**
@@ -1281,10 +1282,21 @@ panic / 置位什么都不做的手工线程，与磁盘和调度无关）·
       > `Io(PermissionDenied)`，按 kind 可判定；但 **Windows 后端 `last_os_error` 把
       > `ERROR_ACCESS_DENIED` 折进 `ErrorKind::NoDevice`**（与 FILE/PATH_NOT_FOUND 共用），权限
       > 信息在依赖内部就已销毁 —— Windows 半边按 kind 分不出「端口被占用」与「设备不存在」，
-      > 逐平台分叉要把 `serialport::Error` 的两套形状先写进用例，不是 `Io` 臂这一格的事。另一处
-      > 同族病根：worker 完成通道（`report_completion`/`complete_command` → `wait_for_completion`）
-      > 拿 `.to_string()` 把 io kind 折成字符串，到判定处已无类型可读 —— 修法是换通道载荷，
-      > 与 `Serial` 臂一并留给下一轮。
+      > 逐平台分叉要把 `serialport::Error` 的两套形状先写进用例，不是 `Io` 臂这一格的事。
+      > **第 42 轮把这条链上的另一处同族病根闭合了：worker 完成通道不再抹 kind**。
+      > `SerialCommand` 的 `completion` 载荷从 `Sender<Result<(), String>>` 换成
+      > `Sender<io::Result<()>>`（`pub(crate)` 内部，不出 crate），`wait_for_completion`
+      > 把收到的错误**原样**包进 `TransportError::Io` —— 旧写法发 `.to_string()`、等待方再
+      > `Error::other(文本)`，kind 恒为 `Other`，第 41 轮那几臂对走过通道的失败全部不可达
+      > （就是第 41 轮如实记下的那处收窄）。`io::Error` 不是 `Clone`，所以「先记日志、后交给
+      > 通道」成了三个生产者（`complete_command`/`finish_signal_command`/
+      > `report_completion`）的共同顺序；唯一例外是 Windows 的写臂：原件要跟着 `result?` 交给
+      > `NativeWorker::run`（它读 `raw_os_error()` 抑制"关闭中被取消"的噪声日志），通道拿的是
+      > `completion_copy` 造的 **同 kind 同 `Display`** 副本（1.92 实测：Win32 码 0..4000 里没有
+      > 任何一格映射成 `InvalidData`/`WouldBlock`，故 kind+文案就是等待方读得到的全部）。
+      > 本 crate 内普查：`Io(WouldBlock)` 的唯一生产者仍是 `open_serial` 的直接 return（正文
+      > 已是中文「… 正在关闭中，请稍后重试」，不走通道），`Io(InvalidData)` **没有**生产者 ——
+      > 两格臂留着、注释已改写实测结论，没编造用例。剩下的未闭合一半只有 `Serial` 臂。
       ⑤ 【本波已闭合】换行后缀表原有 3 份（native `state::LineEnding`、wasm `WebLineEnding`、
       共享面板 `SendLineEnding`），值一致但没有任何断言钉住，两端还各写两份 4 臂 **identity** `match`
       （类型不同才需要转）。现在收进 `tool_core::LineEnding`（`crates/core/src/lib.rs:454`），
