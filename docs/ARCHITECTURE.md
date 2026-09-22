@@ -560,9 +560,15 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
       浏览器侧 `serial.close()` 不带参数会关掉所有已开端口 —— 需要产品裁决，不是机械收敛。
       ③ `TransportCapabilities` 两侧都不被读取（能力位形同虚设）。
       ④ web 错误文案仍有英文与「无 `transport: ` 前缀」差异。
-      ⑤ 换行后缀表有 3 份（`crates/app/src/state.rs`、`crates/app/src/web/mod.rs` 的 `WebLineEnding`、
-      `crates/panels/src/sender.rs` 的 `SendLineEnding`），值一致但没有任何断言钉住；
-      三份各自服务 native / wasm / 共享面板，合并会牵动已持久化的 serde 名字。
+      ⑤ 【本波已闭合】换行后缀表原有 3 份（native `state::LineEnding`、wasm `WebLineEnding`、
+      共享面板 `SendLineEnding`），值一致但没有任何断言钉住，两端还各写两份 4 臂 **identity** `match`
+      （类型不同才需要转）。现在收进 `tool_core::LineEnding`（`crates/core/src/lib.rs:454`），
+      三处只留别名（`pub use ... as SendLineEnding` 保持面板对外名字可导入），四处转换随之删掉。
+      持久化的裸变体名（`"None"`/`"Lf"`/`"Cr"`/`"Crlf"`，桌面 `workspace.json` 与浏览器设置都存它）
+      由 `line_ending_persisted_names_are_bare_variant_strings` 按**字面量**钉住 —— 给合并后的枚举加
+      `#[serde(rename_all = "lowercase")]` 实测打红 3 条、去掉即回绿，所以这条断言不是摆设；
+      三份表本身由 `line_ending_label_and_suffix_tables` 与 `line_ending_default_is_none` 钉住
+      （变体顺序、标签、后缀字节序、默认值）。
       ⑥ web 把 `webserial:session:N` 会话别名键一起持久化。
 
 ### 本轮裁掉项

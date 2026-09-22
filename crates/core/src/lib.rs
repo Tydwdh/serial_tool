@@ -441,6 +441,51 @@ pub fn topic_matches(pattern: &str, topic: &str) -> bool {
     }
 }
 
+// ── 换行符表：native 与 wasm 共用的唯一一份 ──
+//
+// 原先 `tool-panels` 的 `SendLineEnding`、桌面 `state::LineEnding`、浏览器设置的
+// `WebLineEnding` 各抄了一份完全相同的四行表，改一处就会漏改另两处。
+// `tool-core` 是这三处都无条件依赖的 crate，因此表收在这里。
+//
+// 变体名与顺序是**持久化格式的一部分**：桌面 workspace.json 与浏览器设置存的都是
+// 裸变体名字符串（`"None"`/`"Lf"`/`"Cr"`/`"Crlf"`），重命名或调序会让老配置读不回来。
+// 本文件末尾的用例按字面量钉住这个形状。
+
+/// 文本发送追加的行尾符。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LineEnding {
+    #[default]
+    None,
+    Lf,
+    Cr,
+    Crlf,
+}
+
+impl LineEnding {
+    /// 下拉框的候选顺序，与持久化无关，只决定 UI 展示次序。
+    pub const ALL: [Self; 4] = [Self::None, Self::Lf, Self::Cr, Self::Crlf];
+
+    /// 下拉框与插件上下文里展示的名字。
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "无",
+            Self::Lf => "LF",
+            Self::Cr => "CR",
+            Self::Crlf => "CRLF",
+        }
+    }
+
+    /// 追加到待发文本末尾的字节串；HEX 模式不使用它。
+    pub const fn suffix(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Lf => "\n",
+            Self::Cr => "\r",
+            Self::Crlf => "\r\n",
+        }
+    }
+}
+
 // ── HEX 解析与预览：native 与 wasm 共用的唯一判定 ──
 //
 // 原先 `tool-transport` 与 `tool-application` 的 wasm 侧各有一份手抄实现，判定实际已经
@@ -818,5 +863,46 @@ mod tests {
             32,
             "ASCII 列同样必须截到 32 字节，实际: {preview}"
         );
+    }
+
+    // ── 换行符表：持久化形状取证 ──
+    //
+    // 期望值一律写字面量：三份副本合并成一个类型之后，「拿两个名字比一下」的断言会
+    // 恒真，只有字面量还能在改名、调序或加 `rename_all` 时变红。
+
+    #[test]
+    fn line_ending_persisted_names_are_bare_variant_strings() {
+        // 桌面 workspace.json 与浏览器设置里都是这个裸名字符串。
+        for (value, name) in [
+            (LineEnding::None, "\"None\""),
+            (LineEnding::Lf, "\"Lf\""),
+            (LineEnding::Cr, "\"Cr\""),
+            (LineEnding::Crlf, "\"Crlf\""),
+        ] {
+            assert_eq!(serde_json::to_string(&value).unwrap(), name);
+            assert_eq!(serde_json::from_str::<LineEnding>(name).unwrap(), value);
+        }
+
+        // 老配置里的未知值仍应报错，而不是被静默当成某个变体。
+        assert!(serde_json::from_str::<LineEnding>("\"crlf\"").is_err());
+        assert!(serde_json::from_str::<LineEnding>("3").is_err());
+    }
+
+    #[test]
+    fn line_ending_label_and_suffix_tables() {
+        // label 会随插件上下文（`send.line_ending.label`）外泄给 Lua，文案同样是契约。
+        assert_eq!(
+            LineEnding::ALL.map(|it| (it.label(), it.suffix())),
+            [("无", ""), ("LF", "\n"), ("CR", "\r"), ("CRLF", "\r\n")]
+        );
+        // CRLF 的字节序不能被写成 "\n\r"。
+        assert_eq!(LineEnding::Crlf.suffix(), "\r\n");
+    }
+
+    #[test]
+    fn line_ending_default_is_none() {
+        // 缺字段的配置（`#[serde(default)]`）与新建状态都落到 None，不能追加任何字节。
+        assert_eq!(LineEnding::default(), LineEnding::None);
+        assert_eq!(LineEnding::default().suffix(), "");
     }
 }

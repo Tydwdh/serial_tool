@@ -1,5 +1,8 @@
-use serde::{Deserialize, Serialize};
 use tool_application::query::PortView;
+
+// 行尾符表已收进 `tool-core`；桌面设置（`config.rs`）与本文件的发送状态都仍写
+// `crate::state::LineEnding`，持久化形状由 `tool_core` 的用例按字面量钉住。
+pub(crate) use tool_core::LineEnding;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) enum StatusLevel {
@@ -239,34 +242,6 @@ mod tests {
 }
 
 pub(crate) const MAX_SEND_HISTORY: usize = 200;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum LineEnding {
-    None,
-    Lf,
-    Cr,
-    Crlf,
-}
-
-impl LineEnding {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::None => "无",
-            Self::Lf => "LF",
-            Self::Cr => "CR",
-            Self::Crlf => "CRLF",
-        }
-    }
-
-    pub(crate) fn suffix(self) -> &'static str {
-        match self {
-            Self::None => "",
-            Self::Lf => "\n",
-            Self::Cr => "\r",
-            Self::Crlf => "\r\n",
-        }
-    }
-}
 
 pub(crate) struct SendUiState {
     pub(crate) input: String,

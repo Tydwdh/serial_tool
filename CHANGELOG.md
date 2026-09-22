@@ -49,6 +49,15 @@
   `plugins.rs` 除同样的 `//`→`///` 外各新写了 2~12 条解释性注释，一条注释都没有丢。
   ARCHITECTURE.md 里 5 处指向 `web/mod.rs` 的站点已重测：4 处改为按符号定位（行号每轮拆分都会漂），
   1 处（`send_web_current` 及其预检行）更新为新行号。
+- 换行后缀表从 **3 份收成 1 份**：`tool_core::LineEnding` 持有 `ALL`/`label()`/`suffix()`，native
+  （`crate::state::LineEnding`）、wasm（`WebLineEnding`）与共享面板（`tool_panels::SendLineEnding`）
+  三处只留别名，面板对外名字仍然可导入（`pub use`）。**serde 形状一字未动** —— 桌面
+  `workspace.json` 与浏览器设置里存的仍是裸变体名 `"None"/"Lf"/"Cr"/"Crlf"`，这一点由新用例
+  `line_ending_persisted_names_are_bare_variant_strings` 按字面量钉住，并且**实测它会红**：给合并后的
+  枚举加 `#[serde(rename_all = "lowercase")]` 立刻打红 3 条，去掉即回绿。顺带删掉四处只为"两个类型
+  不同"而写的 4 臂 identity `match`（两端各一份 `line_ending ↔ SendLineEnding` 的来回转换），
+  全仓净减 14 行、少两份表。发布给 Lua 插件的 `send.line_ending = {label, suffix}` 快照
+  （`runtime/plugin.rs`、`ui/contributions.rs`、`web/plugins.rs`）字符串逐字未变。
 
 ### 修复
 

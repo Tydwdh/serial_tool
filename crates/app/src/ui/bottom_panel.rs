@@ -1,8 +1,8 @@
 use crate::app::WorkbenchApp;
-use crate::state::{LineEnding, MAX_SEND_HISTORY, SendUiState, StatusLevel};
+use crate::state::{MAX_SEND_HISTORY, SendUiState, StatusLevel};
 use eframe::egui;
 use tool_panels::{
-    SendAction, SendLayout, SendLineEnding, SendPortItem, SendToolbarButton, SendView,
+    SendAction, SendLayout, SendPortItem, SendToolbarButton, SendView,
     record_history as record_shared_send_history, sender_ui as shared_sender_ui,
 };
 
@@ -60,12 +60,7 @@ impl WorkbenchApp {
             })
             .collect::<Vec<_>>();
         let target_open = self.send_target_port_open();
-        let mut line_ending = match self.send.line_ending {
-            LineEnding::None => SendLineEnding::None,
-            LineEnding::Lf => SendLineEnding::Lf,
-            LineEnding::Cr => SendLineEnding::Cr,
-            LineEnding::Crlf => SendLineEnding::Crlf,
-        };
+        let mut line_ending = self.send.line_ending;
         let mut history = self.send.send_history.iter().cloned().collect::<Vec<_>>();
         let shared_layout = layout;
         let was_periodic = self.send.periodic_enabled;
@@ -111,12 +106,7 @@ impl WorkbenchApp {
             };
             shared_sender_ui(ui, &mut view)
         };
-        self.send.line_ending = match line_ending {
-            SendLineEnding::None => LineEnding::None,
-            SendLineEnding::Lf => LineEnding::Lf,
-            SendLineEnding::Cr => LineEnding::Cr,
-            SendLineEnding::Crlf => LineEnding::Crlf,
-        };
+        self.send.line_ending = line_ending;
         if was_periodic
             && !self.send.periodic_enabled
             && let Some(cancel) = self.periodic_send.cancel.take()

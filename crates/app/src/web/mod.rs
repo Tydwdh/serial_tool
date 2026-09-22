@@ -43,6 +43,9 @@ use tool_application::send_plan;
 use tool_application::web::{SignalKind, WebAppEvent, WebRuntime};
 use tool_application::{AppCommand, AppRuntime, CommandOutcome, TaskId};
 use tool_core::Event;
+// 行尾符表已收进 `tool-core`；`WebSettings` 仍以 `WebLineEnding` 这个名字持久化
+// 裸变体名（浏览器设置），合并前的表与 `tool_core` 那份逐字节相同。
+use tool_core::LineEnding as WebLineEnding;
 use tool_core::{Direction, Payload, topic_matches, topics};
 use tool_databus::DataBus;
 use tool_panels::{
@@ -54,7 +57,7 @@ use tool_panels::{
     status_bar_contents_ui, theme,
 };
 use tool_panels::{
-    SendAction, SendLineEnding, SendPortItem, SendToolbarButton, SendView,
+    SendAction, SendPortItem, SendToolbarButton, SendView,
     record_history as record_shared_send_history, send_layout_for_width,
     sender_ui as shared_sender_ui,
 };
@@ -244,35 +247,6 @@ pub(crate) struct WebSerialState {
     network_api_key: String,
     status: String,
     refresh_on_page_entry: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub(crate) enum WebLineEnding {
-    #[default]
-    None,
-    Lf,
-    Cr,
-    Crlf,
-}
-
-impl WebLineEnding {
-    fn label(self) -> &'static str {
-        match self {
-            Self::None => "无",
-            Self::Lf => "LF",
-            Self::Cr => "CR",
-            Self::Crlf => "CRLF",
-        }
-    }
-
-    fn suffix(self) -> &'static str {
-        match self {
-            Self::None => "",
-            Self::Lf => "\n",
-            Self::Cr => "\r",
-            Self::Crlf => "\r\n",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -3085,15 +3059,8 @@ impl WorkbenchApp {
             (ports, connected)
         };
 
-        let mut line_ending = {
-            let serial = self.serial.borrow();
-            match serial.line_ending {
-                WebLineEnding::None => SendLineEnding::None,
-                WebLineEnding::Lf => SendLineEnding::Lf,
-                WebLineEnding::Cr => SendLineEnding::Cr,
-                WebLineEnding::Crlf => SendLineEnding::Crlf,
-            }
-        };
+        // `Ref` 临时量随本语句结束释放，紧接着的块才能 `borrow_mut()`。
+        let mut line_ending = self.serial.borrow().line_ending;
         let (actions, selected_target) = {
             let mut serial = self.serial.borrow_mut();
             let state = &mut *serial;
@@ -3152,12 +3119,7 @@ impl WorkbenchApp {
 
         {
             let mut serial = self.serial.borrow_mut();
-            serial.line_ending = match line_ending {
-                SendLineEnding::None => WebLineEnding::None,
-                SendLineEnding::Lf => WebLineEnding::Lf,
-                SendLineEnding::Cr => WebLineEnding::Cr,
-                SendLineEnding::Crlf => WebLineEnding::Crlf,
-            };
+            serial.line_ending = line_ending;
         }
 
         for action in actions {

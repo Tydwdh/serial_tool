@@ -10,39 +10,12 @@ use egui_material_icons::icons::{ICON_DELETE, ICON_DELETE_SWEEP};
 
 use crate::design::combo_slot;
 
+// 行尾符表已收进 `tool-core`（桌面与浏览器设置共用同一份持久化形状）；
+// 这里保留旧名字，使 `tool_panels::SendLineEnding` 继续可导入。
+pub use tool_core::LineEnding as SendLineEnding;
+
 /// 「清空全部」两步确认按钮在 egui 临时记忆里的 salt。
 const CLEAR_SEND_HISTORY_CONFIRM_ID: &str = "clear_send_history_confirm";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SendLineEnding {
-    #[default]
-    None,
-    Lf,
-    Cr,
-    Crlf,
-}
-
-impl SendLineEnding {
-    pub const ALL: [Self; 4] = [Self::None, Self::Lf, Self::Cr, Self::Crlf];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::None => "无",
-            Self::Lf => "LF",
-            Self::Cr => "CR",
-            Self::Crlf => "CRLF",
-        }
-    }
-
-    pub const fn suffix(self) -> &'static str {
-        match self {
-            Self::None => "",
-            Self::Lf => "\n",
-            Self::Cr => "\r",
-            Self::Crlf => "\r\n",
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendLayout {
