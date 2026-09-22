@@ -719,7 +719,7 @@ impl Workbench {
             .app_config
             .network_ports
             .iter_mut()
-            .find(|existing| existing.display_name() == name)
+            .find(|existing| network_config_matches(existing, &name))
         {
             *existing = config;
         } else {
@@ -733,13 +733,15 @@ impl Workbench {
         }
     }
 
-    /// 注销网络端口。`display_name()` 与 `port_id()` 两种形态都认（与 `is_network_port`
-    /// 对齐），之后再按剩余配置回收 Network 类型的描述符，避免留下无人认领的端口表项。
+    /// 注销网络端口。两种形态都认（判定见 `network_config_matches`），之后再按剩余配置
+    /// 回收 Network 类型的描述符，避免留下无人认领的端口表项。
     fn remove_network_port(&mut self, port: PortId) {
         let port = port.to_string();
         self.app_config
             .network_ports
-            .retain(|config| config.display_name() != port && config.port_id().to_string() != port);
+            .retain(|config| !network_config_matches(config, &port));
+        // 例外：描述符名由本端生成（`register_network_port` / `apply_ports`），恒为规范形，
+        // 不是用户点名的形态 —— 那是另一个输入域，不走 `network_config_matches`。
         self.ports.retain(|descriptor| {
             descriptor.port_type != tool_transport::PortType::Network
                 || self
@@ -798,12 +800,15 @@ impl Workbench {
     /// 不会与该端口上仍在排队的发送任务交错；网络端口走 transport 的阻塞关闭（自带
     /// 超时），真实串口走 platform backend 的 disconnect。
     fn disconnect_port(&mut self, port_name: String) -> CommandOutcome {
+        // 注册过的端口一律换成规范名 `display_name()` 再进队列（理由见 `connect`）：否则
+        // `Disconnect` 与仍在排队的 `SendText` 落在两条 `serial:{port}` 队列上，上面那句
+        // 顺序保证就没了。
+        let canonical = self
+            .find_network_port(&port_name)
+            .map(NetworkPortConfig::display_name);
+        let is_network = canonical.is_some();
+        let port_name = canonical.unwrap_or(port_name);
         let task_port = port_name.clone();
-        let is_network = self
-            .app_config
-            .network_ports
-            .iter()
-            .any(|config| config.display_name() == port_name);
         let task_id = if is_network {
             let transport = self.transport.clone();
             self.tasks.spawn_ordered(
@@ -835,6 +840,12 @@ impl Workbench {
     }
 
     fn cancel_reconnect(&mut self, port_name: String) {
+        // `start_reconnect` 存的键与 `status_port` 的端口表都是规范形，这里必须同源，
+        // 否则 `port_id()` 形态的取消请求找不到人（理由见 `connect`）。
+        let port_name = self
+            .find_network_port(&port_name)
+            .map(NetworkPortConfig::display_name)
+            .unwrap_or(port_name);
         if let Some(task_id) = self.reconnect_tasks.remove(&port_name) {
             self.tasks.cancel(task_id);
         }
@@ -1023,20 +1034,21 @@ impl Workbench {
         port_name: &str,
         settings: SerialSettings,
     ) -> Result<CommandOutcome, AppError> {
-        if let Some(net) = self
-            .app_config
-            .network_ports
-            .iter()
-            .find(|n| n.display_name() == port_name)
-            .cloned()
-        {
+        if let Some(registered) = self.find_network_port(port_name).cloned() {
+            // 之后一律用规范名 `display_name()`，两个理由各管一半：
+            // - `TransportManager` 的端口表以它为键（`open_network_serial` 自己从配置算），
+            //   把 `network://…` 留在写回的选中端口里，下一句发送就会在 `enqueue_command`
+            //   上拿到 `PortNotOpen` —— 那是把「连不上」换成「连上了但发不出」。
+            // - 队列键 `serial:{port}` 也必须同源，否则同一端口换个形态点名就落到另一条
+            //   队列上，`spawn_ordered` 保证的「关闭不与仍在排队的发送交错」静默失效。
+            let port_name = registered.display_name();
             let transport = self.transport.clone();
             let net = tool_transport::NetworkSerialConfig {
-                host: net.host,
-                port: net.port,
-                api_key: net.api_key,
+                host: registered.host,
+                port: registered.port,
+                api_key: registered.api_key,
             };
-            let task_port = port_name.to_owned();
+            let task_port = port_name.clone();
             let task_id = self.tasks.spawn_ordered(
                 format!("serial:{task_port}"),
                 "connect_network",
@@ -1080,20 +1092,21 @@ impl Workbench {
         }
     }
 
+    /// 按 `port_name` 取出对应的已注册网络端口配置；两种形态都认，判定见
+    /// `network_config_matches`。调用方拿它做两件事：认出网络端口、以及把名字换成
+    /// 规范形 `display_name()`（`TransportManager` 与 `serial:{port}` 队列都以它为键）。
+    fn find_network_port(&self, port_name: &str) -> Option<&NetworkPortConfig> {
+        self.app_config
+            .network_ports
+            .iter()
+            .find(|config| network_config_matches(config, port_name))
+    }
+
     /// 「这条命令的端口是不是已注册的网络端口」—— 结论只作为 `plan_send` 的 `is_network`
-    /// 实参，本平台不再自己决定任务种类。
-    ///
-    /// 两种形态都认：`display_name()`（`host:port`，本平台注册与 `workspace.json` 用的形态）
-    /// 与 `port_id()`（`network://host:port`，wasm 侧的键形态）。后者与 `RemoveNetworkPort`
-    /// 的匹配条件（本文件 `AppCommand::RemoveNetworkPort` 分支）对齐，否则 native 自己就不自洽：
-    /// 同一个 id 删得掉、发的时候却被当成串口。
-    /// 串口名不可能误命中：`port_id()` 恒以 `network://` 开头，而真实串口名是 `COMx` /
-    /// `/dev/tty*`；由 `headless.rs` 的 `network_port_ids_are_recognized_in_both_naming_forms`
-    /// 双向钉住（网络两形态 → `send_network`，普通串口名 → `send_serial`）。
+    /// 实参，本平台不再自己决定任务种类。两种形态与它为什么不会误命中串口名，见
+    /// `network_config_matches`。
     fn is_network_port(&self, port_name: &str) -> bool {
-        self.app_config.network_ports.iter().any(|config| {
-            config.display_name() == port_name || config.port_id().to_string() == port_name
-        })
+        self.find_network_port(port_name).is_some()
     }
 
     /// 一次发送只 plan 一次：路由与解码全在 `send_plan::plan_send`，本平台只负责
@@ -1120,6 +1133,11 @@ impl Workbench {
         let to_network = plan.targets_network_port();
         let PlannedSend { task_kind, bytes } = plan;
         if to_network {
+            // 一律换成规范名再进队列、再交给 transport（理由见 `connect`）。
+            let port_name = self
+                .find_network_port(&port_name)
+                .map(NetworkPortConfig::display_name)
+                .unwrap_or(port_name);
             let transport = self.transport.clone();
             let task_port = port_name.clone();
             let task_id = self.tasks.spawn_ordered(
@@ -1186,21 +1204,22 @@ impl Workbench {
     }
 
     fn start_reconnect(&mut self, port_name: String) -> Result<CommandOutcome, AppError> {
+        let registered = self.find_network_port(&port_name).cloned();
+        // 注册过的端口一律换成规范名（理由见 `connect`）：这里的队列键与 `reconnect_tasks`
+        // 的键必须同源，否则同一端口两种形态点名会各起一个重连循环。
+        let port_name = match &registered {
+            Some(config) => config.display_name(),
+            None => port_name,
+        };
         if let Some(previous) = self.reconnect_tasks.remove(&port_name) {
             self.tasks.cancel(previous);
         }
 
-        let network = self
-            .app_config
-            .network_ports
-            .iter()
-            .find(|config| config.display_name() == port_name)
-            .cloned()
-            .map(|config| tool_transport::NetworkSerialConfig {
-                host: config.host,
-                port: config.port,
-                api_key: config.api_key,
-            });
+        let network = registered.map(|config| tool_transport::NetworkSerialConfig {
+            host: config.host,
+            port: config.port,
+            api_key: config.api_key,
+        });
         let backend = self.transport_backend.clone();
         let serial_settings = network.is_none().then(|| self.platform_serial_settings());
         let task_port = port_name.clone();
@@ -1379,6 +1398,25 @@ fn pending(task_id: TaskId, message: impl Into<String>) -> CommandOutcome {
         task_id,
         message: message.into(),
     }
+}
+
+/// 「这个名字指的是不是这份已注册的网络端口配置」—— 全平台唯一的这一判定。
+///
+/// 两种形态都认：`display_name()`（`host:port`，本平台注册与 `workspace.json` 用的形态，
+/// 也是 `TransportManager` 端口表的键）与 `port_id()`（`network://host:port`，wasm 侧网络行
+/// 的键形态，见 `crates/app/src/web/serial.rs`）。写成一条而不是各站点抄一份，是因为它
+/// 分叉过：`connect` / `start_reconnect` 只认前者，于是同一个 id 点名时连接、重连、关闭整个
+/// 走错分支，而发送虽然被路由到网络分支，也会因端口表（以 `display_name()` 为键）查不到
+/// 这个名字而拿到 `PortNotOpen` —— 两种形态其实谁都不好用，只是各处坏法不同；而
+/// `RemoveNetworkPort` 删得掉的端口，换个名字就又当成串口。
+///
+/// 串口名不可能误命中：`port_id()` 恒以 `network://` 开头，而真实串口名是 `COMx` /
+/// `/dev/tty*`；由 `headless.rs` 的 `network_port_ids_are_recognized_in_both_naming_forms`
+/// 双向钉住（网络两形态 → `send_network`，普通串口名 → `send_serial`），
+/// `network_ports_connect_and_reconnect_in_both_naming_forms` 钉住 connect / reconnect
+/// 两条分支同样两形态都认。
+fn network_config_matches(config: &NetworkPortConfig, port_name: &str) -> bool {
+    config.display_name() == port_name || config.port_id().to_string() == port_name
 }
 
 /// 「这次重连失败值不值得再试一次」——只认 `Io` 里的 `ErrorKind::WouldBlock`

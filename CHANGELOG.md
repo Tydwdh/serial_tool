@@ -160,6 +160,30 @@
 
 ### 修复
 
+- **浏览器端「网络串口」那一行原先四件事全坏**（连接、重连、断开、发送），桌面端不受影响。
+  根因是一个端口名有两种写法（`display_name()` = `host:port`，`port_id()` =
+  `network://host:port`），而 `workbench.rs` 里"这个名字是不是已注册网络端口"的判定散在
+  **六处**（注册 upsert、注销 retain、断开、连接、`is_network_port`、重连），用的是**三种规则**：
+  只有发送路径与注销认两种，其余只认一种。wasm 侧的网络端口行偏偏以 `port_id()` 为键
+  （`crates/app/src/web/serial.rs::add_web_network_port` 实测如此），于是浏览器里点这一行：
+  连接/重连/断开静默走串口后端（`COM` 枚举根本不认这名字），发送虽然路由到网络分支、也会在
+  端口表查不到同名键而拿到 `PortNotOpen`。
+  **更正一个先前的错误归因**：本轮取证时我把它记成"发得出、连不上"，实测两头都坏，只是坏法不同。
+  收敛成**一条判定**（`network_config_matches` 与建在其上的 `find_network_port`）加**一个规范形**：
+  凡写回应用状态、作队列键 `serial:{port}`、交给 transport 的名字一律 `display_name()`。
+  规范化是五处（连接、发送、断开、重连、取消重连；最后一处不在原清单里，是改的过程中发现
+  `reconnect_tasks` 的键会不同源才补的）。只统一判定不统一名字是不够的 —— 那会把"连不上"
+  换成"连上了但发不出"，这一点由用例钉着。**native 无任何可观察变化**（它一直传 `display_name()`）。
+  **先红后绿的证据**：新用例 `network_ports_connect_and_reconnect_in_both_naming_forms` 改前红在
+  `left: Some("connect_serial") / right: Some("connect_network")`，改后转绿。另一条新用例
+  `network_port_commands_in_the_id_form_share_the_canonical_port` 连的是真在跑的 loopback WebSocket，
+  并且**不认任务 `Completed` 就算数**（`send_to` 是 fire-and-forget），它问对端有没有真的收到那帧
+  `G28`。变异验证明白：把发送侧的规范化删掉，用例红在
+  `串口 network://127.0.0.1:64341 未打开（可能已断开，请重连）`（主代理独立复跑过一次，不信报告）；
+  把共用判定退回只认 `display_name()`，3 条用例红。**一条诚实的空白**：`cancel_reconnect` 的规范化
+  没有任何用例钉得住 —— 造不出"重连正在进行中"的可达状态（`WouldBlock` 那条没有生产者，见第 9 轮），
+  删掉它整套用例仍绿；这条写进 `docs/ARCHITECTURE.md` 第 12 条 ④ 而不是假装测过。
+  四道门 exit 0（674 passed / 0 failed / 7 ignored，+2 条用例）。
 - 桌面端最后 **9 处**把传输错误直接 `to_string()` 的后台任务出口接上中文映射器
   （`workbench.rs` 的刷新端口、申请端口、两条关闭、两条连接、两条发送、DTR/RTS 一条）：
   此前用户在工作台状态栏与红色任务标签上看到的是错误枚举的 `Display` ——

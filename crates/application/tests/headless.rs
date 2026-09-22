@@ -2127,3 +2127,267 @@ fn refreshing_and_requesting_ports_do_not_leak_the_platform_display_frame() {
         }
     }
 }
+
+/// 第 12 轮的目标：**发送认得两种形态，连接与重连只认一种**。
+///
+/// `is_network_port`（发送路径）同时接受 `display_name()`（`host:port`）与 `port_id()`
+/// （`network://host:port`），而 `connect` 与 `start_reconnect` 只按 `display_name()` 匹配，
+/// 于是同一个 id 点名时连接/重连/关闭静默降级到串口后端，发送虽然走对分支也会因端口表查不到
+/// 这个名字而拿到 `PortNotOpen`。这不只是理论：wasm 侧的网络端口
+/// 列表就是以 `port_id()` 为键的（`crates/app/src/web/serial.rs` 里 `let port = config.port_id()`），
+/// 所以浏览器中点这一行的「连接」走的就是串口分支。
+///
+/// 本用例钉的是两件事：**认定只有一处判定**（两种形态都要认出来），且**写回的名字只有一个规范形**
+/// —— `display_name()`，因为 `TransportManager` 的端口表就是用它作键的。
+#[test]
+fn network_ports_connect_and_reconnect_in_both_naming_forms() {
+    let bus = DataBus::new();
+    let mut wb = Workbench::new(bus);
+    let config = NetworkSerialConfig {
+        host: "127.0.0.1".to_owned(),
+        port: 9,
+        api_key: None,
+    };
+    let display = config.display_name();
+    let network_id = config.port_id().to_string();
+    expect_done(&mut wb, AppCommand::RegisterNetworkPort { config });
+
+    // ① 连接：必须落到 `connect_network`，不得降级成 `connect_serial`。
+    let connect = expect_pending(
+        &mut wb,
+        AppCommand::Connect {
+            port: PortId::new(network_id.clone()),
+            settings: SerialSettings::default(),
+        },
+    );
+    assert_eq!(
+        task_kind(&wb, connect).as_deref(),
+        Some("connect_network"),
+        "`{network_id}` 是注册过的网络端口，连接却静默走了串口后端"
+    );
+    let ended = tick_until(&mut wb, Duration::from_secs(10), |wb| {
+        matches!(
+            task_state(wb, connect),
+            Some(TaskState::Completed | TaskState::Failed)
+        )
+    });
+    assert!(
+        ended,
+        "connect 必须在 10s 内结束，实际: {:?}",
+        task_state(&wb, connect)
+    );
+    assert_eq!(
+        task_state(&wb, connect),
+        Some(TaskState::Completed),
+        "连不上是 worker 的事，`open_network_serial` 自身必须成功（与 display_name 形态同一收尾）"
+    );
+    // ② 规范化：无论用户用哪种形态点名，写回应用状态的必须是规范名 `host:port`。
+    // `TransportManager` 的端口表以 `display_name()` 为键，把 `network://…` 留在选中端口里，
+    // 下一句发送就会在 `enqueue_command` 上拿到 `PortNotOpen` —— 那就是把"连不上"换成了
+    // "连上了但发不出"，不算修好。
+    assert_eq!(
+        wb.query_transport().config.port_name,
+        display,
+        "连接成功后写回的选中端口必须是规范名 `host:port`，实际: {:?}",
+        wb.query_transport().config.port_name
+    );
+
+    // ③ 重连：同一个 id 不得因为形态不同而落到循环的串口分支。
+    let reconnect = expect_pending(
+        &mut wb,
+        AppCommand::Reconnect {
+            port: PortId::new(network_id.clone()),
+        },
+    );
+    assert_eq!(
+        task_kind(&wb, reconnect).as_deref(),
+        Some("reconnect"),
+        "重连命令必须被接受并起一个 reconnect 任务"
+    );
+    let ended = tick_until(&mut wb, Duration::from_secs(15), |wb| {
+        matches!(
+            task_state(wb, reconnect),
+            Some(TaskState::Completed | TaskState::Failed)
+        )
+    });
+    assert!(
+        ended,
+        "reconnect 必须在 15s 内结束，实际: {:?}",
+        task_state(&wb, reconnect)
+    );
+    assert_eq!(
+        task_state(&wb, reconnect),
+        Some(TaskState::Completed),
+        "串口分支会拿着 `network://…` 去枚举物理口而 Failed，与 `display_name()` 形态那条 \
+         `network_reconnect_takes_the_network_branch_of_the_loop` 的收尾不一致。实际句串: {:?}",
+        task_message(&wb, reconnect)
+    );
+}
+
+/// 上一条用例钉住的是 `connect` 那一处的规范形写回；这里钉**剩下三处同名判定**，
+/// 因为它们各自的后果都不在 `connect` 那条断言的射程里（把任意一处改掉，只有本用例会红）：
+/// - 发送不规范化 → `send_to("network://…")` 在 `enqueue_command` 上拿到 `PortNotOpen`，
+///   任务 Failed、对端一帧都收不到；
+/// - 关闭不规范化 → `Disconnected{network://…}` 与 `selected_port`（规范名）对不上，
+///   端口已经关了而 UI 仍显示连着；
+/// - 重连不规范化 → `Reconnected{network://…}` 被写进 `selected_port`，下一句发送就是
+///   `PortNotOpen`（与 `connect` 那一处同一后果）。
+#[test]
+fn network_port_commands_in_the_id_form_share_the_canonical_port() {
+    const SCRIPT: &str = "G28\n";
+
+    // 对端等两帧：identify 与下面这一条 gcode 请求。
+    let (addr, observed) = spawn_loopback_ws_server(2);
+    let bus = DataBus::new();
+    let mut wb = Workbench::new(bus);
+    let config = NetworkSerialConfig {
+        host: "127.0.0.1".to_owned(),
+        port: addr.port(),
+        api_key: None,
+    };
+    let display = config.display_name();
+    let network_id = config.port_id().to_string();
+    expect_done(&mut wb, AppCommand::RegisterNetworkPort { config });
+
+    // ⓪ 先把端口真的打开（连的是活着的 loopback 服务器）。形态问题归上一条用例，
+    // 这里要的是「端口表里有这个规范名」这个前提。
+    let connect = expect_pending(
+        &mut wb,
+        AppCommand::Connect {
+            port: PortId::new(display.clone()),
+            settings: SerialSettings::default(),
+        },
+    );
+    let ended = tick_until(&mut wb, Duration::from_secs(10), |wb| {
+        matches!(
+            task_state(wb, connect),
+            Some(TaskState::Completed | TaskState::Failed)
+        )
+    });
+    assert!(
+        ended,
+        "connect 必须在 10s 内结束，实际: {:?}",
+        task_state(&wb, connect)
+    );
+    assert_eq!(
+        task_state(&wb, connect),
+        Some(TaskState::Completed),
+        "连到真实 loopback 服务器必须成功，实际句串: {:?}",
+        task_message(&wb, connect)
+    );
+
+    // ① 发送：`port_id()` 形态必须落到规范名那个 transport 键上。
+    let send = expect_pending(
+        &mut wb,
+        AppCommand::SendText {
+            port: PortId::new(network_id.clone()),
+            text: SCRIPT.to_owned(),
+        },
+    );
+    assert_eq!(
+        task_kind(&wb, send).as_deref(),
+        Some("send_network"),
+        "`{network_id}` 的发送不得落到 send_serial"
+    );
+    let ended = tick_until(&mut wb, Duration::from_secs(10), |wb| {
+        matches!(
+            task_state(wb, send),
+            Some(TaskState::Completed | TaskState::Failed)
+        )
+    });
+    assert!(
+        ended,
+        "send 必须在 10s 内结束，实际: {:?}",
+        task_state(&wb, send)
+    );
+    assert_eq!(
+        task_state(&wb, send),
+        Some(TaskState::Completed),
+        "端口开着却发不出去，就是名字没规范化到 transport 认的那个键；句串: {:?}",
+        task_message(&wb, send)
+    );
+
+    // `send_to` 是 fire-and-forget，任务 Completed 不等于字节上线，所以还要问对端。
+    // 收帧必须在端口仍打开时完成：后面的关闭会让观测线程看到 Close 帧而提前收口。
+    let (frames, stopped) = drain_frames(&observed, Duration::from_secs(20));
+    assert_eq!(
+        stopped, None,
+        "回路服务器观测中断：{stopped:?}；已收到 {frames:?}"
+    );
+    let parsed: Vec<(String, u64, String)> =
+        frames.iter().map(|frame| json_rpc_frame(frame)).collect();
+    assert_eq!(
+        parsed.len(),
+        2,
+        "对端应恰好收到 identify + 1 条 gcode，实际 {frames:?}"
+    );
+    assert_eq!(
+        parsed[1].0, "printer.gcode.script",
+        "第二条帧必须是 gcode 请求，实际: {:?}",
+        parsed[1]
+    );
+    assert_eq!(
+        parsed[1].2, SCRIPT,
+        "`{network_id}` 形态的发送必须把这一帧投递到规范名 `{display}` 那个端口"
+    );
+
+    // ② 关闭：`port_id()` 形态写回的 `Disconnected` 必须与选中端口同源，才清得掉它。
+    let disconnect = expect_pending(
+        &mut wb,
+        AppCommand::Disconnect {
+            port: PortId::new(network_id.clone()),
+        },
+    );
+    let ended = tick_until(&mut wb, Duration::from_secs(10), |wb| {
+        matches!(
+            task_state(wb, disconnect),
+            Some(TaskState::Completed | TaskState::Failed)
+        )
+    });
+    assert!(
+        ended,
+        "disconnect 必须在 10s 内结束，实际: {:?}",
+        task_state(&wb, disconnect)
+    );
+    assert_eq!(
+        task_state(&wb, disconnect),
+        Some(TaskState::Completed),
+        "关闭一个开着的端口不该失败，句串: {:?}",
+        task_message(&wb, disconnect)
+    );
+    assert_eq!(
+        wb.query_transport().config.port_name,
+        "",
+        "端口已关闭，`selected_port` 却没被清掉 —— 它就是那种「一个端口两个名字」的残留"
+    );
+
+    // ③ 重连：写回的选中端口必须是规范名。
+    let reconnect = expect_pending(
+        &mut wb,
+        AppCommand::Reconnect {
+            port: PortId::new(network_id.clone()),
+        },
+    );
+    let ended = tick_until(&mut wb, Duration::from_secs(15), |wb| {
+        matches!(
+            task_state(wb, reconnect),
+            Some(TaskState::Completed | TaskState::Failed)
+        )
+    });
+    assert!(
+        ended,
+        "reconnect 必须在 15s 内结束，实际: {:?}",
+        task_state(&wb, reconnect)
+    );
+    assert_eq!(
+        task_state(&wb, reconnect),
+        Some(TaskState::Completed),
+        "重连的收尾与 `connect` 同一处约定（连不上是 worker 的事），句串: {:?}",
+        task_message(&wb, reconnect)
+    );
+    assert_eq!(
+        wb.query_transport().config.port_name,
+        display,
+        "重连写回的名字必须是规范名 `host:port`，否则下一句发送就在 `enqueue_command` 上拿到 PortNotOpen"
+    );
+}

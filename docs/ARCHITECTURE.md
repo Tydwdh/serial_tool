@@ -661,9 +661,24 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
       > 要么承认这段循环是死代码并删掉、让重连失败即返回。
       > ② 是否把 `ErrorKind::TimedOut`（`close_port_blocking` 超时那条，网络端口真能走到）
       > 也算可重试 —— 那会让那种情况下重连真的试满 3 秒，是用户可见行为变化。
-      > 另有一个子代理发现、本轮**没动**的不对称：`start_reconnect` 只按 `display_name()` 匹配
-      > 网络端口，所以 `network://host:port` 形态的 id 会静默走串口分支
-      > （与 `is_network_port` 认两种形态不一致）。
+      > 另有一个子代理发现、本轮**没动**的不对称：**【第 12 轮已闭合】**
+      > `start_reconnect` 只按 `display_name()` 匹配网络端口，所以 `network://host:port`
+      > 形态的 id 会静默走串口分支（与 `is_network_port` 认两种形态不一致）。
+      > 实测范围比记下的更宽：这类"这个名字是不是已注册网络端口"的判定在 `workbench.rs` 里
+      > 有**六处**（注册 upsert、注销 retain、断开、连接、`is_network_port`、重连），
+      > 用的是**三种**规则；第 12 轮把它们收成一条
+      > （`network_config_matches` + 建在其上的 `find_network_port`），并规定
+      > **写回与作键的名字一律是 `display_name()`**：`TransportManager` 的端口表与
+      > `serial:{port}` 有序队列都以它为准，只统一判定不统一名字，会把"连不上"换成
+      > "连上了但发不出"（`enqueue_command` 拿 `PortNotOpen`）。
+      > 规范化点因此是**五处**（连接、发送、断开、重连、取消重连 —— 最后那处不在原清单里，
+      > 是改的过程中发现的：`reconnect_tasks` 的键与取消查询不同源就会静默取消不掉）。
+      > 行为差别：native 侧一律传 `display_name()`，**没有可观察变化**；wasm 的网络行以
+      > `port_id()` 为键（`crates/app/src/web/serial.rs::add_web_network_port` 实测如此），
+      > 所以浏览器里这一行的连接/重连/断开/发送四件事原先全都坏的，现在一起通了。
+      > **仍未被任何用例钉住的一条**：`cancel_reconnect` 的规范化 —— 造不出一个"重连正在进行
+      > 中"的可达状态（`WouldBlock` 那条没有生产者，见上面 ④），把它的规范化删掉整套用例仍绿。
+      > 留在这里而不是假装测过。
       ⑤ 【本波已闭合】换行后缀表原有 3 份（native `state::LineEnding`、wasm `WebLineEnding`、
       共享面板 `SendLineEnding`），值一致但没有任何断言钉住，两端还各写两份 4 臂 **identity** `match`
       （类型不同才需要转）。现在收进 `tool_core::LineEnding`（`crates/core/src/lib.rs:454`），
