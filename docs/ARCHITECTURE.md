@@ -132,7 +132,7 @@ cargo tree -p tool-application | grep -i egui    # 0 行
   `cargo +1.92.0 clippy --workspace --all-targets -- -D warnings`、
   `cargo +1.92.0 test --workspace --all-targets` 三条均 **exit 0**。
   用例数**不要按这里的数字判断对错**，它每轮都会随新用例增长（写下这一段时是 590，
-  本文件最近一次复核时是 663，`ignored` 一直是 7 条依赖安静调度的计时用例）；
+  第 10 轮「九处传输错误接中文映射」复核时是 675，`ignored` 一直是 7 条依赖安静调度的计时用例）；
   判据始终是上面这三条命令的退出码。
   历史构成（590 = Task 6 落 `send_plan` 前的
   578 + `send_plan` 的 6 条单测，该模块无 `cfg` 门控所以跑在 native 测试目标里
@@ -616,6 +616,28 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
       > `grep -n "error\.to_string()" crates/application/src/workbench.rs` 实际命中 18 处
       > （含 `AppError::Plugin` / `AppError::Transport` 这些包装），**其中哪些真的会到用户眼前、
       > 哪些只是内部转换，还没逐条核过** —— 这是下一轮的取证项，不要引用"三处"这个数。
+      >
+      > **第 10 轮把这条取证项做完了**：九处传输/平台错误出口（刷新端口、申请端口、两条关闭、
+      > 两条连接、两条发送、DTR/RTS）已全部接上两个中文映射器，其中 6 处由 `headless.rs` 真造出
+      > 失败并逐字钉住，3 处（`spawn_refresh_ports` / `spawn_request_port` / `open_network_serial`）
+      > 在 native 驱动不出失败，改由 `crates/application/tests/transport_error_sites.rs` 钉形状。
+      > 剩余的 `to_string()` 转换**恰好 12 处**，按"会不会真的到用户眼前"分开算（按符号定位，
+      > 这个文件的行号每轮拆分都会漂）：
+      > - 正文本来就是中文，只是换个类型装着：`TransportEndpoint::send`、`validate_hex`、
+      >   `dispatch_send`（三处都是 `SendPlanError`，它自己的 `Display` 就是中文句子）。
+      > - 只是把错误塞进 `AppError` 的某个具名变体，用户读到的是那个变体的框架：
+      >   `dispatch` 的两处插件分支与 `set_plugin_setting`（`Plugin`）、`dispatch_start_recording`
+      >   （`Recording`）、`AppRuntime::dispatch`（浏览器 composition root；它给已中文化的正文
+      >   加上 `AppError` 的英文 `transport: ` 前缀，是"前缀两端不同"那条的同一个根）。
+      > - **仍然把英文原文直接摊给用户**：`dispatch_load_replay`（`io::Error`）、
+      >   `spawn_reload_plugins` / `spawn_discover_plugins`（插件目录扫描）、
+      >   `write_exported_content`（导出落盘）。
+      > 最后这四处不是接线能解决的：`tool-extension` / `tool-recorder` / 回放与文件服务
+      > 各自没有中文映射器（`tool-transport` 与 `tool-platform` 有）。下一轮要么给这几个 crate
+      > 各补一份按变体分发的 `translate_error`，要么承认这些是"面向开发者的错误"并写下理由。
+      > 第 9 轮那条教训的正确版本：**不能拿"已经翻译过的用户文案"再当判定的输入**（那才是
+      > `"would block"` 那个死判定的成因）；映射器自己去读 OS 原始文案是另一回事
+      > （`translate_error` 的 `Serial`/`Io` 两臂本来就这么做，因为它拿到的是 OS 的 `Display`）。
       >
       > **第 9 轮留下的两个待拍板问题**（都不是机械收敛能定的）：
       > ① 重连那个 3 秒预算的循环，改成类型化判定之后**仍然没有任何生产者**

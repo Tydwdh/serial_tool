@@ -133,6 +133,30 @@
 
 ### 修复
 
+- 桌面端最后 **9 处**把传输错误直接 `to_string()` 的后台任务出口接上中文映射器
+  （`workbench.rs` 的刷新端口、申请端口、两条关闭、两条连接、两条发送、DTR/RTS 一条）：
+  此前用户在工作台状态栏与红色任务标签上看到的是错误枚举的 `Display` ——
+  `transport operation failed: 串口 X 未打开…`（平台英文外框套中文正文）或整句英文的
+  `port '…' is not open`。现在同一个失败在两条投递入口上是逐字相同的一句中文。
+  **这是纯接线**：`workbench.rs` 与 HEAD 的字面量、数字、注释多重集三项全等（各 84/25/130 条，
+  增减都是 0），改动只落在 9 个表达式上。
+  **覆盖是分两层的，别读成"9 处都有测试"**：6 处能在无头测试里真造出失败并逐字钉住文案
+  （新增 5 条用例 + 更新 1 条），关键驱动手段是让网络 worker 停进一个"收下 WebSocket 握手请求、
+  永不回话"的 loopback 对端 —— 那次握手读没有超时，`close_port_blocking` 就必定超时，于是
+  「关闭」两条分支的正文也变成应用自己写的那句（`{端口} 正在关闭中`）而不依赖 OS 语言。
+  剩下 3 处（刷新端口、申请端口、`open_network_serial`）在 native 上驱动不出失败，理由逐条写在
+  用例抬头里，它们改由新的形状守卫 `crates/application/tests/transport_error_sites.rs`
+  按函数体数映射器。**变异验证明白**：9 处逐处退回 `.to_string()`，6 处各自点亮对应的行为用例，
+  3 处（794/810/1080）行为套件全绿、只有形状守卫变红 —— 那三处就是这份守卫存在的全部理由；
+  还原后整包复跑 `675 passed / 0 failed / 7 ignored`，四道门全绿。
+  两处诚实记录：`refreshing_and_requesting_ports_…` 那条在**有串口的机器上是空跑的**
+  （两个任务都 Completed，用例自己的注释也这么说），真正钉住逐字中文的是
+  `crates/platform/tests/transport_error_wording.rs`；串口打开失败的正文由 OS 给
+  （本机 `IO 错误：系统找不到指定的文件。 (os error 2)`，换系统语言就变），所以那一格只钉
+  「应用写的那半句之外不许有英文外框」，不钉 OS 文案。
+  顺带留下一条没做的：`workbench.rs` 尾部 `AppRuntime::dispatch`（浏览器 composition root）
+  仍在给已经中文化的正文加上 `AppError` 的英文 `transport: ` 前缀 —— 那是同步返回路径，
+  本轮九处之外，记在 `docs/ARCHITECTURE.md` 第 12 条。
 - 修复重连循环里一个**从来没生效过**的判定：`workbench.rs` 用
   `network.is_some() && error.to_ascii_lowercase().contains("would block")` 决定"要不要再试一次"。
   换成读类型化错误的 `kind`（`reconnect_is_worth_retrying`，只认 `Io(ErrorKind::WouldBlock)`），

@@ -791,7 +791,7 @@ impl Workbench {
         let task_id = self.tasks.spawn("refresh_ports", move |_context| {
             block_on_transport(backend.list_known_ports())
                 .map(TaskResult::PlatformPortsRefreshed)
-                .map_err(|error| error.to_string())
+                .map_err(|error| tool_platform::translate_error(&error))
         });
         pending(task_id, "正在刷新串口列表")
     }
@@ -807,7 +807,7 @@ impl Workbench {
         let task_id = self.tasks.spawn("request_port", move |_context| {
             block_on_transport(backend.request_port())
                 .map(|port| TaskResult::PlatformPortsRefreshed(vec![port]))
-                .map_err(|error| error.to_string())
+                .map_err(|error| tool_platform::translate_error(&error))
         });
         pending(task_id, "正在获取串口")
     }
@@ -843,7 +843,7 @@ impl Workbench {
                 move |_context| {
                     transport
                         .close_port_blocking(&task_port, std::time::Duration::from_secs(3))
-                        .map_err(|error| error.to_string())?;
+                        .map_err(|error| tool_transport::translate_error(&error))?;
                     Ok(TaskResult::Disconnected {
                         port_name: task_port,
                     })
@@ -857,7 +857,7 @@ impl Workbench {
                 "disconnect",
                 move |_context| {
                     block_on_transport(backend.disconnect(port.clone()))
-                        .map_err(|error| error.to_string())?;
+                        .map_err(|error| tool_platform::translate_error(&error))?;
                     Ok(TaskResult::TransportDisconnected { port })
                 },
             )
@@ -1077,7 +1077,7 @@ impl Workbench {
                         .map(|_| TaskResult::Connected {
                             port_name: task_port,
                         })
-                        .map_err(|error| error.to_string())
+                        .map_err(|error| tool_transport::translate_error(&error))
                 },
             );
             Ok(pending(task_id, format!("正在连接 {port_name}")))
@@ -1090,7 +1090,7 @@ impl Workbench {
                 "connect_serial",
                 move |_context| {
                     block_on_transport(backend.connect(port.clone(), settings))
-                        .map_err(|error| error.to_string())?;
+                        .map_err(|error| tool_platform::translate_error(&error))?;
                     Ok(TaskResult::TransportConnected { port })
                 },
             );
@@ -1176,7 +1176,7 @@ impl Workbench {
                 move |_context| {
                     transport
                         .send_to(&task_port, bytes.clone())
-                        .map_err(|error| error.to_string())?;
+                        .map_err(|error| tool_transport::translate_error(&error))?;
                     Ok(TaskResult::TransportSent {
                         port: PortId::new(task_port),
                         bytes: bytes.len(),
@@ -1193,7 +1193,7 @@ impl Workbench {
             self.tasks
                 .spawn_ordered(format!("serial:{port_name}"), task_kind, move |_context| {
                     block_on_transport(backend.send(port.clone(), bytes))
-                        .map_err(|error| error.to_string())?;
+                        .map_err(|error| tool_platform::translate_error(&error))?;
                     Ok(TaskResult::TransportSent {
                         port,
                         bytes: byte_count,
@@ -1223,7 +1223,7 @@ impl Workbench {
                 } else {
                     block_on_transport(backend.set_rts(port, value))
                 };
-                result.map_err(|error| error.to_string())?;
+                result.map_err(|error| tool_platform::translate_error(&error))?;
                 Ok(TaskResult::TransportSignalChanged { port: task_port })
             },
         );

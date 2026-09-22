@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -1455,9 +1456,11 @@ fn periodic_send_endpoint_uses_the_shared_send_plan() {
 /// 收敛前的实测状态：桌面端只有周期发送（`TransportEndpoint::send`）过了
 /// `tool_transport::translate_error`；点一次「发送」走平台后端，`native.rs::operation_error`
 /// 当时直接 `TransportError::to_string()`，**变体在能被翻译之前就被压成英文原文**，
-/// 于是同一个未打开的端口在两条路上得到两种语言。这里钉的是端到端的那两句：
-/// 外框（`transport operation failed: `）是平台错误枚举 `Display` 的既有形状，
-/// 本轮只保证括号里的正文是中文且与周期发送逐字相同。
+/// 于是同一个未打开的端口在两条路上得到两种语言。
+/// 那一轮只把正文换成中文，平台层的外框（`transport operation failed: `，即
+/// `TransportError` 的 `Display`）还留在用户眼前；现在连外框也没了 ——
+/// `Workbench::send_transport_bytes` 的串口分支改过 `tool_platform::translate_error`，
+/// `Operation` 按契约原样返回，于是两条入口给出的是**逐字相同的一句**。
 #[test]
 fn sending_to_a_port_that_was_never_opened_reads_in_chinese_on_both_entry_points() {
     const PORT: &str = "COM_HEADLESS_CLOSED";
@@ -1497,8 +1500,8 @@ fn sending_to_a_port_that_was_never_opened_reads_in_chinese_on_both_entry_points
     );
     assert_eq!(
         task_message(&wb, task).as_deref(),
-        Some(format!("transport operation failed: {CLOSED_PORT_WORDS}").as_str()),
-        "任务失败句串变了：正文不再是周期发送那句中文，或外框被改写出了 `Display` 的形状"
+        Some(CLOSED_PORT_WORDS),
+        "任务失败句串变了：正文不再是周期发送那句中文，或平台 `Display` 的英文外框又回来了"
     );
 
     // ② 周期发送：同一个失败，同一句中文（少了平台层的英文外框）。
@@ -1671,4 +1674,456 @@ fn network_reconnect_takes_the_network_branch_of_the_loop() {
         "重连成功必须带一个被 `poll_tasks` 落进选中端口的结果，实际: {:?}",
         wb.query_transport().config.port_name
     );
+}
+
+// ── 桌面端交给用户的那句话：九条 transport / platform 失败出口 ──────────────────
+//
+// `Workbench` 的后台任务闭包里曾有九处把传输/平台错误直接 `to_string()`。落点是
+// `TaskSnapshot::message`（状态栏、日志、红色标签读的都是它），于是英文的
+// `tool_platform::TransportError` 外框（`transport operation failed: `）或
+// `tool_transport::TransportError` 原文（`port '…' is not open` / `io error: …`）
+// 直接进了用户眼睛。现在两条类型各过各的中文映射器：
+// `tool_transport::TransportError` → `tool_transport::translate_error`，
+// `tool_platform::TransportError` → `tool_platform::translate_error`。
+// 哪个站点包错了映射器**编译就不过**（两个 `translate_error` 的入参是不同名的类型），
+// 下面这些用例钉的是另一件事：那句话真的到了用户手上，而且逐字就是它。
+//
+// 两条驱动手段，都不需要新机器：
+// - **从未打开/从未连接的端口**：`TransportManager::enqueue_command` 给 `PortNotOpen`，
+//   整句正文都是应用自己写的 → 发送、DTR/RTS 两条出口能逐字钉。
+// - **一个关不掉的 worker**：连到一个「收下连接、读掉 WebSocket 握手请求、永不回话」的
+//   loopback 对端上，网络 worker 就永久停在握手读里（那个读没有超时），于是
+//   `close_port_blocking` 必定超时；而 `Io(TimedOut)` 的正文（`{端口} 正在关闭中`）
+//   也是应用写的 → 串口的连接分支与关闭的两条分支同样能逐字钉。
+//   代价只有各站点自己那份超时预算：`open_serial` 里是 100ms，`disconnect_port` 里是
+//   3 秒（两条分支各占一条 per-port 有序队列，并发烧掉）。
+//
+// **三处失败出口从公开面上驱动不出来**，不是漏了：
+// - `spawn_refresh_ports`：native 的 `list_known_ports` 只有
+//   `serialport::available_ports()` 报错、或那个阻塞线程消失才会失败（本机实测
+//   Completed）。
+// - `spawn_request_port`：唯一的非兜底变体 `NoPortAvailable` 要一台一个串口都没有的
+//   机器（本机实测 Completed）。
+// - `connect` 的网络分支：`open_network_serial` 从不因「连不上」而失败（失败由 worker
+//   以日志事件上报，见 `park_a_network_worker` 里那条 Completed 断言），它唯一的错误出口
+//   是那次 100ms 的 `close_port_blocking`，而那要求「同名已经有一个关不掉的句柄」——
+//   偏偏「同名已在打开」的早退按 `display_name()` **精确**匹配，规范名解析才忽略大小写，
+//   所以只有主机名的大小写形态能把这两个名字区分开（`LOCALHOST:端口` 与 `localhost:端口`）。
+//   实测这条路在本机走不通：`("LOCALHOST", p).to_socket_addrs()` 首选 `[::1]:p`，
+//   而本节的对端只监听 IPv4 回环，于是 worker 直接被拒绝、连「停进握手读」都进不去。
+//   拿解析顺序当依赖不是测试该做的事，所以这里宁可不钉。
+//
+// 前三句的逐字中文由 `crates/platform/tests/transport_error_wording.rs` 钉住（六个变体
+// 全在那里，含 `NoPortAvailable`），下面只补一条「真失败时英文外框不得出现」的守卫，
+// 并如实说明它在有串口、且 IPv6 回环优先的机器上是空跑 —— 不为它编一个假的成功路径。
+
+/// 一个「收下连接、读走 WebSocket 握手请求、然后永远不回话」的 loopback 对端。
+///
+/// 只监听 **IPv4** 回环（与本文件其它用例同一形态）：主机名形态会先解析到 `[::1]`，
+/// 于是「对端根本没监听」会被误读成「worker 已经退出」—— 本节抬头里那条驱动不出来的
+/// 网络分支就是这个原因。
+///
+/// 返回的接收端收到一个 `()` 就代表对端已经进入握手读；观测走 channel 而不是 `join()`，
+/// 所以调用方只按 deadline 等待，绝不阻塞在 `accept()` 上。
+///
+/// 之所以要真的 `accept` 并把请求读掉，而不是只 `bind` 不 `accept`：那是「worker 已经
+/// 越过连接期那次 `stop` 检查」的**因果**凭据。只凭时间差就断开，会撞上「`stop` 正好
+/// 落在连接与握手之间」的竞态 —— 那样 worker 直接退出，关闭反而成功，用例就不是在测
+/// 超时分支了。
+///
+/// 观测线程**刻意不保证退出**：握着已建立的连接直到进程结束，正是「关不掉的 worker」
+/// 的另一半。与本文件 `spawn_loopback_ws_server` 同一处置 —— 端口是 `:0` 由内核分配，
+/// 多一个 parked 线程既不影响任何断言，也不影响其它用例。
+fn parked_websocket_server() -> (SocketAddr, Receiver<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("绑定 loopback 监听");
+    let addr = listener.local_addr().expect("内核分配的监听地址");
+    let (sender, parked) = crossbeam_channel::unbounded();
+    std::thread::spawn(move || {
+        let Ok((mut socket, _)) = listener.accept() else {
+            return;
+        };
+        let mut buf = [0_u8; 256];
+        if socket.read(&mut buf).is_ok() {
+            let _ = sender.send(());
+        }
+        loop {
+            std::thread::park();
+        }
+    });
+    (addr, parked)
+}
+
+/// 注册一个网络端口（同步完成），返回它在 `Workbench` 里的名字 `host:port`。
+fn register_network_port(wb: &mut Workbench, host: &str, port: u16) -> String {
+    let config = NetworkSerialConfig {
+        host: host.to_owned(),
+        port,
+        api_key: None,
+    };
+    let name = config.display_name();
+    expect_done(wb, AppCommand::RegisterNetworkPort { config });
+    name
+}
+
+/// 把一个网络端口连到「永不回话」的对端上，并等 worker 真的停进握手读。
+///
+/// `connect_network` 任务本身**必须成功**：`open_network_serial` 只负责把 worker 起起来，
+/// 连不上是 worker 以日志事件上报的事。这条断言同时也是「`connect` 的网络分支造不出
+/// 硬失败」的凭据 —— 那正是本节要把它改造成超时分支的原因。
+fn park_a_network_worker(wb: &mut Workbench, name: &str, parked: &Receiver<()>) {
+    let task = expect_pending(
+        wb,
+        AppCommand::Connect {
+            port: PortId::new(name.to_owned()),
+            settings: SerialSettings::default(),
+        },
+    );
+    assert_eq!(
+        task_kind(wb, task).as_deref(),
+        Some("connect_network"),
+        "已注册网络端口的连接不得落到 `connect_serial`，否则下面造不出「关不掉的 worker」"
+    );
+    let ended = tick_until(wb, Duration::from_secs(10), |wb| {
+        matches!(
+            task_state(wb, task),
+            Some(TaskState::Completed | TaskState::Failed)
+        )
+    });
+    assert!(
+        ended,
+        "connect_network 必须在 10s 内结束，实际: {:?}",
+        task_state(wb, task)
+    );
+    assert_eq!(
+        task_state(wb, task),
+        Some(TaskState::Completed),
+        "对端不回话时 open 自身仍必须返回 Ok（失败由 worker 上报），否则本用例驱动的不是超时分支"
+    );
+    assert!(
+        parked.recv_timeout(Duration::from_secs(10)).is_ok(),
+        "对端必须已经收下并读掉握手请求，worker 才算停进握手读；没有这个信号，「关不掉」是假的"
+    );
+    assert!(
+        wb.transport_status(name).connecting,
+        "停在握手读里的端口应当仍是 connecting，实际: {:?}",
+        wb.transport_status(name)
+    );
+}
+
+/// 两个映射器的英文 `Display`：`map_err(|error| error.to_string())` 漏到用户面前的
+/// 就是这几串，所以每个「本来该说中文」的失败出口都能用它兜一层。
+fn leaked_english_frame(words: &str) -> Option<(&'static str, &'static str)> {
+    [
+        ("tool_platform 外框", "transport operation failed"),
+        ("PortNotOpen 原文", "port '"),
+        ("Io 原文", "io error:"),
+        ("Serial 原文", "serial error:"),
+        ("NoPortAvailable 原文", "no authorized serial port"),
+    ]
+    .into_iter()
+    .find(|(_, frame)| words.contains(frame))
+}
+
+/// 这句话里有没有应用自己写的中文框架（`IO 错误：` / `串口错误：` 这类）。
+fn reads_as_chinese(words: &str) -> bool {
+    words.chars().any(|c| matches!(c, '\u{4E00}'..='\u{9FFF}'))
+}
+
+/// 断言任务以 Failed 收尾、给用户看的那句没有英文 `Display`，并把它交出来。
+fn expect_failed_words(wb: &mut Workbench, task: TaskId, budget: Duration) -> String {
+    let ended = tick_until(wb, budget, |wb| {
+        matches!(
+            task_state(wb, task),
+            Some(TaskState::Completed | TaskState::Failed)
+        )
+    });
+    assert!(
+        ended,
+        "任务必须在 {budget:?} 内结束，实际: {:?}",
+        task_state(wb, task)
+    );
+    assert_eq!(
+        task_state(wb, task),
+        Some(TaskState::Failed),
+        "这条失败出口不得被静默成「成功」（措辞之外，行为也要钉）"
+    );
+    let words = task_message(wb, task).expect("任务快照必须带着失败原文");
+    if let Some((name, frame)) = leaked_english_frame(&words) {
+        panic!("英文 Display（{name} = {frame:?}）又漏到用户面前了：{words:?}");
+    }
+    assert!(
+        reads_as_chinese(&words),
+        "用户看到的那句必须带中文框架，实际: {words:?}"
+    );
+    words
+}
+
+/// `Workbench::connect` 的**串口**分支（平台后端那条出口）的两种失败形状。
+///
+/// 把该站点退回 `error.to_string()`，①②两格都会红：①是英文外框，②是外框再加上
+/// 「正文不再逐字等于应用写的那句超时」。
+#[test]
+fn connecting_a_serial_port_reports_chinese_words_for_both_failure_shapes() {
+    const PORT: &str = "COM_HEADLESS_CONNECT_WORDING";
+
+    let (addr, parked) = parked_websocket_server();
+    let bus = DataBus::new();
+    let mut wb = Workbench::new(bus);
+
+    // ① 根本打不开的口：`Operation(中文)` 原样返回，但 OS 给的那半句随 locale 变
+    //    （`IO 错误：系统找不到指定的文件。` 与 `IO 错误：The system cannot find the
+    //    file specified.`），所以这一格只能钉「应用写的那半句之外没有英文外框」，
+    //    逐字文案由 `crates/transport` 自己的 `translate_error_covers_all_variants` 负责。
+    let hard = expect_pending(
+        &mut wb,
+        AppCommand::Connect {
+            port: PortId::new(PORT),
+            settings: SerialSettings::default(),
+        },
+    );
+    assert_eq!(
+        task_kind(&wb, hard).as_deref(),
+        Some("connect_serial"),
+        "没注册成网络端口的名字必须走平台后端，否则本用例测的不是 `backend.connect` 那条出口"
+    );
+    expect_failed_words(&mut wb, hard, Duration::from_secs(10));
+
+    // ② 同名还剩一个关不掉的旧 worker：`open_serial` 里那次 100ms 的
+    //    `close_port_blocking` 超时，整句都是应用写的 → 逐字钉。
+    let name = register_network_port(&mut wb, "127.0.0.1", addr.port());
+    park_a_network_worker(&mut wb, &name, &parked);
+    // 注销之后，这个名字在 `connect` 那里就不再是网络端口，于是落到串口分支。
+    expect_done(
+        &mut wb,
+        AppCommand::RemoveNetworkPort {
+            port: PortId::new(name.clone()),
+        },
+    );
+    let timed_out = expect_pending(
+        &mut wb,
+        AppCommand::Connect {
+            port: PortId::new(name.clone()),
+            settings: SerialSettings::default(),
+        },
+    );
+    assert_eq!(
+        task_kind(&wb, timed_out).as_deref(),
+        Some("connect_serial"),
+        "注销后的同名端口必须走串口分支，否则测的是 `open_network_serial` 那条出口"
+    );
+    assert_eq!(
+        expect_failed_words(&mut wb, timed_out, Duration::from_secs(10)),
+        format!("操作超时：{name} 正在关闭中"),
+        "关闭超时的正文被改写了：那是 `tool_transport::translate_error` 对 `Io(TimedOut)` 的那句话"
+    );
+}
+
+/// `Workbench::disconnect_port` 的两条分支：网络分支直接调 `close_port_blocking`
+/// （transport 那条出口），串口分支调平台后端的 `disconnect`（platform 那条出口）。
+///
+/// 两条都拿「关不掉的 worker」驱动：`.map_err(|error| error.to_string())` 在前者给出
+/// `io error: …`、在后者给出 `transport operation failed: 操作超时：…`，两种都会红。
+/// 顺带钉住一个反直觉的事实：**关闭一个从未打开的端口不是错误**
+/// （`close_port_blocking` 对不存在的名字直接 `Ok(())`），所以那条路径平时根本没有
+/// 可泄漏的文案 —— 也正因为如此，本用例才必须自己造出一个真的失败。
+#[test]
+fn disconnecting_a_port_that_will_not_finish_closing_reports_chinese() {
+    let (addr_serial_side, parked_serial_side) = parked_websocket_server();
+    let (addr_network_side, parked_network_side) = parked_websocket_server();
+    let bus = DataBus::new();
+    let mut wb = Workbench::new(bus);
+
+    let never_opened = "COM_HEADLESS_DISCONNECT_NOT_OPEN";
+    let network_side = register_network_port(&mut wb, "127.0.0.1", addr_network_side.port());
+    park_a_network_worker(&mut wb, &network_side, &parked_network_side);
+    let serial_side = register_network_port(&mut wb, "127.0.0.1", addr_serial_side.port());
+    park_a_network_worker(&mut wb, &serial_side, &parked_serial_side);
+    // 注销之后同名端口落到平台后端那条出口。
+    expect_done(
+        &mut wb,
+        AppCommand::RemoveNetworkPort {
+            port: PortId::new(serial_side.clone()),
+        },
+    );
+
+    let network_task = expect_pending(
+        &mut wb,
+        AppCommand::Disconnect {
+            port: PortId::new(network_side.clone()),
+        },
+    );
+    let serial_task = expect_pending(
+        &mut wb,
+        AppCommand::Disconnect {
+            port: PortId::new(serial_side.clone()),
+        },
+    );
+    let not_opened_task = expect_pending(
+        &mut wb,
+        AppCommand::Disconnect {
+            port: PortId::new(never_opened),
+        },
+    );
+
+    // 两个超时任务各占一条 per-port 有序队列（`serial:{端口}`），所以两次 3 秒预算是
+    // 并发烧掉的；第三格（从未打开）跟着一起收尾，不额外花时间。
+    let all_ended = tick_until(&mut wb, Duration::from_secs(30), |wb| {
+        [network_task, serial_task, not_opened_task]
+            .iter()
+            .all(|task| {
+                matches!(
+                    task_state(wb, *task),
+                    Some(TaskState::Completed | TaskState::Failed)
+                )
+            })
+    });
+    assert!(
+        all_ended,
+        "三条关闭任务都必须在 30s 内结束，实际: {:?}",
+        [network_task, serial_task, not_opened_task].map(|task| task_state(&wb, task))
+    );
+    assert_eq!(
+        task_message(&wb, network_task).as_deref(),
+        Some(format!("操作超时：{network_side} 正在关闭中").as_str()),
+        "网络分支（`close_port_blocking`）给用户的那句变了"
+    );
+    assert_eq!(
+        task_message(&wb, serial_task).as_deref(),
+        Some(format!("操作超时：{serial_side} 正在关闭中").as_str()),
+        "串口分支（平台后端 `disconnect`）给用户的那句变了"
+    );
+    assert_eq!(
+        task_state(&wb, not_opened_task),
+        Some(TaskState::Completed),
+        "关闭一个从未打开的端口不是错误：这里没有可泄漏的文案，本用例的另外两格才有"
+    );
+}
+
+/// `Workbench::send_transport_bytes` 的网络分支（transport 那条出口）。
+/// 串口分支那条由
+/// `sending_to_a_port_that_was_never_opened_reads_in_chinese_on_both_entry_points`
+/// 逐字钉着，两条入口的正文从这里起是同一句。
+#[test]
+fn sending_over_a_network_port_that_was_never_connected_reads_in_chinese() {
+    let bus = DataBus::new();
+    let mut wb = Workbench::new(bus);
+    let name = register_network_port(&mut wb, "127.0.0.1", 9);
+
+    let task = expect_pending(
+        &mut wb,
+        AppCommand::SendText {
+            port: PortId::new(name.clone()),
+            text: "ping".to_owned(),
+        },
+    );
+    assert_eq!(
+        task_kind(&wb, task).as_deref(),
+        Some("send_network"),
+        "注册过的名字必须走 transport 那条投递入口，否则测的是平台后端的 `send`"
+    );
+    assert_eq!(
+        expect_failed_words(&mut wb, task, Duration::from_secs(10)),
+        format!("串口 {name} 未打开（可能已断开，请重连）"),
+        "网络端口未连接时发送失败的那句正文变了（与串口分支同一句）"
+    );
+}
+
+/// `Workbench::set_transport_signal`：DTR 与 RTS 两个分支共用同一条失败出口。
+///
+/// 顺带钉住网络端口那条**同步**拒绝 —— 它本轮之前就已经是中文，本轮一个字都不该改。
+#[test]
+fn toggling_dtr_or_rts_on_a_port_that_was_never_opened_reads_in_chinese() {
+    const PORT: &str = "COM_HEADLESS_SIGNAL_WORDING";
+    const NOT_OPEN_WORDS: &str = "串口 COM_HEADLESS_SIGNAL_WORDING 未打开（可能已断开，请重连）";
+
+    let bus = DataBus::new();
+    let mut wb = Workbench::new(bus);
+
+    for (signal, command) in [
+        (
+            "DTR",
+            AppCommand::SetDtr {
+                port: PortId::new(PORT),
+                value: true,
+            },
+        ),
+        (
+            "RTS",
+            AppCommand::SetRts {
+                port: PortId::new(PORT),
+                value: false,
+            },
+        ),
+    ] {
+        let task = expect_pending(&mut wb, command);
+        assert_eq!(
+            task_kind(&wb, task).as_deref(),
+            Some("set_serial_signal"),
+            "{signal} 必须落到设信号任务本身，否则测的不是 `backend.set_dtr`/`set_rts` 那条出口"
+        );
+        assert_eq!(
+            expect_failed_words(&mut wb, task, Duration::from_secs(10)),
+            NOT_OPEN_WORDS,
+            "{signal} 失败给用户看的那句正文变了"
+        );
+    }
+
+    let network = register_network_port(&mut wb, "127.0.0.1", 9);
+    match wb.dispatch(AppCommand::SetDtr {
+        port: PortId::new(network),
+        value: true,
+    }) {
+        Err(AppError::Transport(words)) => assert_eq!(
+            words, "网络端口不支持 DTR/RTS",
+            "网络端口的同步拒绝本来就交给用户这句中文，本轮不许改动它"
+        ),
+        other => panic!("网络端口的 DTR/RTS 必须同步被拒，实际: {other:?}"),
+    }
+}
+
+/// `Workbench::spawn_refresh_ports` 与 `spawn_request_port` 的两条失败出口。
+///
+/// **这两格在有串口的机器上是空跑的**（本机实测两个任务都 Completed），它们是
+/// 「驱动不出失败」那条注释的落地：`request_port` 的 `NoPortAvailable` 需要一台一个
+/// 串口都没有的机器，`list_known_ports` 需要 OS 枚举真的报错。真到了那种机器上，
+/// 退回 `to_string()` 的泄漏是一整句英文（`no authorized serial port is available`、
+/// `transport operation failed: …`），所以这层守卫值得留；逐字中文在
+/// `crates/platform/tests/transport_error_wording.rs`。
+#[test]
+fn refreshing_and_requesting_ports_do_not_leak_the_platform_display_frame() {
+    let bus = DataBus::new();
+    let mut wb = Workbench::new(bus);
+
+    for (kind, command) in [
+        ("refresh_ports", AppCommand::RefreshPorts),
+        ("request_port", AppCommand::RequestPort),
+    ] {
+        let task = expect_pending(&mut wb, command);
+        assert_eq!(
+            task_kind(&wb, task).as_deref(),
+            Some(kind),
+            "命令必须落到 {kind} 任务本身，否则下面测的不是那条出口"
+        );
+        let ended = tick_until(&mut wb, Duration::from_secs(10), |wb| {
+            matches!(
+                task_state(wb, task),
+                Some(TaskState::Completed | TaskState::Failed)
+            )
+        });
+        assert!(
+            ended,
+            "{kind} 任务必须在 10s 内结束，实际: {:?}",
+            task_state(&wb, task)
+        );
+        if task_state(&wb, task) == Some(TaskState::Failed) {
+            let words = task_message(&wb, task).expect("任务快照必须带着失败原文");
+            if let Some((name, frame)) = leaked_english_frame(&words) {
+                panic!("{kind} 把英文 Display（{name} = {frame:?}）当成了用户文案：{words:?}");
+            }
+            assert!(
+                reads_as_chinese(&words),
+                "{kind} 失败时用户看到的那句必须带中文框架，实际: {words:?}"
+            );
+        }
+    }
 }
