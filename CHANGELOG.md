@@ -6,6 +6,53 @@
 
 ### 调整
 
+- **删掉已被游标路径取代、却仍各存一份的整座快照导出域**（`tool-panels` 净 **−306 行**：
+  `terminal.rs` 3593 → 3441、`log.rs` 2400 → 2281、`manager.rs` 1683 → 1663（步骤 B）、
+  `table.rs` 1340 → 1325（级联）、`lib.rs` 只改两条 `pub use`；四道门
+  **720 passed / 0 failed / 7 ignored**，725 → 720 逐条见下）。删的是"点导出先物化全量快照"
+  那一族：`TerminalExportJob` + `impl`（`len`/`is_empty`/`render`/`render_chunk`）、
+  `LogExportJob` + 同形 `impl`、两份 `export_job()`、两份 `export_visible_text/csv/json` ——
+  **同一个域以同一形状存在两份（terminal/log），这次两份一起走**。活路径原样保留：两端都走
+  `begin_export_cursor()` → `export_cursor_chunk(cursor, format, 512)`
+  （`app/src/commands.rs:136/140`、`app/src/web/mod.rs:2576/2580`）。
+  **这正是符号普查的已知盲区**：岛内的边（`export_job → render → render_chunk`）按引用计数
+  看着是"生产"——调用者确实不在 `#[cfg(test)]` 里——但进岛的唯一门是测试，判据取可达性。
+  **用户下载的字节删除前后完全相同，证据是字面量钉的两次红，不是"测试仍绿"**：旧的差分用例拿
+  `export_job().render(format)` 当期望值，先把它换成从活路径捕获的字面量表（时间列经 `fmt_ts`
+  按本地时间渲染，只有时间标签插值，表头/引号/换行/JSON 框架全是字面量），绿了之后做两次变异
+  探针 —— ①改活路径 CSV 表头顺序：
+  `assertion left == right failed: Csv 分块导出字节与字面量不一致，
+  left: "time,direction,port,text\n…" right: "time,port,direction,text\n…"`（log 同形一条）；
+  ②剥掉 `csv_cell` 的双引号：三条字面量用例（terminal/log/unicode）全部变红。还原后复绿。
+  删除的用例里有三项**唯一**的钉（CSV 引号双写、HEX 模式内容列、TX 方向过滤）已先折进字面量表，
+  不随删除丢钉。
+  **用例 725 → 720，−5 全部点名**：① `terminal::export_uses_standard_json_and_the_current_visible_content_mode`
+  （主体是 `export_visible_*`）、② `terminal::chunked_export_preserves_format_boundaries`、
+  ③ `log::chunked_export_preserves_csv_and_json_structure`（②③主体是 `job.render_chunk`，
+  批大小=1 的游标用例钉得更密的边界）、④ `table::message_search_is_unicode_case_insensitive`
+  （主体是级联删除的 `MessageSearch::matches`，Unicode 大小写折叠改由重写后的
+  `log::unicode_case_insensitive_search_filters_exported_rows` 在活路径上逐字节钉）、
+  ⑤ `manager::select_center_panel_switches_active`（主体是步骤 B 删除的方法）。
+  `log::cursor_export_matches_snapshot_in_small_batches` 与 terminal 同名差分用例**改名续用**，
+  计数不变。**编译器找到的级联恰好一条**（`clippy -p tool-panels --all-targets` 不挂 `-D` 列出）：
+  `MessageSearch::matches`——最后一个非测试调用者就是被删的 `LogPanel::collect_visible_entries`；
+  它连同源测试 ④ 一起删。其余每个私有助手逐个核过仍被活路径（分块渲染或右键"复制全部可见"）
+  到达、原样保留：`render_terminal_export_chunk`/`render_log_export_chunk`、`visible_row_*`、
+  `log_export_line`/`log_csv_record`/`log_json_value`、`csv_cell`、`json_str`、
+  `content_column_name`、`direction_export_label`；`collect_visible_entries` 岛亡后活引用为零，
+  连岛带走；两份活渲染器的 doc 里"与快照 job 共用实现"那两句已成假话，就地改写而非删除。
+  **步骤 B（同 crate，单独记）**：`PanelManager::select_center_panel` 生产零调用、唯一调用者是
+  自己那条单测，按"只测自己"删除。**此前 docs 记的理由"组合根直接赋 `active_tab` 字段绕过了它"
+  当场证伪**：那两处直写（`app/src/ui/tiles.rs` 的 `tile_panel_body`、`app/src/web/mod.rs` 的
+  `render_panel`）发生在**绘制一块 tile 的过程中**，改走 `select_center_panel` 等于在布局途中
+  执行 `ensure_tiles_layout().select_pane()`，是另一种操作而不是绕过；活的面板选择走
+  `TilesLayout::select_pane` 一族 handler（`manager.rs:621/648/678/690/714`，经
+  `add_to_main_tabs`/`add_to_plugin_tabs`），兄弟方法 `open_tab`/`open_plugin_tab`/`close_tab`
+  都是活的（`dynamic/ingest.rs`、`runtime/plugin.rs` 在调），一字未动。
+  **刻意没做的**：`NativeExportJob`/`WebExportJob`（app 层与游标同名的活类型）不在射程内；
+  第 20 轮 CHANGELOG/ARCHITECTURE 里那段"曾删掉 `ServiceTerminal::export_job` 链"的历史叙述是
+  记录不是承诺，不改写；豁免棘轮仍 5 条（本轮没碰任何 `#[allow]`）。
+
 - **删掉 `LuaHost` 整座零使用者的死岛**（`crates/lua_host/src/lib.rs` 净 **−143 行**，2792 → 2649；
   四道门 **725 passed / 0 failed / 7 ignored —— 与基线逐字相同，一条用例都没丢**）。删的四组符号：
   `pub struct LuaHost` + 它的 `impl`（`new`/`run_script`/`stop`/`state`/`reap_finished` 五个方法）+

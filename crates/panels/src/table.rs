@@ -118,10 +118,6 @@ impl MessageSearch {
         crate::search::SearchQuery::new(&self.text, self.case_sensitive)
     }
 
-    pub(crate) fn matches(&self, haystack: &str, query: &crate::search::SearchQuery) -> bool {
-        query.is_empty() || query.matches(haystack)
-    }
-
     pub(crate) fn toolbar(&mut self, ui: &mut Ui, desired_width: f32, hint: &str, case_hint: &str) {
         // 搜索框后面通常还跟着大小写按钮、来源/端口筛选等控件。
         // 直接使用固定 desired_width 会在窄 Dock 中把后续控件推出可视区域，
@@ -802,17 +798,6 @@ mod tests {
         edge_scroll_delta, estimated_wrapped_line_count, owns_copy_focus, take_copy_feedback,
         wheel_scroll_during_selection,
     };
-
-    #[test]
-    fn message_search_is_unicode_case_insensitive() {
-        let search = super::MessageSearch {
-            text: "ä设备".to_owned(),
-            ..Default::default()
-        };
-        let query = search.query();
-
-        assert!(search.matches("Ä设备已连接", &query));
-    }
 
     #[test]
     fn wrapped_line_estimate_accounts_for_width_and_explicit_lines() {

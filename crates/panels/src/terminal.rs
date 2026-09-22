@@ -138,21 +138,9 @@ struct VisibleRow<'a> {
     live: bool,
 }
 
-/// 已在 UI 线程完成筛选的终端导出任务。
-///
-/// 行数据本身是拥有所有权的，后续格式化和文件写入可以交给 Workbench
-/// 的后台任务，不会把 TerminalPanel 或 egui 状态跨线程借出去。
-pub struct TerminalExportJob {
-    rows: Vec<VisibleRow<'static>>,
-    show_hex: bool,
-    show_raw: bool,
-}
-
-/// Incremental export cursor used by browser composition roots.  Unlike
-/// [`TerminalExportJob`], it does not materialize every visible row when the
-/// export button is clicked.  The owning panel is scanned in stable-id order
-/// in bounded batches, so a 50k-row export does not create a large temporary
-/// allocation on the first UI frame.
+/// 导出游标：点「导出」时不先物化全部可见行，所属面板按稳定 id 顺序、以有界
+/// 批次被扫描，所以 5 万行的导出不会在首帧制造大块临时分配。
+/// 原生与浏览器两端的导出都走这一条路径。
 pub struct TerminalExportCursor {
     filter: TerminalViewFilter,
     last_id: Option<u64>,
@@ -275,8 +263,8 @@ impl VisibleRow<'static> {
 
 /// 渲染一段导出内容：`first` 决定是否补表头/数组左括号，`has_previous` 决定是否补
 /// 分段之间的分隔符，`done` 决定是否收尾（TXT 末尾换行、JSON 右括号）。
-/// 增量游标（[`TerminalExportCursor`]）和快照 job（[`TerminalExportJob::render_chunk`]）
-/// 共用这一份实现，保证两条导出路径的字节输出一致。
+/// 这是导出字节流的唯一渲染实现，两端导出都通过增量游标
+/// （[`TerminalExportCursor`] 的 `export_cursor_chunk`）走到这里。
 fn render_terminal_export_chunk(
     format: TerminalExportFormat,
     rows: &[VisibleRow<'static>],
@@ -337,70 +325,6 @@ fn render_terminal_export_chunk(
                 output.push(']');
             }
             output
-        }
-    }
-}
-
-impl TerminalExportJob {
-    pub fn len(&self) -> usize {
-        self.rows.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
-    }
-
-    /// Render one owned chunk. The browser composition root uses this to
-    /// yield between batches instead of building a large export string in a
-    /// single egui frame.
-    pub fn render_chunk(&self, format: TerminalExportFormat, start: usize, end: usize) -> String {
-        let start = start.min(self.rows.len());
-        let end = end.min(self.rows.len()).max(start);
-        render_terminal_export_chunk(
-            format,
-            &self.rows[start..end],
-            self.show_hex,
-            self.show_raw,
-            start == 0,
-            start > 0,
-            end == self.rows.len(),
-        )
-    }
-
-    /// 一次性渲染全部行。不能直接复用分块渲染：JSON 需要 pretty 输出，
-    /// TXT 的末尾换行判据也不同（这里看渲染结果是否为空）。
-    pub fn render(&self, format: TerminalExportFormat) -> String {
-        match format {
-            TerminalExportFormat::Txt => {
-                let mut output = self
-                    .rows
-                    .iter()
-                    .map(|row| visible_row_content(row, self.show_hex, self.show_raw))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !output.is_empty() {
-                    output.push('\n');
-                }
-                output
-            }
-            TerminalExportFormat::Csv => {
-                let mut output = String::from("time,port,direction,");
-                output.push_str(content_column_name(self.show_hex, self.show_raw));
-                output.push('\n');
-                for row in &self.rows {
-                    output.push_str(&visible_row_csv_record(row, self.show_hex, self.show_raw));
-                    output.push('\n');
-                }
-                output
-            }
-            TerminalExportFormat::Json => {
-                let values = self
-                    .rows
-                    .iter()
-                    .map(|row| visible_row_json(row, self.show_hex, self.show_raw))
-                    .collect::<Vec<_>>();
-                serde_json::to_string_pretty(&values).unwrap_or_default()
-            }
         }
     }
 }
@@ -621,28 +545,8 @@ impl TerminalPanel {
             .collect()
     }
 
-    /// 导出不是每帧渲染路径，允许一次性扫描当前 Store，避免为了保持
-    /// `&self` 导出 API 而让 ViewIndex 使用内部可变性。
-    fn collect_visible_rows_unindexed(&self) -> Vec<VisibleRow<'static>> {
-        let filter = self.current_view_filter();
-        let query = self.search.query();
-        self.store
-            .iter()
-            .filter(|item| terminal_item_matches(item, &filter, &query))
-            .map(VisibleRow::from_item)
-            .collect()
-    }
-
     pub fn take_export_request(&mut self) -> Option<TerminalExportFormat> {
         self.export_request.take()
-    }
-
-    pub fn export_job(&self) -> TerminalExportJob {
-        TerminalExportJob {
-            rows: self.collect_visible_rows_unindexed(),
-            show_hex: self.show_hex,
-            show_raw: self.show_raw,
-        }
     }
 
     pub fn begin_export_cursor(&self) -> TerminalExportCursor {
@@ -709,44 +613,6 @@ impl TerminalPanel {
             cursor.done,
             exported,
         )
-    }
-
-    /// 原生导出入口：TXT/CSV 与快照 job 的整份渲染完全一致，直接复用。
-    pub fn export_visible_csv(&self) -> String {
-        self.export_job().render(TerminalExportFormat::Csv)
-    }
-
-    pub fn export_visible_text(&self) -> String {
-        self.export_job().render(TerminalExportFormat::Txt)
-    }
-
-    /// 与 [`Self::export_job`] 的 JSON 渲染不同：没有端口的行会省略 `port` 字段，
-    /// 而不是写成空串。
-    pub fn export_visible_json(&self) -> String {
-        let show_hex = self.show_hex;
-        let show_raw = self.show_raw;
-        let content_key = content_column_name(show_hex, show_raw);
-        let values = self
-            .collect_visible_rows_unindexed()
-            .iter()
-            .map(|row| {
-                let mut obj = serde_json::Map::new();
-                obj.insert("time".into(), json_str(row.timestamp_label.as_ref()));
-                if let Some(port) = row.port.as_deref() {
-                    obj.insert("port".into(), json_str(port));
-                }
-                obj.insert(
-                    "direction".into(),
-                    json_str(direction_export_label(row.direction)),
-                );
-                obj.insert(
-                    content_key.into(),
-                    json_str(&visible_row_content(row, show_hex, show_raw)),
-                );
-                serde_json::Value::Object(obj)
-            })
-            .collect::<Vec<_>>();
-        serde_json::to_string_pretty(&values).expect("serializable terminal export values")
     }
 
     pub fn port_names(&self) -> Vec<String> {
@@ -2972,108 +2838,19 @@ mod tests {
         assert_eq!(items[0].first_event_id(), 21);
     }
 
+    /// 分块导出逐字节钉死三种格式；并证明游标是快照边界：导出开始后收到的行不进流。
     #[test]
-    fn export_uses_standard_json_and_the_current_visible_content_mode() {
+    fn cursor_export_pins_chunk_bytes_and_ignores_future_rows() {
         let bus = DataBus::new();
         let mut panel = TerminalPanel::new(&bus);
-        bus.publish(
-            Event::new(
-                serial_topics::SERIAL_RX,
-                "serial:COM1",
-                Direction::Rx,
-                Payload::Bytes(b"hello,\"world\"".to_vec()),
-            )
-            .with_metadata(serde_json::json!({ "port": "COM1" })),
-        );
-        bus.publish(
-            Event::new(
-                serial_topics::SERIAL_TX,
-                "serial:COM1",
-                Direction::Tx,
-                Payload::Bytes(b"hidden tx".to_vec()),
-            )
-            .with_metadata(serde_json::json!({ "port": "COM1" })),
-        );
-        assert_eq!(panel.ingest_all_pending(), 2);
-        panel.show_tx = false;
-
-        let csv = panel.export_visible_csv();
-        assert!(csv.starts_with("time,port,direction,text\n"));
-        assert!(csv.contains("\"hello,\"\"world\"\"\""));
-        assert_eq!(panel.export_visible_text(), "hello,\"world\"\n");
-
-        let json: serde_json::Value =
-            serde_json::from_str(&panel.export_visible_json()).expect("valid JSON array");
-        let rows = json.as_array().expect("top-level array");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["port"], "COM1");
-        assert_eq!(rows[0]["direction"], "RX");
-        assert_eq!(rows[0]["text"], "hello,\"world\"");
-
-        panel.show_hex = true;
-        let json: serde_json::Value =
-            serde_json::from_str(&panel.export_visible_json()).expect("valid HEX JSON array");
-        assert_eq!(json[0]["hex"], "68 65 6C 6C 6F 2C 22 77 6F 72 6C 64 22");
-        assert!(json[0].get("text").is_none());
-    }
-
-    #[test]
-    fn chunked_export_preserves_format_boundaries() {
-        let bus = DataBus::new();
-        let mut panel = TerminalPanel::new(&bus);
-        for (direction, payload) in [
-            (Direction::Rx, b"first,\"row\"".to_vec()),
-            (Direction::Tx, b"second\nrow".to_vec()),
-            (Direction::Rx, vec![0, 1, 255]),
-        ] {
-            bus.publish(
-                Event::new(
-                    serial_topics::SERIAL_RX,
-                    "serial:COM1",
-                    direction,
-                    Payload::Bytes(payload),
-                )
-                .with_metadata(serde_json::json!({ "port": "COM1" })),
-            );
-        }
-        assert_eq!(panel.ingest_all_pending(), 3);
-
-        let job = panel.export_job();
-        assert_eq!(job.len(), 3);
-        for format in [
-            TerminalExportFormat::Txt,
-            TerminalExportFormat::Csv,
-            TerminalExportFormat::Json,
-        ] {
-            let mut chunked = String::new();
-            chunked.push_str(&job.render_chunk(format, 0, 1));
-            chunked.push_str(&job.render_chunk(format, 1, 3));
-            match format {
-                TerminalExportFormat::Json => {
-                    let value: serde_json::Value =
-                        serde_json::from_str(&chunked).expect("chunked JSON export is valid");
-                    assert_eq!(value.as_array().expect("JSON array").len(), 3);
-                }
-                TerminalExportFormat::Csv => {
-                    assert!(chunked.starts_with("time,port,direction,text\n"));
-                    assert_eq!(chunked.lines().count(), 4);
-                }
-                TerminalExportFormat::Txt => {
-                    assert!(chunked.ends_with('\n'));
-                    assert!(chunked.contains("first,\"row\""));
-                    assert!(chunked.contains("second"));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn cursor_export_matches_snapshot_without_scanning_future_rows() {
-        let bus = DataBus::new();
-        let mut panel = TerminalPanel::new(&bus);
-        for (index, payload) in [b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]
-            .into_iter()
-            .enumerate()
+        for (index, payload) in [
+            b"one".to_vec(),
+            b"two".to_vec(),
+            b"three".to_vec(),
+            br#"hello,"world""#.to_vec(),
+        ]
+        .into_iter()
+        .enumerate()
         {
             bus.publish(
                 Event::with_timestamp(
@@ -3086,14 +2863,9 @@ mod tests {
                 .with_metadata(serde_json::json!({ "port": "COM1" })),
             );
         }
-        assert_eq!(panel.ingest_all_pending(), 3);
+        assert_eq!(panel.ingest_all_pending(), 4);
 
-        for format in [
-            TerminalExportFormat::Txt,
-            TerminalExportFormat::Csv,
-            TerminalExportFormat::Json,
-        ] {
-            let expected = panel.export_job().render(format);
+        let collect = |panel: &TerminalPanel, format: TerminalExportFormat| {
             let mut cursor = panel.begin_export_cursor();
             let mut actual = String::new();
             loop {
@@ -3103,16 +2875,92 @@ mod tests {
                     break;
                 }
             }
-            if format == TerminalExportFormat::Json {
-                let actual_json: serde_json::Value =
-                    serde_json::from_str(&actual).expect("cursor JSON export is valid");
-                let expected_json: serde_json::Value =
-                    serde_json::from_str(&expected).expect("snapshot JSON export is valid");
-                assert_eq!(actual_json, expected_json);
-            } else {
-                assert_eq!(actual, expected);
-            }
-        }
+            actual
+        };
+
+        // 字面量表：期望字节是在未改动树上、旧快照 oracle 等价用例仍绿时，从活的
+        // 分块游标路径捕获的（第 35 轮）。时间列由 `fmt_ts` 按本地时间生成，所以只有
+        // 时间标签做插值——表头、引号双写转义、顺序、换行与 JSON 框架全是字面量。
+        let ts1 = format!("[{}]", fmt_ts(1_000));
+        let ts2 = format!("[{}]", fmt_ts(1_010));
+        let ts3 = format!("[{}]", fmt_ts(1_020));
+        let ts4 = format!("[{}]", fmt_ts(1_030));
+        let expected_txt = "one\ntwo\nthree\nhello,\"world\"\n";
+        let expected_csv = format!(
+            "time,port,direction,text\n\
+             \"{ts1}\",\"COM1\",\"RX\",\"one\"\n\
+             \"{ts2}\",\"COM1\",\"RX\",\"two\"\n\
+             \"{ts3}\",\"COM1\",\"RX\",\"three\"\n\
+             \"{ts4}\",\"COM1\",\"RX\",\"hello,\"\"world\"\"\"\n"
+        );
+        let expected_json = format!(
+            "[{{\"direction\":\"RX\",\"port\":\"COM1\",\"text\":\"one\",\"time\":\"{ts1}\"}},\
+              {{\"direction\":\"RX\",\"port\":\"COM1\",\"text\":\"two\",\"time\":\"{ts2}\"}},\
+              {{\"direction\":\"RX\",\"port\":\"COM1\",\"text\":\"three\",\"time\":\"{ts3}\"}},\
+              {{\"direction\":\"RX\",\"port\":\"COM1\",\"text\":\"hello,\\\"world\\\"\",\"time\":\"{ts4}\"}}]"
+        );
+
+        assert_eq!(
+            collect(&panel, TerminalExportFormat::Txt),
+            expected_txt,
+            "TXT 分块导出字节与字面量不一致"
+        );
+        assert_eq!(
+            collect(&panel, TerminalExportFormat::Csv),
+            expected_csv,
+            "CSV 分块导出字节与字面量不一致"
+        );
+        assert_eq!(
+            collect(&panel, TerminalExportFormat::Json),
+            expected_json,
+            "JSON 分块导出字节与字面量不一致"
+        );
+
+        // HEX 模式：内容列名/JSON 字段翻成 `hex`，逐字节的十六进制文本也钉死。
+        panel.show_hex = true;
+        let expected_hex_csv = format!(
+            "time,port,direction,hex\n\
+             \"{ts1}\",\"COM1\",\"RX\",\"6F 6E 65\"\n\
+             \"{ts2}\",\"COM1\",\"RX\",\"74 77 6F\"\n\
+             \"{ts3}\",\"COM1\",\"RX\",\"74 68 72 65 65\"\n\
+             \"{ts4}\",\"COM1\",\"RX\",\"68 65 6C 6C 6F 2C 22 77 6F 72 6C 64 22\"\n"
+        );
+        let expected_hex_json = format!(
+            "[{{\"direction\":\"RX\",\"hex\":\"6F 6E 65\",\"port\":\"COM1\",\"time\":\"{ts1}\"}},\
+              {{\"direction\":\"RX\",\"hex\":\"74 77 6F\",\"port\":\"COM1\",\"time\":\"{ts2}\"}},\
+              {{\"direction\":\"RX\",\"hex\":\"74 68 72 65 65\",\"port\":\"COM1\",\"time\":\"{ts3}\"}},\
+              {{\"direction\":\"RX\",\"hex\":\"68 65 6C 6C 6F 2C 22 77 6F 72 6C 64 22\",\"port\":\"COM1\",\"time\":\"{ts4}\"}}]"
+        );
+        assert_eq!(
+            collect(&panel, TerminalExportFormat::Csv),
+            expected_hex_csv,
+            "HEX 模式 CSV 分块导出字节与字面量不一致"
+        );
+        assert_eq!(
+            collect(&panel, TerminalExportFormat::Json),
+            expected_hex_json,
+            "HEX 模式 JSON 分块导出字节与字面量不一致"
+        );
+        panel.show_hex = false;
+
+        // 方向开关同样作用于导出：关掉 TX 后，后补的 TX 行不进导出字节——
+        // 期望值与默认模式的 CSV 字面量逐字节相同。
+        bus.publish(
+            Event::new(
+                serial_topics::SERIAL_TX,
+                "serial:COM1",
+                Direction::Tx,
+                Payload::Bytes(b"hidden tx".to_vec()),
+            )
+            .with_metadata(serde_json::json!({ "port": "COM1" })),
+        );
+        assert_eq!(panel.ingest_all_pending(), 1);
+        panel.show_tx = false;
+        assert_eq!(
+            collect(&panel, TerminalExportFormat::Csv),
+            expected_csv,
+            "TX 关闭时导出字节应与不含 TX 行的字面量一致"
+        );
 
         // The cursor is a snapshot boundary: data received after export
         // starts must not be appended to an already-running download.
@@ -3136,7 +2984,7 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(rows, 3);
+        assert_eq!(rows, 4);
     }
 
     /// 新逻辑：按 \n 拆分行，同包内不合并，跨包只合并未完成行。

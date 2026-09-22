@@ -40,7 +40,7 @@ pub use dynamic::{
 };
 pub use gauge::GaugePanel;
 pub use keymap::{KeymapAction, KeymapEntry, keymap_ui};
-pub use log::{LogExportCursor, LogExportJob, LogPanel};
+pub use log::{LogExportCursor, LogPanel};
 pub use manager::{
     DockArea, DockLayout, DockStack, PANEL_BUILTIN, PANEL_CHART, PANEL_DEVICES, PANEL_LOGS,
     PANEL_PLUGINS, PANEL_REPLAY, PANEL_SENDER, PANEL_SETTINGS, PANEL_TERMINAL, PanelId,
@@ -66,7 +66,7 @@ pub use serial::{
 };
 pub use status::{StatusBarAction, StatusBarView, StatusSignalView, status_bar_contents_ui};
 pub use table::{RowSelection, copy_text_with_feedback, take_copy_feedback};
-pub use terminal::{TerminalExportCursor, TerminalExportFormat, TerminalExportJob, TerminalPanel};
+pub use terminal::{TerminalExportCursor, TerminalExportFormat, TerminalPanel};
 
 /// 将毫秒时间戳格式化为本地时间 HH:MM:SS.mmm
 pub fn fmt_ts(ms: u64) -> String {

@@ -658,7 +658,11 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
    > **生产引用 / 仅测试引用** 分桶：`DEAD 8` + `TEST_ONLY 25`。
    > **两个桶不能混为一谈**：`TEST_ONLY` 不等于可删 —— `TerminalExportJob::render_chunk` 与
    > `LogExportJob::render_chunk` 存在的意义就是被"分块导出 == 整块导出"那条等价用例调用，
-   > 删掉是拆自己的测试能力。反过来 `DEAD 8` 那批里也有刻意留着的（`NotificationQueue::dismiss`
+   > 删掉是拆自己的测试能力。**【第 35 轮：这句话护的是那条等价用例，不是整座岛 —— 先把差分
+   > 期望换成从活路径捕获、并用变异探针验过红/绿效力的字面量表，等价能力不再依赖快照 job，
+   > 两份同形的快照导出域（terminal/log）连同这两条 `render_chunk` 一起删除。"岛内边看起来
+   > 是生产"的盲区结论原样保留：判据是可达性，不是引用计数】**
+   > 反过来 `DEAD 8` 那批里也有刻意留着的（`NotificationQueue::dismiss`
    > 带 `#[allow(dead_code)]` 与一条写明"Toast 得先带上 source"的理由 —— 那是暂停不是遗漏）。
    >
    > **第 23 轮删掉的（`tool-panels` 一个 crate，净 −95 行）**：
@@ -677,7 +681,14 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
    > (a) `PanelManager::select_center_panel` doc 自称是"左侧栏点击"的处理器，实际生产零调用 ——
    > 组合根 `crates/app/src/ui/tiles.rs:12` 直接写 `self.panels.active_tab = id.clone()` 绕过了它
    > （`app` 侧也完全没人调 `open_tab`）。于是"该收敛成字段还是该走 setter"是个方向问题，
-   > 不是机械删除。(b) `Workbench::query_terminal_since` 有 **8 处测试引用、0 处生产引用** ——
+   > 不是机械删除。**【第 35 轮：这颗还了，当时记的理由当场证伪】**那两处直写
+   > （`ui/tiles.rs::tile_panel_body` 与 `web/mod.rs::render_panel`）发生在**绘制一块 tile 的
+   > 过程中**，改走 `select_center_panel` 等于在布局途中执行 `ensure_tiles_layout().select_pane()`
+   > —— 那是另一种操作，不是绕过；括号里"`app` 侧也完全没人调 `open_tab`"同样过期
+   > （`runtime/plugin.rs` 与 `dynamic/ingest.rs` 都在调，`open_tab`/`open_plugin_tab`/
+   > `close_tab` 三兄弟全活，本轮没动）。正确的记录是"**只测自己**的零生产调用 API"：
+   > 方法与它唯一的单测一并删除，活的面板选择走 `TilesLayout::select_pane` 一族 handler。
+   > (b) `Workbench::query_terminal_since` 有 **8 处测试引用、0 处生产引用** ——
    > 终端数据的活读路径是别的那一条（本轮没查是哪条），先记着。
    > 本轮**没**碰其余候选（`recorder` 的 backpressure 两件套、`core::advance`、`tool-testing` 的
    > 两个计数、`replay::publish_next_for_test`、`lua_host::run_script`），它们分属别的 crate，
@@ -740,6 +751,24 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
    grep -rn 'tool_panels::PluginUiCommand' crates/   # 0 行（panels 那份已随文件删除）
    ```
    > 早期文档曾称这些文件为"已占位"（即待用），实测是"已被取代、可直接删除"，属相反结论。
+   > **【第 35 轮：删掉被游标路径取代的整座快照导出域 —— 同一个域两份同形，一起走】**
+   > `tool-panels` 净 **−306 行**（`terminal.rs` 3593 → 3441、`log.rs` 2400 → 2281、
+   > `manager.rs` 1683 → 1663 是上面步骤 B、`table.rs` 1340 → 1325 是级联；`lib.rs` 只改
+   > 两条 `pub use`），**四道门 725 → 720 passed / 0 failed / 7 ignored**。删的符号：
+   > `TerminalExportJob`/`LogExportJob` 两份 `impl`（`render`/`render_chunk`）、两份
+   > `export_job()`、两份 `export_visible_text/csv/json`，级联出 `LogPanel::collect_visible_entries`
+   > 与 `MessageSearch::matches`（编译器只报了后一条 —— 前一条测试还在引用，靠人工按"活路径
+   > 可达"判掉）。**少的 5 条用例全部点名**：两条 `chunked_export_preserves_*`、一条
+   > `export_visible_*` 用例、`MessageSearch::matches` 那条自测、步骤 B 的自测 —— 前两条的
+   > 独有字节（CSV 引号双写、HEX 列、TX 过滤）已先折进字面量表，不随删除丢钉。
+   > **动手顺序是先换钉子再拆房**：差分用例原本拿 `export_job().render()` 当 oracle，先把
+   > 期望换成从活路径捕获的字面量表（terminal 侧时间列经 `fmt_ts` 按本地时间插值，其余框架
+   > 全字面量），再用两次变异探针（改活路径表头顺序、剥 `csv_cell` 引号）证明字面量真的会红，
+   > 还原复绿**之后**才删 —— 用户下载的字节删除前后逐字相同。这类岛的取证陷阱也记在此：
+   > **岛内边的调用者不在 `#[cfg(test)]` 区里，引用计数看起来是"生产"**，死活必须按可达性判。
+   > 另：任务清单里挂着的开放计划"把 `terminal.rs` 导出域 ~390 行拆成兄弟模块"由本轮作废 ——
+   > **能删的东西不拆**。本条上方第 23 轮那句"`render_chunk` 的存在意义是被等价用例调用"
+   > 与疑问 (a) 的"绕过说"两处都已就地标注更正。
 10. **`egui_extras` 是可证明的死依赖（实测，本轮裁决不做）**：
    只在 `Cargo.toml:35`（workspace 声明）与 `crates/app/Cargo.toml:16` 出现；
    **`crates/app` 内 0 引用**，全 `crates/` 的 `.rs` 中 0 处代码引用

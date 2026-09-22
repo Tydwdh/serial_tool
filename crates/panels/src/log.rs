@@ -86,10 +86,6 @@ struct LogFilterKey {
     case_sensitive: bool,
 }
 
-pub struct LogExportJob {
-    entries: Vec<LogEntry>,
-}
-
 /// Incremental browser export cursor.  It captures the filter at the moment
 /// export starts and walks the stable entry order in bounded batches.
 pub struct LogExportCursor {
@@ -102,8 +98,8 @@ pub struct LogExportCursor {
 }
 
 /// 渲染一段导出内容：`first` 决定是否补表头/数组左括号，`has_previous` 决定是否补
-/// 分段之间的分隔符，`done` 决定是否收尾。增量游标与快照 job 共用这一份实现，
-/// 保证两条导出路径的字节输出一致。
+/// 分段之间的分隔符，`done` 决定是否收尾。这是导出字节流的唯一渲染实现，
+/// 两端导出都通过增量游标（[`LogExportCursor`] 的 `export_cursor_chunk`）走到这里。
 fn render_log_export_chunk(
     format: TerminalExportFormat,
     entries: &[LogEntry],
@@ -203,59 +199,6 @@ fn log_json_value(entry: &LogEntry) -> serde_json::Value {
         "source": entry.source,
         "message": entry.message,
     })
-}
-
-impl LogExportJob {
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// 渲染一段内容，供浏览器导出在批次之间让出帧。
-    pub fn render_chunk(&self, format: TerminalExportFormat, start: usize, end: usize) -> String {
-        let start = start.min(self.entries.len());
-        let end = end.min(self.entries.len()).max(start);
-        render_log_export_chunk(
-            format,
-            &self.entries[start..end],
-            start == 0,
-            start > 0,
-            end == self.entries.len(),
-        )
-    }
-
-    /// 一次性渲染全部行。不能直接复用分块渲染：JSON 需要 pretty 输出。
-    pub fn render(&self, format: TerminalExportFormat) -> String {
-        match format {
-            TerminalExportFormat::Txt => {
-                let mut output = self
-                    .entries
-                    .iter()
-                    .map(log_export_line)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !output.is_empty() {
-                    output.push('\n');
-                }
-                output
-            }
-            TerminalExportFormat::Csv => {
-                let mut output = String::from("time,level,source,message\n");
-                for entry in &self.entries {
-                    output.push_str(&log_csv_record(entry));
-                    output.push('\n');
-                }
-                output
-            }
-            TerminalExportFormat::Json => {
-                let values = self.entries.iter().map(log_json_value).collect::<Vec<_>>();
-                serde_json::to_string_pretty(&values).unwrap_or_default()
-            }
-        }
-    }
 }
 
 struct LogRenderOutcome {
@@ -369,16 +312,6 @@ impl LogPanel {
         self.export_request.take()
     }
 
-    pub fn export_job(&self) -> LogExportJob {
-        LogExportJob {
-            entries: self
-                .collect_visible_entries()
-                .into_iter()
-                .cloned()
-                .collect(),
-        }
-    }
-
     pub fn begin_export_cursor(&self) -> LogExportCursor {
         LogExportCursor {
             filter: self.current_filter_key(),
@@ -426,55 +359,6 @@ impl LogPanel {
             cursor.done,
             exported,
         )
-    }
-
-    fn collect_visible_entries(&self) -> Vec<&LogEntry> {
-        let query = self.search.query();
-        self.entry_order
-            .iter()
-            .filter_map(|id| self.entries.get(id))
-            .filter(|entry| entry.level >= self.min_level)
-            .filter(|entry| {
-                self.source_filter
-                    .as_ref()
-                    .is_none_or(|filter| entry.source == *filter)
-            })
-            .filter(|entry| {
-                self.search.matches(&entry.source, &query)
-                    || self.search.matches(&entry.message, &query)
-            })
-            .collect()
-    }
-
-    pub fn export_visible_text(&self) -> String {
-        let mut output = self
-            .collect_visible_entries()
-            .into_iter()
-            .map(log_export_line)
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !output.is_empty() {
-            output.push('\n');
-        }
-        output
-    }
-
-    pub fn export_visible_csv(&self) -> String {
-        let mut output = String::from("time,level,source,message\n");
-        for entry in self.collect_visible_entries() {
-            output.push_str(&log_csv_record(entry));
-            output.push('\n');
-        }
-        output
-    }
-
-    pub fn export_visible_json(&self) -> String {
-        let values: Vec<serde_json::Value> = self
-            .collect_visible_entries()
-            .into_iter()
-            .map(log_json_value)
-            .collect();
-        serde_json::to_string_pretty(&values).expect("serializable log export values")
     }
 
     pub fn set_max_entries(&mut self, max_entries: usize) {
@@ -2183,8 +2067,10 @@ mod tests {
         assert_eq!(rows.len(), 2);
     }
 
+    /// 搜索词按 Unicode 大小写不敏感命中 `Äpp`；导出的字节就是按该条件过滤后的
+    /// 可见行（走活的游标分块路径）。
     #[test]
-    fn unicode_case_insensitive_search_and_exports_use_visible_rows() {
+    fn unicode_case_insensitive_search_filters_exported_rows() {
         let bus = DataBus::new();
         let mut panel = LogPanel::new(&bus);
         panel.push_test_entry(LogEntry {
@@ -2203,72 +2089,18 @@ mod tests {
         });
         panel.search.text = "äpp".into();
 
-        let visible = panel.collect_visible_entries();
-        assert_eq!(visible.len(), 1);
-        assert!(panel.export_visible_text().contains("设备就绪"));
-        assert!(!panel.export_visible_text().contains("ignored"));
-        assert!(panel.export_visible_csv().contains("\"Äpp\""));
-        let json: serde_json::Value =
-            serde_json::from_str(&panel.export_visible_json()).expect("valid JSON");
-        assert_eq!(json.as_array().unwrap().len(), 1);
-    }
+        let expected_txt = "[12:00:00.000] info  Äpp                设备就绪";
+        let expected_csv = concat!(
+            "time,level,source,message\n",
+            "\"[12:00:00.000]\",\"info\",\"Äpp\",\"设备就绪\"\n",
+        );
+        let expected_json = "[{\"level\":\"info\",\"message\":\"设备就绪\",\"source\":\"Äpp\",\"time\":\"[12:00:00.000]\"}]";
 
-    #[test]
-    fn chunked_export_preserves_csv_and_json_structure() {
-        let bus = DataBus::new();
-        let mut panel = LogPanel::new(&bus);
-        for index in 0..3 {
-            panel.push_test_entry(LogEntry {
-                id: index + 1,
-                timestamp_label: format!("[12:00:0{index}.000]"),
-                level: LogLevel::Info,
-                source: "chunk-test".into(),
-                message: format!("message-{index}, \"quoted\""),
-            });
-        }
-
-        let job = panel.export_job();
-        assert_eq!(job.len(), 3);
-        for format in [TerminalExportFormat::Csv, TerminalExportFormat::Json] {
-            let mut chunked = String::new();
-            chunked.push_str(&job.render_chunk(format, 0, 1));
-            chunked.push_str(&job.render_chunk(format, 1, 3));
-            match format {
-                TerminalExportFormat::Csv => {
-                    assert!(chunked.starts_with("time,level,source,message\n"));
-                    assert_eq!(chunked.lines().count(), 4);
-                    assert!(chunked.contains("\"message-0, \"\"quoted\"\"\""));
-                }
-                TerminalExportFormat::Json => {
-                    let value: serde_json::Value =
-                        serde_json::from_str(&chunked).expect("chunked JSON export is valid");
-                    assert_eq!(value.as_array().expect("JSON array").len(), 3);
-                }
-                TerminalExportFormat::Txt => unreachable!(),
-            }
-        }
-    }
-
-    #[test]
-    fn cursor_export_matches_snapshot_in_small_batches() {
-        let bus = DataBus::new();
-        let mut panel = LogPanel::new(&bus);
-        for index in 0..3 {
-            panel.push_test_entry(LogEntry {
-                id: index + 1,
-                timestamp_label: format!("[12:00:0{index}.000]"),
-                level: LogLevel::Info,
-                source: "cursor-test".into(),
-                message: format!("message-{index}"),
-            });
-        }
-
-        for format in [
-            TerminalExportFormat::Txt,
-            TerminalExportFormat::Csv,
-            TerminalExportFormat::Json,
+        for (format, expected) in [
+            (TerminalExportFormat::Txt, expected_txt),
+            (TerminalExportFormat::Csv, expected_csv),
+            (TerminalExportFormat::Json, expected_json),
         ] {
-            let expected = panel.export_job().render(format);
             let mut cursor = panel.begin_export_cursor();
             let mut actual = String::new();
             loop {
@@ -2278,15 +2110,64 @@ mod tests {
                     break;
                 }
             }
-            if format == TerminalExportFormat::Json {
-                let actual_json: serde_json::Value =
-                    serde_json::from_str(&actual).expect("cursor JSON export is valid");
-                let expected_json: serde_json::Value =
-                    serde_json::from_str(&expected).expect("snapshot JSON export is valid");
-                assert_eq!(actual_json, expected_json);
-            } else {
-                assert_eq!(actual, expected);
+            assert_eq!(
+                actual, expected,
+                "{format:?} 过滤后的导出字节与字面量不一致"
+            );
+        }
+    }
+
+    /// 分块导出逐字节钉死三种格式（小批次，批间边界最密）。
+    /// 消息带逗号+引号：CSV 双写转义和 JSON 字符串转义也是钉死内容的一部分。
+    #[test]
+    fn cursor_export_pins_chunk_bytes_in_small_batches() {
+        let bus = DataBus::new();
+        let mut panel = LogPanel::new(&bus);
+        for index in 0..3 {
+            panel.push_test_entry(LogEntry {
+                id: index + 1,
+                timestamp_label: format!("[12:00:0{index}.000]"),
+                level: LogLevel::Info,
+                source: "cursor-test".into(),
+                message: format!("message-{index}, \"quoted\""),
+            });
+        }
+
+        // 字面量表：期望字节是在未改动树上、旧快照 oracle 等价用例仍绿时，
+        // 从活的分块游标路径捕获的（第 35 轮）。时间戳在夹具里就是字面量，
+        // 所以整段期望值不需要任何插值。
+        let expected_txt = concat!(
+            "[12:00:00.000] info  cursor-test        message-0, \"quoted\"\n",
+            "[12:00:01.000] info  cursor-test        message-1, \"quoted\"\n",
+            "[12:00:02.000] info  cursor-test        message-2, \"quoted\"\n",
+        );
+        let expected_csv = concat!(
+            "time,level,source,message\n",
+            "\"[12:00:00.000]\",\"info\",\"cursor-test\",\"message-0, \"\"quoted\"\"\"\n",
+            "\"[12:00:01.000]\",\"info\",\"cursor-test\",\"message-1, \"\"quoted\"\"\"\n",
+            "\"[12:00:02.000]\",\"info\",\"cursor-test\",\"message-2, \"\"quoted\"\"\"\n",
+        );
+        let expected_json = concat!(
+            "[{\"level\":\"info\",\"message\":\"message-0, \\\"quoted\\\"\",\"source\":\"cursor-test\",\"time\":\"[12:00:00.000]\"},",
+            "{\"level\":\"info\",\"message\":\"message-1, \\\"quoted\\\"\",\"source\":\"cursor-test\",\"time\":\"[12:00:01.000]\"},",
+            "{\"level\":\"info\",\"message\":\"message-2, \\\"quoted\\\"\",\"source\":\"cursor-test\",\"time\":\"[12:00:02.000]\"}]",
+        );
+
+        for (format, expected) in [
+            (TerminalExportFormat::Txt, expected_txt),
+            (TerminalExportFormat::Csv, expected_csv),
+            (TerminalExportFormat::Json, expected_json),
+        ] {
+            let mut cursor = panel.begin_export_cursor();
+            let mut actual = String::new();
+            loop {
+                let (chunk, done, _) = panel.export_cursor_chunk(&mut cursor, format, 1);
+                actual.push_str(&chunk);
+                if done {
+                    break;
+                }
             }
+            assert_eq!(actual, expected, "{format:?} 分块导出字节与字面量不一致");
         }
 
         let mut cursor = panel.begin_export_cursor();

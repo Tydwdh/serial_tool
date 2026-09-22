@@ -1108,12 +1108,6 @@ impl PanelManager {
         self.dock.all_tabs()
     }
 
-    /// 切换 Center 标签栏的激活面板（左侧栏点击）。
-    pub fn select_center_panel(&mut self, kind: PanelId) {
-        self.active_tab = kind.clone();
-        self.ensure_tiles_layout().select_pane(&kind);
-    }
-
     pub fn open_tab(&mut self, kind: PanelId) {
         self.active_tab = kind.clone();
         self.ensure_tiles_layout().add_to_main_tabs(kind, true);
@@ -1437,20 +1431,6 @@ mod tests {
                 .find_pane(&PanelId::builtin(PANEL_TERMINAL))
                 .is_some(),
             "默认布局应当包含接收面板"
-        );
-    }
-
-    #[test]
-    fn select_center_panel_switches_active() {
-        let mut manager = PanelManager::default();
-        manager.dock.center.open(PanelId::builtin(PANEL_REPLAY));
-
-        manager.select_center_panel(PanelId::builtin(PANEL_REPLAY));
-
-        assert_eq!(manager.active_tab, PanelId::builtin(PANEL_REPLAY));
-        assert_eq!(
-            manager.dock.center.active,
-            Some(PanelId::builtin(PANEL_REPLAY))
         );
     }
 
