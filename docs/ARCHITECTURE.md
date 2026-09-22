@@ -553,7 +553,8 @@ cargo +1.92.0 clippy -p tool-transport -p tool-platform -p tool-core -p tool-dat
       它钉住宽度上限（删掉 `set_max_width` 实测变红），**钉不住逐段截断**（手绘 galley 不参与
       `min_rect`，把 `galley_width` 换成 `f32::INFINITY` 仍绿）。
     - **仍留**：
-      ① native 有浮层 `ToastOverlay`（`crates/app/src/ui/toast.rs`，由 `app/mod.rs:352` 驱动），
+      ① native 有浮层 `ToastOverlay`（`crates/app/src/ui/toast.rs`，由 `app/mod.rs` 里
+      `self.toast_overlay.show(&ctx, &mut self.notifications)` 那一处驱动，按符号定位），
       web 只在底部状态栏渲染同一条通知。不收的原因：要把它的载体从 native 的 `NotificationQueue`
       泛化到 web 的 `Vec<WebNotification>`，是 UI 结构改动，且本轮无法在浏览器里做回归验证。
       ② wasm 插件沙箱与 native 引擎能力面不同（`load`/`require`/`package`/`debug`/`os.exit`），

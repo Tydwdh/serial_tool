@@ -58,6 +58,24 @@
   不同"而写的 4 臂 identity `match`（两端各一份 `line_ending ↔ SendLineEnding` 的来回转换），
   全仓净减 14 行、少两份表。发布给 Lua 插件的 `send.line_ending = {label, suffix}` 快照
   （`runtime/plugin.rs`、`ui/contributions.rs`、`web/plugins.rs`）字符串逐字未变。
+- 桌面端 composition root `WorkbenchApp::new` 232 → 84 行（全仓最长的生产函数由此让位给
+  浏览器端的 `poll_web_events` 215 行）：按原执行顺序拆出 9 个同文件私有函数
+  （`startup_config`、`ensure_theme_dir`、`activate_startup_theme`、`startup_panel_manager`、
+  `startup_ui_state`、`startup_workbench` + `application_config_from`、
+  `apply_persisted_panel_settings`、`rewrite_config_if_migrated`），没重排任何副作用 ——
+  主题与字体仍在前两条，往 bus 发配置损坏日志的三条分支仍在 `bus` 建好之后，
+  回填面板设置 → `refresh_ports()` → 迁移回写配置的顺序原样保留。
+  **启动顺序这件事以前没有任何东西守**（`new` 要 `eframe::CreationContext`，无头环境构造不出来），
+  本波补了 `crates/app/tests/startup_order.rs`：把 `new` 体内 14 个步骤的先后与"各出现一次"按字面钉住，
+  另加一条防空转的断言（步骤被整段搬出 `new` 时也会红）。实测它抓得住：把
+  `ensure_theme_dir()` 提前到 `startup_config()` 之前，用例立刻报
+  「启动步骤次序被改」，还原后回绿。字面量审计：`app/mod.rs` 的 16 条字符串、9 条数字字面量
+  与 HEAD 多重集一致，两条注释只是从 `//` 升为 `///`。
+- 更正一条已经与代码不符的架构结论（文档，不改行为）：`docs/ARCHITECTURE.md` 第 12 条「仍留 ③」
+  原写 `TransportCapabilities` "两侧都不被读取"。实测共享串口面板读它 7 处、覆盖 5 个能力位；
+  真实的不对称是 native 把交给面板的那份能力写成字面量，而后端上报的 `capabilities()` 在 native
+  不参与 UI。同一轮里核过的另两条（web 仍显示英文 `TransportError` 文案、`webserial:session:N`
+  仍被生成）确认仍然成立，未改文。改后的表述一律写成可复核的 grep 形式。
 
 ### 修复
 
