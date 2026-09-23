@@ -637,6 +637,21 @@ mod tests {
         assert_eq!(bus.history_len(), 3);
     }
 
+    /// 不匹配的事件**一点都不许进**这份 backlog：条数与字节都得是 0。
+    /// 为什么单独一条：上面那条 `assert!(sub.queued_bytes() > 0)` 分不出"过滤生效"和
+    /// "过滤失效、但字节恰好算成 0"，而真正会咬人的回归恰恰是给没订阅的事件也计费 ——
+    /// 背压告警、`subscriber_queued_bytes` 与 `seconds_behind` 全部读这两个计数器。
+    #[test]
+    fn lossless_subscriber_does_not_charge_for_unmatched_events() {
+        let bus = DataBus::new();
+        let sub = bus.subscribe_lossless(TopicFilter::prefix("transport.serial."));
+        bus.publish(ev("log.system"));
+        bus.publish(ev("ui.render"));
+        assert_eq!(sub.queued_len(), 0, "不匹配的事件不该进队列");
+        assert_eq!(sub.queued_bytes(), 0, "不匹配的事件不该计费");
+        assert!(sub.drain().is_empty(), "drain 也不该捞出不匹配的事件");
+    }
+
     #[test]
     fn lossless_subscriber_receives_matching_events() {
         let bus = DataBus::new();

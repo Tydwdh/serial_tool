@@ -5,6 +5,17 @@
 ## [Unreleased]
 
 ### 调整
+- **不匹配的事件一点都不许进 backlog：给背压计数器补一条会红的判据（第 56 轮）**
+
+  （**只动 `crates/databus/src/lib.rs` 的 `mod tests`**，生产部分逐字节等于 HEAD：整文件相对 HEAD 只多 948 字节，全在那一条新用例里。）压力门禁里那条
+  `lossless_subscriber_receives_matching_events` 对字节的判据是 `assert!(sub.queued_bytes() > 0)`，
+  它分不出"过滤生效"与"过滤失效但字节恰好算成 0"，而真正会咬人的回归恰恰是**给没订阅的事件也计费**
+  （`queued_bytes` 与 `queued_events` 是背压告警、`subscriber_queued_bytes` 与 `seconds_behind` 的读数来源）。
+  新增一条只喂不匹配事件的用例，钉住条数、字节、`drain()` 三项全为 0。
+  **红证明**：把 `publish` 里的过滤判定改成恒不跳过（等价于"所有事件都入队"）⇒ 新用例红，
+  既有用例同时红（不是只有它在响）；`error[` 计数 0 ⇒ 不是编译错的假红；变异后逐字节还原、复跑绿。
+  本机：`cargo test -p tool-databus --lib lossless` 基线与还原后 EXIT=0，
+  `cargo fmt --all --check` 与 `cargo clippy -p tool-databus --all-targets -- -D warnings` EXIT=0。
 
 - **两端插件 Lua API 第一次被同一份脚本对齐：新增差分用例（第 55 轮）**
   （新增 `crates/plugin_runtime/tests/lua_api_parity.rs`（12 条"脚本 → 期望值"片段 + 4 条用例）与
