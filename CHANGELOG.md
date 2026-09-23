@@ -22,11 +22,24 @@
   `error[` 计数 0 ⇒ 不是编译错的假红 ⇒ 这道保护确实被用例驱动着。
   **顺带**：`headless.rs` 两条收尾预算循环此前走完就直接 `remove_dir_all`（`break` 有条件但没人对结果负责，
   后台线程没收割干净用例照样绿），补成同文件姊妹形状（`reenabled` / `window_closed`）那条带消息的
-  `assert!`；这两处判据靠"条件满足"退出，实测空载背靠背 3 条用例 ×10 轮 = **30/30 通过、0 次空跑**。
-  **如实记下的两处没做到**：① web 那半边只有编译与形状能保（`application/web.rs` 是
-  `#[cfg(target_arch = "wasm32")]`，本仓没有 `wasm_bindgen_test`，行为层面测不到）；
-  ② 那条新用例整例耗时稳定在 **3.01~3.02s**，而它内部每段 200×5ms 预算实际用掉几成，本轮没单独量 ——
-  也就是说"离假红还有多远"这个数还欠着，已记进队列。
+  `assert!`；这两处判据靠"条件满足"退出。**负载实测分两层报**：批次 A 那两条 200×5ms 收尾断言在
+  hog=cpu×4 与 churn×6 下各 **0/8** 红，主代理自己空载背靠背 3 条用例 ×10 轮 **30/30**；
+  新增那条重连用例的三段等待不是 200×5ms 而是 `const BUDGET = 30s`（同文件
+  `disconnecting_a_port_that_will_not_finish_closing_reports_chinese` 用的同一个数），满载 mean 9.2s / max 11.8s。
+  仍然**只欠一个数**：一次通过的收尾循环实际吃掉 200 次里的几成（0/16 只说明"没红"，说明不了余量）—— 记在队列里。
+  **交付里还有半件我上一版没写**：删掉 web 侧三个零调用者的函数（`task_snapshots`、
+  `replay_set_analyzer_warning`、`replay_clear_analyzer_messages`）—— "零调用者"由编译本身证明（wasm clippy
+  门禁 EXIT=0，删的是唯一那份生产者，native 同名函数与它的调用链一个字没动）。
+  **由此量出第 12 条待拍板**（先前就在，不是本轮造成的）：`ReplayState.analyzer_warning` 这个字段在浏览器侧
+  **根本没有生产者** —— 面板照读（`panels/src/replay.rs` 的 `if let Some(warning) = &status.analyzer_warning`）、
+  web 照转（`application/src/web.rs:650`），但唯一能写它的那个 web setter 从来没人调用；native 在
+  `replay_task.rs:239-246` 会因"部分事件重放失败"写出 warning 加一条 Warn 状态行，浏览器里同样的结果
+  一个字都不提示。补它=新增用户可见行为，归用户拍板，**别当死代码继续删**（这次删的是零调用者的那份，
+  不是这条回路）。
+  **如实记下的没做到处**：web 那半边的运行期行为只有编译与形状能保（`application/web.rs` 是
+  `#[cfg(target_arch = "wasm32")]`，本仓没有 `wasm_bindgen_test`）；新增的"登记前先取消上一个"在浏览器里
+  有一个可感后果（第二个连接会瞬时被取消，其 `TaskCancelled` 事件会把 `view.connecting` 置回 false 并写
+  "任务已取消"，直到新任务自己的事件到达）—— 这是补这道保护的固有代价，需要浏览器核实，已并入 #14 那条待核实。
   五道门整包复跑全 EXIT=0（fmt / 整包 clippy `-D warnings` / wasm clippy / 整包 test / Pressure gates）。
 
 - **`translate_error` 的三条 `!is_empty()` 换成有区分力的判据，并补上从未被驱动的两格（第 53 轮）**
