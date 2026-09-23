@@ -743,6 +743,9 @@ fn plugin_enable_disable_transitions_state_and_rejects_unknown_ids() {
     // 这个预算循环此前走完就直接 `remove_dir_all`：`break` 有条件，但没人对结果负责，
     // 后台收割没完成时用例照样绿。补上同文件姊妹形状（`reenabled` / `window_closed`）
     // 那条带消息的 `assert!`，让「200×5ms 用完」成为一次响亮的红。
+    // 200 这个预算有依据（`target/r56-budget.py` 打点量的实际迭代数）：这条循环空闲与
+    // cpu×4、churn×6 负载下都是**第 1 次迭代就满足**，离用满还差着 200 倍 —— 也就是说
+    // 它红的时候几乎只会是"真没收割干净"，不是"机器慢"。
     let mut harvested = false;
     for _ in 0..200 {
         wb.process_plugin_lifecycle();
@@ -1176,6 +1179,9 @@ fn plugin_restart_handoff_relies_on_the_stopping_predicate() {
         },
     );
     // 同上：`break` 有条件但此前没人对结果负责，停机窗口没关掉时用例照样绿。
+    // 这条比上面那条吃负载（要等停机窗口自己关掉）：实测一次通过用掉的迭代数是
+    // 空闲 2、cpu×4 最坏 13、churn×6 最坏 34（`target/r56-budget.py`）⇒ 200 还有约 6 倍余量，
+    // 真逼近预算时该改的是负载口径而不是悄悄抬数字。
     let mut harvested = false;
     for _ in 0..200 {
         wb.process_plugin_lifecycle();
