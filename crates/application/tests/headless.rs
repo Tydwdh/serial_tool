@@ -739,15 +739,28 @@ fn plugin_enable_disable_transitions_state_and_rejects_unknown_ids() {
     );
 
     // 收尾：等待运行时退出，不留后台线程与临时目录。
+    //
+    // 这个预算循环此前走完就直接 `remove_dir_all`：`break` 有条件，但没人对结果负责，
+    // 后台收割没完成时用例照样绿。补上同文件姊妹形状（`reenabled` / `window_closed`）
+    // 那条带消息的 `assert!`，让「200×5ms 用完」成为一次响亮的红。
+    let mut harvested = false;
     for _ in 0..200 {
         wb.process_plugin_lifecycle();
         if wb.plugin_state("headless.probe") == Some(PluginStateView::Disabled)
             && wb.take_plugin_cleanup_requests().is_empty()
         {
+            harvested = true;
             break;
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+    assert!(
+        harvested,
+        "插件运行时必须在 200×5ms 内被收割干净（状态回到 Disabled 且清理请求取空），\
+         收尾时实际停在 state={:?}、剩余清理请求 {:?} —— 没收割完不许静默通过",
+        wb.plugin_state("headless.probe"),
+        wb.take_plugin_cleanup_requests()
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1162,13 +1175,24 @@ fn plugin_restart_handoff_relies_on_the_stopping_predicate() {
             plugin_id: probe.to_owned(),
         },
     );
+    // 同上：`break` 有条件但此前没人对结果负责，停机窗口没关掉时用例照样绿。
+    let mut harvested = false;
     for _ in 0..200 {
         wb.process_plugin_lifecycle();
         if !wb.plugin_is_stopping(probe) && wb.take_plugin_cleanup_requests().is_empty() {
+            harvested = true;
             break;
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+    assert!(
+        harvested,
+        "停机窗口必须在 200×5ms 内收完（`plugin_is_stopping` 翻回 false 且清理请求取空），\
+         否则本用例留下一个没退场的运行时线程；收尾时插件停在 state={:?}、剩余清理请求 {:?} \
+         —— 没收割完不许静默通过",
+        wb.plugin_state(probe),
+        wb.take_plugin_cleanup_requests()
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1996,6 +2020,122 @@ fn network_reconnect_takes_the_network_branch_of_the_loop() {
         name,
         "重连成功必须带一个被 `poll_tasks` 落进选中端口的结果，实际: {:?}",
         wb.query_transport().config.port_name
+    );
+}
+
+/// 同一个端口登记第二次重连时，**前一个循环必须先被取消**（规则见
+/// `task_model::cancel_deregistered_task`，四份 web 收尾与 native 共用这一份）。
+///
+/// 为什么这条用例必须在 native：wasm 那半没有测试运行器（全仓零 `wasm_bindgen_test`），
+/// 而缺这道保护的恰恰是 web 的四份连接收尾 —— `insert` 就地覆盖前一个 task 的 id 之后，
+/// 终态快照上的清理按 id 比对认不出它，只有 `Connected` / `Disconnected` 会按端口摘除，
+/// 于是那个循环再也停不下来。规则收成一份之后，只有这里能驱动它，所以这份保护的红利
+/// （漏改任一调用点立刻红）全靠本用例。
+///
+/// 驱动手段沿用本文件的「关不掉的 worker」：对端收下并读掉 WebSocket 握手后永不回话，
+/// 平台后端那句 `disconnect` 就会堵满自己的超时预算 —— 前一个重连因此**真的还活着**，
+/// 取消才不是一句空话（步骤①那条断言就是钉这个前提的）。
+#[test]
+fn reconnecting_the_same_port_twice_cancels_the_first_loop() {
+    // 队列轮到它、那条 3 秒关闭超时走完，各给一次预算。依据是实测：96 个忙等进程下本用例
+    // 整体 mean 9.2s / max 11.8s（那 3 秒被放大到约 3 倍），与本文件
+    // `disconnecting_a_port_that_will_not_finish_closing_reports_chinese` 用的是同一个 30s。
+    const BUDGET: Duration = Duration::from_secs(30);
+
+    let (addr, parked) = parked_websocket_server();
+    let bus = DataBus::new();
+    let mut wb = Workbench::new(bus);
+    let name = register_network_port(&mut wb, "127.0.0.1", addr.port());
+    park_a_network_worker(&mut wb, &name, &parked);
+    // 注销之后这个名字落到平台后端那条出口（`block_on_transport(backend.disconnect(..))`），
+    // 重连循环因此会在那里堵满 3 秒 —— 网络分支的 `open_network_serial` 是立即返回的，
+    // 用它就观察不到「前一个还在跑」这个前提。
+    expect_done(
+        &mut wb,
+        AppCommand::RemoveNetworkPort {
+            port: PortId::new(name.clone()),
+        },
+    );
+
+    let first = expect_pending(
+        &mut wb,
+        AppCommand::Reconnect {
+            port: PortId::new(name.clone()),
+        },
+    );
+    let started = tick_until(&mut wb, BUDGET, |wb| {
+        task_state(wb, first) == Some(TaskState::Running)
+    });
+    assert!(
+        started,
+        "第一次重连必须在 {BUDGET:?} 内跑进那条堵住的关闭里，实际: {:?}",
+        task_state(&wb, first)
+    );
+
+    let second = expect_pending(
+        &mut wb,
+        AppCommand::Reconnect {
+            port: PortId::new(name.clone()),
+        },
+    );
+    // ① 前提仍然成立：登记第二个的这一刻，第一个还没结束（否则「取消前一个」无从谈起）。
+    assert!(
+        matches!(
+            task_state(&wb, first),
+            Some(TaskState::Pending) | Some(TaskState::Running)
+        ),
+        "登记第二个重连时前一个必须还活着，实际: {:?}",
+        task_state(&wb, first)
+    );
+    // ② 第二个必须真的被登记上（它排在同一个 `serial:{端口}` 队列里，此时还是 Pending）。
+    assert!(
+        matches!(
+            task_state(&wb, second),
+            Some(TaskState::Pending) | Some(TaskState::Running)
+        ),
+        "第二个重连循环必须被登记，实际: {:?}",
+        task_state(&wb, second)
+    );
+
+    let ended = tick_until(&mut wb, BUDGET, |wb| {
+        matches!(
+            task_state(wb, first),
+            Some(TaskState::Completed | TaskState::Failed | TaskState::Cancelled)
+        )
+    });
+    assert!(
+        ended,
+        "被取消的前一个循环必须在 {BUDGET:?} 内落终态（它堵在关闭超时里），实际: {:?}",
+        task_state(&wb, first)
+    );
+    // ③ 这一句才是本用例的全部意义：前一个循环是**被取消**的，不是自己跑完的。
+    // 把 `start_reconnect` 里那道保护换成 web 此前那份裸 `insert`，这里会读到 Failed
+    // （端口根本打不开的那句超时），用例立刻红。
+    assert_eq!(
+        task_state(&wb, first),
+        Some(TaskState::Cancelled),
+        "同一端口第二次登记必须先取消前一个循环，实际: {:?} / 句串 {:?}",
+        task_state(&wb, first),
+        task_message(&wb, first)
+    );
+    // ④ 被取消的必须是前一个：新起的循环不能一起被取消。
+    assert_ne!(
+        task_state(&wb, second),
+        Some(TaskState::Cancelled),
+        "取消只能落在被顶替的前一个任务上，后来的那个循环不得被牵连"
+    );
+
+    // 收尾：等第二个循环自己结束，不给后面的用例留一个还在跑的 worker。
+    let second_ended = tick_until(&mut wb, BUDGET, |wb| {
+        matches!(
+            task_state(wb, second),
+            Some(TaskState::Completed | TaskState::Failed | TaskState::Cancelled)
+        )
+    });
+    assert!(
+        second_ended,
+        "第二个循环必须自己走完那条超时，实际: {:?}",
+        task_state(&wb, second)
     );
 }
 

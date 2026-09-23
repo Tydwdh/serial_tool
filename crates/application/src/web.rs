@@ -25,7 +25,9 @@ use crate::replay::{
     ReplayStateView, ReplayStatusView,
 };
 use crate::send_plan::{self, PlannedSend};
-use crate::task_model::{TaskId, TaskSnapshot, TaskState, prune_finished_snapshots};
+use crate::task_model::{
+    TaskId, TaskSnapshot, TaskState, cancel_deregistered_task, prune_finished_snapshots,
+};
 use crate::updater::UpdateStatusView;
 use serde::Deserialize;
 use tool_recorder::{ReplayManager, ReplayPolicy, ReplayTextLoader};
@@ -686,16 +688,6 @@ impl WebApplication {
         self.wake();
     }
 
-    pub fn replay_set_analyzer_warning(&self, warning: String) {
-        self.replay.borrow_mut().set_analyzer_warning(warning);
-        self.wake();
-    }
-
-    pub fn replay_clear_analyzer_messages(&self) {
-        self.replay.borrow_mut().clear_analyzer_error();
-        self.wake();
-    }
-
     pub fn query_recording(&self) -> RecordingStatusView {
         self.recording.borrow().status()
     }
@@ -939,10 +931,6 @@ impl WebApplication {
         self.transport
             .clone()
             .ok_or_else(|| "当前浏览器不支持 Web Serial".to_owned())
-    }
-
-    pub fn task_snapshots(&self) -> Vec<TaskSnapshot> {
-        self.tasks.borrow().snapshots.values().cloned().collect()
     }
 
     pub fn task_is_active(&self, id: TaskId) -> bool {
@@ -1766,9 +1754,10 @@ impl WebApplication {
 
     /// `CancelReconnect`：撤掉重连任务，并对已经在 `open()` 里的连接补发一次显式断开。
     fn cancel_reconnect(&self, port: PortId) -> Result<CommandOutcome, String> {
-        if let Some(task_id) = self.reconnect_tasks.borrow_mut().remove(&port) {
+        let previous = self.reconnect_tasks.borrow_mut().remove(&port);
+        cancel_deregistered_task(previous, |task_id| {
             let _ = self.cancel_task(task_id);
-        }
+        });
         self.set_transport_status(format!("已取消重连 {port}"));
 
         // A Promise that is already inside `open()` cannot be
@@ -1878,6 +1867,31 @@ impl WebApplication {
         })
     }
 
+    /// 四份连接/重连收尾的**唯一一处**：先取消该端口上已挂着的那个任务，再登记新的 id，
+    /// 最后把 `Pending` + 用户可见的那句话交回调用方。
+    ///
+    /// 「先取消上一个」与 native 的 `start_reconnect` 走同一条规则
+    /// （`task_model::cancel_deregistered_task`，理由写在那儿）；表本身留在这一侧，
+    /// 因为 native 的键是 `String`、这里的是 `PortId`，两端 `TaskManager` 也不同型。
+    /// 少了这道保护会怎样：`insert` 就地覆盖前一个 id，此后只有 `Connected` /
+    /// `Disconnected` 会按端口摘除，同一端口连点两次连接就留下一个没人能停的循环。
+    fn register_reconnect_task(
+        &self,
+        port: PortId,
+        task_id: TaskId,
+        message: &str,
+    ) -> CommandOutcome {
+        let previous = self.reconnect_tasks.borrow_mut().remove(&port);
+        cancel_deregistered_task(previous, |task_id| {
+            let _ = self.cancel_task(task_id);
+        });
+        self.reconnect_tasks.borrow_mut().insert(port, task_id);
+        CommandOutcome::Pending {
+            task_id,
+            message: message.to_owned(),
+        }
+    }
+
     /// `Connect`：记住本次串口参数；已注册的网络端口交给 `connect_network`，其余走 Web Serial。
     fn connect(
         &self,
@@ -1930,13 +1944,7 @@ impl WebApplication {
             },
             move |_, _| WebAppEvent::Connected { port: task_port },
         );
-        self.reconnect_tasks
-            .borrow_mut()
-            .insert(reconnect_port, task_id);
-        Ok(CommandOutcome::Pending {
-            task_id,
-            message: "正在打开串口".to_owned(),
-        })
+        Ok(self.register_reconnect_task(reconnect_port, task_id, "正在打开串口"))
     }
 
     /// `Reconnect`：用已记住的串口参数重连；已注册的网络端口交给 `reconnect_network`。
@@ -1988,13 +1996,7 @@ impl WebApplication {
             },
             move |_, _| WebAppEvent::Connected { port: task_port },
         );
-        self.reconnect_tasks
-            .borrow_mut()
-            .insert(reconnect_port, task_id);
-        Ok(CommandOutcome::Pending {
-            task_id,
-            message: "正在重连串口".to_owned(),
-        })
+        Ok(self.register_reconnect_task(reconnect_port, task_id, "正在重连串口"))
     }
 
     /// `Disconnect`：按端口名单把关闭动作分到网络串口或 Web Serial 的任务上。
@@ -2175,13 +2177,7 @@ impl WebApplication {
             },
             move |_, _| WebAppEvent::Connected { port: task_port },
         );
-        self.reconnect_tasks
-            .borrow_mut()
-            .insert(reconnect_port, task_id);
-        Ok(CommandOutcome::Pending {
-            task_id,
-            message: "正在连接网络串口".to_owned(),
-        })
+        Ok(self.register_reconnect_task(reconnect_port, task_id, "正在连接网络串口"))
     }
 
     fn reconnect_network(
@@ -2223,13 +2219,7 @@ impl WebApplication {
             },
             move |_, _| WebAppEvent::Connected { port: task_port },
         );
-        self.reconnect_tasks
-            .borrow_mut()
-            .insert(reconnect_port, task_id);
-        Ok(CommandOutcome::Pending {
-            task_id,
-            message: "正在重连网络串口".to_owned(),
-        })
+        Ok(self.register_reconnect_task(reconnect_port, task_id, "正在重连网络串口"))
     }
 }
 

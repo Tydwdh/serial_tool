@@ -6,6 +6,29 @@
 
 ### 调整
 
+- **同一端口连点两次连接，前一个循环会永久失主 —— 两端"登记前先取消上一个"这条规则现在只有一份（第 52 轮）**
+  （动 `crates/application/src/{task_model,workbench,web}.rs` 与 `crates/application/tests/headless.rs`；
+  不改公共 API、不改 serde 字段。native 早有这道保护，**web 的四份连接/重连收尾没有**：
+  `reconnect_tasks` 那张表被 `insert(port, id)` 就地覆盖后，那个被盖掉的 id **再没有任何地方能点名取消**
+  —— 终态快照的清理按 id 比对（`retain(|_, id| *id != snapshot.id)`）认不出它，只有
+  `Connected` / `Disconnected` 会按端口 `remove` ⇒ 用户看到的是同一端口上多了一个停不掉的后台循环。）
+  **做法**：把"要不要动手、动谁"这一格收成 `task_model::cancel_deregistered_task(Option<TaskId>, impl FnOnce)`，
+  两端各自的容器（native `HashMap<String, TaskId>` + `TaskManager::cancel`，web
+  `Rc<RefCell<BTreeMap<PortId, TaskId>>>` + `WebApplication::cancel_task`）连键类型都不同，
+  所以**摘出来与存回去仍留在调用点**，只共用这一句判定 —— 这是本轮唯一新增的抽象，它服务的是一份
+  跨端规则而不是"将来可能有用"。web 侧新增 `register_reconnect_task` 承接四份收尾的重复段。
+  **红证明**（`target/r54-verify.py`，基线→变异→逐字节还原→复跑）：把该函数改成空操作（`let _ = registered;`）
+  ⇒ 新用例 `reconnecting_the_same_port_twice_cancels_the_first_loop` 红在 `headless.rs:2114`，
+  `error[` 计数 0 ⇒ 不是编译错的假红 ⇒ 这道保护确实被用例驱动着。
+  **顺带**：`headless.rs` 两条收尾预算循环此前走完就直接 `remove_dir_all`（`break` 有条件但没人对结果负责，
+  后台线程没收割干净用例照样绿），补成同文件姊妹形状（`reenabled` / `window_closed`）那条带消息的
+  `assert!`；这两处判据靠"条件满足"退出，实测空载背靠背 3 条用例 ×10 轮 = **30/30 通过、0 次空跑**。
+  **如实记下的两处没做到**：① web 那半边只有编译与形状能保（`application/web.rs` 是
+  `#[cfg(target_arch = "wasm32")]`，本仓没有 `wasm_bindgen_test`，行为层面测不到）；
+  ② 那条新用例整例耗时稳定在 **3.01~3.02s**，而它内部每段 200×5ms 预算实际用掉几成，本轮没单独量 ——
+  也就是说"离假红还有多远"这个数还欠着，已记进队列。
+  五道门整包复跑全 EXIT=0（fmt / 整包 clippy `-D warnings` / wasm clippy / 整包 test / Pressure gates）。
+
 - **`translate_error` 的三条 `!is_empty()` 换成有区分力的判据，并补上从未被驱动的两格（第 53 轮）**
   （**只动 `crates/transport/src/lib.rs` 的 `mod tests`**，生产代码零改动：`translate_error` 本体一行未改，
   新用例只是把已有行为钉住。）原来那条叫 `translate_error_covers_all_variants` 的用例，对 `NoOpenPort` /

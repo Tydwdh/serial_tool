@@ -18,6 +18,7 @@ use crate::query::{
 };
 use crate::send_plan::{self, PlannedSend};
 use crate::task::{AppEvent, TaskContext, TaskId, TaskManager, TaskResult, TaskSnapshot};
+use crate::task_model::cancel_deregistered_task;
 
 #[derive(Debug, Clone)]
 pub struct ApplicationConfig {
@@ -831,9 +832,10 @@ impl Workbench {
             .find_network_port(&port_name)
             .map(NetworkPortConfig::display_name)
             .unwrap_or(port_name);
-        if let Some(task_id) = self.reconnect_tasks.remove(&port_name) {
+        let previous = self.reconnect_tasks.remove(&port_name);
+        cancel_deregistered_task(previous, |task_id| {
             self.tasks.cancel(task_id);
-        }
+        });
         // 网络连接中也通过统一任务模型关闭，避免 CancelReconnect 在 UI 线程
         // 直接触碰 transport 生命周期。
         if self.transport.status_port(&port_name).connecting {
@@ -1177,9 +1179,11 @@ impl Workbench {
             Some(config) => config.display_name(),
             None => port_name,
         };
-        if let Some(previous) = self.reconnect_tasks.remove(&port_name) {
-            self.tasks.cancel(previous);
-        }
+        // 登记前先取消该端口上已挂着的那个循环，规则与理由见 `cancel_deregistered_task`。
+        let previous = self.reconnect_tasks.remove(&port_name);
+        cancel_deregistered_task(previous, |task_id| {
+            self.tasks.cancel(task_id);
+        });
 
         let network = registered.map(|config| tool_transport::NetworkSerialConfig {
             host: config.host,

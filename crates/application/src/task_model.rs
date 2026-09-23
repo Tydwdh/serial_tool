@@ -47,6 +47,28 @@ pub(crate) fn prune_finished_snapshots(snapshots: &mut BTreeMap<TaskId, TaskSnap
     }
 }
 
+/// 从「端口 -> 任务」表里摘下来的 id 统一走这里：有就取消，没有就什么都不做。
+///
+/// 为什么这道保护必须有：登记重连/连接任务就是往表里 `insert(port, task_id)` —— 不先取消
+/// 表上原有的那一个，它的 id 会被**就地覆盖**，此后没有任何地方还能点名取消它：终态快照上
+/// 的清理按 id 比对（`retain(|_, id| *id != snapshot.id)`），认不出那个已经被盖掉的值；
+/// 只有 `Connected` / `Disconnected` 会按端口 `remove`。于是同一端口连点两次连接，
+/// 前一个循环就永久失主。
+///
+/// 为什么只收这一步：native 的容器是 `HashMap<String, TaskId>` + `TaskManager::cancel`，
+/// web 的是 `Rc<RefCell<BTreeMap<PortId, TaskId>>>` + `WebApplication::cancel_task`，
+/// 两边连键类型都不同；把 remove/insert 也收进来就要泛型或 trait。所以「摘出来」与「存回去」
+/// 留在各自调用点（那里同时管规范名），**决定要不要动手、动谁**只有这一份。
+/// web 的四份连接/重连收尾经 `WebApplication::register_reconnect_task` 调它，
+/// native 的 `start_reconnect` / `cancel_reconnect` 直接调它，
+/// 由 `crates/application/tests/headless.rs::reconnecting_the_same_port_twice_cancels_the_first_loop`
+/// 驱动。
+pub(crate) fn cancel_deregistered_task(registered: Option<TaskId>, cancel: impl FnOnce(TaskId)) {
+    if let Some(registered) = registered {
+        cancel(registered);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
