@@ -6,6 +6,36 @@
 
 ### 调整
 
+- **两端插件 Lua API 第一次被同一份脚本对齐：新增差分用例（第 55 轮）**
+  （新增 `crates/plugin_runtime/tests/lua_api_parity.rs`（12 条"脚本 → 期望值"片段 + 4 条用例）与
+  `crates/plugin_runtime/Cargo.toml` 的 `[dev-dependencies]` 三条边；**生产代码只改了一处文档注释**，
+  没加 trait / 泛型 / 宏 / 新 crate，没动公共 API 与 serde 结构，三份 app 守卫一字未动。）
+  native 走 `crates/lua_host`（mlua）、浏览器走 `crates/plugin_runtime/src/web_lua.rs`（纯 Rust omniLua），
+  两边各自往 VM 上注册一组 `hw.*` / `ctx.*` —— 本轮之前**没有任何一条用例钉住"同一份脚本两端结果相同"**，
+  而这正是插件作者实际依赖的性质。用例形状：脚本自己算出可判定的值（回传常量、算术、比字符串长度、
+  数注册条目），不依赖墙钟、串口与协程。
+  **它现在测得到的原因**（值得记，因为我自己此前记成"测不到"）：`web_lua.rs` **全文件零 `cfg` 属性**
+  ⇒ 宿主平台直接编得过，`cargo test` 覆盖得到浏览器那半边；而该文件的模块文档原话是"本模块故意做了
+  target 限定"，**与事实相反**（同仓另一处 `crates/application/src/web.rs` 才是真被 `cfg(wasm32)` 限定的）——
+  已按事实改掉，并把"为什么不限定"的理由写进去：一旦限定，浏览器半边就退化成"只有 wasm clippy 在看"，
+  两端分叉再也抓不到。
+  **红证明（五个变异，逐个 `cmp` 还原 + 强制重建）**：M1 期望值全体加后缀 → 12 条全红（消息区分"两端一致
+  但得出的不是声明的期望值"）；M2 web 侧改名 `ctx.bus.subscribe` / `ctx.serial.expect` → 红在
+  `bus_exposes_the_same_function_names`、`serial_exposes_the_same_function_names`（消息直接打印两端串差）；
+  M3 native 语义漂移三处（`storage` set 多写一字符 / keys 多报一键、`commands` 删掉缺参守卫）→ 红在
+  对应三条；M4 web `hw.codec.xor8` 末位取反 → 红在 `codec_module_require_and_xor8_fold`；
+  M5 web `ctx.ui` 名表改名 → 红在 `ui_exposes_the_same_function_names`。
+  **立场：差分测试只钉"确实一致"的部分。** 它一次量出 **12 处两端分叉**（`ctx.plugin`/`ctx.context` 三个
+  装配点两种形状、`ctx.bus.wait` 在浏览器里顶层必失败、`hw.codec`/`hw.utils` 实际是两个不同的模块 ⇒
+  `from_hex`/`crc16_modbus` 在浏览器里是 nil、`format_size` 单位词 `KB` vs `KiB` 等，逐条带行号记在 #84）。
+  这些**故意没写成绿用例** —— 把现状钉住等于把分叉固化；收敛任一条都会改变插件脚本行为，归用户拍板。
+  也**没有**为跑通而放宽判据：0 处 `#[ignore]`、0 处恒真断言，`ctx.task` / `ctx.config` / `ctx.dialog` /
+  `ctx.fs` / `ctx.now_ms` / `ctx.serial` 的 read-expect 路径驱动不了这件事写进了新文件的模块文档，
+  免得后人再往里塞假绿用例。
+  五道门全 EXIT=0（fmt / 整包 clippy `-D warnings` / wasm clippy / 整包 test / Pressure gates；文档改动之后
+  又单独复跑 `cargo fmt --all --check` 与 `clippy -p tool-plugin-runtime --all-targets`，各 EXIT=0），
+  整包用例实测 **740 → 744**（+4 条差分用例），0 failed / 7 ignored。
+
 - **命令面板的"最近使用"两端终于用同一个键；native 那两份逐字相同的端口条目投影收成一份（第 54 轮）**
   （动 `crates/app/src/{config.rs,ui/command_palette.rs,ui/mod.rs,ui/top_bar.rs,ui/device_panel.rs,web/mod.rs}`
   与 `crates/app/tests/architecture.rs`，净 `+304 / −75`；**serde 字段名与属性一字未动**，不加 trait / 泛型 /

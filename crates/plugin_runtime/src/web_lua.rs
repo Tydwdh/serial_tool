@@ -1,9 +1,11 @@
 //! Pure-Rust Lua engine for the browser.
 //!
-//! This module is intentionally target-gated: Native keeps the mature mlua
-//! runtime while the browser uses omniLua, which has no C/FFI dependency and
-//! can be built for `wasm32-unknown-unknown`. Both engines expose the same
-//! `PluginValue`/`PluginHostApi` protocol.
+//! 这里**故意不加 target 限定**（全文件零 `cfg` 属性）：它用的是纯 Rust 的 omniLua，
+//! 没有 C/FFI 依赖，同一份源码既能进 `wasm32-unknown-unknown` 构建，也能在宿主平台直接编译
+//! ⇒ `cargo test` 覆盖得到它。第 55 轮那套"同一份 Lua 脚本喂两端"的差分用例
+//! （`crates/plugin_runtime/tests/lua_api_parity.rs`）就是靠这一点跑起来的：把它 cfg 限定掉，
+//! 浏览器那半边就退化成"只有 wasm clippy 在看"，两端 API 的分叉再也抓不到。
+//! Native 仍走成熟的 mlua 运行时，两边共用 `PluginValue`/`PluginHostApi` 协议。
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};

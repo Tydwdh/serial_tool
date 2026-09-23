@@ -20,3 +20,11 @@ regex = "1"
 # 纯 Rust Lua VM：既用于浏览器，也在桌面测试里跑同一份实现，
 # 因此不做 wasm 限定，让 `cargo test` 能在宿主平台上覆盖它。
 omnilua.workspace = true
+
+# 只给 `tests/lua_api_parity.rs` 用的测试边：那份差分用例要把同一段 Lua 同时喂给
+# 两端引擎，native 侧的 mlua 只在 `tool-lua-host` 里有，而它的 `run_script_for_test`
+# 需要一对一次性的总线/传输。生产依赖面没有因此变宽。
+[dev-dependencies]
+tool-databus = { path = "../databus" }
+tool-lua-host = { path = "../lua_host" }
+tool-transport = { path = "../transport" }

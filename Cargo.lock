@@ -4792,8 +4792,11 @@ dependencies = [
  "omnilua",
  "regex",
  "serde_json",
+ "tool-databus",
+ "tool-lua-host",
  "tool-platform",
  "tool-plugin-api",
+ "tool-transport",
 ]
 
 [[package]]
