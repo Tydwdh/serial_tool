@@ -273,7 +273,22 @@ mod tests {
     #[test]
     fn builtin_ids_are_unique_and_prefixed() {
         let ids = builtin_ids();
-        assert!(!ids.is_empty());
+        // 原来这里只有 `assert!(!ids.is_empty())`。"非空 + 去重 + 都带 $ 前缀"这三条在注册表
+        // **悄悄少注册了一批命令**时全部照绿（少一条仍然非空、仍然唯一、仍然带前缀），
+        // 而用户看到的就是命令面板与快捷键表里少掉几项。点名几个承重命令，丢注册就红在这里。
+        for required in [
+            CMD_COMMAND_PALETTE,
+            CMD_OPEN_PORT,
+            CMD_RECONNECT_PORT,
+            CMD_CLEAR_TERMINAL,
+            CMD_ADD_BOOKMARK,
+        ] {
+            assert!(
+                ids.iter().any(|id| id == required),
+                "内置命令 {required} 不在册：它会从菜单与快捷键表里静默消失（当前在册 {} 条）",
+                ids.len()
+            );
+        }
         let mut sorted = ids.clone();
         sorted.sort();
         sorted.dedup();
