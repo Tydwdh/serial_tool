@@ -6,7 +6,18 @@
 
 ### 调整
 
-- **内置命令注册表：把"非空"判据换成"承重命令必须在册"（第 57 轮）**
+- **内置命令标题：把"全都非空"换成逐条判据 + "不许是纯 ASCII"（第 58 轮）**
+  （**只动 `crates/app/src/command_registry.rs` 的 `mod tests`**，生产部分逐字节等于 HEAD。）
+  原来那条 `assert!(titles.iter().all(|t| !t.is_empty()))` 两头都松：只剩空格的标题照样过，真红了也说不出是哪条命令。
+  改成逐条判（消息点名 id），并补上"内置标题是中文正文"这一格 —— 判据用 `!is_ascii()`，
+  与本仓既有的本地化标签用例同形（`crates/panels/src/plugins.rs` 的状态标签就这么判），
+  **不为此再造第二份"含 CJK"的 helper**（第 53 轮那份留在 transport 测试里，两处各写一份就成了新的重复）。
+  **红证明**：把切换右侧边栏那条的标题换成 `Toggle Right Dock` ⇒ 新判据红并点名该命令，
+  而**旧的 all() 在它下面必然全绿**（英文也非空）；`error[` 计数 0，变异逐字节还原后复跑 EXIT=0。
+  本机：该用例基线与还原后 EXIT=0，`cargo fmt --all --check` 与
+  `clippy -p hardware-workbench-app --all-targets -D warnings` 各 EXIT=0。用例数不变（745）。
+
+：把"非空"判据换成"承重命令必须在册"（第 57 轮）**
   （**只动 `crates/app/src/command_registry.rs` 的 `mod tests`**，生产部分逐字节等于 HEAD；提交 `c01efe4`，
   本条是它欠的 CHANGELOG 条目 —— 那个提交的信息里还写了"顺带补回空行"，其实当时插入脚本因引号问题根本没跑成，
   空行是这一次才真正补回的。）

@@ -306,7 +306,24 @@ mod tests {
     fn builtin_titles_are_unique_and_nonempty() {
         let registry = CommandRegistry::builtin();
         let titles: Vec<String> = registry.all().iter().map(|c| c.title.clone()).collect();
-        assert!(titles.iter().all(|t| !t.is_empty()));
+        // 原来只有 `titles.iter().all(|t| !t.is_empty())`：一个只剩空格的标题照样过，而且红了也
+        // 说不出是哪条命令。逐条判，并补上"内置标题是中文文案"这一条 —— 判据用 `!is_ascii()`，
+        // 与本仓既有的本地化标签用例同形（`crates/panels/src/plugins.rs` 的状态标签就用它），
+        // 不再新造一份"含 CJK"的helper。
+        for (id, title) in registry
+            .all()
+            .iter()
+            .map(|command| (command.id.clone(), command.title.clone()))
+        {
+            assert!(
+                !title.trim().is_empty(),
+                "内置命令 {id} 的标题是空白：菜单与命令面板会渲染成一条没有字目的项"
+            );
+            assert!(
+                !title.is_ascii(),
+                "内置命令 {id} 的标题 {title:?} 是纯 ASCII：内置文案的契约是中文（第 22、24、25 轮清的就是这类正文）"
+            );
+        }
         let mut sorted = titles.clone();
         sorted.sort();
         sorted.dedup();
