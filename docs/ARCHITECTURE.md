@@ -139,22 +139,29 @@ web 平台的门天然隐形；native 那道 `dead_code` 又因为它被 `tick`/
 
 ## 验证
 
-CI 的 **Windows「Test & Lint」作业**（`.github/workflows/ci.yml`，toolchain 钉 `1.92.0`）实际执行：
+CI 的门禁**分散在三个作业里，一共不止三条命令** —— 别按门的名字推覆盖面，下面每一条都对着 `.github/workflows/ci.yml` 核实过（toolchain 钉 `1.92.0`）。Windows「Test & Lint」作业（`test`）跑：
 
 ```bash
-cargo fmt --all --check                        # 工作区级
+cargo fmt --all --check                                   # 工作区级
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
+cargo test -p tool-panels -p tool-databus -- --ignored     # step 名「Pressure gates」
 ```
+
+- 第四条常被漏：`tool-panels` / `tool-databus` 里那批 `#[ignore]` 用例的断言是**结构性**的（行索引保持完整、无损订阅不丢事件），debug 下就能当回归门禁 ⇒ **改动落在这两个 crate 上就必须连它一起跑**，否则会出现"本机三件套全绿、CI 红"。故意 ignore 的**计时**用例不在这一条里（它们按 `docs/performance.md` 手工 `--release --nocapture` 采集，且这一条刻意只选这两个 crate，免得把 `crates/app` 里依赖安静调度的计时测试拉进 CI）。
+- 「WASM check」作业（`wasm`）：`cargo check --target wasm32-unknown-unknown -p hardware-workbench-app`，以及同 target 的 `cargo clippy -p hardware-workbench-app -- -D warnings`。**原生构建会把 wasm-only 模块整个排除**，所以只跑原生那几条时，`cfg(wasm32)` 里的改动等于没验。
+- Ubuntu「.deb」作业（`linux-deb`）：`cargo check --workspace` → `cargo clippy --workspace --all-targets --exclude hardware-workbench-app -- -D warnings` → 再一条**不带** `--exclude` 的整包 clippy（告警继续打印但不红作业）→ `cargo test --workspace --all-targets`。`--exclude` 的来由见下文「Linux clippy 的 `-D warnings` 缺口」。
 
 本机复跑（`<TOOLCHAIN>` 换成 `+1.92.0` 以对齐 CI）：
 
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --target wasm32-unknown-unknown -p hardware-workbench-app -- -D warnings
 cargo test --workspace --all-targets
-cargo tree -p tool-panels | grep -E '^[├└]── '   # 顶格 = depth-1 直接依赖；用 '^\s*' 会误捕 depth-2+
-cargo tree -p tool-application | grep -i egui    # 0 行
+cargo test -p tool-panels -p tool-databus -- --ignored   # 只在动了这两个 crate 时是硬门
+cargo tree -p tool-panels | grep -E '^[├└]── '           # 顶格 = depth-1 直接依赖；用 '^\s*' 会误捕 depth-2+
+cargo tree -p tool-application | grep -i egui            # 0 行
 ```
 
 注意事项（都是实测结论，别照抄旧写法）：
@@ -308,12 +315,14 @@ cargo tree -p tool-application | grep -i egui    # 0 行
   > 两个版本都**编译零告警通过**，守卫随即红并点名 `alias: &mut selected_group` /
   > `selected_group: &mut alias` 两侧，恢复后回绿。所以结论是：写错**会在调用点源码里自我暴露，
   > 并且被这条形状守卫生效**，不能说成"错误无法表达"。
-  **当前状态（修复后）**：`cargo +1.92.0 fmt --all --check`、
-  `cargo +1.92.0 clippy --workspace --all-targets -- -D warnings`、
-  `cargo +1.92.0 test --workspace --all-targets` 三条均 **exit 0**。
+  **当前状态（修复后）**：判据是本文「验证」一节**按作业列出的那几条门** —— fmt、整包
+  `clippy --workspace --all-targets -- -D warnings`、wasm 那道 clippy、整包测试，**外加**改动落在
+  `tool-panels` / `tool-databus` 时要跑的 `--ignored` 压力门禁。早先这里写作"三条均 **exit 0**"，
+  那是**按门的名字推覆盖面**的说法，留着会误导下一轮：原生构建把 wasm-only 模块整个排除，
+  只跑原生那三条时，`cfg(wasm32)` 里的改动等于没验。
   用例数**不要按这里的数字判断对错**，它每轮都会随新用例增长（写下这一段时是 590，
-  第 10 轮「九处传输错误接中文映射」复核时是 675，`ignored` 一直是 7 条依赖安静调度的计时用例）；
-  判据始终是上面这三条命令的退出码。
+  第 10 轮「九处传输错误接中文映射」复核时是 675，`ignored` 一直是 7 条依赖安静调度的计时用例，
+  它们刻意不进 CI）；判据始终是那些门各自的退出码。
   历史构成（590 = Task 6 落 `send_plan` 前的
   578 + `send_plan` 的 6 条单测，该模块无 `cfg` 门控所以跑在 native 测试目标里
   + Task 6 复审轮的 1 条 `headless.rs` 端口命名形态用例
