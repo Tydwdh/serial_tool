@@ -10,6 +10,12 @@
 //! 都必须被抓到。按声明键做文本/行匹配会漏检前两种合法写法，只读成员清单会漏检最后一种，
 //! 两种情况下本守卫都会静默保持绿色 —— 这些都是实证过的绕过向量，
 //! `manifest_deps.rs` 的元测试逐条钉住它们。
+//!
+//! 本文件还有第二类判定：**源码文本形状守卫**。它只用于钉住
+//! `#[cfg(target_arch = "wasm32")]` 门控的那半边（`src/main.rs` 的 `mod web`）：
+//! native 测试目标根本不编译它，本仓也没有 `wasm_bindgen_test`，运行期无从驱动，
+//! 于是把"两端必须同形"这件事钉在源码文本上。读文件失败一律 panic（路径写错时
+//! 不能退化成零断言），判定前还会去掉整行注释，免得注释里的代码样本把守卫喂成假绿。
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -97,5 +103,122 @@ fn app_manifest_does_not_redeclare_pruned_dependencies() {
     assert!(
         !names.contains("crossbeam-channel"),
         "crates/app 已无 crossbeam-channel 的任何引用，不应重新声明该直接依赖（实际依赖：{names:?}）"
+    );
+}
+
+/// 读一份本 crate 的源码文本（形状守卫的判定对象）。
+///
+/// 读不到必须 panic：`unwrap_or_default()` 会让"路径写错"退化成"文件里没有那条
+/// 写法"，正/负判定同时静默通过。
+fn read_source(relative: &str) -> String {
+    let path = crate_dir().join(relative);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("读取 {} 失败：{error}", path.display()))
+}
+
+/// 去掉整行注释后把所有空白压掉：判定就不再依赖换行与缩进（rustfmt 重排链条会让
+/// 逐行匹配假红），而注释里的代码样本也不会把守卫喂成假绿。
+fn squeezed_code(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .flat_map(|line| line.chars().filter(|ch| !ch.is_whitespace()))
+        .collect()
+}
+
+/// 命令面板的「使用顺序」两端必须同一键空间：命令 id。
+///
+/// 为什么是 id 而不是标题：标题会随插件与改名变，id 不会；而且这个设置项两端都叫
+/// `command_usage_order`（各自存各自的存储），同名却不同键空间就永远对不齐。
+/// web 半边在 native 测试目标里不编译（见文件头），所以这里钉的是源码形状。
+#[test]
+fn palette_usage_order_is_keyed_by_command_id_on_both_ends() {
+    // 写入端两端的形状必须一模一样：命令 id 那个绑定被挪到列表最前。
+    // 判定带分号：只比"前缀"会让 insert(0, command_id.clone().to_uppercase()) 蒙过去。
+    const RECORD_TO_FRONT: &str = "usage_order.insert(0,command_id.clone());";
+
+    let native = squeezed_code(&read_source("src/ui/command_palette.rs"));
+    let web = squeezed_code(&read_source("src/web/mod.rs"));
+    let config = squeezed_code(&read_source("src/config.rs"));
+
+    // 载入侧必须整份赋回：`usage_order` 里认不出的值只是排不到前面，不是脏数据，
+    // 在读入侧按 id 裁剪等于把用户的历史删掉。分号同样不能省 ——
+    // `= cfg.command_usage_order.into_iter().filter(..).collect()` 也得被抓到。
+    assert!(
+        config.contains("usage_order=cfg.command_usage_order;"),
+        "载入配置必须把 command_usage_order **整份**赋回面板状态（找 `usage_order = cfg.command_usage_order;`）"
+    );
+
+    assert!(
+        native.contains("position(|used|used==&entry.id)")
+            && web.contains("position(|id|id==&command.id)"),
+        "排序读取必须拿使用顺序里的字符串比命令 id：\
+         native 要找 `used == &entry.id`，web 要找 `id == &command.id`"
+    );
+    for (end, code) in [("native", &native), ("web", &web)] {
+        assert!(
+            code.contains(RECORD_TO_FRONT),
+            "{end} 端记录使用必须把命令 id 插到最前（找 {RECORD_TO_FRONT}）；\
+             写成标题就是两端键空间又分叉了"
+        );
+    }
+    // 派发出口只有一个值，且就是命令 id：标题再被带出来当键，这条就会红。
+    assert!(
+        native.contains("pending_command=Some(command_id);"),
+        "native 面板派发出去的命令 id 必须就是记录使用的那个值（找 `pending_command = Some(command_id);`）"
+    );
+    for forbidden in [
+        "used==&entry.label",
+        "used==&entry.title",
+        "id==&command.title",
+        "Option<(String,String)>",
+    ] {
+        assert!(
+            !native.contains(forbidden) && !web.contains(forbidden),
+            "命令面板的候选派发/排序不许再把标题（label/title）当使用键，\
+             也不许把 (id, 标题) 成对带出渲染层：发现 {forbidden}"
+        );
+    }
+}
+
+/// native 端口条目投影只准有一份，且就住在 `ui/mod.rs`（顶栏与设备面板都从那儿取）。
+///
+/// 这份映射喂给 tool-panels 的可见判据：`kind == "网络"` 决定"移除网络端口"按钮出不
+/// 出现，`kind` 非空才在 label 后加 ` · 类别`；同一个映射分写两处就会改一处漏一处。
+/// 而它钉不住运行期用例——实测把 `kind` 写空、`pending_reconnect` 写死 false，整包仍
+/// 全绿（那两个面板都要 `&eframe::CreationContext` 才渲染得动），所以只能钉源码形状。
+#[test]
+fn native_port_item_projection_exists_exactly_once() {
+    let dir = crate_dir().join("src/ui");
+    let mut hits: Vec<String> = Vec::new();
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|error| panic!("读取 {} 失败：{error}", dir.display()))
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .collect();
+    entries.sort();
+    assert!(
+        entries.len() >= 3,
+        "src/ui 至少要扫到 3 个源文件，实际 {} 个（扫不到就是判定对象为空）",
+        entries.len()
+    );
+    for path in entries {
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("读取 {} 失败：{error}", path.display()));
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        // 只数真正的字段初始化：`-> SerialPortItem {` 后面跟的是函数体，不是投影。
+        let occurrences = squeezed_code(&text).matches("SerialPortItem{id:").count();
+        for _ in 0..occurrences {
+            hits.push(name.clone());
+        }
+    }
+    assert_eq!(
+        hits,
+        vec!["mod.rs".to_owned()],
+        "native 的 SerialPortItem 投影必须只有一份、且在 src/ui/mod.rs 里；\
+         多出来的名字就是又分家了（顶栏/设备面板请调用 WorkbenchApp::native_port_items）"
     );
 }

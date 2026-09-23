@@ -2,7 +2,7 @@ use eframe::egui;
 use egui_material_icons::icons::{ICON_CANCEL, ICON_FIBER_MANUAL_RECORD, ICON_REFRESH, ICON_STOP};
 use std::collections::BTreeMap;
 use tool_panels::design::{self, ButtonKind};
-use tool_panels::{SerialPanel, SerialPortItem, SerialTopBarAction, SerialTopBarView, theme};
+use tool_panels::{SerialPanel, SerialTopBarAction, SerialTopBarView, theme};
 
 use crate::app::WorkbenchApp;
 use crate::state::StatusLevel;
@@ -10,26 +10,7 @@ use crate::state::StatusLevel;
 impl WorkbenchApp {
     pub(super) fn top_bar(&mut self, ui: &mut egui::Ui) {
         let selected_before = self.serial.selected_port.clone();
-        let ports: Vec<SerialPortItem> = self
-            .serial
-            .ports
-            .iter()
-            .map(|port| {
-                let status = self.workbench.transport_status(&port.port_name);
-                SerialPortItem {
-                    id: port.port_name.clone(),
-                    label: port.port_name.clone(),
-                    kind: port.port_type.to_string(),
-                    open: status.open,
-                    connecting: status.connecting,
-                    pending_reconnect: self
-                        .serial
-                        .pending_reconnect
-                        .as_ref()
-                        .is_some_and(|pending| pending.port_name == port.port_name),
-                }
-            })
-            .collect();
+        let ports = self.native_port_items();
         let aliases: BTreeMap<String, String> = self
             .serial
             .port_aliases

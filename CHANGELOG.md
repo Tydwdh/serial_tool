@@ -6,6 +6,39 @@
 
 ### 调整
 
+- **命令面板的"最近使用"两端终于用同一个键；native 那两份逐字相同的端口条目投影收成一份（第 54 轮）**
+  （动 `crates/app/src/{config.rs,ui/command_palette.rs,ui/mod.rs,ui/top_bar.rs,ui/device_panel.rs,web/mod.rs}`
+  与 `crates/app/tests/architecture.rs`，净 `+304 / −75`；**serde 字段名与属性一字未动**，不加 trait / 泛型 /
+  新模块，不改公共 API —— `native_port_items` 是 `crate::ui` 的私有方法。）
+  **（1）为什么改键**：native 把"最近使用"记成**展示标题**（`entry.label`），web 记的是**命令 id** ⇒ 两端键空间
+  分叉，而且标题一改（插件命令改名、文案微调）用户的使用历史就**静默失配**。现在 native 的记录、持久化、排序
+  全部走 id，派发出口从 `Option<(String, String)>` 收成 `Option<String>`（成对带出标题的写法是病根，不是巧合）。
+  **（2）代价，按未拍板处理**：老用户 `workspace.json` 里按标题记的历史从此匹配不上 ⇒ 面板回到"按分类分组的
+  注册顺序"（确定、不随机，有用例钉住），重新用几次即恢复；**不删数据、不写迁移**（那要改写用户设置，归用户拍板）。
+  还有一条要一起拍：这个列表在 id 方案下**不再向"只用过的命令"收敛**（旧标题项永久滞留，`retain` 只按 id 去重），
+  web 一直是 id 所以没这问题。
+  **（3）真实重复的位置和我的记录不一样**：原队列记的是"`web/serial.rs` 与 `panels/serial.rs` 两份逐字相同的
+  端口条目投影"——**位置记错了**。实测：真存在的逐字重复在 **native 两处**（顶栏与设备面板各一份 20 行
+  `SerialPortItem` 投影，去空白与路径前缀后 321 == 321 == 321 字节），已收成 `WorkbenchApp::native_port_items()`
+  一份（净 −75 行）；而 web 那两处**并不逐字相同**（`kind` 取值 `"网络"/""` vs `"Serial"/"网络"/""`，三个旗标
+  来源也不同），并它要么改变可见行为、要么把展示规则做成参数开关 = 新增抽象层 ⇒ 不合，理由写成
+  `native_port_items` 的文档注释。（`panels/src/serial.rs` 里那 10 处 `SerialPortItem` 字样是消费侧与类型引用，
+  本轮没有逐行复核它是否也构造 —— 记作待复核。）
+  **（4）覆盖与牙齿**：合并前先撞了一把 —— 把那两份投影改成假值（`pending_reconnect: false`、`kind: ""`）后
+  **现有用例全绿**（79 passed / 0 failed）⇒ 这份"用户可见的端口条目"此前**零覆盖**。本轮交付：2 条行为用例
+  （最近使用排同分类最前 / 旧的标题值不影响顺序且保持确定）+ 1 条解析侧用例（历史值原样载入，不许裁剪）
+  + 2 条形状守卫（两端"记录"与"读取"必须同一键空间；native 投影只许一份且住在 `src/ui/mod.rs`）。
+  **守卫自己被变异撞出一个洞**：M6 第一次打全绿 —— 判定做了前缀匹配，把载入侧改成 `into_iter().filter(...).collect()`
+  照样算命中；收紧成带分号的完整形态后 M6'/M7 才红。同理，M1 在源码里留了一条**诱饵注释**（内容正是守卫要找的
+  `used == &entry.id`），守卫仍红 ⇒ 注释喂不出假绿。
+  **（5）做不到的照实说**：web/wasm 半边运行期测不到（`#[cfg(target_arch = "wasm32")]`，全仓 `wasm_bindgen_test`
+  为 0；M5 那一轮"只有形状守卫红"就是直接证据），`native_port_items` 合并后也仍无运行期覆盖（要覆盖得能给面板喂
+  `CreationContext`）。另量出一处没动的规则重复："带 `network://` 前缀即网络口"有 3 个入口
+  （`platform/src/lib.rs:105` 产生、`application/src/transport.rs:40` 与 `app/src/web/serial.rs:225` 匹配），
+  收成一份要在 `tool-platform` 的 `PortId` 上加 inherent 方法 = 动公共 API ⇒ 本轮硬约束排除。
+  五道门整包复跑全 EXIT=0（`target/gates-r55-{fmt,clippy,wasm,test,pressure}.log`，test 门 0 条 warning/error 行），
+  整包用例实测 **735 → 740**（+5 = 2 条行为用例 + 1 条解析侧用例 + 2 条形状守卫，逐 target 三数合计）。
+
 - **同一端口连点两次连接，前一个循环会永久失主 —— 两端"登记前先取消上一个"这条规则现在只有一份（第 52 轮）**
   （动 `crates/application/src/{task_model,workbench,web}.rs` 与 `crates/application/tests/headless.rs`；
   不改公共 API、不改 serde 字段。native 早有这道保护，**web 的四份连接/重连收尾没有**：

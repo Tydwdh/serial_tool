@@ -297,26 +297,7 @@ impl WorkbenchApp {
     /// 分组端口行与 Web 端共用同一个共享组件：native 只把自己的字符串键状态
     /// 适配进 SerialView，并分发组件返回的动作。
     fn render_shared_port_list(&mut self, ui: &mut egui::Ui) {
-        let shared_ports: Vec<tool_panels::SerialPortItem> = self
-            .serial
-            .ports
-            .iter()
-            .map(|port| {
-                let status = self.workbench.transport_status(&port.port_name);
-                tool_panels::SerialPortItem {
-                    id: port.port_name.clone(),
-                    label: port.port_name.clone(),
-                    kind: port.port_type.to_string(),
-                    open: status.open,
-                    connecting: status.connecting,
-                    pending_reconnect: self
-                        .serial
-                        .pending_reconnect
-                        .as_ref()
-                        .is_some_and(|pending| pending.port_name == port.port_name),
-                }
-            })
-            .collect();
+        let shared_ports = self.native_port_items();
         let previous_aliases = self.serial.port_aliases.clone();
         let previous_groups = self.serial.port_groups.clone();
         let mut aliases: BTreeMap<String, String> = previous_aliases.clone().into_iter().collect();

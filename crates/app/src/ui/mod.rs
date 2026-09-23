@@ -16,6 +16,34 @@ impl WorkbenchApp {
     pub(crate) fn draw_shell(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
         crate::shared_shell::show_shell(self, ui);
     }
+
+    /// native 端口条目投影：顶栏与设备面板共用这一份映射。
+    ///
+    /// `kind` 与 `pending_reconnect` 都是 tool-panels 侧的可见判据（`kind == "网络"`
+    /// 才给"移除网络端口"按钮，`kind` 非空才在 label 后加 ` · 类别`），同一个映射分写
+    /// 两处就是让两个面板各自漂移。web 那两处不并进来：它们的 `kind` 展示规则不同
+    /// （浏览器串口会写 `"Serial"`）。
+    fn native_port_items(&self) -> Vec<tool_panels::SerialPortItem> {
+        self.serial
+            .ports
+            .iter()
+            .map(|port| {
+                let status = self.workbench.transport_status(&port.port_name);
+                tool_panels::SerialPortItem {
+                    id: port.port_name.clone(),
+                    label: port.port_name.clone(),
+                    kind: port.port_type.to_string(),
+                    open: status.open,
+                    connecting: status.connecting,
+                    pending_reconnect: self
+                        .serial
+                        .pending_reconnect
+                        .as_ref()
+                        .is_some_and(|pending| pending.port_name == port.port_name),
+                }
+            })
+            .collect()
+    }
 }
 
 impl crate::shared_shell::AppShellHost for WorkbenchApp {

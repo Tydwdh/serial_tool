@@ -19,6 +19,8 @@ pub(crate) struct CommandPaletteState {
     pub(crate) open: bool,
     pub(crate) query: String,
     pub(crate) selected: Option<usize>,
+    /// 最近使用顺序：命令 id 列表，最新的在前。键空间与 web 端、与持久化的
+    /// `command_usage_order` 都是同一份命令 id（标题会随插件和改名变）。
     pub(crate) usage_order: Vec<String>,
 }
 
@@ -53,7 +55,7 @@ impl WorkbenchApp {
         if !query.is_empty() {
             entries.retain(|entry| query.matches(&entry.label));
         }
-        self.sort_palette_entries(&mut entries);
+        sort_palette_entries(&self.command_palette.usage_order, &mut entries);
 
         // 键盘导航：搜索文字变化重置选中 → 夹到有效范围 → 处理 ↑↓
         let entry_count = entries.len();
@@ -73,10 +75,15 @@ impl WorkbenchApp {
             close_after = true;
         }
 
-        if let Some((command_id, key)) = command_to_run {
-            // 记录使用：key 移到最前
-            self.command_palette.usage_order.retain(|used| used != &key);
-            self.command_palette.usage_order.insert(0, key);
+        if let Some(command_id) = command_to_run {
+            // 记录使用：命令 id 移到最前。键空间与 web 端一致（命令 id）：标题会随插件
+            // 与改名变，id 两端通用，同名字段 command_usage_order 才可能对得上。
+            self.command_palette
+                .usage_order
+                .retain(|used| used != &command_id);
+            self.command_palette
+                .usage_order
+                .insert(0, command_id.clone());
             close_after = true;
 
             // 与快捷键一致：统一经 pending_command 在下一帧 tick_pre_ui 执行，
@@ -109,21 +116,6 @@ impl WorkbenchApp {
                 category: command.category,
             })
             .collect()
-    }
-
-    /// 排序：先按分类分组，组内按最近使用（usage_order 中 position 越小越靠前）。
-    /// 未使用的条目排组内最后（保持注册顺序，稳定排序）。
-    fn sort_palette_entries(&self, entries: &mut [CommandEntry]) {
-        entries.sort_by_key(|entry| {
-            let usage = self
-                .command_palette
-                .usage_order
-                .iter()
-                .position(|used| used == &entry.label)
-                .map(|position| position as i32)
-                .unwrap_or(i32::MAX);
-            (entry.category, usage)
-        });
     }
 
     /// 搜索文字变化时把选中重置到第一项。
@@ -181,14 +173,14 @@ impl WorkbenchApp {
 
     /// 渲染面板窗口。
     ///
-    /// 返回 `(点击选中的命令 (id, 标题), 是否在本帧后关闭)`；点击窗口外部也算关闭。
+    /// 返回 `(点击选中的命令 id, 是否在本帧后关闭)`；点击窗口外部也算关闭。
     fn render_palette_window(
         &mut self,
         ctx: &egui::Context,
         entries: &[CommandEntry],
         query: &SearchQuery,
-    ) -> (Option<(String, String)>, bool) {
-        let mut command_to_run: Option<(String, String)> = None;
+    ) -> (Option<String>, bool) {
+        let mut command_to_run: Option<String> = None;
         let mut close_after = false;
 
         let window_response = egui::Window::new("命令面板")
@@ -238,12 +230,12 @@ impl WorkbenchApp {
         (command_to_run, close_after)
     }
 
-    /// Enter 要执行的命令：已选中项优先，无选中时只在有查询词的情况下取第一项。
+    /// Enter 要执行的命令 id：已选中项优先，无选中时只在有查询词的情况下取第一项。
     fn enter_confirmed_command(
         &self,
         ctx: &egui::Context,
         entries: &[CommandEntry],
-    ) -> Option<(String, String)> {
+    ) -> Option<String> {
         let query_empty = self.command_palette.query.trim().is_empty();
         if !ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
             return None;
@@ -254,8 +246,24 @@ impl WorkbenchApp {
             None if !query_empty && !entries.is_empty() => 0,
             None => return None,
         };
-        Some((entries[index].id.clone(), entries[index].label.clone()))
+        Some(entries[index].id.clone())
     }
+}
+
+/// 排序：先按分类分组，组内按最近使用（`usage_order` 存的是命令 id，position 越小越靠前）。
+/// 没用过的条目一律取 `usize::MAX`，落在组内最后并保持注册顺序（稳定排序）。
+///
+/// 刻意写成吃 `usage_order` 切片的自由函数、而不是 `WorkbenchApp` 的方法：这条排序只读
+/// 字段，抽出来才能在本文件的 `mod tests` 里被直接测到（`WorkbenchApp` 的构造需要
+/// `&eframe::CreationContext`，headless 下跑不了）。
+fn sort_palette_entries(usage_order: &[String], entries: &mut [CommandEntry]) {
+    entries.sort_by_key(|entry| {
+        let usage = usage_order
+            .iter()
+            .position(|used| used == &entry.id)
+            .unwrap_or(usize::MAX);
+        (entry.category, usage)
+    });
 }
 
 /// 搜索框：打开面板即把焦点交给它，键盘才接得上。
@@ -287,13 +295,13 @@ fn render_palette_search_box(ui: &mut egui::Ui, text: &mut String, search: &Sear
 
 /// 渲染候选列表（分类 header + 行）。
 ///
-/// 返回 `(鼠标停留的行, 被点击执行的命令 (id, 标题))`。
+/// 返回 `(鼠标停留的行, 被点击执行的命令 id)`。
 fn render_palette_rows(
     ui: &mut egui::Ui,
     entries: &[CommandEntry],
     selected: Option<usize>,
     mouse_moving: bool,
-) -> (Option<usize>, Option<(String, String)>) {
+) -> (Option<usize>, Option<String>) {
     let font_size = ui
         .style()
         .text_styles
@@ -303,7 +311,7 @@ fn render_palette_rows(
     let row_height = (font_size + 14.0).max(32.0);
 
     let mut hovered_index: Option<usize> = None;
-    let mut command_to_run: Option<(String, String)> = None;
+    let mut command_to_run: Option<String> = None;
 
     egui::ScrollArea::vertical()
         .max_height(300.0)
@@ -348,7 +356,7 @@ fn render_palette_rows(
 
 /// 渲染一条候选行：命中底色 + 图标 + 标题 + 右对齐的快捷键徽标。
 ///
-/// 返回 `(是否被鼠标悬浮, 被点击时要执行的命令 (id, 标题))`。
+/// 返回 `(是否被鼠标悬浮, 被点击时要执行的命令 id)`。
 fn render_command_row(
     ui: &mut egui::Ui,
     entry: &CommandEntry,
@@ -356,9 +364,9 @@ fn render_command_row(
     is_selected: bool,
     row_height: f32,
     col_width: f32,
-) -> (bool, Option<(String, String)>) {
+) -> (bool, Option<String>) {
     let mut hovered = false;
-    let mut command_to_run: Option<(String, String)> = None;
+    let mut command_to_run: Option<String> = None;
 
     let row_id = ui.id().with(("cp_row", index));
     ui.allocate_ui_with_layout(
@@ -369,7 +377,7 @@ fn render_command_row(
             let response = ui.interact(rect, row_id, egui::Sense::click());
             hovered = response.hovered();
             if response.clicked() {
-                command_to_run = Some((entry.id.clone(), entry.label.clone()));
+                command_to_run = Some(entry.id.clone());
             }
             if hovered || is_selected {
                 let color = if is_selected {
@@ -404,4 +412,88 @@ fn render_command_row(
     );
 
     (hovered, command_to_run)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(id: &str, label: &str, category: CommandCategory) -> CommandEntry {
+        CommandEntry {
+            id: id.to_owned(),
+            icon: ICON_SEARCH,
+            label: label.to_owned(),
+            shortcut: String::new(),
+            category,
+        }
+    }
+
+    fn order(entries: &[CommandEntry]) -> Vec<&str> {
+        entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>()
+    }
+
+    fn usage(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    /// 注册顺序刻意让分类错位：两条串口命令中间夹一条视图命令，
+    /// 这样「分组」与「组内按最近使用」两件事能被分别看到。
+    fn candidates() -> Vec<CommandEntry> {
+        vec![
+            entry("serial.connect", "连接串口", CommandCategory::Serial),
+            entry("view.theme", "切换主题", CommandCategory::View),
+            entry("serial.refresh", "刷新端口", CommandCategory::Serial),
+        ]
+    }
+
+    /// 新格式（usage_order 存命令 id）：被记为最近使用的命令排到同分类最前，
+    /// 且只在自己分类内上位——它不该把别的分类一起顶下去。
+    #[test]
+    fn recently_used_command_sorts_first_in_its_category() {
+        let usage = usage(&["serial.refresh"]);
+        let mut entries = candidates();
+        sort_palette_entries(&usage, &mut entries);
+
+        assert_eq!(
+            order(&entries),
+            ["serial.refresh", "serial.connect", "view.theme"],
+            "最近使用的 serial.refresh 应排在自己分类最前，未使用的保持注册顺序"
+        );
+    }
+
+    /// 使用顺序列表里本来就可能存着**认不出的值**（按标题记的历史、已下架的插件命令）。
+    /// 这条钉住那种输入的后果是可预期的：面板仍有确定顺序（按分类分组、组内保持注册
+    /// 顺序），既不 panic，也不会因为历史内容的多少或先后而被打乱成另一种顺序。
+    #[test]
+    fn stale_title_usage_order_keeps_the_panel_deterministic() {
+        let by_registration = ["serial.connect", "serial.refresh", "view.theme"];
+
+        for stale in [
+            &["刷新端口", "连接串口"][..],
+            &["连接串口", "刷新端口"][..],
+            &["切换主题"][..],
+            &[][..],
+        ] {
+            let mut entries = candidates();
+            sort_palette_entries(&usage(stale), &mut entries);
+            assert_eq!(
+                order(&entries),
+                by_registration,
+                "历史值 {stale:?} 不该影响顺序：面板必须回到按分类分组的注册顺序"
+            );
+
+            // 已排好序的列表再排一次仍然一样（排序对同一输入稳定）。
+            let mut twice = entries;
+            sort_palette_entries(&usage(stale), &mut twice);
+            assert_eq!(
+                order(&twice),
+                by_registration,
+                "同一份历史排两次的结果必须一致，实际 {:?}",
+                order(&twice)
+            );
+        }
+    }
 }

@@ -163,6 +163,8 @@ pub(crate) struct WebSettings {
     replay_policy: ReplayPolicyOption,
     #[serde(default)]
     keymap: Keymap,
+    /// 命令面板最近使用顺序（命令 id）：键空间与 native 那份同名字段一致，
+    /// 两端各存各的存储，但同一个 id 才认得同一份历史。
     #[serde(default)]
     command_usage_order: Vec<String>,
     #[serde(default = "default_terminal_merge_window_ms")]

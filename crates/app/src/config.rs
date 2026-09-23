@@ -74,7 +74,9 @@ pub(crate) struct PersistedConfig {
     /// 日志保留条数上限。默认 2000。
     #[serde(default = "default_log_max_entries")]
     pub(crate) log_max_entries: usize,
-    /// 命令面板使用顺序（label key 列表，最近使用的在前）。
+    /// 命令面板最近使用顺序（命令 id 列表，最近使用的在前）。
+    /// 列表里可能有认不出的值（例如按标题记的历史）：那只是排不到前面，不是脏数据，
+    /// 载入时原样保留、不清空。
     #[serde(default)]
     pub(crate) command_usage_order: Vec<String>,
     /// 市场与更新使用的可选 HTTP/SOCKS 代理地址；为空时自动使用系统/环境代理。
@@ -572,6 +574,26 @@ mod tests {
         assert!(!migrated, "版本已经是当前值，不该被当成需要迁移");
         // 设置本身没被吃掉：挑一个有代表性的字段核对。
         assert_eq!(config.baud_rate, "115200");
+    }
+
+    /// 配置里的使用顺序可能存着认不出的值（按标题记的历史、已下架的插件命令）。
+    /// 解析必须把它们原样读出来：这些值只是排不到前面，而一旦解析侧"顺手"裁掉
+    /// 不认识的项，用户下次开机丢的就不是排序而是整份历史。
+    #[test]
+    fn stale_title_usage_order_is_loaded_verbatim() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&legacy_workspace_json()).expect("valid test JSON");
+        value["command_usage_order"] = serde_json::json!(["刷新端口", "连接串口"]);
+
+        let (config, _) = parse_persisted_config(&value.to_string()).unwrap_or_else(|error| {
+            panic!("带 command_usage_order 的配置必须读得出来，实际: {error}")
+        });
+
+        assert_eq!(
+            config.command_usage_order,
+            ["刷新端口", "连接串口"],
+            "历史值必须按原顺序原样保留，解析侧不裁剪也不改写"
+        );
     }
 
     // ── ensure_jsonl_extension ──
