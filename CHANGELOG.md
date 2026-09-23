@@ -6,6 +6,22 @@
 
 ### 调整
 
+- **legacy 主题：把 `is_ok()` 换成"颜色与 dark_mode 真的落到了主题上"（第 59 轮）**
+  （**只动 `crates/panels/src/theme.rs` 的 `mod tests`**，生产部分逐字节等于 HEAD。）
+  `legacy_theme_is_accepted_but_future_schema_is_rejected` 对 legacy 那半边只判 `is_ok()` ——
+  回归成"解析通过但一个颜色都没落 / dark_mode 被忽略"照样绿，而用户看到的就是换了主题结果全是默认色。
+  邻居那条 `custom_theme_colors_override_the_selected_base` 钉的是**映射表本身**（直接调
+  `apply_color_override`），并不覆盖"没有 base 的 legacy 文档能不能走到这张表"，所以这不是重复覆盖。
+  夹具的 `dark_mode` 从 `true` 改成 `false`：**无 base 时 `inherited_dark` 本来就是 `true`**，
+  写 `true` 就看不出这个字段有没有被读（本轮差点交一条恒绿的断言，靠"先怀疑判据能不能红"逮回来）。
+  **红证明（两个变异各红在自己的那条断言上）**：M1 把 `bg_primary` 映射到别的字段 ⇒ 红在
+  「legacy 的 bg_primary 没有落进 colors.base」；M2 把 `dark_mode` 改成只取继承值 ⇒ 红在
+  「legacy 的 dark_mode: false 没被读出来」。`error[` 计数 0，变异逐字节还原后复跑 EXIT=0。
+  **没做到的一条**：`parse_theme_source` 里"没写到的颜色回落到同族实色"那段（`card => mantle` 等）
+  仍未被钉 —— 夹具只给一个 `bg_primary` 时 `mantle` 本身就是默认值，回落是否真的消掉了透明窟窿，
+  要先确认 `ThemeColors` 的 `Default` 到底是什么（本文件里没有 `impl Default`，未核）再写断言，
+  否则又是恒真判据。已开条目排在下一轮。
+
 - **内置命令标题：把"全都非空"换成逐条判据 + "不许是纯 ASCII"（第 58 轮）**
   （**只动 `crates/app/src/command_registry.rs` 的 `mod tests`**，生产部分逐字节等于 HEAD。）
   原来那条 `assert!(titles.iter().all(|t| !t.is_empty()))` 两头都松：只剩空格的标题照样过，真红了也说不出是哪条命令。

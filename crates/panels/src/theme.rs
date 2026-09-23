@@ -946,10 +946,25 @@ mod tests {
     fn legacy_theme_is_accepted_but_future_schema_is_rejected() {
         let legacy = r##"{
             "name": "Legacy",
-            "dark_mode": true,
+            "dark_mode": false,
             "colors": { "bg_primary": "#101112" }
         }"##;
-        assert!(parse_theme_source(legacy, "legacy.json", 0).is_ok());
+        let legacy_theme = parse_theme_source(legacy, "legacy.json", 0)
+            .expect("legacy（无 schema_version）主题必须被接受");
+        // 原来这里只有 `is_ok()`：回归成"解析通过但一个颜色都没落"照样绿，而用户看到的就是
+        // 换了个主题结果全是默认色。`custom_theme_colors_override_the_selected_base` 钉的是
+        // 映射表本身（直接调 `apply_color_override`），**不覆盖**"没有 base 的 legacy 文档
+        // 能不能走到这张表"，所以这里补的是 `parse_theme_source` 整条路径。
+        assert_eq!(
+            legacy_theme.colors.base,
+            Color32::from_rgb(0x10, 0x11, 0x12),
+            "legacy 的 bg_primary 没有落进 colors.base"
+        );
+        assert!(
+            !legacy_theme.dark_mode,
+            "legacy 的 dark_mode: false 没被读出来（夹具刻意用 false：无 base 时 \
+             inherited_dark 本身就是 true，写 true 就看不出这个字段有没有被忽略）"
+        );
 
         let future = r##"{
             "schema_version": 99,
