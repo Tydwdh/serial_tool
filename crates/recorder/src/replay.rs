@@ -235,10 +235,13 @@ impl ReplayManager {
     /// 只做文件读取和解析，不触碰 ReplayManager，可安全放到 worker 线程。
     ///
     /// **从这里出去的每一个 `io::Error` 都自带中文框架**：派发侧（`dispatch_load_replay`）
-    /// 只做 `to_string()`，框架少补一处就是英文 OS 原文上状态栏；反过来在派发侧再包一层，
+    /// 只做 `to_string()`，框架少补一处就是裸的操作系统原文冒出去；反过来在派发侧再包一层，
     /// 就成了两重中文框架的同义反复。所以三条出口（取大小、打开、逐行读）各自在生产处
     /// 补一句，新增出口时照同一条规则办。框架里点名**是哪个路径**失败的 —— 用户在手输
     /// 路径的那一格要改的就是它。
+    ///
+    /// 原生侧读这两个值的地方是 `load_replay` 的任务消息与 `AppEvent::TaskFailed` 那句
+    /// `后台任务失败: …` 系统日志（本轮普查核出来的出口；状态栏不读它）。
     ///
     /// 包装必须用 `io::Error::new(e.kind(), ..)`，不能图省事用 `io::Error::other(..)`：
     /// `kind()` 在本工作区是承重的（第 9/11 轮的重试判定与 `tool_transport::translate_error`
@@ -294,7 +297,7 @@ impl ReplayManager {
         let mut skipped = 0usize;
         let mut first_errors: Vec<String> = Vec::new();
         for (line_index, line) in lines.enumerate() {
-            // 读行失败（网络盘中途掉线、文件读到一半被收回）也是原样上状态栏的那一个
+            // 读行失败（网络盘中途掉线、文件读到一半被收回）也是原样冒出去的那一个
             // `?`，所以它同样在生产处补框架，与 `prepare_load` 的另两条出口同一个形状：
             // 点名路径、kind 照搬（这一条的 kind 是 OS 给的那一个，不是 `Other`）。
             let line = line.map_err(|e| {
@@ -1124,9 +1127,9 @@ mod tests {
 
     /// 原生加载的三条 IO 出口各有一句中文框架（规则记在 `prepare_load` 的文档注释里）。
     ///
-    /// 派发侧（`dispatch_load_replay`）只做 `to_string()`，所以这里少一句，用户就在状态栏
-    /// 上读到一句英文 OS 原文。三条出口在本用例里一次驱动到位：任何一条退回裸 `?`，
-    /// 对应那一格立刻红。
+    /// 派发侧（`dispatch_load_replay`）只做 `to_string()`，所以这里少一句，用户就在
+    /// `load_replay` 的任务消息与那句系统日志里读到裸的操作系统原文。三条出口在本用例里
+    /// 一次驱动到位：任何一条退回裸 `?`，对应那一格立刻红。
     ///
     /// 冒号一律**全角** `：`（与 `recorder.rs` 的第 40 轮框架一致）。这一条不再单设
     /// `contains` 断言：三条期望里的字面量就带全角冒号，逐字相等已经把标点钉住了 ——
