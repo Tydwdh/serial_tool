@@ -5,6 +5,22 @@
 ## [Unreleased]
 
 ### 调整
+
+- **内置命令注册表：把"非空"判据换成"承重命令必须在册"（第 57 轮）**
+  （**只动 `crates/app/src/command_registry.rs` 的 `mod tests`**，生产部分逐字节等于 HEAD；提交 `c01efe4`，
+  本条是它欠的 CHANGELOG 条目 —— 那个提交的信息里还写了"顺带补回空行"，其实当时插入脚本因引号问题根本没跑成，
+  空行是这一次才真正补回的。）
+  `builtin_ids_are_unique_and_prefixed` 今天这三条是「非空 + 去重 + 都带 `$` 前缀」—— 注册表**悄悄少注册一批命令**时
+  三条全部照绿（剩 9 条仍然非空、仍然唯一、仍然带前缀），而用户看到的就是命令面板与快捷键表里少几项。
+  改成逐个点名承重命令（`$CommandPalette`、打开串口、重连串口、清空终端、添加书签）必须在册，
+  并删掉被它蕴含的那条 `!ids.is_empty()`。
+  **红证明**：在 `$CommandPalette` 那次 `add` 之前提前 `return registry` ⇒ 新断言红，消息是
+  「内置命令 $CommandPalette 不在册：它会从菜单与快捷键表里静默消失（当前在册 9 条）」，
+  而旧三条在同一变异下**全部通过** —— 本轮买到的牙齿就在这条差集上。`error[` 计数 0 ⇒ 不是编译错的假红。
+  本机：`cargo test -p hardware-workbench-app --bins builtin_ids_are_unique_and_prefixed` 基线与还原后 EXIT=0，
+  `cargo fmt --all --check` 与 `clippy -p hardware-workbench-app --all-targets -D warnings` EXIT=0。
+  用例数不变（745 条，本轮只换判据不加用例）。
+
 - **不匹配的事件一点都不许进 backlog：给背压计数器补一条会红的判据（第 56 轮）**
 
   （**只动 `crates/databus/src/lib.rs` 的 `mod tests`**，生产部分逐字节等于 HEAD：整文件相对 HEAD 只多 948 字节，全在那一条新用例里。）压力门禁里那条
