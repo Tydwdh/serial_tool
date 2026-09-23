@@ -20,7 +20,9 @@
   **一处必须记下的自我更正**：我原本的判断是"`Io` 臂只在 linux 有用例、Windows 侧 0 覆盖"，**M-B 的第一版
   打在 `TimedOut` 上时同时红了既有的 `translate_error_keeps_the_timeout_and_generic_frames_for_other_kinds`**
   ⇒ 那三格（权限/超时/泛型）早就有 Windows 跑得到的跨平台用例，我差点把重复代码当缺口入库。据此把新用例
-  **收缩**到只剩真正没覆盖的两格，并把写错的注释一并改掉（用例数：`translate_error*` 一族从 5 条变 6 条）。
+  **收缩**到只剩真正没覆盖的两格，并把写错的注释一并改掉（用例数实测：`translate_error*` 一族 4 条 → 5 条，
+  `cargo test -p tool-transport --lib translate_error` 报 `running 5 tests`；整包总数本轮**不引**，
+  那次全绿跑的是"改前的第 53 轮 + 批次 A 在飞的用例"，735 里混着别人的增量，说不清就别写）。
   `Serial(sp::Error)` 变体仍然驱动不了：全仓没有一处构造 `sp::Error`（唯一入口是 `#[from]`），本轮不为它编造
   构造方式，已在用例末尾如实注明 —— 要补它得先决定用什么方式造，那是另一件事。
   本机核过：`cargo test -p tool-transport --lib translate_error` 基线/还原后 EXIT=0、
