@@ -1427,21 +1427,121 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// 验证 seek_with_replay 在大量事件下的性能。
-    /// 生成 N 个事件，录制到临时文件，加载后执行 seek，确保在合理时间内完成。
+    /// 验证 `seek_with_replay` 的耗时**随「这次 seek 重放了多少事件」线性增长**。
+    ///
+    /// ## 为什么不再是「1 万条 seek < 1 秒」这种定长墙钟（两条理由，都有实测数字）
+    /// 1. **假红**：绝对毫秒数取决于这台机器此刻有多忙。第 39 轮按 `target/r36-load.py` 那套 hog
+    ///    实测它 churn×4 跑整包改前 **6/10** 红、churn×6 **2/8** 红，红点原文
+    ///    `seek_with_replay took 1.14s for 10000 events — should be < 1s`。第 44 轮把旧尺子原样
+    ///    留着、与新尺子在**同一批 hog 里按轮交替**重测（`target/r39-ab.py`）：churn×4 **1/10** 红、
+    ///    churn×6 **2/8** 红、cpu×2 0/10 红，而新尺子同场 **0/10、0/8、0/10**。一次**通过**的运行
+    ///    就能吃掉那条线的 85%（本轮空载实测旧尺子那一次 seek = 22~26ms，但整包并行时能冲到 1.1s）：
+    ///    它断的是机器快慢，不是它想守的性质。
+    /// 2. **没牙**：旧注释自己写着「O(n²) 的旧实现在 100k 事件时会显著变慢」，也就是说它想抓的是
+    ///    「别把 seek 退回平方级」。第 44 轮把两个语义不变的人为平方级变异装到生产代码上量它：
+    ///    M1（每次发布前从 0 重扫前缀）下旧断言实测 **157~169ms**、M1b（前缀纯累加，常数最小的
+    ///    平方级）下 **93~96ms** —— 都远在 1000ms 之下，**旧尺子全绿**（它连 fixture 时间戳全塌成
+    ///    同一毫秒都能绿：那次实测 count=10000、耗时 38~40ms，仍然「通过」）。
+    ///    一条永远抓不到它声称要抓的东西的断言，比没有断言更糟。
+    ///
+    /// ## 换成什么
+    /// 同一次运行里取三档「被 seek 覆盖的事件数」N、2N、4N，断耗时随 N 增长的**指数**有界：
+    /// 覆盖数翻倍时线性 ⟹ 2×（指数≈1）、平方 ⟹ 4×（指数≈2）。比值对「机器多慢」不敏感、
+    /// 对「算法形状」极敏感。负载只能把绝对时间**抬高**、抬不低，所以每档取 K 次采样的
+    /// **最小值**，不用平均值。
+    ///
+    /// ## 前提核实（读生产代码 + 实测两边都对上）
+    /// `seek_with_replay` = `seek_panel_phase` + `seek_data_phase`：
+    /// · `seek_panel_phase` 先把 `cursor = 0`，再 `publish_until_filtered(position_ms, 是 panel.create)`
+    ///   —— 从 0 扫到第一条位置 > target 的事件，**cursor 停在那里**；
+    /// · `seek_data_phase` 先 `publish_range_filtered(0, cursor, …)` 把同一段前缀**再扫一遍**发布其余事件，
+    ///   然后 `publish_until_filtered(…)`：此时 `events[cursor]` 的位置已 > target，它第一拍就 break。
+    /// 所以一次 seek 的工作量 = Θ(覆盖事件数)，两阶段各发布一次 ⟹ **返回值恰等于覆盖事件数**
+    /// （本用例 24 个采样每次都实测 `count == covered`；最大档 40k 的那一版同样每档全等），而且每档都从
+    /// `cursor = 0` 重新起（档与档之间不残留进度，第三档不会因为前两档跑过而变快）。
+    /// 每个事件 `DataBus::publish` 是 O(1)（history 是 `DEFAULT_HISTORY_LIMIT`=20000 封顶的
+    /// `VecDeque`，满了就 push+pop；本用例不注册订阅者）。fixture 每毫秒一条事件 ⟹ 位置 p 覆盖
+    /// p+1 条，所以「覆盖 covered 条」的位置就是 `covered - 1`。
+    ///
+    /// ## 这些数字是怎么量出来的（16 核本机、debug 构建；脚本都在 `target/` 下，不入库）
+    /// · **空载**（`target/r44-probe.py --load 0 --full` 与 `cargo test -p tool-recorder`）三档 min =
+    ///   **19.5~25.2ms / 38.9~49.5ms / 78.1~103.2ms**（相邻比值 1.99~2.10，即指数 ≤1.09 —— 线性成立）；
+    ///   本用例单独 **1.27~1.68s**；recorder 整包测试二进制 **0.10s → 1.34~1.83s**、
+    ///   `cargo test -p tool-recorder` 墙钟 **1.07s → 2.18~2.96s**；
+    ///   工作区 `cargo test --workspace --all-targets` **热构建后 7.71s → 8.5~8.7s**（+0.8~1.0s，
+    ///   两侧都是 32 条 `test result:` 行、**731 passed / 0 failed / 7 ignored**，用例数一条没变）。
+    /// · **为什么三档、为什么最大档是 20k、为什么 K=8**：三档才谈得上「形状」（两档只能谈一个比值，
+    ///   一个撞车的样本就能把它抬过界）。最大档试过 40k（K=5）：本用例单独 **1.81~1.83s**、
+    ///   churn×4 整包最坏 **117s** 一轮，并且出现过一次「小档 min 被饿到 1.93s、比中档的 0.37s
+    ///   还慢」的单调性反转 —— 那意味着整条断言在负载下不再可靠。降到 20k + K=8 之后，
+    ///   整包 **44 轮负载**（churn×4 18 + churn×6 16 + cpu×2 10）+ 6 轮空载整包里单调性反转
+    ///   **0 次**，而最弱的平方级变异（M1b）在 20k 档
+    ///   仍读到 exp **1.77~1.89** —— 牙齿没变弱，墙钟减半。K 取 8 也是同一批测量定的：
+    ///   每档取最小值，K 越大越能等到一个真正没被撞车的窗口，8 已经让两个估计量在负载下都留有余量。
+    /// · **负载**（`target/r39-ab.py`，同一批 hog 下新旧二进制**按轮交替**跑整包 libtest）：
+    ///   | 配方 | 轮数 | 旧尺子红 | 新尺子红 | 新尺子 exp(min比值) 最大 | exp(每轮最小) 最大 |
+    ///   | --- | --- | --- | --- | --- | --- |
+    ///   | churn×4（64 个搅缓存 hog） | 10 | **1/10** | **0/10** | 1.47 | 1.01 |
+    ///   | churn×6（96 个） | 8 | **2/8** | **0/8** | 1.22 | 0.93 |
+    ///   | cpu×2（32 个纯忙等） | 10 | 0/10 | 0/10 | 1.25 | 0.95 |
+    ///   换成终版字节（只动了注释）后又各复跑一轮：churn×4 8 轮、churn×6 8 轮，两侧仍 **0 红**，
+    ///   新尺子两个估计量的最大读数 1.40 与 0.93 —— 上面引的两条上界对全部 44 轮负载成立。
+    ///   合计：**同一批交替跑的 44 轮里旧尺子红 3 轮（churn×4 1/10、churn×6 2/8、cpu×2 0/10、
+    ///   终版复跑 0/16），新尺子 0/44 红**。第 39 轮同配方量到旧尺子 churn×4 **6/10**、churn×6
+    ///   **2/8** 红 —— 同一条配方在不同时刻数出来的红数会漂，所以本轮两侧在同一批 hog 里交替跑：
+    ///   旧尺子红不红取决于天气，而天气不是它想守的那个性质。
+    /// · **变异体**（`target/r44-mutate.py` + `target/r44-verdict.py`，同一份三档 K=8 采样、空载，
+    ///   每个变异都核过「其余 35 条用例全绿 + 返回值与发布内容逐条不变」）：
+    ///   M1「每次发布前从 0 重扫前缀」= exp(min比值) **1.90~2.23**、exp(每轮最小) **1.56~1.91** → **红**；
+    ///   M1b「前缀纯累加」= **1.99~2.08** / **1.77~1.89** → **红**；
+    ///   M3「数据阶段多扫三遍前缀并 clone」（仍然线性、实测把三档 min 抬高 5~8%）= **≤1.08** → 绿；
+    ///   M4「每次 seek 重建跳表索引」（与各档覆盖数无关的常数）= **≤1.08** → 绿。
+    ///   再往上更重的平方级不必再测：两个估计量都随平方项系数**单调上升**（t(n)=a·n+q·n²/2 时
+    ///   t(2n)/t(n) 从 2 单调趋向 4），M1 已读到 1.90~2.23，更重的只会更高。
+    ///   **没被抓到的是 M3 与 M4 这类「常数」回归**（旧尺子同样抓不到：两者实测 21~26ms，
+    ///   离 1000ms 差 40 倍）—— 这把尺子只判形状，这是它换取「不因机器慢而假红」的代价，写在下面。
+    ///
+    /// ## 两条上界怎么定的，以及它们的分工
+    /// 门界必须**高于**线性实现的最坏观测（含负载）、又**低于**平方实现的最优观测：
+    /// · `MIN_RATIO_EXPONENT_CEIL = 1.75`：空载最坏 **1.09**（探针版 1.12）、三种负载配方最坏 **1.47**
+    ///   → 上方余量 0.28；下方到 M1b 的 1.99 还有 0.24。这条负责**牙齿**。
+    /// · `EVERY_ROUND_EXPONENT_CEIL = 1.50`：每轮比值取最小，负载抬不动它（44 轮负载最坏 1.01，
+    ///   余量 0.49），代价是撞车的轮会把它压低（空载见过 0.62、负载见过 −3.14，即比值 0.29×）；
+    ///   平方变异在它上面仍读到 1.56~1.91。这条负责**绝不因负载假红**。
+    /// 两条各自独立断言：任何一条红都说明「这个形状不是线性」，而 churn×4/×6 实测 0 红。
+    /// **代价**：只增大常数、不改形状的回归（M3/M4）看不见 —— 要守那种回归就得钉绝对预算，
+    /// 而绝对预算正是本轮删掉的那条 `< 1000ms`：它既在负载下假红、又在平方级下没牙。
     #[test]
     fn seek_performance_with_many_events() {
         use std::io::Write;
+        use std::time::{Duration, Instant};
 
-        let event_count = 10_000;
+        // 三档「被这次 seek 覆盖的事件数」：N、2N、4N（相邻两档覆盖数正好翻倍 ⟹ 指数 = log2 比值）。
+        const TIER_UNIT: usize = 5_000;
+        let covered_tiers = [TIER_UNIT, 2 * TIER_UNIT, 4 * TIER_UNIT];
+        // 每档 K 次采样的最小值。K=8 是量出来的：K=5 时（40k 最大档那一版）churn×4 整包跑出现过
+        // 一次「小档 min 被饿得比中档还慢」的单调性反转；K=8 + 20k 在 44 轮负载 + 6 轮空载整包里 0 次。
+        const SAMPLES: usize = 8;
+        // 估计量 A：各档 min 之比 → 指数。上界 1.75 的依据见本用例文档注释（线性最坏读数 1.47、
+        // 平方变异最低读数 1.90）。
+        const MIN_RATIO_EXPONENT_CEIL: f64 = 1.75;
+        // 估计量 B：每一轮各算一次比值，取 K 轮里**最小**的那个 → 指数。它在负载下抬不起来
+        // （44 轮负载最坏读数 1.01），但一轮撞车就能把它压低，所以只给到 1.50。
+        const EVERY_ROUND_EXPONENT_CEIL: f64 = 1.50;
+
+        let event_count = *covered_tiers.last().unwrap();
         let dir =
             std::env::temp_dir().join(format!("replay-perf-{}", tool_core::now_timestamp_ms()));
         std::fs::create_dir_all(&dir).unwrap();
         let jsonl_path = dir.join("perf.jsonl");
 
         // 生成事件：每毫秒一个，部分是 UI_PANEL_CREATE，大部分是串口数据
+        // —— 只生成**一份**最大档的文件、只 load 一次，档位靠 seek 到递增位置区分：变的是
+        // 「这次 seek 要重放多少事件」（正是要守的量），20k 行 JSONL 的生成与解析开销一次付清。
         {
-            let mut file = std::fs::File::create(&jsonl_path).unwrap();
+            // BufWriter：每条事件一次 `writeln!` 到裸 File 是 2 万次写系统调用，它把建 fixture
+            // 的开销堆进整包墙钟（不进尺子，但拖慢整个套件）。聚成大块一次刷出去。
+            let mut file = std::io::BufWriter::new(std::fs::File::create(&jsonl_path).unwrap());
             for i in 0..event_count {
                 let topic = if i % 100 == 0 {
                     "ui.panel.create"
@@ -1468,20 +1568,111 @@ mod tests {
 
         assert_eq!(mgr.status().total_events, event_count);
 
-        // 执行 seek 到中间位置
-        let start = std::time::Instant::now();
-        let count = mgr.seek_with_replay(5_000); // seek 到 5 秒位置
-        let elapsed = start.elapsed();
+        // 预热一次满量程：把 bus 的 history 环推到 `DEFAULT_HISTORY_LIMIT` 封顶、把代码页与
+        // 分支预测器热起来。不预热的话第一轮要额外付「环从 0 长到 20k」的开销，那不是 seek 的形状。
+        let warmup = mgr.seek_with_replay(event_count as u64 - 1);
+        assert_eq!(
+            warmup, event_count,
+            "预热这次 seek 就该重放满量程 {event_count} 条事件"
+        );
 
-        // 验证有事件被发布
-        assert!(count > 0, "seek should publish events");
+        // 采样按「轮」交错：每一轮把三档各跑一次，再进下一轮。这样某一轮撞上负载时三档一起撞，
+        // 而不是「小档在风平浪静时跑完、大档整段撞上 hog」—— 那会把比值凭空抬高。
+        let mut samples: Vec<Vec<Duration>> =
+            vec![Vec::with_capacity(SAMPLES); covered_tiers.len()];
+        let mut published = Vec::with_capacity(SAMPLES * covered_tiers.len());
+        for _round in 0..SAMPLES {
+            for (tier, covered) in covered_tiers.iter().enumerate() {
+                // fixture 每毫秒一条事件 ⟹ 覆盖 `covered` 条事件的位置是 `covered - 1`。
+                let position_ms = (*covered - 1) as u64;
+                let started = Instant::now();
+                let count = mgr.seek_with_replay(position_ms);
+                samples[tier].push(started.elapsed());
+                published.push((tier, *covered, count));
+            }
+        }
 
-        // 性能断言：10k 事件的 seek 应在 1 秒内完成
-        // O(n) seek 应该远快于此；O(n²) 的旧实现在 100k 事件时会显著变慢
+        // ── 防空转（必须先于任何比值断言）：每一档都要真的重放了它声称覆盖的那些事件 ──
+        // 少了这条，fixture 没喂进数据（解析整批跳过、位置算错、policy 不匹配直接 return 0）时
+        // 三档会一起退化成「耗时全是最小的同一个数、比值恒为 1」，缩放比就成了永远为真的空转。
+        for (tier, covered, count) in published {
+            assert_eq!(
+                count, covered,
+                "第 {tier} 档（覆盖 {covered} 条事件）实际重放了 {count} 条 —— 期望恰等于覆盖数：\
+                 panel 阶段与 data 阶段各发布一次，不多不少。不相等说明尺子量的不是「重放多少事件」",
+            );
+        }
+        let mins: Vec<Duration> = samples
+            .iter()
+            .map(|tier_samples| *tier_samples.iter().min().expect("每档都有 SAMPLES 个样本"))
+            .collect();
+        for (tier, min) in mins.iter().enumerate() {
+            assert!(
+                !min.is_zero(),
+                "第 {tier} 档（覆盖 {} 条事件）的 {} 次采样最小值为 0 —— 尺子没量到东西\
+                 （Instant 分辨率不够？），缩放比在这个尺寸下无意义",
+                covered_tiers[tier],
+                SAMPLES,
+            );
+        }
+        for tier in 1..mins.len() {
+            assert!(
+                mins[tier] >= mins[tier - 1],
+                "耗时不随覆盖事件数单调不减：第 {tier} 档（覆盖 {} 条）min {:?} < 第 {} 档\
+                 （覆盖 {} 条）min {:?} —— 这是尺子坏了（某一档整段被饿住），不是实现变快了",
+                covered_tiers[tier],
+                mins[tier],
+                tier - 1,
+                covered_tiers[tier - 1],
+                mins[tier - 1],
+            );
+        }
+
+        // ── 缩放比：对每对相邻档算两个指数估计量，取这一对里更「像平方」的那个 ──
+        let mut report = Vec::new();
+        let mut max_mins_exponent = 0f64;
+        let mut max_every_round_exponent = 0f64;
+        for tier in 1..mins.len() {
+            let mins_exponent = (mins[tier].as_secs_f64() / mins[tier - 1].as_secs_f64()).log2();
+            // 估计量 B：每一轮各算一次「这一档 / 前一档」的指数，取 K 轮里**最小**的那个。
+            // 取最小是因为负载只会把某一档抬慢、不会压低：一轮撞车只会让这个估计量偏「像线性」，
+            // 反过来它要超过上界，就意味着**每一轮**都看见了超线性增长。
+            let every_round_exponent = samples[tier]
+                .iter()
+                .zip(&samples[tier - 1])
+                .map(|(cur, prev)| (cur.as_secs_f64() / prev.as_secs_f64()).log2())
+                .fold(f64::INFINITY, f64::min);
+            max_mins_exponent = max_mins_exponent.max(mins_exponent);
+            max_every_round_exponent = max_every_round_exponent.max(every_round_exponent);
+            report.push(format!(
+                "档{}→{}: exp(min比值)={:.2} exp(每轮最小)={:.2}",
+                tier - 1,
+                tier,
+                mins_exponent,
+                every_round_exponent,
+            ));
+        }
+
+        println!(
+            "[r44] covered={covered_tiers:?} K={SAMPLES} min={:?} 估计量 max: exp(min比值)={max_mins_exponent:.2}\
+             (<{MIN_RATIO_EXPONENT_CEIL}) exp(每轮最小)={max_every_round_exponent:.2}\
+             (<{EVERY_ROUND_EXPONENT_CEIL}) | {}",
+            mins.iter().map(|d| d.as_micros()).collect::<Vec<_>>(),
+            report.join(" | "),
+        );
+
         assert!(
-            elapsed.as_millis() < 1000,
-            "seek_with_replay took {:?} for {event_count} events — should be < 1s",
-            elapsed
+            max_mins_exponent < MIN_RATIO_EXPONENT_CEIL,
+            "seek_with_replay 的耗时随覆盖事件数呈 **指数 {max_mins_exponent:.2}** 增长\
+             （上界 {MIN_RATIO_EXPONENT_CEIL}）：三档 {covered_tiers:?} 的 min 耗时 {mins:?}。\
+             线性应≈1.00、平方≈2.00 —— 这个形状是「每次 seek 都从头逐事件重扫」那一类回归的形状，\
+             不是机器慢（机器慢抬绝对值、三档同摊）。",
+        );
+        assert!(
+            max_every_round_exponent < EVERY_ROUND_EXPONENT_CEIL,
+            "即使取每一轮比值里最**有利**的那个，指数仍达 {max_every_round_exponent:.2}\
+             （上界 {EVERY_ROUND_EXPONENT_CEIL}）：三档 {covered_tiers:?} 的 min 耗时 {mins:?}。\
+             这条比上一条更难被负载抬高（44 轮整包负载实测最坏 1.01），它红说明每一轮都看见超线性增长。",
         );
 
         let _ = std::fs::remove_dir_all(dir);
