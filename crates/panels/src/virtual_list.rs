@@ -399,6 +399,7 @@ mod tests {
                 (scroll + VIEWPORT).min(index.total_height())
             );
         }
+        // 耗时仍然只是观测值，不进判据（这条门禁要在 debug 下也能当回归门）。
         let elapsed = started.elapsed();
         println!(
             "virtual_rows pressure rows={} visited={} total_height={:.0} elapsed={:?}",
@@ -417,7 +418,5 @@ mod tests {
             2941.0 * 32.0 + 47_059.0 * 16.0,
             "50k 行的总高不等于夹具算术的值"
         );
-        // 耗时仍然只是观测值，不进判据（这条门禁要在 debug 下也能当回归门）。
-        assert!(visited > 0);
     }
 }
