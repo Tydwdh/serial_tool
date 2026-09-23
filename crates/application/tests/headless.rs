@@ -31,12 +31,6 @@ fn headless_workbench_can_dispatch_and_query() {
     let _ = wb.query_replay();
     let _ = wb.query_plugins();
 
-    // Incremental terminal query returns delta without cloning full history.
-    let d1 = wb.query_terminal_since(0, 100);
-    assert_eq!(d1.entries.len(), 0);
-    assert_eq!(d1.next_seq, 0);
-    assert!(!d1.truncated);
-
     // Invalid connect should return transport error, not panic.
     let connect = wb.dispatch(AppCommand::Connect {
         port: PortId::new("COM_NOT_EXIST_999"),
@@ -70,36 +64,18 @@ fn headless_workbench_can_dispatch_and_query() {
     );
 }
 
-#[test]
-fn terminal_delta_is_incremental() {
-    let bus = DataBus::new();
-    let mut wb = Workbench::new(bus.clone());
-
-    bus.publish(tool_transport::serial_rx_event(
-        "serial:COM1",
-        b"hello\n".to_vec(),
-    ));
-    wb.tick(0.0);
-
-    let d = wb.query_terminal_since(0, 10);
-    assert_eq!(d.entries.len(), 1);
-    assert!(d.next_seq > 0);
-
-    // 带着返回的 next_seq 再查一次应为空：增量查询不得重复投递已消费的条目。
-    let d2 = wb.query_terminal_since(d.next_seq, 10);
-    assert_eq!(d2.entries.len(), 0);
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Headless 契约测试（docs/ARCHITECTURE.md「剩余工作」3 / todo.txt §39）
 //
-// 五类行为：send routing / terminal bound / replay lifecycle /
-// plugin enable-disable / event emission
+// 四类行为：send routing / replay lifecycle / plugin enable-disable / event emission
 //
 // 全部用例只经由 Workbench + AppCommand + query_* 的真实 API 驱动：不启动 egui，
 // 不打开真实串口，不访问仓库 plugins/ 目录，不发网络请求。断言目标是真实状态
-// 变化（任务 kind / 终端 seq 上限淘汰 / 回放状态机 / 插件状态机 / DataBus 事件），
-// 不是"调用不报错"。
+// 变化（任务 kind / 回放状态机 / 插件状态机 / DataBus 事件），不是"调用不报错"。
+// 终端的保留条数与按 seq 淘汰最旧条目不在这里测：那份读取模型（`query_terminal_since`）
+// 第 46 轮证实零生产使用者后已删除，活路径的上限行为由 `tool-panels` 的
+// `max_entries_is_global_across_ports_and_keeps_newest_events` /
+// `lowering_max_entries_trims_immediately` 与 `TerminalStore` 单测守着。
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// 读取任务快照的 kind；任务快照被回收或任务不存在时返回 None。
@@ -428,90 +404,6 @@ fn network_port_ids_are_recognized_in_both_naming_forms() {
         all_failed,
         "端口未打开时发送任务必须以 Failed 收尾，实际: {:?}",
         sends.map(|task_id| task_state(&wb, task_id))
-    );
-}
-
-#[test]
-fn terminal_bound_clamps_max_entries_and_pages_incrementally() {
-    let bus = DataBus::new();
-    let mut wb = Workbench::new(bus.clone());
-
-    // 设 5 条上限：store 有 max(100) 的夹取，因此实际保留 100 条。
-    wb.dispatch(AppCommand::SetTerminalMaxEntries { max: 5 })
-        .expect("设置终端上限");
-    for index in 0..150 {
-        bus.publish(tool_transport::serial_rx_event(
-            "serial:COM_BOUND",
-            format!("line-{index}\n").into_bytes(),
-        ));
-    }
-    wb.tick(0.0);
-
-    let all = wb.query_terminal_since(0, usize::MAX);
-    assert_eq!(all.entries.len(), 100, "终端上限必须被 max(100) 夹取");
-    assert_eq!(
-        all.entries.first().map(|entry| entry.seq),
-        Some(51),
-        "超过上限时必须按 seq 淘汰最旧条目"
-    );
-    assert_eq!(all.entries.last().map(|entry| entry.seq), Some(150));
-    assert_eq!(all.next_seq, 150);
-    assert!(!all.truncated, "limit 足够大时不得标记截断");
-    assert_eq!(all.dropped, 0, "150 条事件不应触发订阅环丢包");
-
-    // limit 截断：一次只取 1 条时必须标记 truncated，且 next_seq 只推进到该条。
-    let first_page = wb.query_terminal_since(0, 1);
-    assert_eq!(first_page.entries.len(), 1);
-    assert!(
-        first_page.truncated,
-        "limit 小于剩余条数时必须标记 truncated"
-    );
-    assert_eq!(first_page.next_seq, 51);
-
-    // 按 next_seq 逐页消费：必须不重不漏。
-    let mut cursor = 0_u64;
-    let mut seen = Vec::new();
-    loop {
-        let page = wb.query_terminal_since(cursor, 7);
-        if page.entries.is_empty() {
-            break;
-        }
-        assert_eq!(page.next_seq, page.entries.last().expect("page 非空").seq);
-        seen.extend(page.entries.iter().map(|entry| entry.seq));
-        cursor = page.next_seq;
-        if !page.truncated {
-            break;
-        }
-    }
-    assert_eq!(
-        seen,
-        (51..=150).collect::<Vec<u64>>(),
-        "增量分页必须按 seq 不重不漏地覆盖保留区间"
-    );
-
-    // ClearTerminal 清空条目，但已消费的游标不得回退。
-    wb.dispatch(AppCommand::ClearTerminal).expect("清空终端");
-    let cleared = wb.query_terminal_since(cursor, usize::MAX);
-    assert!(cleared.entries.is_empty());
-    assert_eq!(cleared.next_seq, cursor, "清空后 next_seq 不得回退");
-
-    // 清空后新条目 seq 继续单调递增（稳定 ID 不复用），旧游标不会重复收到历史。
-    for index in 0..3 {
-        bus.publish(tool_transport::serial_rx_event(
-            "serial:COM_BOUND",
-            format!("after-{index}\n").into_bytes(),
-        ));
-    }
-    wb.tick(0.0);
-    let after = wb.query_terminal_since(cursor, usize::MAX);
-    assert_eq!(after.entries.len(), 3);
-    assert!(
-        after.entries.iter().all(|entry| entry.seq > cursor),
-        "清空后新条目 seq 必须继续递增"
-    );
-    assert!(
-        !wb.query_terminal_since(0, usize::MAX).entries.is_empty(),
-        "清空后写入的条目必须可从 seq=0 重新读回"
     );
 }
 

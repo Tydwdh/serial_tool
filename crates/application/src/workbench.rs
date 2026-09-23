@@ -17,7 +17,6 @@ use crate::query::{
     TransportView,
 };
 use crate::send_plan::{self, PlannedSend};
-use crate::service::terminal::TerminalService;
 use crate::task::{AppEvent, TaskContext, TaskId, TaskManager, TaskResult, TaskSnapshot};
 
 #[derive(Debug, Clone)]
@@ -70,7 +69,6 @@ pub struct Workbench {
     recorder: JsonlRecorder,
     replay: ReplayManager,
     plugin_manager: PluginManager,
-    terminal: TerminalService,
     app_config: ApplicationConfig,
     ports: Vec<SerialPortDescriptor>,
     selected_port: Option<String>,
@@ -166,7 +164,6 @@ impl Workbench {
         pm.set_host_services(dialog_sender, file_broker.clone());
         let recorder = JsonlRecorder::new(bus.clone());
         let replay = ReplayManager::new(bus.clone());
-        let terminal = TerminalService::new(bus.clone());
         Self {
             bus,
             transport,
@@ -175,7 +172,6 @@ impl Workbench {
             recorder,
             replay,
             plugin_manager: pm,
-            terminal,
             app_config: ApplicationConfig::default(),
             ports: Vec::new(),
             selected_port: None,
@@ -187,9 +183,6 @@ impl Workbench {
     }
 
     pub fn with_config(mut self, config: ApplicationConfig) -> Self {
-        self.terminal
-            .set_merge_window_ms(config.terminal_merge_window_ms);
-        self.terminal.set_max_entries(config.terminal_max_entries);
         self.selected_port = config.selected_port.clone();
         self.app_config = config;
         self
@@ -197,7 +190,6 @@ impl Workbench {
 
     pub fn tick(&mut self, _now_secs: f64) {
         self.poll_tasks();
-        self.terminal.ingest_pending();
         self.recorder.tick_backpressure();
     }
 
@@ -393,17 +385,20 @@ impl Workbench {
                 self.publish_plugin_command(plugin_id, command_id, context);
                 Ok(CommandOutcome::Done)
             }
-            AppCommand::ClearTerminal => {
-                self.terminal.clear();
-                Ok(CommandOutcome::Done)
-            }
+            // 三个终端命令都不在这里改动用户看到的终端：渲染中的 `TerminalPanel`
+            // 自订阅 `transport.serial.*`，两项设置由组合根直接落到面板
+            // （`app/mod.rs::apply_persisted_panel_settings` 启动回填、
+            // `config.rs::load_config_from_path` 重载、`ui/settings_panel.rs` 用户改值），
+            // 这里只把值记进 `app_config`。`ClearTerminal` 因此在 native 侧无可见效果
+            // ——wasm 侧同名分支靠 `notify(TerminalCleared)` 让组合根清面板，桌面侧没有
+            // 这条回路（原先它清的是 Application 内那份零使用者的重复 store，第 46 轮删除），
+            // 要不要补上这条回路属产品决定，别把它当成漏接线重新接回幻影管道。
+            AppCommand::ClearTerminal => Ok(CommandOutcome::Done),
             AppCommand::SetTerminalMergeWindow { ms } => {
-                self.terminal.set_merge_window_ms(ms);
                 self.app_config.terminal_merge_window_ms = ms;
                 Ok(CommandOutcome::Done)
             }
             AppCommand::SetTerminalMaxEntries { max } => {
-                self.terminal.set_max_entries(max);
                 self.app_config.terminal_max_entries = max;
                 Ok(CommandOutcome::Done)
             }
@@ -696,14 +691,6 @@ impl Workbench {
 
     pub fn clear_plugin_file_authorization(&self, plugin_id: &str) {
         self._file_broker.clear(plugin_id);
-    }
-
-    pub fn query_terminal_since(
-        &self,
-        since_seq: u64,
-        limit: usize,
-    ) -> crate::model::terminal::TerminalDelta {
-        self.terminal.entries_since(since_seq, limit)
     }
 
     // —— 以下是 `dispatch` 各命令分支的实现：只搬位置、不改判定，顺序与 dispatch 里的

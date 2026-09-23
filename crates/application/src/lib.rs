@@ -21,8 +21,6 @@ pub mod error;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod event;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod model;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod perf;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod query;

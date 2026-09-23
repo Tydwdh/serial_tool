@@ -25,14 +25,14 @@ tool-core (Event/Payload/Config)
 
 | 层 | 职责 | 例子 |
 |---|---|---|
-| Application (`tool-application`) | 行为与状态 | `Workbench::dispatch(AppCommand)`, `send_plan::plan_send`（send 命令 → (任务种类, 字节) 的唯一决策点，无 `cfg` 门控、wasm 侧同调）, `TerminalService`, `ApplicationConfig` |
+| Application (`tool-application`) | 行为与状态 | `Workbench::dispatch(AppCommand)`, `send_plan::plan_send`（send 命令 → (任务种类, 字节) 的唯一决策点，无 `cfg` 门控、wasm 侧同调）, `ApplicationConfig` |
 | Presentation (`tool-panels` + `app`) | 呈现与交互 | `TerminalPanel/LogPanel`, `PanelRegistry`, `CommandPalette`, `rfd` 文件选择 |
 
 ## Command / Query / Event
 
 - **Command** (`AppCommand`)意图：`RefreshPorts/Connect/SendText/StartRecording/LoadReplay/EnablePlugin/ClearTerminal...`，由 `Workbench::dispatch` 执行，返回 `CommandOutcome::Done|Pending`，错误为 `AppError`。
-- **Query** 只读 DTO：`query_transport/query_recording/query_replay/query_plugins/query_terminal_since(seq,limit)`，不暴露 `&mut TransportManager`。
-- **Event** 事实：复用 `tool-databus/DataBus`，`transport.serial.* / log.system / ui.* / plugin.command.*`，高频终端用 `TerminalService::entries_since(seq,limit)->TerminalDelta{entries,next_seq,truncated,dropped}` 增量消费，不每帧 clone 全量。
+- **Query** 只读 DTO：`query_transport/query_recording/query_replay/query_plugins`，不暴露 `&mut TransportManager`。（第 46 轮删掉 `query_terminal_since(seq,limit)`：它读的是 Application 内那份零生产使用者的重复终端 store，见「Terminal 高频数据路径」。）
+- **Event** 事实：复用 `tool-databus/DataBus`，`transport.serial.* / log.system / ui.* / plugin.command.*`，高频终端的增量消费只有一处：呈现层 `TerminalPanel` 自订阅 `transport.serial.*` 后每帧 `ingest_pending()`，不每帧 clone 全量（见「Terminal 高频数据路径」）。
 
 ## State 归属
 
@@ -49,7 +49,7 @@ tool-core (Event/Payload/Config)
 ## 如何新增能力
 
 1. 在 `tool-application::command::AppCommand` 加变体
-2. 在 `workbench.rs` 实现 `dispatch` 分支 + `query`/`TerminalService` 扩展；
+2. 在 `workbench.rs` 实现 `dispatch` 分支 + `query_*` 扩展（Application 侧**没有**终端读模型可扩：那份 `TerminalService` 第 46 轮按「零生产使用者」删除，终端数据只在呈现层，见「Terminal 高频数据路径」）；
    **`dispatch` 有两套实现**（native `workbench.rs` / wasm `application/src/web.rs`，变体数已实测不同：
    仅 native 有 `LoadReplay`，仅 web 有
    `InstallMarketplacePlugin`/`LoadReplayText`），只改一侧就是埋下「同一命令在两端行为不同」
@@ -85,14 +85,53 @@ tool-core (Event/Payload/Config)
 
 | 层 | 职责 | 代表 |
 |---|---|---|
-| Application (`tool-application`) | 行为与状态 | `Workbench::dispatch(AppCommand)->Result<CommandOutcome,AppError>` / `query_*` / `tick(now)` / `TerminalService(seq)` / `ApplicationConfig` |
+| Application (`tool-application`) | 行为与状态 | `Workbench::dispatch(AppCommand)->Result<CommandOutcome,AppError>` / `query_*` / `tick(now)` / `ApplicationConfig` |
 | Presentation (`tool-panels` + `app` UI) | 呈现与交互 | `TerminalPanel/LogPanel/ChartPanel + DynamicPanels` / `PanelRegistry::Builtin(fn(&mut WorkbenchApp,&mut Ui))` / `CommandPalette` / `rfd` |
 
 判定规则（todo.txt §7）：换个 UI 仍需知道即 `Application`，仅用于当前 `egui` 的 `scroll/selection/hover/dock` 即 `Presentation`.
 
-## Terminal 高频特殊处理
+## Terminal 高频数据路径（native 只剩一条：第 46 轮）
 
-`TerminalService` 持有 `RingSubscription(prefix("transport.serial."),65_536)`，`push_event` 做 `merge(同port同方向≤merge_window_ms且不以\n结尾则拼接)`，`enforce_limit(50_000>` 按 `seq` 最旧淘汰)，`query_terminal_since` 供 headless/Flutter 增量拉取。
+活的那一条全在呈现层：`crates/panels/src/terminal.rs` 的 `TerminalPanel::new(&bus)` 自己
+`subscribe_ring_bounded(TopicFilter::prefix("transport.serial."), 65_536)`、自己持有那份
+`TerminalStore`，每帧由组合根调 `ingest_pending()`（native `crates/app/src/runtime/plugin.rs`、
+web `crates/app/src/web/mod.rs`，两边都进 `record_terminal_ingest` 的 perf 采样），预算
+`MAX_INGEST_PER_FRAME = 500`；`push_event` 把「按 idle 定稿 / ≤`MAX_TERMINAL_BLOCK_BYTES` 分块」
+交给共用的 `TerminalAssembler` + `TerminalStore`，`set_max_entries` 夹 `max(100)` 后由
+`trim_to_limit` 按 seq 淘汰最旧。**两项用户设置活的落点就是这里**：`terminal_merge_window_ms`
+在 `push_event` 里同步成 `assembler.idle_finalize_ms`，`terminal_max_entries` 经
+`set_max_entries`→`enforce_max_entries`，两端各自还有 `app/mod.rs::apply_persisted_panel_settings`
+（启动回填）、`config.rs::load_config_from_path`（重载）、`ui/settings_panel.rs`（用户改值）三处入口。
+
+**曾经并存的第二条（本轮删除）**：`crates/application/src/service/terminal.rs`（145 行）+
+`crates/application/src/model/terminal.rs`（27 行）里那份 `TerminalService` 用同一个前缀**再开一条
+65_536 环**（`subscribe_ring_bounded` 是 `VecDeque::with_capacity`，实测 `size_of::<Event>() = 136`
+→ **8,912,896 B ≈ 8.5 MiB 在 `Workbench::new` 当场分配**），再配第二份 `TerminalStore`
+（`DEFAULT_MAX_ENTRIES = 50_000`），`Workbench::tick` 每帧 `drain_limited(2048)` 把同一批字节重新
+装配一遍。release 实测（同一夹具、600 帧、删前/删后各跑一遍）：
+
+| 会话形态 | 删前 `Workbench::tick()` | 删后 | 幻影调用自身（插桩单测） |
+|---|---|---|---|
+| 空载（0 事件/帧） | 74.0 ns/帧 | 79.8 ns/帧 | 45.5 ns/帧，store 0 条 |
+| 115200 连续流（1×192 B/帧） | 1,501.3 ns/帧 | 47.5 ns/帧 | 1,487.2 ns/帧，store 600 条 |
+| 突发（8×1 KB/帧） | 14,862.7 ns/帧 | 46.3 ns/帧 | 14,436.8 ns/帧，store 4,800 条 |
+
+即 **application 层的每帧终端开销从「与面板同量级」降到与流量无关的 ~50 ns 噪声带**；空载那一行
+删前删后都在噪声里（真正消失的是 45 ns 与那条环的 8.5 MiB），有流量时才是实打实的第二份装配
+工作（1.45 µs/帧与 14.8 µs/帧）。面板那份代码两个构建完全相同，不参与对比。
+
+**为什么四道门从没抓到它（cfg 根因）**：`service/terminal.rs` 挂在
+`#[cfg(not(target_arch = "wasm32"))] pub(crate) mod terminal;` 上，`model` 整个模块也是
+`cfg(not(target_arch = "wasm32"))` —— wasm 那道 clippy 连这个模块都看不见，那条重复订阅对
+web 平台的门天然隐形；native 那道 `dead_code` 又因为它被 `tick`/`dispatch` 调着而必然沉默。
+于是「第二条订阅」在两边的门里都不显眼，只有按符号查使用者才看得见：它的 9 处调用 + 2 条用例
+全在 `crates/application/tests/headless.rs`，生产侧 0 读者。`tool-panels` 依赖 `tool-application`、
+反向没有边（加依赖就是往守卫在乎的架构里新增一条边），所以那些断言无法改指活面板 —— 本轮按
+「删代码即删其自测用例」处理。仍在守的语义：稳定 seq 与「清空后游标不回退」由 `TerminalStore`
+自己的 `clear_keeps_terminal_ids_monotonic_for_incremental_clients` 守，条数上限与按 seq 淘汰由
+面板的 `max_entries_is_global_across_ports_and_keeps_newest_events` /
+`lowering_max_entries_trims_immediately` 守；面板侧不存在 `entries_since` 那种「调用方持游标分页」
+的读法（导出走 `TerminalStore::iter_after(Some(last_id))`，是另一件事）。
 
 ## WorkbenchApp 定位（已收敛）
 
@@ -123,8 +162,10 @@ cargo tree -p tool-application | grep -i egui    # 0 行
 - `Cargo.toml` 有 `default-members = ["crates/app"]`，因此**裸跑** `cargo clippy --all-targets` /
   `cargo test --all-targets` 只覆盖 `crates/app` 一个包，`crates/application/tests/*.rs` 与其他 crate
   既不执行也不被 lint。必须带 `--workspace`（CI 已改为带 `--workspace`）。
-- `rg "egui|eframe" crates/application` **不为 0 行**：`crates/application/src/**` 有 **4 处**在注释里合法提到 egui
-  （`task.rs:136`、`workbench.rs:240`、`model/mod.rs:1`、`service/terminal.rs:3`，均为 doc/行注释）。
+- `rg "egui|eframe" crates/application/src` **不为 0 行**：第 46 轮删掉幻影终端管道与 `model` 模块后剩
+  **3 行**（`task.rs` 与 `workbench.rs` 的 worker 文档在说「不外借 UI 状态」「不在 egui 回调里写大文件」，
+  `workbench.rs` 的导出闭包同理）。**别按行号核对，行号一直在漂**：上一版记的 `task.rs:136`、
+  `workbench.rs:240` 现在分别是 137、229，而它列的 `model/mod.rs:1`、`service/terminal.rs:3` 已经不存在。
   判断 UI 隔离要看 `Cargo.toml` 与 `crates/application/tests/architecture.rs`，不要用这条 grep。
 - MSRV 差异：本机 stable 是 `1.98.0`，CI 钉 `1.92.0`。**必须用 `+1.92.0` 复跑**——历史上两套工具链
   对 lint 的判定确实相反，并因此暴露过两个 red gate（**均已修复**）：
@@ -870,6 +911,22 @@ panic / 置位什么都不做的手工线程，与磁盘和调度无关）·
    > 方法与它唯一的单测一并删除，活的面板选择走 `TilesLayout::select_pane` 一族 handler。
    > (b) `Workbench::query_terminal_since` 有 **8 处测试引用、0 处生产引用** ——
    > 终端数据的活读路径是别的那一条（本轮没查是哪条），先记着。
+   > **【第 46 轮：这颗还了，而且它比"零使用者"更糟 —— 整座 `TerminalService` 是 native-only 的
+   > 第二条终端摄入管道】**活读路径查明了：`crates/panels/src/terminal.rs` 的 `TerminalPanel`
+   > 自订阅 `transport.serial.*` 并持有自己那份 `TerminalStore`（native 每帧在
+   > `crates/app/src/runtime/plugin.rs`、web 在 `crates/app/src/web/mod.rs` 调 `ingest_pending()`），
+   > 终端数据从不跨 application 边界。本轮复核：引用是 **9 处调用 + 2 条用例，全部在
+   > `crates/application/tests/headless.rs`**（当时记的 8 处少算了同一条 assert 里的第 9 个调用）。
+   > 删的符号：`TerminalService`、`TerminalDelta`、`TerminalSeq`、`TerminalEntry`、
+   > `Workbench::query_terminal_since`、`DEFAULT_MAX_ENTRIES`、整个 `model` 模块（它只装这份 DTO），
+   > 以及 `tool-application` 的 `parking_lot` 依赖边（`git grep HEAD` 证实全 crate 唯一使用者就是
+   > 被删那把 `RwLock<TerminalStore>`）；用例 `terminal_delta_is_incremental` 与
+   > `terminal_bound_clamps_max_entries_and_pages_incrementally` 一并删除。**另两件记账级事实**：
+   > ① native 的 `AppCommand::ClearTerminal`（命令面板/快捷键「清空终端」）原先只清那份没人读的
+   > store，删除后该分支只剩 `Ok(Done)` —— 桌面端这条命令历史上就没有可见效果（wasm 侧靠
+   > `notify(TerminalCleared)` 让组合根清面板），补不补这条回路是产品决定，代码里就地写了；
+   > ② `crates/application/src/service/device.rs` 是一份**没被任何 `mod` 声明**的遗留文件
+   > （`DeviceService` 全仓 0 引用，连编译都不参与），按"一轮一个域"本轮没动它。
    > 本轮**没**碰其余候选（`recorder` 的 backpressure 两件套、`core::advance`、`tool-testing` 的
    > 两个计数、`replay::publish_next_for_test`、`lua_host::run_script`），它们分属别的 crate，
    > 按"一轮一个域"排到后面。**【`lua_host::run_script` 那一颗由第 34 轮还掉，见本条末尾】**
@@ -1262,9 +1319,13 @@ panic / 置位什么都不做的手工线程，与磁盘和调度无关）·
       > 也照样是坏的，只有 `kind()` 看得见）。**这一族在本 crate 已闭合**：
       > `prepare_load_text` 那句 `io::Error::other("回放文本解析未完成")` **保持不动** ——
       > 它底下没有 OS 错误、没有 kind 可保，代码里就地写了这句话，别当漏网的顺手改掉。
-      > **还剩一条同类小账，但在别的 crate**：`crates/app/src/runtime/autosave.rs` 里
+      > **还剩两条同类小账，都在别的 crate**：`crates/app/src/runtime/autosave.rs` 里
       > `format!("录制失败: {e}")` 那一格仍是半角 `:`（同一文件的另一格与 `recorder.rs`
-      > 全用全角 `：`），本轮按要求没动，下一轮的候选。
+      > 全用全角 `：`）；本轮普查又抓到**这条回放路径上**的另一格 ——
+      > `crates/application/src/workbench.rs` 里 `AppEvent::TaskFailed` 那句
+      > `format!("后台任务失败: {error}")` 也是半角 `:`（它是所有后台任务失败进系统日志的
+      > 公共出口，改它会影响导出/扫描插件等一整批句串，不是顺手改的量）。两处本轮都没动，
+      > 下一轮的候选。
       > **再纠一处可达性**：这句到用户眼前的路是 native **状态栏**（`commands.rs` 的
       > `start_or_stop_recording` → `set_status_force(Error, error.to_string())` → `AppError::Recording`
       > 的 `录制错误：{0}`），**不是**录制面板那句 `录制错误：{error}`（它读

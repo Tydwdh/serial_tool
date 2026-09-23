@@ -6,6 +6,84 @@
 
 ### 调整
 
+- **删掉 native-only 的重复终端摄入管道：Application 里那份 `TerminalService` 连同它的读模型
+  （净 −302 行 = 岛 172 行 + 装配点 + 只测它的两条用例；第 46 轮）**（本轮只动 `crates/application`
+  一个 crate：`src/service/terminal.rs` **−145**（整删）、`src/model/terminal.rs` **−27**（整删）、
+  `src/model/mod.rs` **−3**（整删，连 `model/` 目录）、`src/service/mod.rs` **−2**、`src/lib.rs` **−2**、
+  `src/workbench.rs` **+9/−22**（多的 9 行是就地写清「为什么这三个分支不再动用户看到的东西」的中文注释）、
+  `tests/headless.rs` **+6/−114**、`Cargo.toml` **−1**（`parking_lot` 依赖边）、`Cargo.lock` **−1**；
+  不新增 trait/泛型/宏/模块/依赖，不加 `#[allow]`/`#[ignore]`，豁免计数仍 **5**；
+  两份架构守卫（`crates/app/tests/architecture.rs`、`crates/application/tests/architecture.rs`）
+  **一行未改**：它们的计数断言全是 `>=` 下限且按 *manifest* 统计，纯删源文件不触发（先跑一遍确认，
+  不是推断）。四道门 fmt / native clippy `-D warnings` / wasm clippy / test 全 **EXIT=0**，
+  **731 passed / 0 failed / 7 ignored**、32 条 `test result:` 行 —— 基线 733 **净减 2 条**，
+  就是下面 (4) 点名的两条只测幻影管道的用例，没有别的差额。
+  **（1）可达性取证（动手前重跑一遍，不是照抄简报）**：`grep -rnw` 逐符号 —— `TerminalService`
+  3 处（自身定义 2 + `workbench.rs` 的 import/字段/构造）、`TerminalDelta`/`TerminalSeq`/`TerminalEntry`
+  只在 `model/terminal.rs` 与 `service/terminal.rs` 内部互引 + `workbench.rs` 的返回类型、
+  `query_terminal_since` **9 处调用全在 `tests/headless.rs`**（简报记 8 处，少算了同一条 assert 里的
+  第 9 个调用）、`model::terminal`/`service::terminal` 作为路径 0 个外部使用者。岛内成员互相调用看着
+  "像活的"，所以入口从外面追：唯一的进口是 `Workbench::new/with_config/tick/dispatch/query_terminal_since`，
+  而这五个口子对终端做的事**只有一份幻影 store**。**根因（为什么四道门从没抓到）**：
+  `service/terminal.rs` 挂在 `#[cfg(not(target_arch = "wasm32"))] pub(crate) mod terminal;` 上、
+  `model` 整个模块也是 `cfg(not(wasm32))` —— wasm 那道 clippy 根本编不到它，native 那道 `dead_code`
+  又因为它被 `tick`/`dispatch` 调着而必然沉默。**（2）两项设置在两端都还活着（这是能不能删的关键）**：
+  真正渲染的 `crates/panels/src/terminal.rs::TerminalPanel` 有自己的
+  `subscribe_ring_bounded(TopicFilter::prefix("transport.serial."), 65_536)` 与自己的 `TerminalStore`，
+  `terminal_max_entries` 经 `set_max_entries`→`max(100)`→`enforce_max_entries`→`TerminalStore::set_max_entries`
+  生效，`terminal_merge_window_ms` 在 `push_event` 里每事件同步成 `assembler.idle_finalize_ms`；
+  native 三个入口 `app/mod.rs::apply_persisted_panel_settings`（启动回填）、
+  `config.rs::load_config_from_path`（重载）、`ui/settings_panel.rs`（用户改值），持久化则反向
+  **从面板读回**（`config.rs::build_config_snapshot`）；web 两个入口 `web/mod.rs` 的
+  `dispatch(TerminalSettingsChanged)` 与设置卡片。**结论：幻影不是任何一项设置的唯一消费者**，
+  它只是同一份设置的第二份落点、同一批字节的第二次装配。**（3）断言走的是「连代码带用例一起删」(a)**，
+  证据：`entries_since(since_seq, limit) -> TerminalDelta{next_seq,truncated,dropped}` 这种
+  「调用方持 seq 游标分页拉取」的读法**只存在于幻影服务**（全仓 `entries_since` 2 处命中都在被删文件里）；
+  面板侧唯一相近的是导出走的 `TerminalStore::iter_after(Some(last_id))`，那是"多帧扫大 store 做导出"，
+  不是同一条对外读取契约 —— 也就是说这两条用例守的是**一个产品代码从来不用的特性**，
+  把它"移植"到面板等于给面板补一份它没有的 API（新抽象 + 新依赖边，越界）。且 `tool-panels`
+  依赖 `tool-application`、反向没有边，`headless.rs` 根本指不到活面板。**（4）删掉的具体用例与它们
+  原本守什么**：`terminal_delta_is_incremental`（守「带 `next_seq` 复查不得重投已消费条目」）、
+  `terminal_bound_clamps_max_entries_and_pages_incrementally`（守四件事：`SetTerminalMaxEntries{max:5}`
+  被 `max(100)` 夹取、超限按 seq 淘汰最旧、`limit=1` 必须标 `truncated`、`ClearTerminal` 后游标不回退
+  且新条目 seq 继续递增）；`headless_workbench_can_dispatch_and_query` 只摘掉其中 4 行
+  （`query_terminal_since(0,100)` 的三条断言 + 那句注释），命令可派发/`query_*` 可用/无效连接终态
+  都还在。**仍然有牙的部分没丢**：稳定 seq 与「清空后 ID 不复用」由 `TerminalStore` 自己的
+  `clear_keeps_terminal_ids_monotonic_for_incremental_clients` 守，条数上限与按 seq 淘汰由面板的
+  `max_entries_is_global_across_ports_and_keeps_newest_events`、`lowering_max_entries_trims_immediately`
+  守（三个名字都逐字核过存在）。**（5）实测数字，不是推断**（临时插桩 + 临时夹具，跑完全部回退并
+  `cmp`/`md5sum` 逐文件验回原状；夹具是同一条事件流、600 帧）：插桩单测里幻影每帧取走的事件数与
+  store 增长 = 空载 **0 件 / 0 条**、115200 连续流（1×192 B/帧）**600 件 / 600 条**、突发
+  （8×1 KB/帧）**4,800 件 / 4,800 条**，即"面板收多少它装配多少"；同一构建里两者耗时同量级
+  （release：幻影 1,487 vs 面板 1,417 ns/帧；14,437 vs 13,479 ns/帧）。同一夹具在两个构建里量
+  `Workbench::tick()` 每帧开销（release）：空载 **74.0 → 79.8 ns**（这一行是噪声，删除的只是 45 ns
+  的空 drain）、115200 流 **1,501.3 → 47.5 ns**、突发 **14,862.7 → 46.3 ns** —— 也就是
+  **application 层的每帧终端开销从「与面板同量级」降到与流量无关的 ~50 ns**（debug 档给的是插桩
+  单测里那个被删调用自身的开销：167.8 / 5,212.0 / 55,004.7 ns/帧，与面板同档实测 74.8 / 5,427.2 /
+  56,668.7 ns/帧 —— 两份工作确实同量级）。**另一笔是启动即分配**：`subscribe_ring_bounded` 用
+  `VecDeque::with_capacity`，实测 `size_of::<Event>() = 136` → 那条重复的 65_536 环在 `Workbench::new`
+  当场占 **8,912,896 B ≈ 8.5 MiB**，删掉就没了（面板自己那条照旧）。所以这次既省每帧第二份装配、
+  也省 8.5 MiB + 第二份 50_000 条 store；说成"纯性能胜利"不诚实：空载会话里它本来每帧只花 45 ns，
+  真正的收获是有流量时的第二份装配与那两份内存。**（6）用户可见变化：无。** 终端内容、两项设置的
+  生效、面板工具栏的「清空」两步确认、导出、录制回放全部走原路径（面板那份代码在删前删后逐字相同）。
+  唯一"本来就不一样"的是 native 命令面板/快捷键的 `$ClearTerminal`：它此前只清那份没人读的 store，
+  用户看到的面板同样不动 —— 删除后该分支只剩 `Ok(Done)`，**行为对用户逐字不变**，但这笔账被如实
+  写进 `workbench.rs` 的注释里（wasm 侧靠 `notify(TerminalCleared)` 让组合根清面板，桌面侧没有这条回路）。
+  **（7）三笔顺带查出、本轮按「一轮一个域」没动的账（需orchestrator拍板）**：
+  ① native 的「清空终端」命令历史上是空转 —— 补这条回路（组合根收到 `Done` 后清面板，或像 web 那样
+  发事件）是**产品决定**，不是机械修线；② `ApplicationConfig::terminal_merge_window_ms`/
+  `terminal_max_entries` 现在**只写不读**（native 无人派发 `SetTerminalMergeWindow/MaxEntries`，
+  启动值由组合根直接落面板），要不要连字段一起收掉涉及 `crates/app::application_config_from`，
+  超出本轮单 crate 边界；③ `crates/application/src/service/device.rs` 是一份**没被任何 `mod` 声明**的
+  遗留文件（`DeviceService` 全仓 0 引用，连编译都不参与，11 行），以及 `TerminalItem::last_timestamp_ms()`
+  本轮普查里 0 调用者（本轮之前就已死，不是被这次删除变成孤儿的，故未动）。**（8）文档**：
+  `docs/ARCHITECTURE.md` 的「Terminal 高频特殊处理」重写成「Terminal 高频数据路径（native 只剩一条）」，
+  记 cfg 根因 + 上表实测数字，分层表/`Command·Query·Event`/「如何新增能力」第 2 步里指向
+  `TerminalService`、`query_terminal_since` 的四处一并改掉，第 9 条 (b) 那颗"先记着"的疑问就地还账；
+  「注释里提到 egui 有 4 处（含行号）」那条改成按符号核对、行号会漂（现 3 行）。CRLF 逐字节保持
+  （1421 行全 CRLF，无裸 LF）。`headless.rs` 那条钉 `docs/ARCHITECTURE.md` 发布文案的用例钉的是
+  HEX 严格模式那句，本轮没碰那一栏，两份文档也没有被任何测试从磁盘读取（已 grep 核实）。）
+
 - **回放的三条 io 出口不再把 OS 的 `kind()` 折成 `Other`：框架点名路径、冒号改全角
   （第 40 轮记下的那笔同类账，本轮平掉）**（本轮动 `crates/recorder/src/replay.rs`
   的 `prepare_load` 两条出口 + `prepare_load_lines` 一条 + 它的 `#[cfg(test)] mod tests`；
@@ -45,7 +123,16 @@
   生产侧**唯一**的调用点就是它；web 走的是 `prepare_load_text`/`ReplayTextLoader`
   （`AppCommand::LoadReplay` 只出现在 native 的 `workbench.rs:336`，wasm 那份派发的是
   `LoadReplayText`），这三条出口在浏览器侧结构上跑不到；同步的 `ReplayManager::load`
-  没有生产调用者，只有本 crate 的 `rejects_oversized_file` 用例走它（本轮按范围没动）。(b) **谁钉着** ——
+  没有生产调用者，只有本 crate 的 `rejects_oversized_file` 用例走它（本轮按范围没动）。
+  **纠一条本文件自己写错的前提**：`prepare_load` 的文档注释与那条用例的注释都写着
+  「少一句框架就是英文 OS 原文**上状态栏**」—— 实测**状态栏不读它**：原生侧
+  `Workbench::dispatch` 之后没有任何地方渲染 `load_replay` 的任务快照（`task_message`
+  这个读法全仓只有测试在用），可见的就是上面那两处。两处注释已按实况改成点名
+  「任务消息 + 那句系统日志」，免得下一轮又照"状态栏"去找不存在的接线。
+  **顺带查出、本轮没动**：那句系统日志的框架 `format!("后台任务失败: {error}")`
+  自己也是半角 `:`（在 `crates/application`，是所有后台任务失败进日志的公共出口，
+  改它牵连导出/扫描插件一整批句串），与 `autosave.rs` 那格一起记进
+  `docs/ARCHITECTURE.md` 当下一轮的候选。(b) **谁钉着** ——
   `grep -rn "回放文件打开失败\|获取文件大小失败\|回放文件读取失败" crates/ --include=*.rs`
   只命中**两个文件**：本文件（三条生产者 + 用例里的三条期望）、`crates/application/tests/headless.rs` 的
   `replay_file_that_cannot_be_opened_reaches_the_user_in_chinese`（一条注释 + 两条断言）。
