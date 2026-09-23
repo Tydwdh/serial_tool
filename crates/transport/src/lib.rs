@@ -1492,13 +1492,62 @@ mod tests {
     // 随函数一并迁入 `crates/core/src/lib.rs` 的 `mod tests`，断言逐字未改。
 
     // ── #8: translate_error 按变体分发 ──
+    /// 「翻译出来的文案是给人看的中文」这条判据的最小形式。
+    /// 原来三处只写 `!is_empty()` —— 任何字符串都能过，包括把臂删成 `err.to_string()`
+    /// 之后那口英文 `Description(...)`；`is_empty` 对那种回归完全无感。
+    fn contains_chinese(text: &str) -> bool {
+        text.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+    }
+
     #[test]
     fn translate_error_covers_all_variants() {
-        assert!(!translate_error(&TransportError::NoOpenPort).is_empty());
+        let no_port = translate_error(&TransportError::NoOpenPort);
+        assert!(
+            contains_chinese(&no_port),
+            "NoOpenPort 的文案不是中文：{no_port:?}"
+        );
         assert!(translate_error(&TransportError::PortNotOpen("COM3".into())).contains("COM3"));
-        assert!(!translate_error(&TransportError::WorkerClosed).is_empty());
-        assert!(!translate_error(&TransportError::QueueFull).is_empty());
+        let worker_closed = translate_error(&TransportError::WorkerClosed);
+        assert!(
+            contains_chinese(&worker_closed),
+            "WorkerClosed 的文案不是中文：{worker_closed:?}"
+        );
+        let queue_full = translate_error(&TransportError::QueueFull);
+        assert!(
+            contains_chinese(&queue_full),
+            "QueueFull 的文案不是中文：{queue_full:?}"
+        );
         assert!(translate_error(&TransportError::InvalidHex("bad".into())).contains("bad"));
+        // 第 7 个变体 `Serial(sp::Error)` 这里**驱动不了**：全仓没有一处构造 `sp::Error`
+        // （唯一的入口是 `#[from]`），本轮不为它编造构造方式。`Io` 变体已有自己的跨平台用例
+        // （权限建议两格 + 超时/泛型框架），本轮另补的是它内部从未驱动过的两格透传，
+        // 见 `translate_error_passes_the_already_chinese_io_arms_through`。
+    }
+
+    /// `Io` 臂五格里，`PermissionDenied` / `TimedOut` / `other` 三格**已有**跨平台用例
+    /// （`translate_error_keeps_the_timeout_and_generic_frames_for_other_kinds` 等，Windows 跑得到 ——
+    /// 本轮用变异核对覆盖时才发现，先前以为它们只在 linux）。剩下两格"原样透出"此前一处用例都没有：
+    /// `WouldBlock`（那句「COM3 正在关闭中，请稍后重试」由 `open_serial` 直接造）与 `InvalidData`。
+    /// 它们的契约恰恰是**不许**再包一层中文：包了就会出现「IO 错误：COM3 正在关闭中，请稍后重试」
+    /// 这种两套说法叠在一起的用户可见文案。
+    #[test]
+    fn translate_error_passes_the_already_chinese_io_arms_through() {
+        for (kind, detail) in [
+            (
+                std::io::ErrorKind::WouldBlock,
+                "COM3 正在关闭中，请稍后重试",
+            ),
+            (
+                std::io::ErrorKind::InvalidData,
+                "文件不是本工具写出的录制格式",
+            ),
+        ] {
+            let message = translate_error(&TransportError::Io(std::io::Error::new(kind, detail)));
+            assert_eq!(
+                message, detail,
+                "kind {kind:?} 约定是原样透出（正文已是中文句子），再包一层会出现两套说法"
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]

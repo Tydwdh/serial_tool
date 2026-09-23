@@ -6,6 +6,27 @@
 
 ### 调整
 
+- **`translate_error` 的三条 `!is_empty()` 换成有区分力的判据，并补上从未被驱动的两格（第 53 轮）**
+  （**只动 `crates/transport/src/lib.rs` 的 `mod tests`**，生产代码零改动：`translate_error` 本体一行未改，
+  新用例只是把已有行为钉住。）原来那条叫 `translate_error_covers_all_variants` 的用例，对 `NoOpenPort` /
+  `WorkerClosed` / `QueueFull` 三格只断言 `!is_empty()` —— **任何非空字符串都能过**，包括把臂删成
+  `err.to_string()` 之后那口英文 `Description(...)`；而"用户看到的是中文"正是第 10、22、25 轮收过的那条契约。
+  改法是加一个 5 行的 `contains_chinese`（只在测试模块内）断言文案含 CJK 字符，另加一条新用例钉
+  `Io` 臂里此前**一处用例都没有**的两格 `WouldBlock` / `InvalidData` —— 它们的契约恰恰是**不许**再包一层
+  中文（包了就出现「IO 错误：COM3 正在关闭中，请稍后重试」这种两套说法叠在一起的用户可见文案）。
+  **红证明（两个变异都红在我新写的断言上，`error[` 计数为 0 ⇒ 不是编译错的假红）**：M-A 把 `QueueFull`
+  改成英文 `"serial write queue is full"` → 新断言红，而**旧的 `!is_empty()` 在它下面必然全绿**（英文也非空），
+  这就是本轮买到的那条牙齿；M-B 把 `WouldBlock` 改成 `format!("IO 错误：{message}")` → 新用例红。
+  **一处必须记下的自我更正**：我原本的判断是"`Io` 臂只在 linux 有用例、Windows 侧 0 覆盖"，**M-B 的第一版
+  打在 `TimedOut` 上时同时红了既有的 `translate_error_keeps_the_timeout_and_generic_frames_for_other_kinds`**
+  ⇒ 那三格（权限/超时/泛型）早就有 Windows 跑得到的跨平台用例，我差点把重复代码当缺口入库。据此把新用例
+  **收缩**到只剩真正没覆盖的两格，并把写错的注释一并改掉（用例数：`translate_error*` 一族从 5 条变 6 条）。
+  `Serial(sp::Error)` 变体仍然驱动不了：全仓没有一处构造 `sp::Error`（唯一入口是 `#[from]`），本轮不为它编造
+  构造方式，已在用例末尾如实注明 —— 要补它得先决定用什么方式造，那是另一件事。
+  本机核过：`cargo test -p tool-transport --lib translate_error` 基线/还原后 EXIT=0、
+  `cargo clippy -p tool-transport --all-targets -- -D warnings` 与 `cargo fmt --all --check` EXIT=0；
+  整包五道门在第 50、51 轮那次已全绿（`8c05fc0`），本轮改动只在这个基础上加测试目标。
+
 - **豁免棘轮补上两条它原本看不见的静默通道（第 51 轮）**（**只动 `crates/app/tests/lint_exemptions.rs`**，
   169 行全是**加强**守卫的新增断言，一条豁免都没退）：原本那条守卫只数源码里的 `#[allow(...)]`，而
   ① 往任意 `Cargo.toml` 写一段 `[lints.clippy] … = "allow"`、② 往 `.cargo/config.toml` 的 rustflags 塞
