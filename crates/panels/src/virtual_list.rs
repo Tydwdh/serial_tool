@@ -366,9 +366,38 @@ mod tests {
         let started = std::time::Instant::now();
         let mut index = VirtualRowIndex::default();
         index.sync_rows(&ids, &estimates, 1);
+        // 视口与 overscan 是这个门禁的契约对象，写成常量供下面的断言复用（不要再抄一遍字面量：
+        // 抄第二份就会有人改了上面忘了改下面）。
+        const VIEWPORT: f32 = 480.0;
+        const OVERSCAN: f32 = 320.0;
         let mut visited = 0usize;
         for offset in (0..10_000).step_by(97) {
-            visited += index.visible_range(offset as f32, 480.0, 320.0).len();
+            let scroll = offset as f32;
+            let range = index.visible_range(scroll, VIEWPORT, OVERSCAN);
+            visited += range.len();
+            // 「行索引保持完整」这半条契约原来只由 `visited > 0` 守着 —— 那条断言几乎不可能失败
+            // （任何非空索引都会 >0，只有"每个 offset 都返回空窗口"才红）。这里改成**覆盖性**：
+            // 窗口必须真的盖住视口。用的全是已有访问器，**不在测试里再实现一遍 `index_at_offset`**
+            // —— 给被测算法留第二份副本，迟早和实现各说各话。
+            assert!(
+                !range.is_empty(),
+                "offset {scroll} 上可见窗口为空：无损索引把整个视口跳过了"
+            );
+            let first_top = index.row_top(range.start);
+            let last_index = range.end - 1;
+            let last_bottom = index.row_top(last_index) + index.height(last_index);
+            assert!(
+                first_top <= (scroll - OVERSCAN).max(0.0),
+                "offset {scroll} 的首可见行顶在 {first_top}，晚于 overscan 起点 \
+                 {} —— 索引至少漏了 overscan 这一段",
+                (scroll - OVERSCAN).max(0.0)
+            );
+            assert!(
+                last_bottom >= (scroll + VIEWPORT).min(index.total_height()),
+                "offset {scroll} 的末可见行底在 {last_bottom}，够不到视口底 {} —— \
+                 行高累加或下界查找错位（off-by-one 就在这里露出来）",
+                (scroll + VIEWPORT).min(index.total_height())
+            );
         }
         let elapsed = started.elapsed();
         println!(
@@ -379,6 +408,16 @@ mod tests {
             elapsed
         );
         assert_eq!(index.len(), 50_000);
+        // `total_height()` 已核实就是 `fenwick.total()`（不含 viewport / padding 项），所以期望值
+        // 可以直接由夹具算术得出：ids 1..=50_000 中 17 的倍数有 ⌊50000/17⌋ = 2941 个按 32.0，
+        // 其余 47_059 个按 16.0 ⇒ 2941×32 + 47059×16 = 847_056。原来这个数只被 println 掉。
+        // 抓的是"sync 之后行没丢、且高度按行分配对了"——把 32.0 那支按 16.0 累就会红。
+        assert_eq!(
+            index.total_height(),
+            2941.0 * 32.0 + 47_059.0 * 16.0,
+            "50k 行的总高不等于夹具算术的值"
+        );
+        // 耗时仍然只是观测值，不进判据（这条门禁要在 debug 下也能当回归门）。
         assert!(visited > 0);
     }
 }

@@ -223,3 +223,172 @@ fn lint_exemptions_match_the_pinned_list() {
          已消失（很好，把 EXPECTED 收紧到实际条数）：{removed:?}"
     );
 }
+
+/// manifest 文本里 `[lints…]` 段中把某个 lint 设成 `allow` 的行。
+///
+/// 只做行级文本扫描，不引 TOML 解析器：为这一条守卫加依赖，代价大于收益，
+/// 而且本仓的 `manifest_deps.rs` 已经在管依赖边了。
+fn manifest_allowed_lints(text: &str) -> Vec<String> {
+    let mut section = String::new();
+    let mut found = Vec::new();
+    for raw in text.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(header) = line
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
+            section = header.to_owned();
+            continue;
+        }
+        // `lints`、`lints.clippy`、`workspace.lints.rust`、`workspace.lints.clippy` 都要算：
+        // 按 `.` 拆开找一段叫 lints 的，而不是前缀匹配 —— 前缀匹配会**整段漏掉标准写法
+        // `[workspace.lints.*]`**，那正好是最容易偷偷加静默的地方。
+        if !section.split('.').any(|part| part == "lints") {
+            continue;
+        }
+        // `lint = "allow"`（含 `level = "allow"`）以及 `{ level = "allow" }` 三种写法。
+        let Some((_, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        let quoted_allow = value.trim_matches('"') == "allow";
+        let table_allow = value.contains("level") && value.contains("allow");
+        if quoted_allow || table_allow {
+            found.push(format!("{section} → {line}"));
+        }
+    }
+    found
+}
+
+/// cargo 配置里的 rustflags 中会**静默 lint** 的旗标。
+fn silencing_rustflags(text: &str) -> Vec<String> {
+    const FORBIDDEN: &[&str] = &["-A", "--allow", "--cap-lints"];
+    let mut found = Vec::new();
+    for raw in text.lines() {
+        let line = raw.split('#').next().unwrap_or("");
+        if !line.contains("rustflags") {
+            continue;
+        }
+        for flag in FORBIDDEN {
+            // 只在"作为独立 token 出现"时算数，避免把 `--cfg=…allow…` 这类误判进来。
+            let hits = line
+                .split(['"', ',', ' '])
+                .map(str::trim)
+                .any(|token| token == *flag || token.starts_with(&format!("{flag}=")));
+            if hits {
+                found.push(format!("{flag} ← {}", line.trim()));
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn no_lint_allowance_in_manifests() {
+    // 为什么要这条：棘轮原本只数源码里的 `#[allow(...)]`。往任意 `Cargo.toml` 加一行
+    // `[lints.clippy] … = "allow"` 就能让全仓某个 lint 静默，而**四道门与那条守卫都会照常绿** ——
+    // "豁免只准减、不准悄悄加"的承诺当场失效。这条把它也钉住。
+    //
+    // 本测试自带**正向对照**（下面喂一段人造的坏文本）：没有它，谓词写坏了（比如 section
+    // 状态机没跟上）会让"扫到 0 条"看起来像"仓库很干净"，实际是探测器坏了。
+    let planted = "[package]\nname = \"x\"\n\n[lints.clippy]\nunwrap_used = \"allow\"\n";
+    assert_eq!(
+        manifest_allowed_lints(planted).len(),
+        1,
+        "正向对照失败：人造的 `[lints.clippy] … = \"allow\"` 没被认出来 —— 谓词是空转的"
+    );
+    assert!(
+        manifest_allowed_lints("[lints.clippy]\nunwrap_used = \"deny\"\n").is_empty(),
+        "把 lint 设成 deny/警告不是静默，不该被报出来"
+    );
+    // 最容易漏的两种写法单独钉：cargo 的**标准**形式是 `[workspace.lints.*]`（父包声明、
+    // 成员 `lints.workspace = true` 继承），以及表值写法 `{ level = "allow", priority = 1 }`。
+    assert_eq!(
+        manifest_allowed_lints(
+            "[workspace.lints.clippy]\nunwrap_used = \"allow\"\n[workspace.lints.rust]\ndead_code = { level = \"allow\", priority = -1 }\n"
+        ).len(),
+        2,
+        "标准写法 `[workspace.lints.*]` 或表值 `level = \"allow\"` 没被认全 —— 静默通道会漏"
+    );
+
+    let root = workspace_root();
+    let mut manifests = Vec::new();
+    for entry in fs::read_dir(&root).expect("读工作区根失败") {
+        let path = entry.expect("读目录项失败").path();
+        if path.file_name().and_then(|n| n.to_str()) == Some("Cargo.toml") {
+            manifests.push(path);
+        }
+    }
+    for dir in ["crates", "xtask"] {
+        let base = root.join(dir);
+        if !base.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(&base).expect("读 crates/ 失败") {
+            let path = entry.expect("读目录项失败").path().join("Cargo.toml");
+            if path.is_file() {
+                manifests.push(path);
+            }
+        }
+    }
+    assert!(
+        manifests.len() >= 10,
+        "只扫到 {} 份 manifest，扫描路径大概错了 —— 这条守卫会退化成零断言",
+        manifests.len()
+    );
+    let mut offenders = Vec::new();
+    for path in &manifests {
+        let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("读取 {path:?} 失败：{e}"));
+        for hit in manifest_allowed_lints(&text) {
+            let relative = path.strip_prefix(&root).unwrap_or(path.as_path());
+            offenders.push(format!("{relative:?}: {hit}"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "manifest 里有把 lint 设成 allow 的段 —— 这等于绕过豁免棘轮加静默。\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn rustflags_do_not_silence_lints() {
+    // 同上，另一条静默通道：`.cargo/config.toml` 的 rustflags。`-A` / `--allow` /
+    // `--cap-lints allow` 都能在不改一行源码的前提下让告警消失。
+    let planted = "[build]\nrustflags = [\"-A\", \"dead_code\"]\n";
+    assert_eq!(
+        silencing_rustflags(planted).len(),
+        1,
+        "正向对照失败：人造的 `-A` 没被认出来 —— 谓词是空转的"
+    );
+    assert!(
+        silencing_rustflags(
+            "[target.wasm32-unknown-unknown]\nrustflags = [\"--cfg=web_sys_unstable_apis\"]\n"
+        )
+        .is_empty(),
+        "合法的 `--cfg` 不该被报成静默"
+    );
+
+    let root = workspace_root();
+    let mut checked = 0usize;
+    for name in [".cargo/config.toml", ".cargo/config", ".cargo/config.yml"] {
+        let path = root.join(name);
+        if !path.is_file() {
+            continue;
+        }
+        checked += 1;
+        let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("读取 {path:?} 失败：{e}"));
+        let offenders = silencing_rustflags(&text);
+        assert!(
+            offenders.is_empty(),
+            "{name} 的 rustflags 里有静默 lint 的旗标：\n{}",
+            offenders.join("\n")
+        );
+    }
+    // 一个配置文件都没有也是安全的，那就没什么可核 —— 但那种情况下这条测试确实没在守任何东西，
+    // 所以把扫到的文件数打印出来，便于人工确认它不是永远空转。
+    println!("[lint 静默通道] 已核对 cargo 配置文件 {checked} 份");
+}

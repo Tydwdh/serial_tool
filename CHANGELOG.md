@@ -6,6 +6,36 @@
 
 ### 调整
 
+- **豁免棘轮补上两条它原本看不见的静默通道（第 51 轮）**（**只动 `crates/app/tests/lint_exemptions.rs`**，
+  169 行全是**加强**守卫的新增断言，一条豁免都没退）：原本那条守卫只数源码里的 `#[allow(...)]`，而
+  ① 往任意 `Cargo.toml` 写一段 `[lints.clippy] … = "allow"`、② 往 `.cargo/config.toml` 的 rustflags 塞
+  `-A` / `--allow` / `--cap-lints`，都能在不改一行源码的前提下让全仓某个 lint 静默，且**四道门与那条棘轮照常绿**
+  ⇒ "豁免只准减、不准悄悄加"的承诺本来是漏的。今天这两条通道实测都是空的（逐份扫过：全仓无任何 `[lints]` 声明、
+  无 `clippy.toml`、rustflags 只有 `--cfg=web_sys_unstable_apis`）——**"此刻为空"正是钉住它的时点**。
+  **两条新断言各自带正向对照**（先喂一段人造的坏文本，认不出来就直接红），因为"扫到 0 条"既可能是仓库干净也可能是探测器坏了；
+  写第一版时就靠它抓到自己用前缀匹配会**整段漏掉 cargo 的标准写法 `[workspace.lints.*]`**，遂改成按 `.` 拆段找 `lints`。
+  **红证明（三个独立变异，全红且都是断言红不是编译错）**：M2 根 manifest 追加 `[workspace.lints.rust] unused = "allow"`
+  → 红，报出 `"Cargo.toml": workspace.lints.rust → unused = "allow"`；M3 把已有 wasm rustflags 数组扩成
+  `[…, "-A", "dead_code"]` → 红，报出 `-A ← rustflags = …`（写成重复表头会是 TOML 解析错，故改数组；放宿主用不到的
+  wasm 段是为了零重建）。成员 manifest 那一半的遍历由守卫自带的 `manifests.len() >= 10` 兜住（根只贡献 1 份）。
+  **没守住的如实记下**：`vendor/egui_tiles/Cargo.toml` 不在扫描路径里，那里加 `[lints]` 仍看不见 —— 那是约定不碰的第三方
+  目录，要扩就下一轮单独扩。（五道门 fmt/clippy/wasm/test/pressure 全 EXIT=0；test 门 32 条 `test result:` 行合计
+  **733 passed / 0 failed / 7 ignored**，比第 44 轮的 731 正好多这两条新用例。）
+
+- **CI 真正在跑的那道压力门禁里，把一条几乎不会失败的断言换成真检查（第 50 轮）**（**只动 `crates/panels/src/virtual_list.rs`
+  的 `mod tests`**：`#[cfg(test)]` 之前 8737 个字符逐字节核过与 `git show HEAD:` 相同 ⇒ 生产代码与用户可见行为一个字没改。）
+  `pressure_50k_rows_stays_indexed` 原来守"行索引保持完整"只有 `assert!(visited > 0)` —— **任何非空索引都会 >0**，
+  只有"每个 offset 都返回空窗口"才红。换成两条：① `total_height` 等于夹具算术值 `2941×32 + 47059×16 = 847,056`
+  （已核 `total_height()` 就是 `fenwick.total()`，不含 viewport/padding；全部高度都是 16 的倍数、部分和远小于 2²⁴
+  ⇒ f32 里精确可表，因此**故意不写容差** —— `f32::EPSILON` 在 8e5 量级低于 ulp，写了只是自我安慰）；
+  ② 对每个采样 offset 断言**窗口真的盖住视口**：首可见行的顶不晚于 overscan 起点、末可见行的底不早于视口底，只用已有的
+  `row_top()` / `height()`。**不在测试里重算一遍 `index_at_offset`** —— 那等于给被测算法留第二份副本，迟早和实现各说各话
+  （第 32 轮删临时几何用例就是这个理由）。`elapsed` 仍然只 `println!`，不进判据。
+  **红证明**：M1「首行高度没进前缀树」（`sync_rows` 里喂给 `from_values` 的数组把 h[0] 归零）→ 新断言红在
+  `left: 847040.0 / right: 847056.0`（差的正是那 16），而**改前那条旧断言在它下面必然全绿** —— 这就是"牙齿"的具体形状。
+  锚点要求命中数恰好为 1 才打补丁，否则会打到 `sync_ids` 那份同形代码上（那里确实有一字不差的重载）。
+  压力门同次复跑：tool-panels 1 passed、tool-databus 1 passed。
+
 - **回放 seek 的那条"1 万条事件 < 1 秒"换成同一次运行内的缩放比 —— 旧尺子既在负载下假红、又在平方级回归下没牙（第 44 轮）**
   （**只动 `crates/recorder/src/replay.rs` 的 `#[cfg(test)]`**：主代理逐字节核过 `#[cfg(test)]` 之前的 34,467 个字符
   与 `git show HEAD:` 完全相同 ⇒ 生产代码与用户可见行为一个字没改；树上无变异残留。四道门
