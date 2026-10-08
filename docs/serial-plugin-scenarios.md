@@ -9,6 +9,9 @@ cargo run -p tool-extension --example plugin_scenario -- `
   plugins plugins/template.serial-chart/tests/serial.scenario.json
 ```
 
+同一份场景也已接进 `cargo test`：`crates/extension/tests/serial_scenario.rs` 每次改动
+`template.serial-chart` 或场景运行器都会自动执行该文件，无需手工运行示例。
+
 场景文件基本结构：
 
 ```json

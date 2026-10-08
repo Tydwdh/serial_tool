@@ -13,7 +13,6 @@ description = "Rust + egui hardware serial debugging workbench with Lua plugins 
 [dependencies]
 eframe.workspace = true
 egui.workspace = true
-egui_extras.workspace = true
 egui_material_icons.workspace = true
 egui_tiles.workspace = true
 log.workspace = true

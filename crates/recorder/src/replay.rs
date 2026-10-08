@@ -360,11 +360,6 @@ impl ReplayManager {
         self.events.len()
     }
 
-    pub fn load(&mut self, path: impl AsRef<std::path::Path>) -> io::Result<usize> {
-        let prepared = Self::prepare_load(path)?;
-        Ok(self.load_prepared(prepared))
-    }
-
     // ── Policy ──
 
     pub fn set_policy(&mut self, policy: ReplayPolicy) {
@@ -1403,7 +1398,7 @@ mod tests {
 
         let bus = DataBus::new();
         let mut mgr = ReplayManager::new(bus);
-        mgr.load(&jsonl_path).unwrap();
+        mgr.load_prepared(ReplayManager::prepare_load(&jsonl_path).unwrap());
 
         // 超大行应该被跳过，只加载了第一行
         assert_eq!(mgr.status().total_events, 1);
@@ -1422,8 +1417,11 @@ mod tests {
         // 这里验证 MAX_FILE_BYTES 逻辑存在即可（实际触发需要真实超大文件）
         let bus = DataBus::new();
         let mut mgr = ReplayManager::new(bus);
-        // 不存在的路径应该返回错误
-        let result = mgr.load(std::path::PathBuf::from("/nonexistent/path/for/test.jsonl"));
+        // 不存在的路径应该返回错误（`prepare_load` 就是生产加载路径的第一步）
+        let result = ReplayManager::prepare_load(std::path::PathBuf::from(
+            "/nonexistent/path/for/test.jsonl",
+        ))
+        .map(|prepared| mgr.load_prepared(prepared));
         assert!(result.is_err());
     }
 
@@ -1567,7 +1565,7 @@ mod tests {
         let bus = DataBus::new();
         let mut mgr = ReplayManager::new(bus);
         mgr.set_policy(ReplayPolicy::ExactRecorded);
-        mgr.load(&jsonl_path).unwrap();
+        mgr.load_prepared(ReplayManager::prepare_load(&jsonl_path).unwrap());
 
         assert_eq!(mgr.status().total_events, event_count);
 

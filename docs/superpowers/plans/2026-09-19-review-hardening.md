@@ -2,6 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**状态（2026-10-08 核对，本计划归档）**：Task 1–6 的改动在仓库中全部落地（自更新外置哈希、
+沙箱收回 `dofile/loadfile/load`、僵尸端口双信号回收、架构守卫改 TOML 解析、发送字节级契约、
+`plan_send` 统一路由），本文件里的 `- [ ]` 复选框**未逐条回填**，它们反映写作时的进度、
+不是待办清单。收尾项对账：`CHANGELOG.md` 顶部已新增「安全」小节（由第 60 轮清扫批补入，
+含发布构建 `overflow-checks`）；「未纳入本计划」清单里 `overflow-checks`、zip 越界条目静默跳过、
+regex 缓存 `Box::leak`、`ARCHITECTURE.md` 的 `todo.txt §7` 引用已由第 60 轮处理，
+其余（`ws://` 明文 + `api_key` 落盘、registry 声明权限与包内 `plugin.json` 不交叉校验、
+`tool-testing` 落在生产依赖闭包内）仍未立项。
+
 **Goal:** 关闭 2026-09-19 项目评审确认的 4 个 Critical 与 2 个 Important 缺陷：自更新无外置哈希、Lua 沙箱 `dofile` 可达、发送链路无字节级契约、worker panic 成僵尸端口、架构守卫可被绕过、native/web 两套 send 路由已分叉。
 
 **Architecture:** 全部改动落在既有分层内，不新增 crate。`tool-core` 承接跨平台 HEX 解析（native/wasm 唯一真相）；`tool-application` 新增无 `cfg` 门控的 `send_plan` 模块统一命令→(任务种类, 字节) 路由；`crates/*/tests/architecture.rs` 从「Cargo.toml 文本匹配」升级为「TOML 解析 + 重命名归一」。

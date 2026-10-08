@@ -204,11 +204,15 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # 覆盖全部能在 wasm32 上编译的工作区成员：native-only 的 extension/lua_host/
+      # marketplace/transport/updater 在 wasm 下编不过（getrandom 直接报错），只能排除；
+      # 这样 tool-application/platform/panels/... 的 wasm 专属分支才会逐条进 -D warnings，
+      # 而不是只 lint 主程序一个包（未加 --workspace 时其余成员只被当作依赖编译）。
       - name: Check Web target
-        run: cargo check --target wasm32-unknown-unknown -p hardware-workbench-app
+        run: cargo check --target wasm32-unknown-unknown --workspace --exclude tool-extension --exclude tool-lua-host --exclude tool-marketplace --exclude tool-transport --exclude tool-updater
 
       - name: Lint Web target
-        run: cargo clippy --target wasm32-unknown-unknown -p hardware-workbench-app -- -D warnings
+        run: cargo clippy --target wasm32-unknown-unknown --workspace --exclude tool-extension --exclude tool-lua-host --exclude tool-marketplace --exclude tool-transport --exclude tool-updater -- -D warnings
 
   release:
     name: GitHub Release

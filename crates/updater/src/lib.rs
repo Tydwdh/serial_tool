@@ -818,7 +818,17 @@ pub fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), String> {
 
         let out_path = match entry.enclosed_name() {
             Some(path) => dest.join(path),
-            None => continue,
+            None => {
+                // `enclosed_name` 为 None 表示条目路径会逃出目标目录（绝对路径或 `..`）。
+                // 跳过之外必须留下可见痕迹：上层把「解压成功」当整体成功，文件静默缺失
+                // 之后没人查得到（这条自更新路径此前连一条 warn 都没有）。
+                log::warn!(
+                    "updater: 跳过越界的 zip 条目 {:?}（目标 {}）",
+                    entry.name(),
+                    dest.display()
+                );
+                continue;
+            }
         };
 
         if entry.is_dir() {
@@ -853,7 +863,16 @@ pub fn extract_zip_filtered(zip_path: &Path, dest: &Path) -> Result<(), String> 
 
         let out_path = match entry.enclosed_name() {
             Some(path) => dest.join(path),
-            None => continue,
+            None => {
+                // 与 `extract_zip` 同一处理：越界条目跳过必须留痕，否则插件包可以在
+                // 「安装成功」的外表下少掉任意文件。
+                log::warn!(
+                    "updater: 跳过越界的 zip 条目 {:?}（目标 {}）",
+                    entry.name(),
+                    dest.display()
+                );
+                continue;
+            }
         };
 
         if !entry.is_dir() && is_unsafe_resource_extension(&out_path) {

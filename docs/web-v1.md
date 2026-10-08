@@ -66,7 +66,7 @@ Web 应用的启动和刷新不会主动触发浏览器权限请求。用户必�
 本地开发和构建：
 
 ```text
-cargo check --target wasm32-unknown-unknown -p hardware-workbench-app
+cargo check --target wasm32-unknown-unknown --workspace --exclude tool-extension --exclude tool-lua-host --exclude tool-marketplace --exclude tool-transport --exclude tool-updater
 cd web
 trunk serve --release
 ```

@@ -181,19 +181,18 @@ fn network_worker_loop(context: NetworkWorkerContext) {
     while !stop.load(Ordering::Acquire) {
         // 发送队列：文本 → printer.gcode.script
         while let Ok(command) = command_rx.try_recv() {
-            let SerialCommand::Write { bytes, completion } = command else {
-                let completion = match command {
-                    SerialCommand::SetDtr { completion, .. }
-                    | SerialCommand::SetRts { completion, .. } => completion,
-                    SerialCommand::Write { .. } => unreachable!(),
-                };
-                if let Some(completion) = completion {
-                    // 这里的 `other` 不是第 42 轮删掉的那种"重新包装"：网络串口从来没有
-                    // 过 io::Error 可丢，文案就是它的全部信息，等待方看到的仍是
-                    // `IO 错误：网络串口不支持 DTR/RTS`。
-                    let _ = completion.send(Err(io::Error::other("网络串口不支持 DTR/RTS")));
+            let (bytes, completion) = match command {
+                SerialCommand::Write { bytes, completion } => (bytes, completion),
+                SerialCommand::SetDtr { completion, .. }
+                | SerialCommand::SetRts { completion, .. } => {
+                    if let Some(completion) = completion {
+                        // 这里的 `other` 不是第 42 轮删掉的那种"重新包装"：网络串口从来没有
+                        // 过 io::Error 可丢，文案就是它的全部信息，等待方看到的仍是
+                        // `IO 错误：网络串口不支持 DTR/RTS`。
+                        let _ = completion.send(Err(io::Error::other("网络串口不支持 DTR/RTS")));
+                    }
+                    continue;
                 }
-                continue;
             };
             let script = String::from_utf8_lossy(&bytes).into_owned();
             if script.trim().is_empty() {

@@ -75,13 +75,6 @@ impl TerminalItem {
         }
     }
 
-    pub fn last_timestamp_ms(&self) -> u64 {
-        match self {
-            Self::Sealed(record) => record.last_timestamp_ms,
-            Self::Live(tail) => tail.last_timestamp_ms,
-        }
-    }
-
     pub fn port(&self) -> &str {
         match self {
             Self::Sealed(record) => &record.port,

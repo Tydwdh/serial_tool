@@ -4,7 +4,49 @@
 
 ## [Unreleased]
 
+### 安全
+
+- **可直接动手的清扫/收口批（第 60 轮）：发布构建开整数溢出检查、zip 越界条目留痕、正则缓存不再永久泄漏。**
+  （只动配置与既有实现，无新 crate、无新 API；`Cargo.lock` 因死依赖删除重解析，净 −36 行。）
+  * `Cargo.toml` 的 `[profile.release]` 增加 `overflow-checks = true`：此前发布构建的整数溢出按回绕
+    静默算错，现在与测试构建一致地 panic。这是 2026-09-19 评审登记、长期未立项的加固项。
+  * `updater::extract_zip` / `extract_zip_filtered` 对 `enclosed_name()` 为 None 的条目（绝对路径
+    或 `..` 越界）从"静默 `continue`"改成**先 `log::warn!` 再跳过**：自更新路径此前连一条日志都
+    没有，文件缺失无从追查。是否升级为硬失败未定（行为未变，仍跳过）。
+  * `lua_host::api::serial` 的正则缓存由 `Box::leak` 改为缓存持有 `Arc<regex::Regex>`：清空发生时
+    旧条目随引用计数释放；此前每轮清空都永久泄漏最多 256 个已编译正则。
+
 ### 调整
+
+- **死件/死边清扫（第 60 轮）：2 条可证明的死 Cargo 边 + 3 处死件 + 两处 `unreachable!()`。**
+  （生产行为零变化；测试入口改走生产路径。）
+  * 删 `egui_extras`（workspace 声明 + `crates/app` 依赖边，全仓 0 处代码引用；`Cargo.lock` 随之
+    消失 `egui_extras`/`enum-map`/`enum-map-derive` 三包）与 `tool-extension → tool-plugin-api`
+    死边（0 处 `use`）。
+  * 删 `crates/application/src/service/device.rs`（未被任何 `mod` 声明、不参与编译）、
+    `TerminalItem::last_timestamp_ms()`（零调用）、`ReplayManager::load`（仅测试调用；测试改走
+    生产两步 `prepare_load` + `load_prepared`）。
+  * `transport` 两处运行期 `unreachable!()` 换成编译期穷尽：桌面 `send_control_blocking` 改收
+    私有枚举 `BlockingControl`（新增 `SerialCommand` 变体不再需要运行期断言），网络 worker 的
+    `let-else` + 内层 match 收成单层 `match`。
+
+- **wasm clippy 从「只 lint 主程序一个包」扩到全部能在 wasm32 上编译的工作区成员（第 60 轮）**：
+  `ci.yml`/`web.yml` 改为 `--workspace --exclude tool-extension --exclude tool-lua-host
+  --exclude tool-marketplace --exclude tool-transport --exclude tool-updater`（这 5 个 crate 在
+  wasm32 下编不过，getrandom 直接报错）。此前 application/platform/panels 等包的 wasm 分支
+  只被当作依赖编译，不在 `-D warnings` 范围内。
+
+- **两条从未自动化的回归接进 `cargo test`（第 60 轮）**：
+  * 主题「未写颜色回落同族实色」补上有区分力的断言（第 59 轮自记的欠条）：无值时
+    `card→mantle`/`input→surface0`/`text_white→text` 三条回落必须落地，显式写的值不许被覆盖。
+    红证明：把回落目标指错字段 ⇒ 红在"没写时回落到同族"；把条件改成无条件覆盖 ⇒ 红在"显式值被保留"。
+  * `plugins/template.serial-chart/tests/serial.scenario.json` 由
+    `crates/extension/tests/serial_scenario.rs` 自动执行（此前只能手工跑 example）。
+    红证明：改错场景里的期望值 ⇒ 用例红。
+
+- **文档对账（第 60 轮）**：`docs/ARCHITECTURE.md` 三处过期陈述更正（分层判据去掉不可核对的
+  `todo.txt §7`；seek 性能用例条目改记现状；两处"未接映射器"补闭合结论）；review-hardening
+  计划归档并标注执行状态；`serial-plugin-scenarios.md` 记上场景已接进测试。
 
 - **legacy 主题：把 `is_ok()` 换成"颜色与 dark_mode 真的落到了主题上"（第 59 轮）**
   （**只动 `crates/panels/src/theme.rs` 的 `mod tests`**，生产部分逐字节等于 HEAD。）

@@ -416,6 +416,16 @@ pub(crate) fn wait_for_completion(
         .map_err(TransportError::Io)
 }
 
+/// `send_control_blocking` 只接受 DTR/RTS 两种控制命令。
+///
+/// 刻意不直接收 `SerialCommand`：后者将来新增变体时，需要配 `completion` 的
+/// 位置由**构造侧**（`send_control_blocking` 里的 match）穷尽覆盖，
+/// 而不是靠一个运行期 `unreachable!()` 兜着。
+enum BlockingControl {
+    SetDtr { value: bool },
+    SetRts { value: bool },
+}
+
 impl TransportManager {
     pub fn new(bus: DataBus) -> Self {
         Self {
@@ -1041,14 +1051,7 @@ impl TransportManager {
         value: bool,
         timeout: Duration,
     ) -> TransportResult<()> {
-        self.send_control_blocking(
-            port_name,
-            SerialCommand::SetDtr {
-                value,
-                completion: None,
-            },
-            timeout,
-        )
+        self.send_control_blocking(port_name, BlockingControl::SetDtr { value }, timeout)
     }
 
     pub fn set_rts_blocking(
@@ -1057,29 +1060,26 @@ impl TransportManager {
         value: bool,
         timeout: Duration,
     ) -> TransportResult<()> {
-        self.send_control_blocking(
-            port_name,
-            SerialCommand::SetRts {
-                value,
-                completion: None,
-            },
-            timeout,
-        )
+        self.send_control_blocking(port_name, BlockingControl::SetRts { value }, timeout)
     }
 
     fn send_control_blocking(
         &self,
         port_name: &str,
-        mut command: SerialCommand,
+        control: BlockingControl,
         timeout: Duration,
     ) -> TransportResult<()> {
         let (sender, result) = bounded(1);
-        match &mut command {
-            SerialCommand::SetDtr { completion, .. } | SerialCommand::SetRts { completion, .. } => {
-                *completion = Some(sender)
-            }
-            SerialCommand::Write { .. } => unreachable!("control command expected"),
-        }
+        let command = match control {
+            BlockingControl::SetDtr { value } => SerialCommand::SetDtr {
+                value,
+                completion: Some(sender),
+            },
+            BlockingControl::SetRts { value } => SerialCommand::SetRts {
+                value,
+                completion: Some(sender),
+            },
+        };
         self.enqueue_command(port_name, command)?;
         wait_for_completion(result, timeout, "串口控制信号超时")
     }

@@ -46,36 +46,31 @@ pub(crate) fn match_pat(line: &str, pat: &str) -> bool {
 /// 按模式字符串缓存编译结果；非法正则返回 None（并记录一次警告）。
 ///
 /// 缓存有上限（[`REGEX_CACHE_MAX_ENTRIES`]），超限时清空重建，避免 Lua 插件
-/// 用可变的 pattern 拼接导致无界内存增长。
-fn compile_cached_regex(pattern: &str) -> Option<&'static regex::Regex> {
-    use std::sync::{Mutex, OnceLock};
+/// 用可变的 pattern 拼接导致无界内存增长。缓存持有 `Arc` 所有权：清空或整表丢弃时
+/// 旧条目随引用计数释放，不再像 `Box::leak` 那样每轮清空都永久泄漏最多 256 个已编译正则。
+fn compile_cached_regex(pattern: &str) -> Option<Arc<regex::Regex>> {
+    use std::sync::{LazyLock, Mutex};
 
     /// 缓存条目上限。达到后整个清空（保证有界），由插件正常使用的 pattern 数量远小于此。
     const REGEX_CACHE_MAX_ENTRIES: usize = 256;
 
-    static CACHE: OnceLock<
-        Mutex<std::collections::HashMap<String, Option<&'static regex::Regex>>>,
-    > = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-    let mut map = cache.lock().expect("regex cache poisoned");
+    static CACHE: LazyLock<Mutex<std::collections::HashMap<String, Option<Arc<regex::Regex>>>>> =
+        LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+    let mut map = CACHE.lock().expect("regex cache poisoned");
     if map.len() >= REGEX_CACHE_MAX_ENTRIES {
         map.clear();
     }
     if let Some(entry) = map.get(pattern) {
-        return *entry;
+        return entry.clone();
     }
     let compiled = match regex::Regex::new(pattern) {
-        Ok(re) => {
-            // Box::leak 返回 &'static mut，显式收窄为 &'static 共享引用后缓存。
-            let leaked: &'static regex::Regex = Box::leak(Box::new(re));
-            Some(leaked)
-        }
+        Ok(re) => Some(Arc::new(re)),
         Err(e) => {
             log::warn!("serial expect: invalid regex pattern {pattern:?}: {e}");
             None
         }
     };
-    map.insert(pattern.to_owned(), compiled);
+    map.insert(pattern.to_owned(), compiled.clone());
     compiled
 }
 

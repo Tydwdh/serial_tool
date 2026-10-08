@@ -56,7 +56,7 @@ jobs:
           test -n "$js_file"
 
       - name: Web target clippy
-        run: cargo clippy --target wasm32-unknown-unknown -p hardware-workbench-app -- -D warnings
+        run: cargo clippy --target wasm32-unknown-unknown --workspace --exclude tool-extension --exclude tool-lua-host --exclude tool-marketplace --exclude tool-transport --exclude tool-updater -- -D warnings
 
       - uses: actions/upload-pages-artifact@v3
         with:

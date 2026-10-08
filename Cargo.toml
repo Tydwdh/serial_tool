@@ -33,7 +33,6 @@ publish = false
 [workspace.dependencies]
 eframe = { version = "0.35", features = ["persistence", "glow", "inspection"] }
 egui = "0.35"
-egui_extras = { version = "0.35", default-features = false }
 egui_material_icons = "0.7"
 egui_tiles = "0.16"
 crossbeam-channel = "0.5"
@@ -60,3 +59,6 @@ opt-level = "s"   # 优化体积
 lto = true        # 链接时优化
 codegen-units = 1 # 单代码生成单元，更好地内联
 strip = true      # 去除调试符号
+# 发布构建的整数溢出也 panic，而不是静默回绕：回绕几乎总是缺陷，
+# 安全加固优先于那一点体积/性能代价（2026-09-19 评审登记的未立项项）。
+overflow-checks = true

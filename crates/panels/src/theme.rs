@@ -975,6 +975,53 @@ mod tests {
     }
 
     #[test]
+    fn missing_card_input_and_text_white_fall_back_to_family_solids() {
+        // 无 base 时所有颜色从 `ThemeColors::default()` 起步（`derive(Default)` → 全 0，
+        // 即 `Color32::TRANSPARENT`）；JSON 没写到的 card/input/text_white 会保持透明，
+        // 直接渲染就是卡片/输入框透明的窟窿。这条钉的是 `parse_theme_source` 末尾那三行
+        // 「回落到同族实色」——`custom_theme_colors_override_the_selected_base` 钉的是映射表
+        // 本身（直接调 `apply_color_override`），覆盖不到这段回落。
+        let unsupplied = r##"{
+            "name": "Fallback",
+            "colors": {
+                "bg_secondary": "#111213",
+                "bg_tertiary": "#212223",
+                "text_primary": "#313233"
+            }
+        }"##;
+        let theme =
+            parse_theme_source(unsupplied, "fallback.json", 0).expect("legacy 主题必须被接受");
+        assert_eq!(
+            theme.colors.card,
+            Color32::from_rgb(0x11, 0x12, 0x13),
+            "没写 bg_card 时应回落到同族的 bg_secondary（mantle），而不是透明窟窿"
+        );
+        assert_eq!(
+            theme.colors.input,
+            Color32::from_rgb(0x21, 0x22, 0x23),
+            "没写 bg_input 时应回落到同族的 bg_tertiary（surface0）"
+        );
+        assert_eq!(
+            theme.colors.text_white,
+            Color32::from_rgb(0x31, 0x32, 0x33),
+            "没写 text_white 时应回落到同族的 text_primary（text）"
+        );
+
+        // 反向：显式写了的键不许被回落覆盖（回落条件必须是「仍为 TRANSPARENT」）。
+        let explicit = r##"{
+            "name": "Explicit",
+            "colors": { "bg_card": "#414243" }
+        }"##;
+        let theme =
+            parse_theme_source(explicit, "explicit.json", 0).expect("legacy 主题必须被接受");
+        assert_eq!(
+            theme.colors.card,
+            Color32::from_rgb(0x41, 0x42, 0x43),
+            "显式写了 bg_card 时必须保留用户值"
+        );
+    }
+
+    #[test]
     fn legacy_theme_file_is_migrated_and_corrupt_file_is_quarantined() {
         let dir = std::env::temp_dir().join(format!(
             "hw-theme-migration-test-{}-{}",

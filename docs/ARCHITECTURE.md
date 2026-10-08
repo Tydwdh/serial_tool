@@ -88,7 +88,7 @@ tool-core (Event/Payload/Config)
 | Application (`tool-application`) | 行为与状态 | `Workbench::dispatch(AppCommand)->Result<CommandOutcome,AppError>` / `query_*` / `tick(now)` / `ApplicationConfig` |
 | Presentation (`tool-panels` + `app` UI) | 呈现与交互 | `TerminalPanel/LogPanel/ChartPanel + DynamicPanels` / `PanelRegistry::Builtin(fn(&mut WorkbenchApp,&mut Ui))` / `CommandPalette` / `rfd` |
 
-判定规则（todo.txt §7）：换个 UI 仍需知道即 `Application`，仅用于当前 `egui` 的 `scroll/selection/hover/dock` 即 `Presentation`.
+判定规则：换个 UI 仍需知道即 `Application`，仅用于当前 `egui` 的 `scroll/selection/hover/dock` 即 `Presentation`.
 
 ## Terminal 高频数据路径（native 只剩一条：第 46 轮）
 
@@ -149,7 +149,7 @@ cargo test -p tool-panels -p tool-databus -- --ignored     # step 名「Pressure
 ```
 
 - 第四条常被漏：`tool-panels` / `tool-databus` 里那批 `#[ignore]` 用例的断言是**结构性**的（行索引保持完整、无损订阅不丢事件），debug 下就能当回归门禁 ⇒ **改动落在这两个 crate 上就必须连它一起跑**，否则会出现"本机三件套全绿、CI 红"。故意 ignore 的**计时**用例不在这一条里（它们按 `docs/performance.md` 手工 `--release --nocapture` 采集，且这一条刻意只选这两个 crate，免得把 `crates/app` 里依赖安静调度的计时测试拉进 CI）。
-- 「WASM check」作业（`wasm`）：`cargo check --target wasm32-unknown-unknown -p hardware-workbench-app`，以及同 target 的 `cargo clippy -p hardware-workbench-app -- -D warnings`。**原生构建会把 wasm-only 模块整个排除**，所以只跑原生那几条时，`cfg(wasm32)` 里的改动等于没验。
+- 「WASM check」作业（`wasm`）：`cargo check` 与 `cargo clippy --target wasm32-unknown-unknown --workspace --exclude tool-extension --exclude tool-lua-host --exclude tool-marketplace --exclude tool-transport --exclude tool-updater`（第 60 轮起从"只 lint 主程序一个包"扩到全部能在 wasm32 上编译的成员；这 5 个 crate 在 wasm 下编不过，裸 `--workspace` 会在 getrandom 上直接失败）。**原生构建会把 wasm-only 模块整个排除**，所以只跑原生那几条时，`cfg(wasm32)` 里的改动等于没验。
 - Ubuntu「.deb」作业（`linux-deb`）：`cargo check --workspace` → `cargo clippy --workspace --all-targets --exclude hardware-workbench-app -- -D warnings` → 再一条**不带** `--exclude` 的整包 clippy（告警继续打印但不红作业）→ `cargo test --workspace --all-targets`。`--exclude` 的来由见下文「Linux clippy 的 `-D warnings` 缺口」。
 
 本机复跑（`<TOOLCHAIN>` 换成 `+1.92.0` 以对齐 CI）：
@@ -157,7 +157,7 @@ cargo test -p tool-panels -p tool-databus -- --ignored     # step 名「Pressure
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo clippy --target wasm32-unknown-unknown -p hardware-workbench-app -- -D warnings
+cargo clippy --target wasm32-unknown-unknown --workspace --exclude tool-extension --exclude tool-lua-host --exclude tool-marketplace --exclude tool-transport --exclude tool-updater -- -D warnings
 cargo test --workspace --all-targets
 cargo test -p tool-panels -p tool-databus -- --ignored   # 只在动了这两个 crate 时是硬门
 cargo tree -p tool-panels | grep -E '^[├└]── '           # 顶格 = depth-1 直接依赖；用 '^\s*' 会误捕 depth-2+
@@ -194,7 +194,8 @@ cargo tree -p tool-application | grep -i egui            # 0 行
   > `crates/app/src/web/mod.rs` 里既被构造也被 `match`，gauge 那几个由
   > `crates/panels/src/dynamic/ingest.rs` 在总线驱动下调用，而 `DynamicPanels` 在 wasm 侧是活的。
   > **判空转的正确做法（这一条值钱在避坑）**：一次摘光之后**分别**跑两条 clippy ——
-  > native 的 `--workspace --all-targets` 与 `--target wasm32-unknown-unknown -p hardware-workbench-app`
+  > native 的 `--workspace --all-targets` 与 wasm 那条（`--target wasm32-unknown-unknown --workspace`
+  > 减 5 个 native-only crate，作用域见文首 CI 小节）
   > —— 两边都不点名的才是死的。只跑 native 会得出完全相反的结论：`cfg_attr(target_arch =
   > "wasm32", …)` 护着的东西在 native 构建里本来就活着，native 永远不会抱怨它。
   > 另外**别把同文件的另一条豁免顺手带走**：`gauge.rs` 那条 `too_many_arguments` 在 wasm
@@ -529,15 +530,15 @@ join，超时降级 detach。**两条要盯着的**：`app/src/app/mod.rs:39` �
     形状是把 fixture 换成**永不自行结束**的循环（`while true` + 取消后写一条终止标记），把「停了」
     变成正向期望 —— 那是重写这条用例，不是改窗口。
 
-13. `recorder/src/replay.rs:1381`（`seek_performance_with_many_events`）—— **第 39 轮在同一批 hog
-    里实测到、没动**。它不是 `sleep(N)` 形状，而是把耗时本身钉成断言：
-    `assert!(elapsed.as_millis() < 1000, "seek_with_replay took {:?} for {event_count} events — should
-    be < 1s")`，1 万个事件 seek 到 5s 位置。实测红点原文
-    `seek_with_replay took 1.1408557s for 10000 events — should be < 1s`：churn×4 跑整包**改前 6/10、
-    改后 3/10**（改后那几轮里红的全是它），churn×6 改前 2/8、改后 3/8。**"改后变少"不是修好了** ——
-    只是 recorder 整包省掉那 500ms 白等、同场竞争变轻；墙钟阈值 + 满载这对组合本身没治。
-    修法与本轮三类都不同（要么把"结果正确"当条件、耗时只记成观测值，要么按机器倍率给尺，要么明确
-    这条就是不允许在满载共享 runner 上跑），留给下一轮判这条性能钉要不要留。
+13. ~~`recorder/src/replay.rs:1381`（`seek_performance_with_many_events`）把耗时钉成定长墙钟断言~~ ——
+    **【已闭环】第 39 轮实测到（churn×4 整包改前 6/10、改后 3/10 红在它），后续轮已把整把尺子换掉**：
+    现用例没有绝对预算，改为**同运行内的缩放比**（一份 20k 事件文件只 load 一次，靠 seek 到递增位置
+    得三档 5k/10k/20k，相邻翻倍 ⇒ log2 比值即指数；两条独立估计量各管一头 —— `min` 比值指数 ≤ 1.75
+    管牙齿、每轮最小比值指数 ≤ 1.50 管"绝不因负载假红"，四条防空转断言排在比值之前；
+    数字依据与 A/B 实测在用例文档注释与 CHANGELOG 的 seek 条目里）。
+    **换尺子换来的已知代价**：只放大常数、不改形状的回归在新尺子下不可见（实测 ≤1.08 全绿）——
+    要守那种回归就得回到绝对预算，而绝对预算正是删掉的那条（负载下假红、平方级下没牙）。
+    本条留档只为解释"为什么这里没有绝对墙钟"。
 
 *(c) 有意节奏 / 已经是「真条件 + deadline + 大声失败」，别动*：
 `application/tests/headless.rs:165`（就是 `tick_until` 本体的步长，本轮两条改用它是直接受益者）、
@@ -936,6 +937,9 @@ panic / 置位什么都不做的手工线程，与磁盘和调度无关）·
    > `notify(TerminalCleared)` 让组合根清面板），补不补这条回路是产品决定，代码里就地写了；
    > ② `crates/application/src/service/device.rs` 是一份**没被任何 `mod` 声明**的遗留文件
    > （`DeviceService` 全仓 0 引用，连编译都不参与），按"一轮一个域"本轮没动它。
+   > **【2026-10 清理批：已删除】**该文件与 `TerminalItem::last_timestamp_ms()`（零调用）、
+   > `ReplayManager::load`（仅测试调用；测试改走生产两步 `prepare_load` + `load_prepared`）
+   > 一并删除。
    > 本轮**没**碰其余候选（`recorder` 的 backpressure 两件套、`core::advance`、`tool-testing` 的
    > 两个计数、`replay::publish_next_for_test`、`lua_host::run_script`），它们分属别的 crate，
    > 按"一轮一个域"排到后面。**【`lua_host::run_script` 那一颗由第 34 轮还掉，见本条末尾】**
@@ -990,6 +994,10 @@ panic / 置位什么都不做的手工线程，与磁盘和调度无关）·
    > `PluginManifest::required_capabilities` 也随之删除，于是 **`tool-extension` 现在有一条
    > 可证明的死 Cargo 边 `tool-plugin-api`**（全 crate 0 处 `use`）。它和第 10 条
    > `egui_extras` 是同一类决定（要动 `Cargo.lock`），等用户拍板，本轮不动。
+   > **【2026-10 清理批：两条死边一起删除】**`tool-extension/Cargo.toml` 的 `tool-plugin-api`
+   > 边与 `egui_extras`（workspace 声明 + `crates/app` 依赖边）均已移除；`Cargo.lock` 重解析后
+   > 净 −36 行（`egui_extras` 及两个仅供它使用的传递包 `enum-map`/`enum-map-derive` 消失，
+   > 另有本条死边的一行）。
    注意 `PluginUiCommand` 存在**同名不同类型**（这条对删完的现状仍然成立）：
    `plugin_api::host::PluginUiCommand` 是活着的那组（在 `web_plugin_host.rs`、`mlua_engine.rs`、
    `web_lua.rs` 中大量使用）。核对：
@@ -1015,7 +1023,7 @@ panic / 置位什么都不做的手工线程，与磁盘和调度无关）·
    > 另：任务清单里挂着的开放计划"把 `terminal.rs` 导出域 ~390 行拆成兄弟模块"由本轮作废 ——
    > **能删的东西不拆**。本条上方第 23 轮那句"`render_chunk` 的存在意义是被等价用例调用"
    > 与疑问 (a) 的"绕过说"两处都已就地标注更正。
-10. **`egui_extras` 是可证明的死依赖（实测，本轮裁决不做）**：
+10. **`egui_extras` 是可证明的死依赖（实测；2026-10 清理批已删除，见本条第末）**：
    只在 `Cargo.toml:35`（workspace 声明）与 `crates/app/Cargo.toml:16` 出现；
    **`crates/app` 内 0 引用**，全 `crates/` 的 `.rs` 中 0 处代码引用
    （唯一命中是 `crates/app/tests/manifest_deps.rs` 的禁用语清单字符串字面量）。
@@ -1047,6 +1055,9 @@ panic / 置位什么都不做的手工线程，与磁盘和调度无关）·
    > **本轮不做的理由**：captain 裁定本轮延后（避免让验证/评审对象漂移），且 `Cargo.lock`
    > 不在任何任务的 inScope。
    > **下一轮立项必须把 `Cargo.lock` 纳入 inScope**，否则任何"删死依赖"都无法落地。
+   > **【2026-10 清理批：已按本节配方删除】**workspace 声明与 `crates/app` 的依赖边一起移除，
+   > `Cargo.lock` 重解析后净 −36 行：本节预测的 3 个包 `egui_extras`/`enum-map`/`enum-map-derive`
+   > 全部消失（多出的一行来自 `tool-extension → tool-plugin-api` 死边，见上文）。
 
 11. **`crates/app` 的自动更新链路在 Linux 下留 9 处死代码诊断（实测，本轮只记录了缺口）**：
    Linux 用 `cfg(not(target_os = "linux"))` 关掉更新 UI 后，`UpdateState`/`CheckResult`
@@ -1219,6 +1230,12 @@ panic / 置位什么都不做的手工线程，与磁盘和调度无关）·
       > 状态栏、native 直接丢弃，那是产品可见的取舍，不在机械收敛范围内。
       > 那 9 个变体的中文映射器仍在待办，另有 `dispatch_load_replay`、`write_exported_content`
       > 与 `AppRuntime::dispatch` 的 `transport: ` 前缀也未动。
+      > **【后文对账（2026-10）：这四处都已闭合】**① 9 个变体：第 22 轮已译（见下）；
+      > ② `write_exported_content`：接了 `tool_platform::storage::translate_error`
+      > （`crates/application/src/workbench.rs:1353-1365`）；③ `dispatch_load_replay`：中文框架由
+      > recorder 的三个 io 出口生产处补全（`crates/recorder/src/replay.rs`），残留差异只有不带
+      > 分类前缀（web 侧同）；④ `AppRuntime::dispatch` 的 `transport: ` 前缀：第 24 轮随
+      > `application/src/error.rs` 七个标签中文化一起闭合。
       >
       > **第 22 轮做了那个翻译**（685 → 698）：`tool_extension::translate_error` 按变体分发、
       > **不写 `_ =>`**（与 `tests/error_wording.rs` 的 `variant_name` 同一形状，两处都不写兜底 ⇒
