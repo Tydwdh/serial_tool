@@ -2,7 +2,7 @@
 
 本项目的重要变更记录于此。版本号遵循语义化版本。
 
-## [Unreleased]
+## [1.3.1] - 2026-10-15
 
 ### 安全
 
@@ -17,6 +17,21 @@
     旧条目随引用计数释放；此前每轮清空都永久泄漏最多 256 个已编译正则。
 
 ### 调整
+
+- **gcode-sender v0.8.0：默认设置改成开箱即用的 Marlin 配置（默认暂停/取消 = `N1 !M410 S0*69`）。**
+  （`plugins/gcode-sender/plugin.json` 与 `main.lua` 的 `DEFAULTS` 同步改；市场 0.8.0 的 zip 与
+  `registry.json` 由 `publish.ps1` 重新生成。）
+  * 三条应答匹配不再留空：成功 `ok`、错误 `FAILED`、运行中 `echo:busy: processing`。留空时只有内置
+    `^ok`/`^Error`/`busy` 生效：回 `done`、`FAILED` 这类字样的固件要一直等到 ACK 超时（默认 300s）。
+  * 暂停/取消默认写 `N1 !M410 S0*69`（Marlin quickstop：`!` 前缀 + 行号 + 校验和；`xor8("N1 !M410 S0")`
+    = 69 已核对）。此前默认留空，点暂停/取消不会给设备任何指令。
+  * 暂停/取消是原样写串口（不加行号、不等 ACK），默认值里的 `N1` 就是写给固件的行号；插件恢复后
+    不会重发 M110 行号同步。
+  * `plugins/gcode-sender/tests/main_test.lua` 钉住这些默认值（清空配置后暂停/取消必须发出该行、
+    三条正则必须以 ok/error/running 注册）。红证明：`DEFAULTS` 的 `custom_success_patterns` 改回空 ⇒
+    红在 "default success pattern must be ok"；`pause_gcode` 改回空 ⇒ 红在 "default pause must send
+    one direct control payload"。另外用场景运行器（真实 PluginManager + Lua 运行时的内存串口）跑通
+    一次端到端：暂停/取消各发出 `N1 !M410 S0*69`，设备回 `echo:busy: processing` 时刷新等待而不完成该行。
 
 - **死件/死边清扫（第 60 轮）：2 条可证明的死 Cargo 边 + 3 处死件 + 两处 `unreachable!()`。**
   （生产行为零变化；测试入口改走生产路径。）

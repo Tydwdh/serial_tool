@@ -2,7 +2,7 @@
   "$schema": "../plugin.schema.json",
   "id": "gcode-sender",
   "name": "G-code Sender",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "api_version": "0.1",
   "runtime": "lua",
   "main": "main.lua",
@@ -98,35 +98,35 @@
         "id": "custom_success_patterns",
         "title": "自定义成功匹配（正则）",
         "kind": "textarea",
-        "default": "",
+        "default": "ok",
         "description": "每行一个正则（Rust regex 语法），命中即视为命令执行成功，即使设备不回 ok。示例：^done$、completed。空行与 # 开头的行忽略"
       },
       {
         "id": "custom_error_patterns",
         "title": "自定义错误匹配（正则）",
         "kind": "textarea",
-        "default": "",
+        "default": "FAILED",
         "description": "每行一个正则（Rust regex 语法），命中即视为设备错误并停止发送。示例：thermal runaway、(?i)^!!。空行与 # 开头的行忽略"
       },
       {
         "id": "custom_running_patterns",
         "title": "运行中匹配（正则）",
         "kind": "textarea",
-        "default": "",
+        "default": "echo:busy: processing",
         "description": "每行一个正则（Rust regex 语法），命中表示设备仍在执行当前命令，会刷新 ACK 超时并继续等待；不会视为成功。空行与 # 开头的行忽略"
       },
       {
         "id": "pause_gcode",
         "title": "暂停指令",
         "kind": "textarea",
-        "default": "",
+        "default": "N1 !M410 S0*69",
         "description": "点击暂停时直接写入串口的内容；不解析、不加行号/校验和、不等待响应。恢复时不发送内容"
       },
       {
         "id": "cancel_gcode",
         "title": "取消指令",
         "kind": "textarea",
-        "default": "",
+        "default": "N1 !M410 S0*69",
         "description": "点击取消时直接写入串口的内容；不解析、不加行号/校验和、不等待响应"
       }
     ],

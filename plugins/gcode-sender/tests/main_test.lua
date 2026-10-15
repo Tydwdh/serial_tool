@@ -375,6 +375,45 @@ assert(running_pattern, "custom running pattern must be registered")
 assert(running_pattern.pattern == "re:(?i)processing\\s+command")
 assert(running_pattern.action == "continue")
 
+-- 默认设置：三条应答匹配必须作为 ok/error/running 注册（空默认会让设备不回的 ok 永远等不到）。
+reset()
+send_single("G1 X1")
+local default_patterns = {}
+for _, pattern in ipairs(ctx.last_expect_options.patterns) do
+    default_patterns[pattern.pattern] = pattern.name
+end
+assert(default_patterns["re:ok"] == "ok", "default success pattern must be ok")
+assert(default_patterns["re:FAILED"] == "error", "default error pattern must be FAILED")
+assert(default_patterns["re:echo:busy: processing"] == "running",
+    "default running pattern must be echo:busy: processing")
+
+-- 默认暂停/取消指令：Marlin quickstop（! 前缀 + 行号 + 校验和）原样写入串口。
+reset()
+local default_pause_requested = false
+responder = function(wire)
+    if wire:match("^N0 M110") and not default_pause_requested then
+        default_pause_requested = true
+        callbacks["gcode-sender.pause"]({})
+    end
+    return ok_response()
+end
+send_single("G1 X1")
+assert(#control_writes == 1, "default pause must send one direct control payload")
+assert(control_writes[1] == "N1 !M410 S0*69", control_writes[1])
+
+reset()
+local default_cancel_requested = false
+responder = function(wire)
+    if wire:match("^N1 ") and not default_cancel_requested then
+        default_cancel_requested = true
+        callbacks["gcode-sender.cancel"]({})
+    end
+    return ok_response()
+end
+send_single("G1 X1")
+assert(#control_writes == 1, "default cancel must send one direct control payload")
+assert(control_writes[1] == "N1 !M410 S0*69", control_writes[1])
+
 -- 暂停指令直接发送原始内容，不走 G-code 清理、行号校验或 ACK 等待。
 reset()
 config_values.pause_gcode = "M25 ; raw pause\nM117 paused"

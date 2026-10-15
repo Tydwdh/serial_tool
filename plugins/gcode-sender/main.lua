@@ -23,11 +23,11 @@ local DEFAULTS = {
     ack_timeout_ms = 300000,
     start_timeout_ms = 3000,
     error_followup_ms = 2000,
-    custom_success_patterns = "",
-    custom_error_patterns = "",
-    custom_running_patterns = "",
-    pause_gcode = "",
-    cancel_gcode = "",
+    custom_success_patterns = "ok",
+    custom_error_patterns = "FAILED",
+    custom_running_patterns = "echo:busy: processing",
+    pause_gcode = "N1 !M410 S0*69",
+    cancel_gcode = "N1 !M410 S0*69",
 }
 
 -- ── helpers ──
