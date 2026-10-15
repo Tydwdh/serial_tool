@@ -19,3 +19,8 @@ serde.workspace = true
 serde_json.workspace = true
 tool-core = { path = "../core" }
 tool-databus = { path = "../databus" }
+
+[dev-dependencies]
+# 测试夹具 `UnopenablePath`（「stat 得到、当文件打开必失败」的跨平台路径）只有一份实现，
+# 放在这里而不是在 `replay.rs` / `recorder.rs` 各写一份 —— 三处用例共用同一条平台结论。
+tool-testing = { path = "../testing" }

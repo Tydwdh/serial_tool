@@ -232,6 +232,72 @@ impl TestReportStore {
     }
 }
 
+#[cfg(any(unix, windows))]
+static UNOPENABLE_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// 一个「`metadata` 拿得到、当文件**打开必失败**」的临时路径，`Drop` 时自动清理。
+///
+/// 为什么需要它：第 43 轮那三条用例（`crates/recorder/src/replay.rs` 两条、
+/// `crates/application/tests/headless.rs` 一条）拿**目录**当"打不开"的夹具，注释里写的
+/// 「Linux 是目录 ⇒ `EISDIR`」是错的 —— POSIX 只在**写**打开时给 `EISDIR`，
+/// `open(目录, O_RDONLY)` 是成功的，于是那句
+/// `File::open(&dir).expect_err("目录不能当文件打开")` 在 Linux 上当场 panic：
+/// 从这些用例进来的那一版起，Linux 作业（`cargo test --workspace --all-targets`）一直是红的，
+/// 红在"测试前提"而不是被测代码上。
+///
+/// 各平台挑一个 stat 得到、打开必失败的形状：
+/// * Windows：目录（`File::open` 给 `ERROR_ACCESS_DENIED` ⇒ `PermissionDenied`）；
+/// * Unix：Unix 域套接字文件（`open(O_RDONLY)` 给 `ENXIO`，`File::create` 给 `ENXIO` 同样成立），
+///   它**在 root 下也拦得住** —— 权限类夹具（`chmod 000`）跑在 root 上会被 `CAP_DAC_OVERRIDE`
+///   整个绕过，本机与容器里的 root 复跑会得到"夹具其实能打开"的假绿。
+#[cfg(any(unix, windows))]
+pub struct UnopenablePath {
+    path: std::path::PathBuf,
+}
+
+#[cfg(any(unix, windows))]
+impl UnopenablePath {
+    pub fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "hw-unopenable-{}-{}",
+            std::process::id(),
+            UNOPENABLE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        #[cfg(windows)]
+        fs::create_dir_all(&path).expect("创建「目录」形状的不可打开夹具失败");
+        #[cfg(unix)]
+        {
+            // 上一次运行崩在中间会留下同名套接字文件，先清掉，否则 `bind` 给 `EADDRINUSE`。
+            let _ = fs::remove_file(&path);
+            std::os::unix::net::UnixListener::bind(&path)
+                .expect("创建「Unix 域套接字」形状的不可打开夹具失败");
+        }
+        Self { path }
+    }
+
+    /// 夹具路径本体；调用方拿它去跑裸操作与被测出口，两边的路径必须逐字相同。
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl Default for UnopenablePath {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl Drop for UnopenablePath {
+    fn drop(&mut self) {
+        // 两种形状各删一次，对不上的那一次是无害的空操作（失败也没别的办法）。
+        if fs::remove_file(&self.path).is_err() {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1001,10 +1001,12 @@ fn file_export_failures_reach_the_user_in_chinese() {
 
 /// 回放文件**打不开**（区别于「不存在」）时，用户读到的那半句必须是中文框架。
 ///
-/// 为什么用目录而不是不存在的路径：`prepare_load` 第一步就 `metadata`，路径不存在时
-/// 那里先红（那句中文是第 24 轮之前就有的 `获取文件大小 <路径> 失败：<OS 细节>`），
-/// 永远走不到 `File::open`。目录能 stat 到、却当不成文件（本机是「拒绝访问」，Linux 是
-/// 「是目录」），所以它才是「打开」这条出口的输入。
+/// 为什么用一个"能 stat、打不开"的路径而不是不存在的路径：`prepare_load` 第一步就
+/// `metadata`，路径不存在时那里先红（那句中文是第 24 轮之前就有的
+/// `获取文件大小 <路径> 失败：<OS 细节>`），永远走不到 `File::open`。
+/// 这种路径由 `tool_testing::UnopenablePath` 造（Windows 用目录；Unix 用 Unix 域套接字，
+/// 因为**目录在 Linux 上是可以读打开的**，第 43 轮那版"目录就是打不开"的夹具在 Linux 上
+/// 直接死在测试前提上）。
 ///
 /// 第 43 轮起框架里点名**是哪个路径**（用户在回放面板手输的就是它），所以本用例钉
 /// 「框架在最前 + 整句正好等于框架与 OS 细节的拼接」—— 后者同时钉住了路径、原样带出的
@@ -1016,18 +1018,15 @@ fn replay_file_that_cannot_be_opened_reaches_the_user_in_chinese() {
     let bus = DataBus::new();
     let mut wb = Workbench::new(bus);
 
-    let dir = std::env::temp_dir().join(format!(
-        "serial-tool-headless-replay-dir-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("创建回放临时目录");
-    let raw = std::fs::File::open(&dir)
-        .expect_err("测试前提：这个目录必须打不开，否则本用例没有在测「打开失败」");
+    let unopenable = tool_testing::UnopenablePath::new();
+    let target = unopenable.path();
+    let raw = std::fs::File::open(target)
+        .expect_err("测试前提：这个路径必须打不开，否则本用例没有在测「打开失败」");
 
     let task = expect_pending(
         &mut wb,
         AppCommand::LoadReplay {
-            file: FileHandle::from_native_path(&dir),
+            file: FileHandle::from_native_path(target),
         },
     );
     assert_eq!(task_kind(&wb, task).as_deref(), Some("load_replay"));
@@ -1052,11 +1051,9 @@ fn replay_file_that_cannot_be_opened_reaches_the_user_in_chinese() {
     );
     assert_eq!(
         words,
-        format!("打开回放文件 {} 失败：{raw}", dir.display()),
+        format!("打开回放文件 {} 失败：{raw}", target.display()),
         "框架之外还多了别的话（双重框架），或者路径/OS 细节被改写了"
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 重启交接的判定必须来自权威状态（PluginManager 的 stopping 表），不是错误文案。

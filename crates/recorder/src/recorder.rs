@@ -1073,13 +1073,15 @@ mod tests {
     /// 两道出口的可移植触发方式（`create_recording_file` 只有这两步会失败）：
     ///
     /// ① 建目录：目标放在**一个已存在的普通文件**之下（`<blocker>/subdir/recording.jsonl`）。
-    ///    `create_dir_all` 递归到那个普通文件上 `mkdir` 就翻车：Windows 给
-    ///    `ERROR_ALREADY_EXISTS`、POSIX 给 `EEXIST`，两边都映成 `AlreadyExists`，而
+    ///    `create_dir_all` 递归到那个普通文件上 `mkdir` 就翻车，而
     ///    `create_dir_all` 内部"`path.is_dir()` 就算了"的兜底救不了它（它不是目录）。
+    ///    这一步的 kind 两边都给得出、但**不是同一个**：Windows 是 `ERROR_ALREADY_EXISTS` ⇒
+    ///    `AlreadyExists`，POSIX 是在"路径前缀不是目录"上给 `ENOTDIR` ⇒ `NotADirectory`
+    ///    （v1.3.1 前这里按 `EEXIST` 写死了 `AlreadyExists`，Linux 作业因此一直红）。
     ///    这正是 `start_fails_with_invalid_path` 走的那条路，也是真实用户手输路径能撞上的。
-    /// ② 建文件：目标路径本身是一个已存在的目录。这一步的 kind **随平台不同**
-    ///    （Windows `ERROR_ACCESS_DENIED` ⇒ `PermissionDenied`，Linux `EISDIR` ⇒
-    ///    `IsADirectory`），所以不硬编某个 kind、也不 `#[cfg]` 分平台。
+    /// ② 建文件：目标路径本身是一个已存在的目录。这一步两边都映成具体 kind
+    ///    （Windows `ERROR_ACCESS_DENIED` ⇒ `PermissionDenied`，POSIX `EISDIR` ⇒ `IsADirectory`），
+    ///    所以不硬编某个 kind、也不 `#[cfg]` 分平台。
     ///
     /// 两条都不写权限相关的前提（chmod / 只读根目录）：那在 Windows 上根本造不出来。
     /// 断言手法与 `replay.rs` 的 `native_load_exits_all_mint_a_chinese_frame` 同一套 ——
@@ -1105,10 +1107,17 @@ mod tests {
             "① 必须是「一句中文框架 + 点名的目录路径 + 原样带出的 OS 细节」，多一句少一句都算变"
         );
         assert_eq!(dir_error.kind(), raw_dir.kind(), "① 框架不得改 kind");
+        // 逐平台钉死（而不是把 Windows 的答案当作两边的答案）：POSIX 在"路径前缀不是目录"
+        // 这一格给 `ENOTDIR`，不是 `EEXIST` —— `mkdir` 只有在**最后一段**已存在时才给 `EEXIST`。
+        let expected_dir_kind = if cfg!(windows) {
+            io::ErrorKind::AlreadyExists
+        } else {
+            io::ErrorKind::NotADirectory
+        };
         assert_eq!(
             dir_error.kind(),
-            io::ErrorKind::AlreadyExists,
-            "① 的 kind 在 Windows 与 POSIX 两边都应是 AlreadyExists（推导见上），got {:?}",
+            expected_dir_kind,
+            "① 的 kind 应随平台而定（Windows AlreadyExists / POSIX NotADirectory），got {:?}",
             dir_error.kind()
         );
 

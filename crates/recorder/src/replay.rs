@@ -1149,12 +1149,16 @@ mod tests {
             "① 必须是「一句中文框架 + 点名的路径 + 原样带出的 OS 细节」，多一句少一句都算变"
         );
 
-        // ② 打开：目录能 stat 到，却不能当文件打开（Windows 拒绝访问 / Linux 是目录）。
-        let raw = File::open(&dir).expect_err("测试前提：目录不能当文件打开");
-        let error = ReplayManager::prepare_load(&dir).expect_err("目录必须打不开");
+        // ② 打开：这个路径 stat 得到，却不能当文件打开。
+        //    夹具形状与为什么不能用目录（Linux 上目录是**可读打开**的）见
+        //    `tool_testing::UnopenablePath`。
+        let unopenable = tool_testing::UnopenablePath::new();
+        let target = unopenable.path();
+        let raw = File::open(target).expect_err("测试前提：这个路径不能当文件打开");
+        let error = ReplayManager::prepare_load(target).expect_err("这个路径必须打不开");
         assert_eq!(
             error.to_string(),
-            format!("打开回放文件 {} 失败：{raw}", dir.display()),
+            format!("打开回放文件 {} 失败：{raw}", target.display()),
             "② 必须是「一句中文框架 + 点名的路径 + 原样带出的 OS 细节」，多一句少一句都算变"
         );
 
@@ -1202,22 +1206,21 @@ mod tests {
             error.kind()
         );
 
-        // ② 打开（本轮要证明的那一格）：目录能 stat 到却打不开。这一格的 kind **随平台不同**
-        //    （Windows `ERROR_ACCESS_DENIED` ⇒ `PermissionDenied`，Linux `EISDIR` ⇒
-        //    `IsADirectory`），所以只钉"等于裸操作的 kind"与"不是 Other"这两条。
-        let raw = File::open(&dir).expect_err("测试前提：目录不能当文件打开");
-        let error = ReplayManager::prepare_load(&dir).expect_err("② 的失败必须冒出来");
+        // ② 打开（本轮要证明的那一格）：这个路径 stat 得到却打不开。这一格的 kind **随平台不同**
+        //    （Windows `ERROR_ACCESS_DENIED` ⇒ `PermissionDenied`；Unix 是 `ENXIO` ⇒ 无对应变体），
+        //    所以钉的是"等于裸操作给的 kind"这一条 —— 它同时也是"没退回 `io::Error::other(..)`"
+        //    的判据：那种写法无论 OS 说什么都折成 `Other`，两边立刻不等。
+        //    夹具形状与为什么不能用目录（Linux 上目录是**可读打开**的）见 `tool_testing::UnopenablePath`。
+        let unopenable = tool_testing::UnopenablePath::new();
+        let target = unopenable.path();
+        let raw = File::open(target).expect_err("测试前提：这个路径不能当文件打开");
+        let error = ReplayManager::prepare_load(target).expect_err("② 的失败必须冒出来");
         assert_eq!(
             error.to_string(),
-            format!("打开回放文件 {} 失败：{raw}", dir.display()),
+            format!("打开回放文件 {} 失败：{raw}", target.display()),
             "② 框架的形状变了（路径没点名 / OS 细节被改写）"
         );
         assert_eq!(error.kind(), raw.kind(), "② 的框架把 kind 折掉了");
-        assert_ne!(
-            error.kind(),
-            io::ErrorKind::Other,
-            "② 的 OS 给得出具体 kind，出现 Other 说明框架退回了 `io::Error::other(..)`"
-        );
 
         // ③ 逐行读：真掉一次网络盘驱动不出来，所以注入 —— 钉的是"迭代器递来什么 kind，
         // 出口就还什么 kind"。两格而不是一格：只调通一格的写法在这里看不出来。

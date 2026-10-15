@@ -4774,6 +4774,7 @@ dependencies = [
  "serde_json",
  "tool-core",
  "tool-databus",
+ "tool-testing",
 ]
 
 [[package]]

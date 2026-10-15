@@ -1530,6 +1530,25 @@
 
 ### 修复
 
+- **四条用例的"打不开的路径"夹具把 Windows 的行为当成了两边的行为：Linux 作业从第 43 轮起一直红。**
+  （不涉及生产代码；被挡下的是 v1.3.1 的发布流水线 —— `Ubuntu .deb` 作业红在 `Linux tests`，
+  `GitHub Release` 因依赖它而整个跳过。）
+  * 第 43 轮那三条（`crates/recorder/src/replay.rs` 两条、`crates/application/tests/headless.rs` 一条）
+    拿**目录**当"`metadata` 拿得到、当文件打不开"的夹具，注释里写"Linux 是目录 ⇒ `EISDIR`" ——
+    POSIX 只在**写**打开时给 `EISDIR`，`open(目录, O_RDONLY)` 是成功的，于是
+    `File::open(&dir).expect_err(..)` 在 Linux 上当场 panic：**红在测试前提上，不在被测代码上**。
+  * `crates/recorder/src/recorder.rs` 的 `create_recording_file_frames_both_io_exits_in_chinese` 把
+    "普通文件之下建目录"的 POSIX 答案记成了 `EEXIST` ⇒ `AlreadyExists`，实际是"路径前缀不是目录"的
+    `ENOTDIR` ⇒ `NotADirectory`（`mkdir` 只有**最后一段**已存在时才给 `EEXIST`）。
+  * **取证（本机 WSL，`cargo test --workspace --all-targets --no-fail-fast`）**：四条红分别是
+    `headless.rs:1025 测试前提：这个目录必须打不开`、`replay.rs:1153`、`replay.rs:1208`、`recorder.rs:1108`；
+    同一份命令在 Windows 侧全绿 —— 这就是"夹具编码了平台答案"的形状。
+  * **修法**：跨平台的"能 stat、打不开"夹具收进 `tool_testing::UnopenablePath` 一份（Windows 用目录；
+    Unix 用 Unix 域套接字，`open(O_RDONLY)` 给 `ENXIO` 且 **root 也拦得住** —— 权限类夹具在 root 下会被
+    `CAP_DAC_OVERRIDE` 绕过，本机与容器里的 root 复跑会得到假绿）；递归建目录那一格改成逐平台钉 kind；
+    "不是 `Other`"那两处断言改成只钉"等于裸操作给的 kind"（`io::Error::other(..)` 会把任何 kind 折成
+    `Other`，两边立刻不等，判据没变弱，也不再依赖某个平台恰好给出可命名的变体）。
+  * 夹具只有一份实现，为此给 `tool-recorder` 加了一条 `[dev-dependencies] tool-testing` 边。
 - **修掉一个"从旧版本升级上来、第一次开机就丢设置"的缺陷**：`schema_version` 改名之前写的
   `workspace.json` 只用历史键 `version` 声明版本，这样的文件在本版本读不出来 ——
   `parse_persisted_config` 会无条件往 map 里 `insert("schema_version", …)`，而
