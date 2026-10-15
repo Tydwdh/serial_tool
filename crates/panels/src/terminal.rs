@@ -116,7 +116,8 @@ pub struct TerminalPanel {
 
     /// 用户可调的字体大小（10-24px），默认 13.0
     pub font_size: f32,
-    /// 展示块的空闲结束阈值。它只用于结束 LiveTail，不代表协议帧边界。
+    /// 展示块的空闲结束阈值：只决定"何时把未封存的行封存"（影响后续数据是否并入同一行），
+    /// 不代表协议帧边界，也不再影响显示（未封存的行与封存的行渲染相同）。
     pub merge_window_ms: u64,
     /// 框选状态
     pub selection: RowSelection,
@@ -135,7 +136,6 @@ struct VisibleRow<'a> {
     display_text: Cow<'a, str>,
     hex_text: Cow<'a, str>,
     preview_text: Cow<'a, str>,
-    live: bool,
 }
 
 /// 导出游标：点「导出」时不先物化全部可见行，所属面板按稳定 id 顺序、以有界
@@ -256,7 +256,6 @@ impl VisibleRow<'static> {
             hex_text: Cow::Owned(format_hex(item.bytes())),
             preview_text: Cow::Owned(format_utf8_preview(item.bytes())),
             raw_text: Cow::Owned(raw_text),
-            live: item.is_live(),
         }
     }
 }
@@ -843,8 +842,8 @@ impl TerminalPanel {
         let update: TerminalStoreUpdate =
             self.store
                 .ingest(self.assembler, &event, port, bytes.as_ref());
-        // LiveTail 预览始终固定为单行；离屏内容变化不应重置旧行高，避免用户查看历史
-        // 时因为后台接收而发生滚动位置跳动。进入视口后仍会重新 layout 并收敛真实高度。
+        // 未封存的行会随接收增长，但**离屏**行高不在这里重置：用户在翻历史时不该因为
+        // 后台接收而跳位置。行进入视口后由 layout 收敛到真实高度（`set_height`）。
         self.view_index.mark_changed(update.changed_ids);
         self.view_index
             .mark_removed(update.removed_ids.iter().copied());
@@ -971,33 +970,6 @@ fn terminal_layout_key(
     hasher.finish()
 }
 
-fn live_tail_max_chars(width: f32, glyph_width: f32) -> usize {
-    (width.max(glyph_width) / glyph_width.max(1.0))
-        .floor()
-        .max(1.0) as usize
-}
-
-/// LiveTail 是固定高度的 transient row，只展示当前最后一段；完整历史字节
-/// 仍保存在 Store 中，封存后再恢复完整记录的正常高度。
-fn compact_live_tail_preview(content: &str, max_chars: usize) -> String {
-    let tail = content.rsplit_once('\n').map_or(content, |(_, tail)| tail);
-    compact_live_tail_segment(tail, max_chars)
-}
-
-fn compact_live_tail_segment(text: &str, max_chars: usize) -> String {
-    let char_count = text.chars().count();
-    if char_count <= max_chars {
-        return text.to_owned();
-    }
-
-    // 省略号本身占一格，所以尾部只保留 max_chars-1 个字符。
-    let tail: String = text
-        .chars()
-        .skip(char_count - max_chars.saturating_sub(1))
-        .collect();
-    format!("…{tail}")
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TerminalTableWidths {
     label: f32,
@@ -1114,7 +1086,6 @@ struct RowMeasure {
     preview_galley_width: f32,
     text_padding: f32,
     text_color: Color32,
-    glyph_width: f32,
     row_height: f32,
     font_id: egui::FontId,
     layout_key: u64,
@@ -1132,7 +1103,6 @@ fn measure_rows(
     let preview_width = widths.preview;
     let text_padding = 4.0;
     let text_color = ui.style().visuals.text_color();
-    let glyph_width = ui.fonts_mut(|fonts| fonts.glyph_width(font_id, '0'));
 
     let galley_width = (hex_width - text_padding).max(0.0).floor();
     let preview_galley_width = if show_hex {
@@ -1159,7 +1129,6 @@ fn measure_rows(
         preview_galley_width,
         text_padding,
         text_color,
-        glyph_width,
         row_height,
         font_id: font_id.clone(),
         layout_key,
@@ -1414,22 +1383,17 @@ fn build_row_galleys(
     measure: &RowMeasure,
 ) -> RenderedRow {
     let (show_hex, show_raw) = (measure.show_hex, measure.show_raw);
-    let (galley_width, preview_galley_width, glyph_width, text_color, row_height) = (
+    let (galley_width, preview_galley_width, text_color, row_height) = (
         measure.galley_width,
         measure.preview_galley_width,
-        measure.glyph_width,
         measure.text_color,
         measure.row_height,
     );
     let font_id = measure.font_id.clone();
+    // 未封存的行与已封存的行**同样渲染**：接收区该按原样显示收到的多行数据。
+    // 从前这里对 LiveTail 做单行压缩（只留最后一行、超宽前缀 "…"），于是"数据超过
+    // 一行"时用户只看到最后一行，且在没有后续数据把它封存之前一直保持那样。
     let content = visible_row_content(row, show_hex, show_raw);
-    // LiveTail 是固定单行的 transient 记录：只保留最后一段的尾部字符，
-    // 避免未封存的长行把视口顶开。
-    let content = if row.live {
-        compact_live_tail_preview(&content, live_tail_max_chars(galley_width, glyph_width))
-    } else {
-        content
-    };
     let content = if content.is_empty() {
         " ".to_owned()
     } else {
@@ -1446,14 +1410,6 @@ fn build_row_galleys(
             " ".to_owned()
         } else {
             row.preview_text.to_string()
-        };
-        let preview_text = if row.live {
-            compact_live_tail_preview(
-                &preview_text,
-                live_tail_max_chars(preview_galley_width, glyph_width),
-            )
-        } else {
-            preview_text
         };
         let mut layout_job = egui::text::LayoutJob::simple(
             preview_text,
@@ -2753,13 +2709,75 @@ mod tests {
         assert!(items[1].is_live());
     }
 
+    /// 未封存的长行必须整段进 layout（换行折行显示），不再被压成"…" + 尾部。
+    ///
+    /// 第 61 轮删掉了 LiveTail 的单行压缩：从前未封存的行只保留最后一段、超出行宽就前缀
+    /// `…`，于是"超过一行的数据"在接收区只显示一小截，而且在没有后续数据把它封存之前
+    /// 一直保持那样。这里取的是**真正交给 layout 的 galley**（`build_row_galleys` 的产物）：
+    /// 文本必须逐字完整、行高必须真的折成多行；压缩不管被写回哪一层，这条都会红。
     #[test]
-    fn live_tail_preview_keeps_latest_text_and_completed_lines() {
-        assert_eq!(
-            compact_live_tail_preview("completed\n0123456789", 5),
-            "…6789"
+    fn an_unsealed_long_line_is_laid_out_in_full() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+        let long_line: String = "0123456789".repeat(20); // 200 字符，远超一行宽度
+        bus.publish(Event::with_timestamp(
+            1_000,
+            serial_topics::SERIAL_RX,
+            "serial:COM1",
+            Direction::Rx,
+            Payload::Bytes(long_line.clone().into_bytes()),
+        ));
+        assert_eq!(panel.ingest_all_pending(), 1);
+
+        let rows = panel.collect_visible_rows();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            panel
+                .store
+                .get(rows[0].id)
+                .is_some_and(|item| item.is_live()),
+            "这一行必须还是未封存状态，否则本用例没在测 LiveTail 那一段"
         );
-        assert_eq!(compact_live_tail_preview("short", 5), "short");
+
+        let aliases = HashMap::new();
+        let inputs = RowsViewInputs {
+            scroll_key: "unsealed-long-line",
+            height: 200.0,
+            visible_ids_update: VisibleIdsUpdate::default(),
+            scroll_to_row: None,
+            show_hex: false,
+            show_raw: false,
+            stick_to_bottom: false,
+            force_scroll_to_bottom: false,
+            wheel_scroll_delta_y: 0.0,
+            font_size: 13.0,
+            port_aliases: &aliases,
+            empty_hint: "",
+            navigate_highlight: None,
+        };
+        let font_id = egui::FontId::monospace(13.0);
+        let widths = TerminalTableWidths {
+            label: 120.0,
+            hex: 300.0,
+            preview: 0.0,
+        };
+        // 刻意不用 `egui::__run_test_ui`：它把字体清空以省 CPU，而"折成多行"这件事
+        // 需要真实字宽。默认 `Context` 会装载内建字体，量得到真实折行。
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let measure = measure_rows(ui, &widths, &font_id, 18.0, &inputs);
+            let rendered = build_row_galleys(ui, &rows[0], 0.0, &measure);
+            assert_eq!(
+                rendered.galley.text(),
+                long_line,
+                "未封存的长行必须整段进 layout，而不是只剩尾部 + 省略号"
+            );
+            assert!(
+                rendered.entry_height > 18.0,
+                "长行必须真的折成多行显示，实际行高 {}",
+                rendered.entry_height
+            );
+        });
     }
 
     #[test]
@@ -3148,7 +3166,6 @@ mod tests {
             display_text: Cow::Borrowed("first\nsecond\n"),
             hex_text: Cow::Borrowed("66 69 72 73 74 0D 0A"),
             preview_text: Cow::Borrowed("first\nsecond\n"),
-            live: false,
         };
 
         assert_eq!(visible_row_content(&row, false, false), "first\nsecond");
@@ -3205,7 +3222,6 @@ mod tests {
 
         assert_eq!(row.port.as_deref(), Some("COM6"));
         assert_eq!(row.raw_text, "(42.0000)ok*29\n");
-        assert!(!row.live);
     }
 
     /// 换行是展示边界，同一个 packet 内的多行也分别封存。
@@ -3399,7 +3415,6 @@ mod tests {
         let rows = panel.collect_visible_rows();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].raw_text, "prefixtarget\n");
-        assert!(!rows[0].live);
     }
 
     #[test]

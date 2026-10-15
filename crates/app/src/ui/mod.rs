@@ -35,11 +35,7 @@ impl WorkbenchApp {
                     kind: port.port_type.to_string(),
                     open: status.open,
                     connecting: status.connecting,
-                    pending_reconnect: self
-                        .serial
-                        .pending_reconnect
-                        .as_ref()
-                        .is_some_and(|pending| pending.port_name == port.port_name),
+                    pending_reconnect: self.serial.reconnects.entry(&port.port_name).is_some(),
                 }
             })
             .collect()

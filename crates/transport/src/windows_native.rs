@@ -187,14 +187,30 @@ impl NativeWorker {
             hEvent: read_event.raw(),
             ..Default::default()
         };
-        let mut first_byte = [0_u8; 1];
-        let mut read_pending = false;
+        let mut state = ReadState {
+            pending: false,
+            first_byte: [0_u8; 1],
+            probe_failures: 0,
+        };
+        let result = self.run_loop(&read_event, &mut read_overlapped, &mut state);
+        // 任何退出路径（正常返回或错误）都要先把挂起的读收干净：OVERLAPPED 活在本帧栈上，
+        // 带着未完成的 IRP 返回会让内核继续引用已失效的栈内存（`cancel_pending_read` 的契约）。
+        // 从前只有 stop 那两条分支自己取消，`?` 冒出去的失败路径（写失败、探测失败、
+        // `start_read` 失败）都直接返回 —— 那些路径上正好都有一条挂起的读。
+        if state.pending {
+            cancel_pending_read(self.port.handle, &read_overlapped);
+        }
+        result
+    }
 
+    fn run_loop(
+        &self,
+        read_event: &EventHandle,
+        read_overlapped: &mut OVERLAPPED,
+        state: &mut ReadState,
+    ) -> io::Result<()> {
         loop {
             if self.stop.load(Ordering::Acquire) {
-                if read_pending {
-                    cancel_pending_read(self.port.handle, &read_overlapped);
-                }
                 return Ok(());
             }
 
@@ -206,17 +222,14 @@ impl NativeWorker {
                 &self.repaint_waker,
             )?;
             if self.stop.load(Ordering::Acquire) {
-                if read_pending {
-                    cancel_pending_read(self.port.handle, &read_overlapped);
-                }
                 return Ok(());
             }
 
-            if !read_pending {
+            if !state.pending {
                 read_event.reset();
                 match self
                     .port
-                    .start_read(&mut first_byte, &mut read_overlapped)?
+                    .start_read(&mut state.first_byte, read_overlapped)?
                 {
                     ReadStart::Completed(size) => {
                         if size > 0 {
@@ -224,7 +237,7 @@ impl NativeWorker {
                                 &self.port,
                                 &self.bus,
                                 &self.source,
-                                &first_byte[..size],
+                                &state.first_byte[..size],
                                 &self.stop,
                                 &self.repaint_waker,
                             )?;
@@ -232,31 +245,55 @@ impl NativeWorker {
                         continue;
                     }
                     ReadStart::Pending => {
-                        read_pending = true;
+                        state.pending = true;
                     }
                 }
             }
 
             let handles = [read_event.raw(), self.wake.raw()];
+            // 有上限的等待：到点做一次存活探测。设备被拔出后驱动**不一定会完成**那次
+            // overlapped 读，只靠"读失败"自证死亡的话，worker 会一直活着、`status_for`
+            // 一直报 open、UI 一直显示"已连接"，直到用户手动重连时那次 open 才失败。
             let wait = unsafe {
-                WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, INFINITE)
+                WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), 0, IDLE_PROBE_MS)
             };
             if wait == WAIT_FAILED {
                 return Err(last_error());
+            }
+            if wait == WAIT_TIMEOUT {
+                match self.port.probe_alive() {
+                    Ok(()) => state.probe_failures = 0,
+                    Err(error) => {
+                        // 连续两次失败才判死：一次驱动打嗝不值得掐掉一条还能用的链路，
+                        // 而真的失效多等一秒也不影响（UI 会亮明原因并自动重连）。
+                        state.probe_failures += 1;
+                        if state.probe_failures >= PROBE_FAILURES_BEFORE_DEAD {
+                            return Err(error);
+                        }
+                    }
+                }
+                continue;
             }
 
             if wait == WAIT_OBJECT_0 {
                 let mut transferred = 0_u32;
                 let ok = unsafe {
-                    GetOverlappedResult(self.port.handle, &read_overlapped, &mut transferred, 0)
+                    GetOverlappedResult(self.port.handle, read_overlapped, &mut transferred, 0)
                 };
-                read_pending = false;
+                state.pending = false;
                 if ok == 0 {
                     let error = last_error();
-                    if self.stop.load(Ordering::Relaxed)
-                        || error.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32)
-                    {
+                    if self.stop.load(Ordering::Relaxed) {
                         return Ok(());
+                    }
+                    if error.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32) {
+                        // 非 stop 的 `ABORTED`：设备被意外移除时，驱动会取消挂起的读。
+                        // 从前这里直接 `return Ok(())` —— 日志与事件一个都没有。
+                        publish_port_error(
+                            &self.bus,
+                            &self.source,
+                            "读操作被系统取消（设备可能已被拔出或链路失效）",
+                        );
                     }
                     return Err(error);
                 }
@@ -265,7 +302,7 @@ impl NativeWorker {
                         &self.port,
                         &self.bus,
                         &self.source,
-                        &first_byte[..(transferred as usize).min(first_byte.len())],
+                        &state.first_byte[..(transferred as usize).min(state.first_byte.len())],
                         &self.stop,
                         &self.repaint_waker,
                     )?;
@@ -275,6 +312,22 @@ impl NativeWorker {
             }
         }
     }
+}
+
+/// 空闲等待的单次上限：到点就做一次存活探测（[`NativeSerialPort::probe_alive`]）。
+///
+/// 取值权衡：设备失效到句柄被判死最多晚这么久，代价是每秒一次 `ClearCommError`。
+const IDLE_PROBE_MS: u32 = 1_000;
+
+/// 连续这么多次探测失败才判定设备已失效（每秒探一次）。
+const PROBE_FAILURES_BEFORE_DEAD: u32 = 2;
+
+/// 读路径的可变状态：跨多次等待保持。
+struct ReadState {
+    pending: bool,
+    first_byte: [u8; 1],
+    /// 连续探测失败次数（成功一次就清零）。
+    probe_failures: u32,
 }
 
 /// MSDN 契约：`CancelIoEx` 返回 ≠ I/O 完成，必须经 `GetOverlappedResult` 确认取消完成
@@ -577,6 +630,20 @@ impl NativeSerialPort {
         Ok(status.cbInQue as usize)
     }
 
+    /// 空闲心跳：确认这个句柄背后的设备还在。
+    ///
+    /// 为什么不能只靠那条挂起的读：设备被拔出后驱动**不一定完成**那次 `ReadFile`，
+    /// 于是 worker 活着、`alive` 为真、`status_for` 报 `open: true`，UI 一直显示
+    /// "已连接"，直到用户手动重连、那次 `open_serial` 才失败。`ClearCommError` 是设备对象上
+    /// 的同步 ioctl：设备消失后它立刻失败，不需要有数据到达，也不动读缓冲区（返回的只是一份
+    /// 状态快照，与 `bytes_to_read` 用的是同一个调用）。
+    fn probe_alive(&self) -> io::Result<()> {
+        let mut errors = 0_u32;
+        let mut status = COMSTAT::default();
+        cvt(unsafe { ClearCommError(self.handle, &mut errors, &mut status) })?;
+        Ok(())
+    }
+
     fn set_dtr(&self, value: bool) -> io::Result<()> {
         cvt(unsafe { EscapeCommFunction(self.handle, if value { SETDTR } else { CLRDTR }) })
     }
@@ -661,6 +728,55 @@ fn create_event(manual_reset: bool) -> io::Result<HANDLE> {
 
 fn last_error() -> io::Error {
     io::Error::from_raw_os_error(unsafe { GetLastError() } as i32)
+}
+
+/// 探测函数本身的测试：它必须在"不是活着的 COM 端口"的句柄上失败。
+///
+/// 这里能构造的边界就是"句柄有效但不是 COM 设备"（普通文件）—— 真正的"设备被拔出"要在
+/// 有硬件的机器上拔线，CI 里造不出来。这条用例钉的是探测**接在同一个 `ClearCommError`
+/// 路径上、并且失败确实会冒上来**：一旦有人把 `probe_alive` 改成恒 `Ok(())`（等于把心跳
+/// 关掉），它立刻红。
+#[cfg(all(test, windows))]
+mod probe_tests {
+    use super::*;
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, OPEN_EXISTING,
+    };
+
+    #[test]
+    fn probe_alive_fails_on_a_handle_that_is_not_a_live_com_port() {
+        let path = std::env::temp_dir().join("hw-probe-alive-fixture.tmp");
+        std::fs::write(&path, b"x").expect("写夹具文件");
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(
+            handle, INVALID_HANDLE_VALUE,
+            "夹具文件必须能打开，否则这条用例没测到探测函数"
+        );
+
+        let port = NativeSerialPort { handle };
+        assert!(
+            port.probe_alive().is_err(),
+            "非 COM 设备上的 ClearCommError 必须失败：心跳据此判设备失效"
+        );
+        drop(port);
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 /// Windows 生产入口的 **guard 站点**测试。

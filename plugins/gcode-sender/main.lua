@@ -728,27 +728,53 @@ local function looks_like_path(s)
     return false
 end
 
+-- G文件 的语义就是"发文件"：发送区里不是文件时直接把选择框打开，而不是只记一条警告
+-- 让用户自己清空再点一次。选择的文件由宿主授权给本插件读取。
+local function request_gcode_file()
+    return ctx.dialog.open_file({
+        title = "选择 G-code 文件",
+        filters = {
+            { name = "Marlin G-code", extensions = { "gcode", "gco", "gc" } },
+            { name = "所有文件", extensions = { "*" } },
+        },
+    })
+end
+
+-- 发送区那一行"是不是一个现在打得开的文件"：`read_lines_stream` 在调用时就 open（不读内容），
+-- 拿它当探针，开得出第一个迭代器就算文件。宿主的 `ctx.fs` 只认已授权的路径（用户手输的一行
+-- 路径由宿主在派发按钮时授权），所以这里同时覆盖"路径不存在"与"没授权"两种打不开。
+-- 拿不到 fs API（老宿主）时按旧行为当作可用。
+local function is_readable_file(candidate)
+    local probe = ctx.fs and (ctx.fs.read_lines_stream or ctx.fs.read_lines)
+    if not probe then
+        return true
+    end
+    return pcall(function()
+        local iter = probe(candidate)
+        if iter then
+            iter()
+        end
+    end)
+end
+
 local function resolve_file_path(input)
     local candidate = strip_quotes(input)
     if candidate == "" then
-        return ctx.dialog.open_file({
-            title = "选择 G-code 文件",
-            filters = {
-                { name = "Marlin G-code", extensions = { "gcode", "gco", "gc" } },
-                { name = "所有文件", extensions = { "*" } },
-            },
-        })
+        return request_gcode_file()
     end
 
-    if looks_like_path(candidate) then
+    if looks_like_path(candidate) and is_readable_file(candidate) then
         return candidate
     end
 
     if candidate:find("[\r\n]") then
-        log("warn", "发送区是多行内容，请使用 G单条 发送")
+        log("warn", "发送区是多行内容，已打开文件选择框；发送这些内容请用 G单条")
+    elseif looks_like_path(candidate) then
+        log("warn", string.format("发送区里的路径打不开（%s），已打开文件选择框", candidate))
     else
-        log("warn", "发送区内容不像文件路径，请清空后点 G文件 选择文件")
+        log("warn", "发送区内容不是文件路径，已打开文件选择框")
     end
+    return request_gcode_file()
 end
 
 -- ── command handlers ──

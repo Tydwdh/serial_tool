@@ -20,6 +20,7 @@ mod panel_registry;
 mod panels_ops;
 #[cfg(not(target_arch = "wasm32"))]
 mod perf;
+mod reconnect;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod replay_task;
 #[cfg(not(target_arch = "wasm32"))]

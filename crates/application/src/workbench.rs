@@ -115,6 +115,7 @@ pub struct UiEventSubscriptions {
     file_browse: tool_databus::Subscription,
     contribution_set_value: tool_databus::Subscription,
     set_status: tool_databus::Subscription,
+    serial_closed: tool_databus::Subscription,
 }
 
 impl UiEventSubscriptions {
@@ -128,6 +129,18 @@ impl UiEventSubscriptions {
 
     pub fn drain_status(&self, limit: usize) -> Vec<tool_core::Event> {
         self.set_status.drain_limited(limit)
+    }
+
+    /// 端口关闭/失联事件（`transport.serial.closed`）。
+    ///
+    /// 这是 UI 唯一能区分「用户关了端口」与「设备被拔/链路失效」的信号：
+    /// 两者在 `status_port` 上都是 `open: false`，只有 `reason` 分得开。
+    pub fn drain_serial_disconnects(&self, limit: usize) -> Vec<tool_transport::SerialClosed> {
+        self.serial_closed
+            .drain_limited(limit)
+            .iter()
+            .filter_map(tool_transport::serial_closed_from_event)
+            .collect()
     }
 }
 
@@ -561,6 +574,9 @@ impl Workbench {
                 TopicFilter::exact(tool_core::topics::UI_SET_STATUS),
                 1024,
             ),
+            serial_closed: self
+                .bus
+                .subscribe_lossy_bounded(TopicFilter::exact(tool_core::topics::SERIAL_CLOSED), 128),
         }
     }
 
@@ -1198,53 +1214,34 @@ impl Workbench {
             "reconnect",
             move |context: TaskContext| {
                 let port = PortId::new(task_port.clone());
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                // 一次尝试，不重试。原先这里是一段「3 秒预算 + 10ms 轮询」的循环，判据是
+                // `Io(WouldBlock)` —— 而这条通道上**没有任何生产者**：串口的 kind 在
+                // `platform/src/native.rs::operation_error` 就被折成字符串，
+                // `open_network_serial` 在连接失败时也照旧返回 `Ok`。循环因此恒等于"一次 open"，
+                // 只是把失败结果压在手里最多 3 秒。真要重试的是**自动重连**那一套
+                // （`crates/app/src/reconnect.rs`：真退避 + 上限 + 可取消）；手动重连失败就立刻
+                // 把中文原因交给用户，不在这里假装等待。
+                context
+                    .check_cancelled()
+                    .map_err(|_| "重连已取消".to_owned())?;
 
-                loop {
-                    context
-                        .check_cancelled()
-                        .map_err(|_| "重连已取消".to_owned())?;
-
-                    // 两条路径各拿各的错误类型，「要不要再试一次」只有类型化那条答得出：
-                    // - 网络端口：`open_network_serial` 给 `tool_transport::TransportError`，
-                    //   `Io(kind)` 还在，判定见 `reconnect_is_worth_retrying`（它的文档记着
-                    //   旧版按英文子串匹配为什么从来没生效，别再退回消息匹配）。
-                    // - 真实串口：平台后端给 `tool_platform::TransportError`，其 `Operation`
-                    //   载荷在 `platform/src/native.rs::operation_error` 里已经过完
-                    //   `translate_error`、kind 到不了这里，所以一律立即放弃 —— 它的
-                    //   `disconnect` 走的又是 `close_port_blocking`（同步等到 worker 退出），
-                    //   串口重连本来也撞不上 `open_serial` 那句「正在关闭中」。
-                    if let Some(network) = network.clone() {
-                        let transport = backend.manager().clone();
-                        match transport.open_network_serial(network) {
-                            Ok(_) => {
-                                return Ok(TaskResult::Reconnected {
-                                    port_name: task_port,
-                                });
-                            }
-                            // 端口还在关闭中：落到下面的 10ms 重试，3 秒预算归预算。
-                            Err(error) if reconnect_is_worth_retrying(&error) => {}
-                            Err(error) => return Err(tool_transport::translate_error(&error)),
-                        }
-                    } else {
-                        if let Err(error) = block_on_transport(backend.disconnect(port.clone()))
-                            .and_then(|()| {
-                                block_on_transport(
-                                    backend
-                                        .connect(port.clone(), serial_settings.unwrap_or_default()),
-                                )
-                            })
-                        {
-                            return Err(tool_platform::translate_error(&error));
-                        }
-                        return Ok(TaskResult::TransportConnected { port });
-                    }
-
-                    if std::time::Instant::now() >= deadline {
-                        return Err("重连超时（3 秒）".to_owned());
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
+                let Some(network) = network else {
+                    block_on_transport(backend.disconnect(port.clone()))
+                        .and_then(|()| {
+                            block_on_transport(
+                                backend.connect(port.clone(), serial_settings.unwrap_or_default()),
+                            )
+                        })
+                        .map_err(|error| tool_platform::translate_error(&error))?;
+                    return Ok(TaskResult::TransportConnected { port });
+                };
+                let transport = backend.manager().clone();
+                transport
+                    .open_network_serial(network)
+                    .map(|_| TaskResult::Reconnected {
+                        port_name: task_port,
+                    })
+                    .map_err(|error| tool_transport::translate_error(&error))
             },
         );
         self.reconnect_tasks.insert(port_name.clone(), task_id);
@@ -1389,91 +1386,4 @@ fn pending(task_id: TaskId, message: impl Into<String>) -> CommandOutcome {
 /// 两条分支同样两形态都认。
 fn network_config_matches(config: &NetworkPortConfig, port_name: &str) -> bool {
     config.display_name() == port_name || config.port_id().to_string() == port_name
-}
-
-/// 「这次重连失败值不值得再试一次」——只认 `Io` 里的 `ErrorKind::WouldBlock`
-/// （= 端口还在关闭中，稍后重开就好），其余一律立即放弃。
-///
-/// 别再把它退回消息子串匹配。上一版是
-/// `network.is_some() && error.to_ascii_lowercase().contains("would block")`，
-/// 两个方向都恒假，从来没生效过：
-/// - `std::io::Error::new(kind, msg)` 的 `Display` **只打印 msg、不含 kind 名**，
-///   所以那句英文子串根本不会出现在错误里；而全工作区唯一造出 `WouldBlock` 的
-///   `TransportManager::open_serial` 给的 msg 本身就是中文「… 正在关闭中，请稍后重试」。
-/// - `network.is_some()` 又把判定限定在网络端口，而 `open_network_serial` 没有这条
-///   错误路径（它的连接失败发生在 worker 线程里，以日志事件发布，`open` 本身仍返回 Ok）。
-/// - 换成 OS 给的英文原文（Windows「A non-blocking socket operation could not be
-///   completed immediately」/ Linux「Resource temporarily unavailable」）同样对不上，
-///   而且这类文案按系统 locale 变化。
-///
-/// 判定要的 `kind` 只在错误还是类型化的时候存在，所以它必须在 `workbench.rs`
-/// 的重连循环里问，且只能问 `TransportError::Io`。
-fn reconnect_is_worth_retrying(error: &tool_transport::TransportError) -> bool {
-    matches!(
-        error,
-        tool_transport::TransportError::Io(io)
-            if io.kind() == std::io::ErrorKind::WouldBlock
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::reconnect_is_worth_retrying;
-    use tool_transport::TransportError;
-
-    /// 只有「端口还在关闭中」（`Io(WouldBlock)`）值得再试一次。
-    ///
-    /// 消息照抄生产端 `TransportManager::open_serial` 的那句中文，它同时是一条证据：
-    /// 这个错误的 `Display` 里**没有** "would block" 这几个英文字母（`io::Error::new(kind,
-    /// msg)` 只打印 msg），所以旧版按英文子串写的判定永远读不出这一支 —— 改回消息匹配
-    /// 实现，本断言立刻变红。
-    #[test]
-    fn reconnect_only_retries_a_port_that_is_still_closing() {
-        let closing = TransportError::Io(std::io::Error::new(
-            std::io::ErrorKind::WouldBlock,
-            "COM3 正在关闭中，请稍后重试",
-        ));
-        assert!(
-            !closing
-                .to_string()
-                .to_ascii_lowercase()
-                .contains("would block"),
-            "前提变了就要重写这条：判定之所以只能用 kind，是因为 kind 不出现在 Display 里"
-        );
-        assert!(
-            reconnect_is_worth_retrying(&closing),
-            "WouldBlock = 关掉就能重开，必须留在 3 秒预算里重试，实际: {closing}"
-        );
-    }
-
-    /// 硬失败一律立即放弃，**包括消息看起来像「正在关闭中」的那些**。
-    ///
-    /// `TimedOut` 那条是专门给消息匹配实现准备的陷阱：`close_port_blocking` 超时时给的
-    /// 也是「… 正在关闭中」这句，kind 却是 TimedOut —— 按子串判定的实现会把它当成可重试，
-    /// 于是打不开的口要转满 3 秒才报障。
-    #[test]
-    fn reconnect_never_retries_a_hard_failure_even_when_the_words_look_closing() {
-        let cases = [
-            TransportError::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "127.0.0.1:7125 正在关闭中",
-            )),
-            TransportError::Io(std::io::Error::new(
-                std::io::ErrorKind::ConnectionRefused,
-                "would block forever on a dead peer",
-            )),
-            TransportError::Io(std::io::Error::other("COM3 正在关闭中，请稍后重试")),
-            TransportError::PortNotOpen("COM3".to_owned()),
-            TransportError::WorkerClosed,
-            TransportError::NoOpenPort,
-            TransportError::QueueFull,
-            TransportError::InvalidHex("COM3 正在关闭中".to_owned()),
-        ];
-        for error in &cases {
-            assert!(
-                !reconnect_is_worth_retrying(error),
-                "非 WouldBlock 的失败必须立即放弃，实际: {error}"
-            );
-        }
-    }
 }

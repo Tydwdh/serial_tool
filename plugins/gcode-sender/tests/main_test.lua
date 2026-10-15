@@ -12,6 +12,8 @@ local followup_lines = {}
 local logs = {}
 local responder
 local serial_status_calls = 0
+local dialog_requests = {}
+local dialog_response
 local clock = 0
 
 local function ok_response(line)
@@ -72,7 +74,12 @@ ctx = {
             end
         end,
     },
-    dialog = {},
+    dialog = {
+        open_file = function(options)
+            dialog_requests[#dialog_requests + 1] = options
+            return dialog_response
+        end,
+    },
     task = {},
     now_ms = function()
         clock = clock + 10
@@ -145,6 +152,8 @@ local function reset()
     logs = {}
     responder = function() return ok_response() end
     serial_status_calls = 0
+    dialog_requests = {}
+    dialog_response = nil
     clock = 0
     ctx.last_ui_status = nil
     ctx.last_task_action = nil
@@ -167,12 +176,75 @@ local function send_file(path)
     })
 end
 
+-- 用户看得见的那句话在 `logs` 里，按子串找（文案本身就是给用户读的成品）。
+local function logged(fragment)
+    for _, entry in ipairs(logs) do
+        if entry.message:find(fragment, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
 -- 已有行号/校验和会被移除，M110 会被跳过；已有 M30 时不追加 M2。
 reset()
 send_single("N42 G1 X1*99 ; old checksum\nM110 N0\nM30")
 assert(#writes == 3, "expected M110 sync plus two G-code lines")
 assert(writes[2]:match("^N1 G1 X1%*"), writes[2])
 assert(writes[3]:match("^N2 M30%*"), writes[3])
+
+-- G文件：发送区不是文件时改开文件选择框，选中什么就发什么。
+reset()
+dialog_response = "picked.gcode"
+file_contents["picked.gcode"] = { "G1 X1", "G1 X2" }
+send_file("G1 X9") -- 一行 G-code，不是路径
+assert(#dialog_requests == 1, "发送区不是文件时必须打开文件选择框")
+assert(dialog_requests[1].title == "选择 G-code 文件", dialog_requests[1].title)
+assert(dialog_requests[1].filters[1].extensions[1] == "gcode", "选择框必须带 G-code 过滤器")
+assert(#writes == 4, "M110 同步 + 选中文件两行 + 默认 M2")
+assert(writes[2]:match("^N1 G1 X1%*"), writes[2])
+assert(writes[3]:match("^N2 G1 X2%*"), writes[3])
+assert(current_task.status == "发送完成", current_task.status)
+
+-- 发送区为空时同样开选择框（长期行为，本轮补上用例）。
+reset()
+dialog_response = "picked.gcode"
+file_contents["picked.gcode"] = { "G1 X1" }
+send_file("")
+assert(#dialog_requests == 1, "空发送区必须打开文件选择框")
+assert(not logged("已打开文件选择框"), "空发送区没有内容问题，不该补一句解释")
+assert(#writes == 3, "M110 同步 + 选中文件一行 + 默认 M2")
+
+-- 看起来像路径但打不开（不存在 / 没被宿主授权）时也退回选择框，而不是拿它去读文件。
+reset()
+dialog_response = "picked.gcode"
+file_contents["picked.gcode"] = { "G1 X1" }
+send_file("missing.gcode")
+assert(#dialog_requests == 1, "打不开的路径必须打开文件选择框")
+assert(#writes == 3, "M110 同步 + 选中文件一行 + 默认 M2")
+
+-- 打得开的路径直接用，不再弹选择框（旧的"单行路径可直接用"不许被这次改动吃掉）。
+reset()
+file_contents["job.gcode"] = { "G1 X1" }
+send_file("job.gcode")
+assert(#dialog_requests == 0, "能打开的文件路径不得再弹选择框")
+assert(#writes == 3, "M110 同步 + 文件一行 + 默认 M2")
+
+-- 多行 G-code 也是"不是文件"：开选择框，同时提示这类内容该用 G单条。
+reset()
+dialog_response = "picked.gcode"
+file_contents["picked.gcode"] = { "G1 X1" }
+send_file("G1 X1\nG1 X2")
+assert(#dialog_requests == 1, "多行内容必须打开文件选择框")
+assert(logged("发送这些内容请用 G单条"), "多行内容要提示改用 G单条")
+assert(#writes == 3, "M110 同步 + 选中文件一行 + 默认 M2")
+
+-- 在选择框里取消：一行都不发，并留下一句警告。
+reset()
+send_file("G1 X9")
+assert(#dialog_requests == 1, "取消也要先把选择框打开")
+assert(#writes == 0, "取消选择后不得发送任何内容")
+assert(logged("未选择 G-code 文件"), "取消后必须留下一句说明")
 
 -- 初始化命令必须同时用于文件和单条模式，默认初始化为空。
 reset()

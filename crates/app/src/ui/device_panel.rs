@@ -1,5 +1,6 @@
 use crate::app::WorkbenchApp;
 use crate::config::pick_recorder_path;
+use crate::reconnect::RECONNECT_MAX_ATTEMPTS;
 use crate::state::StatusLevel;
 use eframe::egui;
 use egui_material_icons::icons::{ICON_CABLE, ICON_TUNE, ICON_WARNING};
@@ -126,16 +127,21 @@ impl WorkbenchApp {
 
             ui.checkbox(&mut self.serial.auto_reconnect, "串口拔出后自动重连");
             if self.serial.auto_reconnect
-                && let Some(ref pending) = self.serial.pending_reconnect
+                && let Some(pending) = self
+                    .serial
+                    .reconnects
+                    .display(self.serial.selected_port.as_deref())
+                    .cloned()
             {
                 let now = tool_core::now_timestamp_ms() as f64 / 1000.0;
                 let remaining = (pending.next_try_at - now).max(0.0);
                 ui.label(
                     egui::RichText::new(format!(
-                        "等待 {} {:2.1}s 后重试 (第 {}/10 次)",
-                        pending.port_name,
+                        "等待 {} {:2.1}s 后重试 (第 {}/{} 次)",
+                        pending.port,
                         remaining,
-                        pending.attempts + 1
+                        pending.attempts + 1,
+                        RECONNECT_MAX_ATTEMPTS
                     ))
                     .color(theme::yellow()),
                 );
@@ -196,6 +202,7 @@ impl WorkbenchApp {
                 }
                 self.refresh_ports_silent();
                 // 添加即连接：异步建立 WebSocket，UI 进入“连接中”过渡态。
+                self.note_manual_connect(&name);
                 match self
                     .workbench
                     .dispatch(tool_application::AppCommand::Connect {

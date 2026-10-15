@@ -1140,7 +1140,8 @@ panic / 置位什么都不做的手工线程，与磁盘和调度无关）·
       仍然是两端不同**（native 有、web 无）。
       > **再更正一次（第 9 轮）**：上面这句里"重连那处喂字符串给重试判定"已经修掉了 ——
       > 判定改读类型化 `kind`（`reconnect_is_worth_retrying`），两条失败出口各自过
-      > `translate_error`，不再是英文。同一轮还发现**"三处 `error.to_string()`"这个数是我自己数错的**：
+      > `translate_error`，不再是英文。**第 61 轮起那个判定连同它那段 3 秒循环一起删掉了**
+      > （判据没有生产者 = 死代码，收口见下方第 9 轮两个待拍板问题那条）。同一轮还发现**"三处 `error.to_string()`"这个数是我自己数错的**：
       > `grep -n "error\.to_string()" crates/application/src/workbench.rs` 实际命中 18 处
       > （含 `AppError::Plugin` / `AppError::Transport` 这些包装），**其中哪些真的会到用户眼前、
       > 哪些只是内部转换，还没逐条核过** —— 这是下一轮的取证项，不要引用"三处"这个数。
@@ -1172,14 +1173,19 @@ panic / 置位什么都不做的手工线程，与磁盘和调度无关）·
       > 又让 worker 完成通道把 `io::Error` 本体（而不是它的文案）送到这一臂，见本条末尾的
       > 第 41/42 轮记录）。
       >
-      > **第 9 轮留下的两个待拍板问题**（都不是机械收敛能定的）：
-      > ① 重连那个 3 秒预算的循环，改成类型化判定之后**仍然没有任何生产者**
-      > （串口的 kind 在 `platform/src/native.rs::operation_error` 就丢了；网络的
-      > `open_network_serial` 连接失败时照样返回 `Ok`，失败以日志事件发布）。
-      > 要么把 `WouldBlock` 生产者接到路上（需要 `tool_platform::TransportError` 携带 kind 的变体），
-      > 要么承认这段循环是死代码并删掉、让重连失败即返回。
-      > ② 是否把 `ErrorKind::TimedOut`（`close_port_blocking` 超时那条，网络端口真能走到）
-      > 也算可重试 —— 那会让那种情况下重连真的试满 3 秒，是用户可见行为变化。
+      > **第 9 轮留下的两个待拍板问题 —— 第 61 轮按「删死代码」收口**：
+      > ① 重连那 3 秒预算循环的判据（`Io(WouldBlock)`）**没有任何生产者**：串口的 kind 在
+      > `platform/src/native.rs::operation_error` 就丢了，网络的 `open_network_serial` 连接
+      > 失败时照样返回 `Ok`（失败以日志事件发布）。它恒等于「一次 open」，只是把失败结果压在
+      > 手里最多 3 秒 —— 循环、判据 `reconnect_is_worth_retrying` 与它的两条单测都已删除，
+      > `Workbench::start_reconnect` 现在是一次尝试、失败即返回中文原因。要重试的是**自动重连**：
+      > `crates/app/src/reconnect.rs` 的 `ReconnectTracker`（按端口、退避 `0.5·2ⁿ` 封顶 8s、
+      > 10 次上限、到点派发 `Connect`、可取消），触发点是 `device_lost` 事件或端口从枚举列表消失。
+      > 顺带闭合同轮的另一个遗留：串口断连此前只能靠「恰好有一次 I/O 失败」自证，现在 Windows
+      > worker 每秒探一次设备存活并发布带 `reason` 的 `transport.serial.closed`，
+      > `reap_dead_ports` 是「用户关闭 vs 设备失效」的唯一判据。
+      > ② `ErrorKind::TimedOut`（`close_port_blocking` 超时那条）要不要算可重试 ——
+      > **随 ① 一起消失**：现在没有「重试预算」这回事，超时与硬失败一样立刻把原因交给用户。
       > 另有一个子代理发现、本轮**没动**的不对称：**【第 12 轮已闭合】**
       > `start_reconnect` 只按 `display_name()` 匹配网络端口，所以 `network://host:port`
       > 形态的 id 会静默走串口分支（与 `is_network_port` 认两种形态不一致）。

@@ -24,6 +24,7 @@ pub fn data_settings_ui(ui: &mut egui::Ui, view: &mut DataSettingsView<'_>) -> b
             )
             .on_hover_text(
                 "展示块超过此毫秒没有新数据就暂时封存；换行和展示分段会直接封存。\
+                 封存只决定后续数据是否并入同一行，不影响显示（未封存的行也按原样显示）。\
                  这只是展示边界，不代表协议帧。",
             )
             .changed()

@@ -2,7 +2,7 @@
   "$schema": "../plugin.schema.json",
   "id": "gcode-sender",
   "name": "G-code Sender",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "api_version": "0.1",
   "runtime": "lua",
   "main": "main.lua",
@@ -144,7 +144,7 @@
         "slot": "send.toolbar",
         "kind": "button",
         "command": "gcode-sender.send_file",
-        "tooltip": "选择并发送 Marlin G-code 文件；发送区中的单行文件路径也可直接使用",
+        "tooltip": "选择并发送 Marlin G-code 文件；发送区那一行能当文件打开就直接用，否则自动打开文件选择框",
         "record_send_input": true,
         "order": 20
       },

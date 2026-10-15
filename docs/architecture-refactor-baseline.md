@@ -64,7 +64,7 @@ crates/transport  crates/updater  vendor/egui_tiles
 | # | 位置 | 方法 | 耦合业务 |
 |---|------|------|----------|
 | 1 | `app/mod.rs:438` | `eframe::App::update` | `tick_pre_ui → draw_shell → tick_post_ui → export → toast → request_repaint_after 80/250ms` 帧编排即业务调度 |
-| 2 | `commands.rs:207` | `refresh_ports_impl` (160行) | `BTreeSet diff + pending_reconnect 指数退避 1<<a*100 min30000` 10次上限 + 网络端口合并排序 |
+| 2 | `commands.rs:207` | `refresh_ports_impl` (160行) | `BTreeSet diff` → `ReconnectTracker::schedule`（退避 `0.5·2ⁿ` 封顶 8s、10 次上限，判定在 `reconnect.rs`）+ 网络端口合并排序 |
 | 3 | `commands.rs:383/430/471` | `toggle/open/reconnect_port` | 参数校验 `parse_data_bits/parity` + `open_network_serial` + `close_port_blocking 3s` + 读写 `serial.port_profiles` |
 | 4 | `runtime/periodic_send.rs:27` | `tick_periodic_send` | 校验后克隆5字段进 `thread::spawn`，`AtomicBool+Mutex` 回传 |
 | 5 | `runtime/replay.rs:10` | `tick_replay/rebuild_replay` | 清 `terminal/log/charts` + `publish ui.replay.reset` + `seek` 闭包 + `ingest_all_pending` |

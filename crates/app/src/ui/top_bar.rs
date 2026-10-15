@@ -5,6 +5,7 @@ use tool_panels::design::{self, ButtonKind};
 use tool_panels::{SerialPanel, SerialTopBarAction, SerialTopBarView, theme};
 
 use crate::app::WorkbenchApp;
+use crate::reconnect::RECONNECT_MAX_ATTEMPTS;
 use crate::state::StatusLevel;
 
 impl WorkbenchApp {
@@ -45,25 +46,31 @@ impl WorkbenchApp {
             serial_actions = SerialPanel::top_bar_contents_ui(ui, &mut view);
 
             // 自动重连进度：拔串口后顶部栏直接可见，无需展开 device_panel。
-            if let Some(ref pending) = self.serial.pending_reconnect {
+            // 多端口同时重连时这里只展示一条（选中的优先），其余由设备面板与日志承载。
+            let pending = self
+                .serial
+                .reconnects
+                .display(self.serial.selected_port.as_deref())
+                .cloned();
+            if let Some(pending) = pending {
                 let now = tool_core::now_timestamp_ms() as f64 / 1000.0;
                 let remaining = (pending.next_try_at - now).max(0.0);
-                let label = format!(
+                let extra = self.serial.reconnects.len().saturating_sub(1);
+                let mut label = format!(
                     "{} 重连中 {} {:.1}s ({}/{})",
                     ICON_REFRESH.codepoint,
-                    pending.port_name,
+                    pending.port,
                     remaining,
                     pending.attempts + 1,
-                    10
+                    RECONNECT_MAX_ATTEMPTS
                 );
+                if extra > 0 {
+                    label.push_str(&format!(" +{extra}"));
+                }
                 ui.label(egui::RichText::new(label).color(theme::yellow()))
-                    .on_hover_text("点击 × 取消等待重连");
+                    .on_hover_text("点击 × 取消这个端口的自动重连");
                 if design::icon_button(ui, ICON_CANCEL, "取消重连").clicked() {
-                    self.serial
-                        .manual_disconnects
-                        .insert(pending.port_name.clone());
-                    self.serial.pending_reconnect = None;
-                    self.set_status_force(StatusLevel::Info, "已取消自动重连".to_owned());
+                    self.cancel_auto_reconnect(&pending.port, "已取消自动重连 ");
                 }
             }
             ui.separator();

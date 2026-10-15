@@ -1,7 +1,7 @@
 use crate::app::WorkbenchApp;
 use crate::config::resolve_recorder_path;
+use crate::reconnect::{RECONNECT_MAX_ATTEMPTS, ReconnectOutcome};
 use crate::state::PendingPortOpenNotice;
-use crate::state::PendingReconnect;
 use crate::state::StatusLevel;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -318,6 +318,8 @@ impl WorkbenchApp {
             .as_ref()
             .is_some_and(|selected| new_names.contains(selected));
 
+        // 端口从系统列表里消失：**任何**已打开却没了的端口都算失联，不只是选中的那个。
+        // 从前只检查 `selected_port`，于是"拔了另一个已打开的端口"既不报警也不重连。
         if !selected_still_exists && let Some(selected) = self.serial.selected_port.clone() {
             if self.workbench.transport_status(&selected).open {
                 self.set_status_force(
@@ -328,50 +330,23 @@ impl WorkbenchApp {
                 self.serial.selected_port = None;
                 self.set_status_force(StatusLevel::Warn, format!("{selected} 已拔出或不可用"));
             }
-            if self.serial.auto_reconnect && !self.serial.manual_disconnects.contains(&selected) {
-                self.serial.pending_reconnect = Some(PendingReconnect {
-                    port_name: selected,
-                    attempts: 0,
-                    next_try_at: 0.0,
-                });
-            }
         }
-
-        // 自动重连现在只提交统一后台任务，UI tick 不再直接触碰 open_serial。
-        if self.serial.auto_reconnect
-            && let Some(pending) = self.serial.pending_reconnect.clone()
-            && new_names.contains(&pending.port_name)
-        {
-            let name = pending.port_name.clone();
-            let settings = match Self::serial_settings_from_state(&self.serial) {
-                Ok(settings) => settings,
-                Err(error) => {
-                    self.set_status_force(StatusLevel::Warn, error);
-                    return;
-                }
-            };
-            if let Err(error) = self
-                .workbench
-                .dispatch(tool_application::AppCommand::SetSerialSettings { settings })
-            {
-                self.set_status_force(StatusLevel::Warn, error.to_string());
-                return;
-            }
-            match self
-                .workbench
-                .dispatch(tool_application::AppCommand::Reconnect {
-                    port: tool_platform::PortId::new(name.clone()),
-                }) {
-                Ok(tool_application::CommandOutcome::Pending { .. }) => {
-                    self.serial.pending_reconnect = None;
-                    self.defer_port_open_notice(&name, format!("已自动重连 {name}"));
-                    self.set_status_force(StatusLevel::Info, format!("正在自动重连 {name}..."));
-                }
-                Ok(tool_application::CommandOutcome::Done) => {
-                    self.serial.pending_reconnect = None;
-                }
-                Err(error) => self.set_status_force(StatusLevel::Warn, error.to_string()),
-            }
+        let missing: Vec<String> = self
+            .workbench
+            .open_port_names()
+            .into_iter()
+            .filter(|port| !new_names.contains(port))
+            .filter(|port| {
+                !self
+                    .serial
+                    .network_ports
+                    .iter()
+                    .any(|net| net.display_name() == *port)
+            })
+            .collect();
+        let now = tool_core::now_timestamp_ms() as f64 / 1000.0;
+        for port in missing {
+            self.schedule_auto_reconnect(&port, now, format!("{port} 不在系统端口列表中了"));
         }
 
         if show_status {
@@ -410,19 +385,16 @@ impl WorkbenchApp {
     /// - 自动重连中（⟳）：取消重连
     /// - 未打开（○）：切换 selected_port 到该端口（恢复其配置档案）并打开
     pub(crate) fn toggle_port_by_name(&mut self, name: &str) {
-        // 自动重连中：取消重连
-        if let Some(pending) = &self.serial.pending_reconnect
-            && pending.port_name == name
-        {
-            self.serial.pending_reconnect = None;
-            self.set_status_force(StatusLevel::Info, format!("已取消 {name} 的自动重连"));
+        // 自动重连中：取消重连（与顶栏 chip 的 × 走同一条路径）
+        if self.serial.reconnects.entry(name).is_some() {
+            self.cancel_auto_reconnect(name, "已取消 ");
             return;
         }
 
         if self.workbench.transport_status(name).open {
-            // 已打开：关闭
+            // 已打开：关闭（用户自己的动作 —— 记住它，别再自动重连回来）
             self.serial.manual_disconnects.insert(name.to_owned());
-            self.serial.pending_reconnect = None;
+            self.serial.reconnects.cancel(name);
             self.cancel_pending_port_open_notice(name);
             match self
                 .workbench
@@ -496,6 +468,7 @@ impl WorkbenchApp {
         }
 
         let settings = Self::serial_settings_from_state(&self.serial)?;
+        self.note_manual_connect(&p);
         self.workbench
             .dispatch(tool_application::AppCommand::SetSerialSettings { settings })
             .map_err(|error| error.to_string())?;
@@ -506,6 +479,199 @@ impl WorkbenchApp {
             })
             .map(|_| ())
             .map_err(|error| error.to_string())
+    }
+
+    /// 用户主动连接某个端口：清掉"手动关过"的记忆并撤掉它的待重连条目。
+    ///
+    /// 从前这个集合只在端口圆点的"未打开→打开"分支里清，于是「手动关 COM3 → 从顶栏/设备面板
+    /// 再连 COM3 → 拔线」会被判成"用户手动断开的"，自动重连再也挂不上。所有连接入口都走这里，
+    /// 记忆就与"最后一次动作是谁做的"对齐。
+    pub(crate) fn note_manual_connect(&mut self, port: &str) {
+        self.serial.manual_disconnects.remove(port);
+        self.serial.reconnects.cancel(port);
+    }
+
+    /// 挂起一个端口的自动重连（拔线/失联的**唯一**入口）。
+    ///
+    /// `reason` 只用于写一句给用户看的话：挂起本身是同一个动作。自动重连关着、或这个端口
+    /// 是用户手动关掉的，都不挂 —— 后者由 `manual_disconnects` 记住，任何一次显式连接会清掉它。
+    pub(crate) fn schedule_auto_reconnect(
+        &mut self,
+        port: &str,
+        now: f64,
+        reason: impl Into<String>,
+    ) {
+        if !self.serial.auto_reconnect || self.serial.manual_disconnects.contains(port) {
+            return;
+        }
+        if !self.serial.reconnects.schedule(port, now) {
+            return;
+        }
+        let reason = reason.into();
+        self.set_status_force(StatusLevel::Warn, format!("{reason}，正在自动重连"));
+        self.notifications.push(
+            "serial-reconnect",
+            StatusLevel::Warn,
+            format!("{port} 已断开，正在自动重连"),
+        );
+    }
+
+    /// 取消一个端口的自动重连：停止等待、撤掉在飞的任务，并记住"这是用户自己不要的"。
+    ///
+    /// 三条 UI 入口（顶栏 chip 的 ×、端口行的 ⟳、关掉自动重连勾选）都走这里，
+    /// 从前它们各清各的状态：chip 只清 pending、端口行只派发 `CancelReconnect`，
+    /// 于是"取消"要么对在飞任务无效，要么下一帧又被挂回来。
+    pub(crate) fn cancel_auto_reconnect(&mut self, port: &str, note: &str) {
+        self.serial.reconnects.cancel(port);
+        self.serial.manual_disconnects.insert(port.to_owned());
+        self.cancel_pending_port_open_notice(port);
+        let _ = self
+            .workbench
+            .dispatch(tool_application::AppCommand::CancelReconnect {
+                port: tool_platform::PortId::new(port),
+            });
+        self.set_status_force(StatusLevel::Info, format!("{note}{port}"));
+    }
+
+    /// 自动重连的每帧驱动：先收断开事件，再派发到点的尝试，最后回收在飞任务的结果。
+    pub(crate) fn tick_reconnects(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|input| input.time);
+        self.ingest_serial_disconnects(now);
+        self.dispatch_due_reconnects(now);
+        self.reap_reconnect_tasks(now);
+    }
+
+    /// 收 `transport.serial.closed`：只有 `device_lost` 才需要反应（`user_close` 是用户自己的动作）。
+    fn ingest_serial_disconnects(&mut self, now: f64) {
+        for closed in self.ui_events.drain_serial_disconnects(32) {
+            if closed.reason != tool_transport::CloseReason::DeviceLost {
+                continue;
+            }
+            let port = closed.port.clone();
+            // 选中的端口若已从系统列表消失，交给 `sync_ports_from_workbench` 的既有分支
+            // 去清 selected（它还会用中文说清"已拔出/不在列表里"），这里只负责挂重连。
+            let vanished = !self.serial.ports.iter().any(|item| item.port_name == port);
+            let note = if vanished {
+                format!("{port} 已断开（设备或链路已失效）")
+            } else {
+                format!("{port} 已断开（设备可能已被拔出），端口仍在系统列表中")
+            };
+            self.schedule_auto_reconnect(&port, now, note);
+        }
+        // 关掉自动重连勾选时，表里还挂着的等待一律清掉。
+        if !self.serial.auto_reconnect && !self.serial.reconnects.is_empty() {
+            self.serial.reconnects.clear();
+        }
+    }
+
+    fn dispatch_due_reconnects(&mut self, now: f64) {
+        for port in self.serial.reconnects.take_due(now) {
+            let settings = match Self::serial_settings_from_state(&self.serial) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    self.set_status_force(StatusLevel::Warn, error);
+                    return;
+                }
+            };
+            if let Err(error) = self
+                .workbench
+                .dispatch(tool_application::AppCommand::SetSerialSettings { settings })
+            {
+                self.set_status_force(StatusLevel::Warn, error.to_string());
+                return;
+            }
+            let attempt = self
+                .serial
+                .reconnects
+                .entry(&port)
+                .map(|entry| entry.attempts + 1)
+                .unwrap_or(1);
+            // 用 `Connect` 而不是 `Reconnect`：重连表里的端口要么已死、要么已关，
+            // `Reconnect` 在"同名句柄还活着"时会直接返回 Ok（连接其实已经坏了）。
+            match self
+                .workbench
+                .dispatch(tool_application::AppCommand::Connect {
+                    port: tool_platform::PortId::new(port.clone()),
+                    settings,
+                }) {
+                Ok(tool_application::CommandOutcome::Pending { task_id, .. }) => {
+                    self.serial.reconnects.mark_dispatched(&port, task_id);
+                    self.set_status_force(
+                        StatusLevel::Info,
+                        format!("正在自动重连 {port}（第 {attempt}/{RECONNECT_MAX_ATTEMPTS} 次）"),
+                    );
+                }
+                Ok(tool_application::CommandOutcome::Done) => {
+                    self.serial.reconnects.record_success(&port);
+                    self.set_status_force(StatusLevel::Info, format!("已自动重连 {port}"));
+                }
+                Err(error) => {
+                    self.report_reconnect_attempt(&port, now, &error.to_string());
+                }
+            }
+        }
+    }
+
+    /// 回收在飞的重连任务：完成 → 摘掉条目；失败/被取消 → 记一次并退避。
+    fn reap_reconnect_tasks(&mut self, now: f64) {
+        let snapshots = self.workbench.task_snapshots();
+        let inflight: Vec<(String, tool_application::TaskId)> = self
+            .serial
+            .reconnects
+            .in_flight()
+            .map(|(port, task_id)| (port.to_owned(), task_id))
+            .collect();
+        for (port, task_id) in inflight {
+            // 端口已经打开即成功：任务快照有保留上限（256 条），丢掉的终态不该把重连卡住，
+            // 而 transport 的状态才是权威判据。
+            if self.workbench.transport_status(&port).open {
+                self.serial.reconnects.record_success(&port);
+                self.set_status_force(StatusLevel::Info, format!("已自动重连 {port}"));
+                continue;
+            }
+            let Some(snapshot) = snapshots.iter().find(|snapshot| snapshot.id == task_id) else {
+                continue;
+            };
+            match snapshot.state {
+                tool_application::TaskState::Completed => {
+                    self.serial.reconnects.record_success(&port);
+                    self.set_status_force(StatusLevel::Info, format!("已自动重连 {port}"));
+                }
+                tool_application::TaskState::Failed => {
+                    let message = snapshot.message.clone();
+                    self.report_reconnect_attempt(&port, now, &message);
+                }
+                // 被取消也算一次尝试：否则"取消 → 立刻重试"会变成热循环。
+                tool_application::TaskState::Cancelled => {
+                    self.report_reconnect_attempt(&port, now, "重连任务被取消");
+                }
+                tool_application::TaskState::Pending | tool_application::TaskState::Running => {}
+            }
+        }
+    }
+
+    /// 一次重连尝试没成：按 tracker 的判定写回退避，或宣布放弃。
+    fn report_reconnect_attempt(&mut self, port: &str, now: f64, error: &str) {
+        match self.serial.reconnects.record_attempt_failed(port, now) {
+            Some(ReconnectOutcome::Retry { attempts, delay }) => {
+                self.set_status_force(
+                    StatusLevel::Warn,
+                    format!("{port} 自动重连失败（第 {attempts}/{RECONNECT_MAX_ATTEMPTS} 次）：{error}，{delay:.1}s 后重试"),
+                );
+            }
+            Some(ReconnectOutcome::GaveUp { attempts }) => {
+                self.set_status_force(
+                    StatusLevel::Error,
+                    format!("{port} 自动重连失败（已尝试 {attempts} 次）：{error}"),
+                );
+                self.notifications.push(
+                    "serial-reconnect",
+                    StatusLevel::Error,
+                    format!("{port} 自动重连失败（已尝试 {attempts} 次）"),
+                );
+            }
+            None => {}
+        }
     }
 
     /// 提交统一后台重连任务；关闭和重新打开均在线程中完成。
@@ -534,6 +700,7 @@ impl WorkbenchApp {
             self.set_status_force(StatusLevel::Error, error.to_string());
             return;
         }
+        self.note_manual_connect(&p);
         match self
             .workbench
             .dispatch(tool_application::AppCommand::Reconnect {

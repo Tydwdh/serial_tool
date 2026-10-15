@@ -288,15 +288,6 @@ impl Default for SendUiState {
     }
 }
 
-/// 待重连的串口信息（拔出后自动重连用）。
-/// 重连时使用当前 UI 串口配置，故仅记录端口名。
-#[derive(Clone)]
-pub(crate) struct PendingReconnect {
-    pub(crate) port_name: String,
-    pub(crate) attempts: u32,
-    pub(crate) next_try_at: f64,
-}
-
 /// 等待 transport 确认端口已真正打开后再显示成功提示。
 #[derive(Clone)]
 pub(crate) struct PendingPortOpenNotice {
@@ -317,7 +308,9 @@ pub(crate) struct SerialUiState {
     pub(crate) parity: String,
     pub(crate) last_port_refresh: f64,
     pub(crate) auto_reconnect: bool,
-    pub(crate) pending_reconnect: Option<PendingReconnect>,
+    /// 拔线/失联后的自动重连表（多端口）。判定与退避都在 `crate::reconnect` 里，
+    /// 这里只存状态。
+    pub(crate) reconnects: crate::reconnect::ReconnectTracker,
     /// Ports manually closed by the user must not be treated as unexpected
     /// disconnects by the periodic port-list refresh.
     pub(crate) manual_disconnects: std::collections::HashSet<String>,
@@ -357,7 +350,7 @@ impl Default for SerialUiState {
             parity: "none".to_owned(),
             last_port_refresh: 0.0,
             auto_reconnect: true,
-            pending_reconnect: None,
+            reconnects: crate::reconnect::ReconnectTracker::default(),
             manual_disconnects: std::collections::HashSet::new(),
             pending_open_notice: None,
             port_aliases: std::collections::HashMap::new(),
