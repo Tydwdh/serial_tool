@@ -1,202 +1,188 @@
-# 安装器与发布
+# 发布包与安装器
 
-本项目提供两个发布形态：
+本文说明三种发布形态的生成方式、包内布局、安装位置与卸载行为。发布流程与版本号约定见
+[RELEASE.md](RELEASE.md)。
 
-- Portable zip：由 `package.bat` 生成，解压即可运行。
-- Windows installer：由 Inno Setup 脚本生成，适合正式发布给普通用户。
-- Ubuntu 22.04+ `.deb`：由 `installer/linux/build-deb.sh` 生成，安装后从应用菜单直接运行。
+## 发布形态概览
 
-## 生成 Ubuntu `.deb`
+| 形态 | 生成脚本 | 产物 |
+|------|----------|------|
+| 便携 zip | `package.bat`（Windows） | `dist/hardware-workbench-app\`、`dist/hardware-workbench-app.zip` |
+| Windows 安装器 | `installer/build-installer.ps1`（Inno Setup 6） | `dist/HardwareWorkbenchSetup.exe` |
+| Ubuntu `.deb` | `installer/linux/build-deb.sh`（Ubuntu/Debian） | `dist/hardware-workbench_<version>_amd64.deb` |
 
-Ubuntu V1 目标为 x86_64（Debian 架构名 `amd64`）。在 Ubuntu 或其它带有
-`dpkg-deb` 的 Debian 系统上执行：
+发布包默认不预装个人脚本或测试脚本；应用会创建空的插件目录，用户可从插件市场安装或手动放入。
 
-```bash
-bash ./installer/linux/build-deb.sh
-```
-
-输出文件：
-
-```text
-dist/hardware-workbench_<version>_amd64.deb
-```
-
-安装阶段需要系统管理员权限，这是一次性的系统安装权限：
-
-```bash
-sudo apt install ./dist/hardware-workbench_<version>_amd64.deb
-```
-
-安装完成后，应用菜单会出现 `Hardware Workbench`，也可以执行：
-
-```bash
-hardware-workbench-app
-```
-
-这两个启动方式都以当前普通用户运行，不要使用 `sudo hardware-workbench-app`。
-程序、插件、主题和默认录制文件的用户可写数据分别位于：
-
-```text
-~/.config/HardwareWorkbench/
-~/.local/share/HardwareWorkbench/
-```
-
-### 串口权限
-
-如果打开 `/dev/ttyUSB0` 或 `/dev/ttyACM0` 时提示 `Permission denied`，应用会给出
-Ubuntu 的标准处理方式：
-
-```bash
-sudo usermod -aG dialout $USER
-```
-
-执行后注销并重新登录即可。`.deb` 不会把所有串口设备开放给所有用户，也不会自动
-修改 `dialout` 或安装宽泛的 udev 规则。
-
-## 生成便携包
-
-Windows PowerShell 5.1：
+## 便携包
 
 ```powershell
 Set-Location <仓库目录>
 .\package.bat
 ```
 
-输出：
+脚本先 `cargo build -p hardware-workbench-app --release`（`package.bat:15`），再组装
+`dist/hardware-workbench-app\` 并压缩为 `dist/hardware-workbench-app.zip`（`package.bat:76`）。
+目录布局：
 
-```text
-dist\hardware-workbench-app\
-dist\hardware-workbench-app.zip
-```
+| 路径 | 来源 / 说明 | 依据 |
+|------|-------------|------|
+| `hardware-workbench-app.exe` | `target\release\` 构建产物 | `package.bat:32` |
+| `assets\` | 字体与图标：`JetBrainsMonoNerdFontMono-Regular.ttf`、`NotoSansSC-VF.ttf`、`app-icon.ico`、`FONT_LICENSES.md`、`OFL-1.1.txt`（存在才复制） | `package.bat:39` |
+| `themes\` | 来自 `assets\themes\` | `package.bat:50` |
+| `docs\` | 来自仓库 `docs\`（存在才复制） | `package.bat:49` |
+| `README.md`、`CHANGELOG.md`、`LICENSE`、`THIRD_PARTY_NOTICES.md` | 仓库根文件 | `package.bat:52` |
+| `licenses\` | `egui_tiles-LICENSE-MIT`、`ChineseSimplified-Translation-LICENSE-MIT` | `package.bat:56` |
+| `plugins\plugin.schema.json`、`plugins\.lua\`、`.luarc.json` | 插件清单 schema 与 Lua 定义 | `package.bat:60` |
+| `examples\plugins\` | `plugin.schema.json`、`.lua\` 与模板插件 `template.hello`、`template.serial-chart`、`template.file-tool` | `package.bat:64` |
+| `logs\` | 空目录 | `package.bat:73` |
 
-便携包会包含：
+便携版没有安装步骤，解压即可运行；程序与数据目录都在解压目录内（见文末位置表）。
 
-- 主程序 exe。
-- `assets\` 字体资源。
-- `docs\` 文档。
-- 空的 `plugins\` 目录。
-- `examples\plugins\` 中的模板插件。
-- 空的 `logs\` 目录。
+## Windows 安装器
 
-便携包不会默认带上个人脚本、测试脚本或 `gcode-sender`。
-
-## 生成 Windows 安装器
-
-先安装 Inno Setup 6，并确保 `ISCC.exe` 在 `PATH` 中，或安装在默认目录。
-
-简体中文安装界面使用仓库内固定版本的
-`installer\ChineseSimplified.isl`，不依赖 Inno Setup 安装目录中是否附带翻译文件。
-
-Windows PowerShell 5.1：
+前置：安装 Inno Setup 6，且 `ISCC.exe` 在 `PATH` 或默认安装目录中；也可用环境变量
+`INNOSETUP_ISCC` 指定其完整路径（`installer/build-installer.ps1:8`）。
 
 ```powershell
 Set-Location <仓库目录>
 .\installer\build-installer.ps1
 ```
 
-脚本会先运行 `package.bat`，再调用 Inno Setup 编译：
+脚本流程（`installer/build-installer.ps1`）：
 
-```text
-installer\hardware-workbench-app.iss
+1. 校验简体中文语言文件 `installer\ChineseSimplified.isl` 存在。
+2. 除非传入 `-SkipPackage`，先运行 `package.bat` 生成便携目录。
+3. 通过 `cargo metadata` 读取 `hardware-workbench-app` 的版本，以 `/DMyAppVersion=<version>`
+   传给 Inno Setup（`:33`、`:81`）。
+4. 编译 `installer\hardware-workbench-app.iss`，产物为 `dist\HardwareWorkbenchSetup.exe`（`:54`）。
+
+安装器要点（`installer/hardware-workbench-app.iss`）：
+
+| 项目 | 值 |
+|------|-----|
+| AppId | `{9C06F7D9-4E3B-45CF-8C3A-4373D6F83C79}`（`:8`） |
+| 默认安装目录 | `{localappdata}\Programs\HardwareWorkbench`（`:16`） |
+| 权限 | `PrivilegesRequired=lowest`，**按当前用户安装，不需要管理员**（`:25`） |
+| 架构 | `x64compatible`（`:26`） |
+| 安装界面语言 | 英文 + `ChineseSimplified.isl`（`:33`） |
+| 启动菜单快捷方式 | 始终创建（`:48`） |
+| 桌面快捷方式 | 可选任务 `desktopicon`，默认不勾选（`:38`） |
+| 安装内容 | `dist\hardware-workbench-app\` 全部文件复制进 `{app}`（`:44`） |
+| 安装后 | 可选启动应用（`:51`） |
+
+### 卸载清理范围
+
+`[UninstallDelete]`（`installer/hardware-workbench-app.iss:54` 起）把程序文件与用户数据一并清除：
+
+**安装目录（`{app}`）内：**
+
+- 程序文件（安装时记录）。
+- `logs\`、`plugins\`、`themes\`、`plugin-config\` 用户内容。
+- 旧版残留的 `workspace.json`、`workspace.json.backup`、`plugin-config\`。
+- 更新器残留：`*.exe.bak`（替换失败时只回滚不删）、`.hw_update_probe_*`（写权限探测文件）。
+- 末尾兜底删除整个 `{app}` 目录。
+
+**`%APPDATA%\HardwareWorkbench\` 内：**
+
+- `workspace.json`、`workspace.json.backup`、`*.tmp`。
+- 被隔离的损坏配置副本 `*.corrupt-*.backup`。
+- `plugin-config\`、`update\`、`updater\`。
+- 早期版本写在漫游目录下的遗留：`themes\`、`workspace-iced.json(+.backup)`。
+- 最后 `dirifempty` 移除目录本身。
+
+**另加：** `%APPDATA%\hardware-workbench\`——eframe 的窗口位置与 egui memory 持久化目录，目录名取自
+`crates/app/src/main.rs:119` 的 `with_app_id("hardware-workbench")`，与上面的 `HardwareWorkbench`
+是两个不同目录。
+
+末尾对整个 `{app}` 的兜底删除是必需的：Inno 只删它记录过的文件、且只在目录已空时才移除目录，而
+`copy_updated_resources` 会把更新包里的 `assets`/`docs`/`licenses`/`examples` 复制进来，这些新增
+文件不在安装日志里，不兜底就会残留。
+
+两个后果需要知道：
+
+- Windows 的用户数据目录就是安装目录，因此卸载会连带删除 `logs\` 中的
+  `session-*.jsonl` 录制文件与用户插件配置。
+- 该清单由 `crates/app/tests/installer_uninstall_scope.rs` 钉住：它从 `main.rs` 读出 `app_id`
+  再在 `.iss` 中查找对应条目，因此改了 `with_app_id` 而未同步清单会直接测试失败。
+
+## Ubuntu `.deb`
+
+目标为 x86_64（Debian 架构名 `amd64`，`installer/linux/build-deb.sh:8`，其它架构直接报错退出）。
+在 Ubuntu 或带 `dpkg-deb` 的 Debian 系统上执行：
+
+```bash
+bash ./installer/linux/build-deb.sh
 ```
 
-输出：
+产物 `dist/hardware-workbench_<version>_amd64.deb`（`build-deb.sh:46`）。安装需要一次性的系统
+权限：
 
-```text
-dist\HardwareWorkbenchSetup.exe
+```bash
+sudo apt install ./dist/hardware-workbench_<version>_amd64.deb
 ```
+
+安装后可从应用菜单启动，或执行 `hardware-workbench-app`；两者都以当前普通用户运行，**不要**
+用 `sudo hardware-workbench-app`。
+
+### 包内布局与依赖
+
+| 项 | 值 | 依据 |
+|----|-----|------|
+| 二进制 | `/usr/lib/hardware-workbench/hardware-workbench-app` | `build-deb.sh:51` |
+| 命令 | `/usr/bin/hardware-workbench-app`（指向上述二进制的符号链接） | `build-deb.sh:67` |
+| 字体资源 | `/usr/lib/hardware-workbench/assets/JetBrainsMonoNerdFontMono-Regular.ttf`、`NotoSansSC-VF.ttf` | `build-deb.sh:53` |
+| 图标 | `/usr/share/icons/hicolor/256x256/apps/hardware-workbench.png` | `build-deb.sh:57` |
+| 桌面项 | `/usr/share/applications/hardware-workbench.desktop` | `build-deb.sh:59` |
+| 文档/版权 | `/usr/share/doc/hardware-workbench/{copyright,README.md}` | `build-deb.sh:61` |
+| 运行时依赖 | `libgl1`、`libudev1`、`libx11-6`、`libxkbcommon0`、`libwayland-client0` | `installer/linux/control.in` |
+| 包名 / 段 | `hardware-workbench` / `electronics` | `control.in` |
+| 维护者 | `Tydwdh <tydwdh@users.noreply.github.com>` | `control.in` |
+
+桌面项声明 `Exec=hardware-workbench-app`、`Icon=hardware-workbench`、分类
+`Development;Electronics;`、`StartupWMClass=hardware-workbench`
+（`installer/linux/hardware-workbench.desktop`）。
+
+### 串口权限
+
+打开 `/dev/ttyUSB0`、`/dev/ttyACM0` 等设备提示 `Permission denied` 时，应用按 Ubuntu 标准做法
+提示把用户加入 `dialout` 组：
+
+```bash
+sudo usermod -aG dialout $USER
+```
+
+执行后注销并重新登录生效。`.deb` 不会放宽设备权限，也不会自动安装宽泛的 udev 规则。
+
+### 卸载行为
+
+`.deb` 不含 `prerm`/`postrm`/`conffiles`，因此 `dpkg -r` 与 `dpkg -P` 都**不会**删除用户数据：
+`~/.config/HardwareWorkbench`、`~/.local/share/HardwareWorkbench`，以及 eframe 的
+`~/.local/share/hardware-workbench` 都会保留。
 
 ## 版本号来源
 
-项目版本以根目录 `Cargo.toml` 的 `[workspace.package].version` 为准。安装器构建脚本会通过 `cargo metadata` 读取 `hardware-workbench-app` 的版本，并传给 Inno Setup。
+版本号唯一权威来源是根 `Cargo.toml` 的 `[workspace.package].version`（`Cargo.toml:19`）。
 
-发布新版本时只需要：
+- Windows 安装器：`build-installer.ps1` 用 `cargo metadata` 读取 `hardware-workbench-app` 版本，
+  作为 `/DMyAppVersion` 传给 Inno Setup（`installer/build-installer.ps1:33`、`:81`）；`.iss` 中该宏
+  缺失会直接编译报错（`installer/hardware-workbench-app.iss:3`）。
+- Ubuntu `.deb`：`build-deb.sh` 默认用 `cargo pkgid -p hardware-workbench-app` 解析版本，也接受
+  位置参数覆盖（`build-deb.sh:21`）；格式须匹配 `x.y.z` 语义版本（`build-deb.sh:27`）。
 
-1. 修改 `Cargo.toml` 中的版本号。
-2. 提交版本变更。
-3. 打同名 tag，例如版本 `0.1.1` 对应 `v0.1.1`。
+## 安装 / 配置 / 数据位置
 
-Windows PowerShell 5.1：
+| 用途 | Windows（便携 / 安装器） | Ubuntu `.deb` | 依据 |
+|------|--------------------------|----------------|------|
+| 程序与只读资源 | 便携：解压目录；安装器：`%LOCALAPPDATA%\Programs\HardwareWorkbench` | `/usr/lib/hardware-workbench/` | `hardware-workbench-app.iss:16` |
+| 主配置 | `%APPDATA%\HardwareWorkbench\workspace.json` | `~/.config/HardwareWorkbench/workspace.json` | `crates/app/src/config.rs:238` |
+| 插件配置 | `%APPDATA%\HardwareWorkbench\plugin-config\` | `~/.config/HardwareWorkbench/plugin-config/` | `crates/extension/src/manager.rs:71` |
+| 用户数据根 | 安装目录（Windows 取 exe 所在目录） | `~/.local/share/HardwareWorkbench/` | `crates/app/src/bootstrap.rs:38` |
+| 插件 | 用户数据根 `plugins\` | 用户数据根 `plugins/` | `bootstrap.rs:54` |
+| 主题 | 用户数据根 `themes\` | 用户数据根 `themes/` | `bootstrap.rs:58` |
+| 日志 / 录制 | 用户数据根 `logs\` | 用户数据根 `logs/` | `bootstrap.rs:64` |
+| 更新下载与清单 | `%APPDATA%\HardwareWorkbench\update\` | `~/.config/HardwareWorkbench/update/` | `crates/updater/src/lib.rs:415` |
+| 更新 helper 日志 | `%APPDATA%\HardwareWorkbench\updater\` | `~/.config/HardwareWorkbench/updater/` | `crates/updater/src/lib.rs:437` |
+| eframe 窗口/记忆 | `%APPDATA%\hardware-workbench\` | `~/.local/share/hardware-workbench/` | `crates/app/src/main.rs:119` |
 
-```powershell
-Set-Location <仓库目录>
-git tag -a v1.1.2 -m "v1.1.2"
-git push origin v1.1.2
-```
-
-## 安装位置
-
-安装器默认安装到当前用户目录：
-
-```text
-%LOCALAPPDATA%\Programs\HardwareWorkbench
-```
-
-这样不需要管理员权限，也允许应用在安装目录下创建 `logs\`。
-
-## 配置位置
-
-主程序配置：
-
-```text
-%APPDATA%\HardwareWorkbench\workspace.json
-%APPDATA%\HardwareWorkbench\workspace.json.backup
-```
-
-插件配置：
-
-```text
-%APPDATA%\HardwareWorkbench\plugin-config\
-```
-
-旧版或便携模式可能产生的配置：
-
-```text
-<安装目录>\workspace.json
-<安装目录>\plugin-config\
-```
-
-## 卸载清理范围
-
-安装器卸载时会删除：
-
-- 安装目录中的程序文件。
-- 安装目录中的 `logs\`。
-- 安装目录中的用户插件与自定义主题。
-- `%APPDATA%\HardwareWorkbench\workspace.json`。
-- `%APPDATA%\HardwareWorkbench\workspace.json.backup`。
-- `%APPDATA%\HardwareWorkbench\*.corrupt-*.backup`（解析失败被隔离的配置副本）。
-- `%APPDATA%\HardwareWorkbench\themes\` 与 `workspace-iced.json(+.backup)`：早期版本写在漫游目录下的遗留。
-  现在的 `user_themes_dir()` 在安装目录里，所以这三条纯粹是历史债 —— 但**少了它们，卸载后那里仍剩
-  12 个文件，目录非空，`dirifempty` 就不会生效**。这两处是读代码没读出来、实跑一轮才现形的。
-- `%APPDATA%\HardwareWorkbench\plugin-config\`。
-- `%APPDATA%\HardwareWorkbench\update\`（更新下载残留）。
-- `%APPDATA%\HardwareWorkbench\updater\`（更新 helper 日志）。
-- `%APPDATA%\hardware-workbench\`（eframe 的窗口位置与 egui memory 持久化，目录名取自
-  `main.rs` 的 `with_app_id`，**与上面的 `HardwareWorkbench` 是两个不同目录**）。
-- 安装目录中旧版残留的 `workspace.json` 和 `plugin-config\`。
-- 更新器写在安装目录内的残留：`*.exe.bak`（替换失败时只回滚不删）与
-  `.hw_update_probe_*`（进程被强杀时的写权限探测文件）。
-- 最后兜底删除整个安装目录：Inno 只删它自己记录过的文件、且只在目录已空时才移除它，
-  而 `copy_updated_resources` 会把更新包里的 `assets`/`docs`/`licenses`/`examples`
-  复制进来，这些新增文件不在安装日志里。
-
-这份清单由 `crates/app/tests/installer_uninstall_scope.rs` 钉住：它从 `main.rs` 读出
-`app_id` 再去 `.iss` 里找对应条目，所以改了 `with_app_id` 而忘了同步清单会直接变红；
-`dirifempty` 必须排在清理各条之后也有断言，因为目录非空时它就不生效。
-
-清单本身在真机上跑完整周期验过：静默安装 → 启动一次程序（让 eframe 的 `app.ron` 与
-`plugins`/`themes` 等目录真实产生）→ 伪造更新器残留（`.exe.bak`、`.hw_update_probe_*`、
-更新包新增的 assets/docs）→ 静默卸载。结果：安装目录、`%APPDATA%\HardwareWorkbench`、
-`%APPDATA%\hardware-workbench` 与 HKCU 卸载项全部消失。
-
-两处需要知道的后果：
-
-- Windows 的用户数据目录就是安装目录，因此卸载会连带删掉 `logs\` 里的
-  `session-*.jsonl` 录制文件。
-- Ubuntu 的 `.deb` 不含 `prerm`/`postrm`/`conffiles`，`dpkg -r` 与 `dpkg -P` 都**不会**
-  删除 `~/.config/HardwareWorkbench`、`~/.local/share/HardwareWorkbench` 与 eframe 的
-  `~/.local/share/hardware-workbench`（后者由 `~/.local/share` 下的 XDG 数据目录规则决定，
-  同 Windows 一样是"另一个小写目录"）。
-
-本节开头的清单即"卸载不残留配置"这一目标的实现：它确实不残留配置，但也意味着用户插件配置不会保留。
+Windows 上便携版与安装版的用户数据根都落在程序所在目录，因此便携包可整体搬移；Ubuntu 上程序
+安装在只读的 `/usr/lib/hardware-workbench`，插件、主题与录制文件统一写入用户数据目录，无需 root。

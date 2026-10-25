@@ -64,7 +64,7 @@ impl std::error::Error for SendPlanError {}
 /// 两平台的发送按钮都读 `crates/panels/src/sender.rs` 里 `render_actions` 调用的
 /// panels 自己那份 `hex_error`（`0x` 只剥**一层**，`tool_core` 是反复剥），于是
 /// `"0x0xAB"` 这类输入会被门禁判非法、被这里判合法（按钮灰着而 `dispatch` 其实
-/// 收）。实测记录与"为何不在本轮统一"见 `docs/ARCHITECTURE.md`「发送路径的残留
+/// 收）。实测记录与"为何不在本轮统一"见 `docs/known-gaps.md`「发送路径的残留
 /// 差异」；两侧的实际行为由 `crates/panels/src/sender.rs` 的
 /// `gate_and_decoder_disagree_on_repeated_0x_prefix` 钉住。
 pub fn decode_hex(hex: &str, strict: bool) -> Result<Vec<u8>, String> {
@@ -319,7 +319,7 @@ mod tests {
     /// 看到的同一行字：native 把它包进 `AppError::Transport`，后者的
     /// `#[error("传输错误：{0}")]` 会再加一层 `传输错误：` 分类前缀（第 24 轮之前那层是英文
     /// `transport: `；活的红字标签与状态栏渲染的就是带前缀的那句，见
-    /// `docs/ARCHITECTURE.md`「发送路径的残留差异 → 错误文案」），
+    /// `docs/known-gaps.md`「发送路径的残留差异 → 错误文案」），
     /// wasm 侧 `to_string()` 出来的才是不带前缀的本句。
     /// 本用例钉的是**不带前缀**的那句；带 `传输错误：` 的原文由
     /// `tests/headless.rs::send_routing_dispatches_by_port_kind_and_rejects_invalid_hex`

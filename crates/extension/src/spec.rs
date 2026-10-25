@@ -99,7 +99,7 @@ pub fn synchronize_repository(root: &Path) -> Result<(), String> {
     let schema_text = serde_json::to_string_pretty(&schema).map_err(|e| e.to_string())? + "\n";
     std::fs::write(schema_path, schema_text).map_err(|e| e.to_string())?;
     std::fs::write(
-        root.join("docs/plugin-spec.generated.md"),
+        root.join("docs/plugins/spec.generated.md"),
         generated_reference(),
     )
     .map_err(|e| e.to_string())?;
@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn generated_reference_is_checked_in() {
         assert_eq!(
-            include_str!("../../../docs/plugin-spec.generated.md"),
+            include_str!("../../../docs/plugins/spec.generated.md"),
             generated_reference()
         );
     }

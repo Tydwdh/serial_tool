@@ -8,7 +8,7 @@ use thiserror::Error;
 ///
 /// 这一层只有 native 看得到：`AppError` 被 `lib.rs` 的 `cfg(not(target_arch = "wasm32"))`
 /// 挡在 wasm 之外，web 侧 `to_string()` 出的是**不带前缀**的正文 —— 换语言并不关掉这个
-/// 两端差异，它仍按设计存在（见 `docs/ARCHITECTURE.md`「发送路径的残留差异 → 错误文案」）。
+/// 两端差异，它仍按设计存在（见 `docs/known-gaps.md`「发送路径的残留差异 → 错误文案」）。
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("传输错误：{0}")]

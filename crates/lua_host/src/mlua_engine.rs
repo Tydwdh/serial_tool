@@ -565,7 +565,7 @@ mod tests {
         engine.stop(instance).expect("plugin should stop");
     }
 
-    /// `load_plugin` 是 `pub use` 导出的（`lib.rs:46`），`docs/plugin-api-v2.md` 把 native
+    /// `load_plugin` 是 `pub use` 导出的（`lib.rs:46`），`docs/ARCHITECTURE.md` 的「插件体系」把 native
     /// `mlua` 运行时写成 `LuaEngine` 适配的一侧入口，但它此前只有一个断言"能加载能派发"的
     /// 用例：沙箱在这里没人看管，全靠 `lib.rs` 的字符串守卫 —— 而守卫当时恰好漏掉
     /// `Lua::default()` 这个同义写法（mlua 里 `Lua::default() == Lua::new()` ==

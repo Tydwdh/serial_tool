@@ -1631,6 +1631,25 @@
   机器紧张时露一次脸——上一次发布就出现过"同一批代码先红后绿"。现在碰主题状态的用例共用一把
   测试专用锁，锁的注释里写着这组数字与失效模式。
 
+### 文档
+
+- **文档集重启（第 61 轮）：docs/ 从零重写为 13 个文件——架构正文 + 已知差异登记册 +
+  插件四件套 + 在线/性能/发布/安装文档 + 发布说明模板；旧的 148KB 架构台账与 75KB 执行计划不再继承。**
+  （生产行为零变化；代码面唯一改动是生成物路径：`crates/extension/src/spec.rs` 两行。）
+  * 新结构：`docs/README.md`（索引）、`docs/ARCHITECTURE.md`、`docs/known-gaps.md`、
+    `docs/web.md`、`docs/performance.md`、`docs/RELEASE.md`、`docs/INSTALLER.md`、
+    `docs/plugins/{README,manifest,lua-api,scenarios}.md`、`docs/plugins/spec.generated.md`（生成物）、
+    `docs/releases/TEMPLATE.md`。
+  * 不重建：`architecture-refactor-baseline.md`、`superpowers/plans/*`、历史 `releases/v1.0.0–v1.3.0.md`
+    （历史由本 CHANGELOG 与 GitHub Releases 承担）；根 README 的旧发布说明链接改指 Releases 页。
+  * 引用对账：代码/测试/CI 里所有指向旧文档的注释（「发送路径的残留差异」「预检的规则来源」
+    「Linux clippy 缺口」「ExpectNoTx 半条契约」「Serial 臂权限修法」等）与根 README 链接逐一改指
+    `docs/known-gaps.md` / 新路径；`plugin-spec.generated.md` 迁至 `docs/plugins/`，生成器与
+    `include_str!` 用例随路径同步。
+  * 验证：`cargo test -p tool-extension` 42 通过（生成物用例转绿）、`cargo check --workspace --all-targets`
+    通过；README + docs 共 14 份 Markdown 的 63 条相对链接经脚本体检全部可解析；全仓旧路径清扫后
+    只剩指向新文档的有意引用。
+
 ## [1.3.0] - 2026-09-22
 
 ### 新增

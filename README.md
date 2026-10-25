@@ -120,23 +120,22 @@ crates/
   recorder/      JSONL 录制与回放
   testing/       测试辅助
   updater/       自动更新
-docs/            插件和发布文档
+docs/            文档（架构/插件开发/发布/在线模式）
 plugins/         开发期插件模板与本地脚本
 plugin-marketplace/ 插件市场索引、发布脚本与版本化安装包
 installer/       Windows 安装器配置
 ```
 
-架构详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 与 [docs/architecture-refactor-baseline.md](docs/architecture-refactor-baseline.md)。
+架构与已知缺口见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 与 [docs/known-gaps.md](docs/known-gaps.md)。
 
 ## 插件开发
 
-参见 [docs/README.md](docs/README.md)。
+参见 [docs/plugins/README.md](docs/plugins/README.md)。
 
 ## 发布与变更
 
 - [变更记录](CHANGELOG.md)
-- [v1.2.0 发布说明](docs/releases/v1.2.0.md)
-- [v1.1.2 发布说明](docs/releases/v1.1.2.md)
+- [历史发布说明](https://github.com/Tydwdh/serial_tool/releases)
 - [发布流程](docs/RELEASE.md)
 - [安装器说明](docs/INSTALLER.md)
 

@@ -386,7 +386,7 @@ end)
                 //     观测到 4 / 5 / 6 条 PING，空载恰好 4 条 = 第一次 3 条 + 第二次 1 条），
                 //     窗口里静悄悄并不等于「循环被取消了」。
                 // 抬高窗口买不到证明力 —— 要越过派发延迟（≈3.3s）才有声音，代价是每次通过都白等
-                // 3.3s。所以维持 80ms，缺的那半条契约与关闭它的代价如实记在 docs/ARCHITECTURE.md。
+                // 3.3s。所以维持 80ms，缺的那半条契约与关闭它的代价如实记在 docs/known-gaps.md 的「场景测试缺的半条契约（ExpectNoTx 窗口）」。
                 SerialScenarioStep::ExpectNoTx {
                     timeout_ms: Some(80),
                 },

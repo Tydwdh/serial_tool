@@ -1459,7 +1459,7 @@ pub fn translate_error(err: &TransportError) -> String {
 /// 只剩 `Serial` 臂还用它 —— `sp::Error::kind` 在 POSIX 后端能给出
 /// `ErrorKind::Io(PermissionDenied)`，但 Windows 后端把 `ERROR_ACCESS_DENIED`
 /// 折进 `ErrorKind::NoDevice`（与「设备不存在」共用），kind 在那半边不可判定；
-/// 逐平台修法见 `docs/ARCHITECTURE.md` 第 ④ 条末尾。
+/// 逐平台修法见 `docs/known-gaps.md`「串口权限错误的逐平台修法（Serial 臂）」。
 fn is_permission_denied(message: &str) -> bool {
     message.contains("access is denied")
         || message.contains("access denied")

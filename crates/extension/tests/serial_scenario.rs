@@ -2,7 +2,7 @@
 //!
 //! 这条场景此前只能手工跑（`cargo run -p tool-extension --example plugin_scenario`），
 //! 模板插件或其回放解析器坏了没人会知道。运行器本身不碰硬件：内存串口 + 真实
-//! PluginManager / Lua 运行时 / DataBus，用法与 `docs/serial-plugin-scenarios.md` 一致。
+//! PluginManager / Lua 运行时 / DataBus，用法与 `docs/plugins/scenarios.md` 一致。
 
 use std::path::Path;
 

@@ -722,8 +722,8 @@ mod tests {
     // `hex_error` 是**两平台发送按钮实际读到的那道门**：`render_actions` 里
     // `can_send = view.target_open && !input.is_empty() && hex_error.is_none()`，
     // native 经 `bottom_panel.rs` 的 `tool_panels::sender_ui` 走到它，web 经
-    // `crates/app/src/web.rs` 的同一个组件走到它（见 docs/ARCHITECTURE.md 的
-    // 「预检的规则来源」行）。本文件此前一条 `#[test]` 都没有：把严格档的
+    // `crates/app/src/web.rs` 的同一个组件走到它（见 docs/known-gaps.md 的
+    // 「预检的规则来源」条目）。本文件此前一条 `#[test]` 都没有：把严格档的
     // `normalized.len() != 2` 放松成 `> 2`，全工作区 585 条用例仍然全绿 ——
     // 也就是按钮可以在输入根本发不出去的情况下亮着，而 CI 看不见。
     //
@@ -830,7 +830,7 @@ mod tests {
     /// `hex_error` 只剥**一层** `0x`，`tool_core::normalize_hex_token` 用
     /// `trim_start_matches` 反复剥，于是 `"0x0xAB"` 在发送侧解得出 `AB`、
     /// 在门禁侧两档都被拒 —— 结果是**按钮灰着而 `dispatch` 其实接受这串**
-    /// （`docs/ARCHITECTURE.md`「预检的规则来源」行记的就是它，且把它判为
+    /// （`docs/known-gaps.md`「预检的规则来源」条目记的就是它，且把它判为
     /// 后续项而非本轮改动：改判定会移动用户可见的按钮状态）。
     ///
     /// 把它钉在两边各自的实际行为上，是为了让"某天有人统一了它"以红测试的

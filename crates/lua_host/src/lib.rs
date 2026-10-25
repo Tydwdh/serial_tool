@@ -1526,7 +1526,7 @@ assert(task.finished == false)
     // ── expect / expect_from 的三种模式形态 ────────────────────────────────
     //
     // `write_line_and_expect` 的 patterns 早就能用 `re:` 与 `^`（见
-    // `docs/lua-plugin-api.md`「patterns 匹配规则」），但 `expect`/`expect_from`
+    // `docs/plugins/lua-api.md`「响应模式匹配规则」），但 `expect`/`expect_from`
     // 的匹配点当时是裸 `contains`，同一个 `"re:^ok"` 在这里被当成字面量子串。
     // 下面每个用例只钉一种形态 × 一条路径：阻塞路径与 task yield 路径是**不同的
     // 匹配点**，少任一处都不会被另一处发现。

@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 /// `web` 模块会读（`mod web` 是 `cfg(target_arch = "wasm32")`），所以 native 构建里它们必然报死；
 /// 剩下 1 条是 `crates/app/src/state.rs` 里普通的 `#[allow(dead_code)]`，护着一个刻意暂停、
 /// 尚无调用者的方法（该模块本身是 `cfg(not(target_arch = "wasm32"))`）。前者对应
-/// `docs/ARCHITECTURE.md` 里 Linux / wasm 死代码那张表。
+/// `docs/known-gaps.md` 的「Linux / wasm 死代码与豁免」条目。
 /// `cfg_attr` 形式也算豁免 —— 它同样只是让告警静默，所以一起钉住。
 ///
 /// **判"某条豁免是不是空转"的正确做法**（第 9 轮与第 17 轮都用它，第 17 轮据此删掉 6 条；
