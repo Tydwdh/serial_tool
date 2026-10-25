@@ -1001,10 +1001,12 @@ fn file_export_failures_reach_the_user_in_chinese() {
 
 /// 回放文件**打不开**（区别于「不存在」）时，用户读到的那半句必须是中文框架。
 ///
-/// 为什么用目录而不是不存在的路径：`prepare_load` 第一步就 `metadata`，路径不存在时
-/// 那里先红（那句中文是第 24 轮之前就有的 `获取文件大小 <路径> 失败：<OS 细节>`），
-/// 永远走不到 `File::open`。目录能 stat 到、却当不成文件（本机是「拒绝访问」，Linux 是
-/// 「是目录」），所以它才是「打开」这条出口的输入。
+/// 为什么用一个"能 stat、打不开"的路径而不是不存在的路径：`prepare_load` 第一步就
+/// `metadata`，路径不存在时那里先红（那句中文是第 24 轮之前就有的
+/// `获取文件大小 <路径> 失败：<OS 细节>`），永远走不到 `File::open`。
+/// 这种路径由 `tool_testing::UnopenablePath` 造（Windows 用目录；Unix 用 Unix 域套接字，
+/// 因为**目录在 Linux 上是可以读打开的**，第 43 轮那版"目录就是打不开"的夹具在 Linux 上
+/// 直接死在测试前提上）。
 ///
 /// 第 43 轮起框架里点名**是哪个路径**（用户在回放面板手输的就是它），所以本用例钉
 /// 「框架在最前 + 整句正好等于框架与 OS 细节的拼接」—— 后者同时钉住了路径、原样带出的
@@ -1016,18 +1018,15 @@ fn replay_file_that_cannot_be_opened_reaches_the_user_in_chinese() {
     let bus = DataBus::new();
     let mut wb = Workbench::new(bus);
 
-    let dir = std::env::temp_dir().join(format!(
-        "serial-tool-headless-replay-dir-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("创建回放临时目录");
-    let raw = std::fs::File::open(&dir)
-        .expect_err("测试前提：这个目录必须打不开，否则本用例没有在测「打开失败」");
+    let unopenable = tool_testing::UnopenablePath::new();
+    let target = unopenable.path();
+    let raw = std::fs::File::open(target)
+        .expect_err("测试前提：这个路径必须打不开，否则本用例没有在测「打开失败」");
 
     let task = expect_pending(
         &mut wb,
         AppCommand::LoadReplay {
-            file: FileHandle::from_native_path(&dir),
+            file: FileHandle::from_native_path(target),
         },
     );
     assert_eq!(task_kind(&wb, task).as_deref(), Some("load_replay"));
@@ -1052,11 +1051,9 @@ fn replay_file_that_cannot_be_opened_reaches_the_user_in_chinese() {
     );
     assert_eq!(
         words,
-        format!("打开回放文件 {} 失败：{raw}", dir.display()),
+        format!("打开回放文件 {} 失败：{raw}", target.display()),
         "框架之外还多了别的话（双重框架），或者路径/OS 细节被改写了"
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 重启交接的判定必须来自权威状态（PluginManager 的 stopping 表），不是错误文案。
@@ -1869,25 +1866,20 @@ fn sending_to_a_port_that_was_never_opened_reads_in_chinese_on_both_entry_points
     );
 }
 
-// ── 重连循环的失败判定（`Workbench::start_reconnect`）────────────────────────
+// ── 手动重连的一次性尝试（`Workbench::start_reconnect`）─────────────────────
 //
-// 循环有两条失败出口：「端口还在关闭中（`Io(WouldBlock)`）→ 每 10ms 再试一次，最多 3 秒」
-// 与「硬失败 → 立刻放弃」。判定读的是类型化错误里的 `kind`（`reconnect_is_worth_retrying`
-// 的文档记着旧版那句英文子串匹配为什么从来没生效），翻译只发生在交给用户的那一句上。
+// 这里原先守着一段「3 秒预算 + 10ms 轮询」的循环，判据是 `Io(WouldBlock)`（"端口还在关闭中"）。
+// 那条判据**没有任何生产者**（串口的 kind 在 `platform/src/native.rs::operation_error` 就被
+// 折成字符串；`open_network_serial` 连接失败时也照旧返回 `Ok`），循环因此恒等于"一次 open"，
+// 只是把失败结果压在手里最多 3 秒。判定与循环一起删掉了 —— 要重试的是**自动重连**那套
+// （`crates/app/src/reconnect.rs`：退避 + 上限 + 可取消）；手动重连失败立刻把中文原因交给用户。
 //
-// **「WouldBlock 会重试」这一支从 `Workbench` 的公开面上驱动不出来**，不是漏了：
-// 全工作区唯一造出 `Io(WouldBlock)` 的是 `TransportManager::open_serial`（串口路径），
-// 而串口重连的错误在到得了本文件之前就被 `crates/platform/src/native.rs::operation_error`
-// 折成 `TransportError::Operation(中文)`，`kind` 已丢；网络路径的 `open_network_serial`
-// 根本没有这条错误（它的连接失败发生在 worker 线程里，以日志事件发布，`open` 自身仍返回
-// Ok）。所以 `kind → 重试` 的对应关系由 `crates/application/src/workbench.rs` 里的
-// `reconnect_only_retries_a_port_that_is_still_closing` 钉住；下面三条钉的是公开面上
-// 真走得通的另外几支。
+// 下面三条钉的是这次尝试的公开面：立刻放弃、文案中文化、网络端口走网络分支。
 
-/// 打不开的口必须**立刻**放弃：3 秒预算是留给「还在关闭中」的，不是留给硬失败的。
+/// 打不开的口必须**立刻**放弃：这一次尝试就是全部，没有第二轮。
 ///
-/// 把串口分支的 `return Err(...)` 改成继续重试，这条用例会在 2.5s 时看到任务仍然
-/// Running 而变红（真失败要等满 3 秒），用户侧的症状就是「重连一个不存在的口也要转 3 秒」。
+/// 把串口分支的 `return Err(...)` 改成重试（或给回那段 3 秒预算），这条用例会在 2.5s 时
+/// 看到任务仍然 Running 而变红 —— 用户侧的症状就是「重连一个不存在的口也要转 3 秒」。
 #[test]
 fn reconnect_gives_up_at_once_on_a_port_that_cannot_be_opened() {
     const PORT: &str = "COM_HEADLESS_RECONNECT_HARD_FAIL";
@@ -1903,7 +1895,7 @@ fn reconnect_gives_up_at_once_on_a_port_that_cannot_be_opened() {
     assert_eq!(
         task_kind(&wb, task).as_deref(),
         Some("reconnect"),
-        "Reconnect 必须落到重连任务本身，否则下面测的不是那条循环"
+        "Reconnect 必须落到重连任务本身，否则下面测的不是这次尝试"
     );
 
     let gave_up = tick_until(&mut wb, Duration::from_millis(2_500), |wb| {
@@ -1914,7 +1906,7 @@ fn reconnect_gives_up_at_once_on_a_port_that_cannot_be_opened() {
     });
     assert!(
         gave_up,
-        "硬失败必须在 3 秒重试预算之内结束，实际: {:?}",
+        "硬失败必须在预算之内结束（不留任何重试等待），实际: {:?}",
         task_state(&wb, task)
     );
     assert_eq!(
@@ -1925,7 +1917,7 @@ fn reconnect_gives_up_at_once_on_a_port_that_cannot_be_opened() {
     assert_ne!(
         task_message(&wb, task).as_deref(),
         Some("重连超时（3 秒）"),
-        "放弃的理由必须是端口给的那句错，而不是被重试预算兜掉的超时"
+        "放弃的理由必须是端口给的那句错（那条「重连超时（3 秒）」已经不存在，这里防的是它回来）"
     );
 }
 
@@ -1976,12 +1968,12 @@ fn reconnect_failure_words_are_translated_before_they_reach_the_user() {
     );
 }
 
-/// 已注册网络端口的重连必须走循环的网络分支：`open_network_serial` + `Reconnected`。
+/// 已注册网络端口的重连必须走网络分支：`open_network_serial` + `Reconnected`。
 ///
-/// 网络分支与串口分支在循环里各拿各的错误类型、各造各的结果，写回落到串口分支的话，
-/// `open_serial` 会拿着 `127.0.0.1:9` 这种名字去枚举物理口，用户看到的是一句硬失败。
+/// 两条分支各拿各的错误类型、各造各的结果，写回落到串口分支的话，`open_serial` 会拿着
+/// `127.0.0.1:9` 这种名字去枚举物理口，用户看到的是一句硬失败。
 #[test]
-fn network_reconnect_takes_the_network_branch_of_the_loop() {
+fn network_reconnect_takes_the_network_branch() {
     let bus = DataBus::new();
     let mut wb = Workbench::new(bus);
     let config = NetworkSerialConfig {

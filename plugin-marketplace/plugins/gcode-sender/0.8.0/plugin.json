@@ -1,0 +1,178 @@
+{
+  "$schema": "../plugin.schema.json",
+  "id": "gcode-sender",
+  "name": "G-code Sender",
+  "version": "0.8.0",
+  "api_version": "0.1",
+  "runtime": "lua",
+  "main": "main.lua",
+  "description": "面向 Marlin 固件的 G-code 发送器：支持文件/单条发送、行号校验、暂停/恢复/取消、进度显示",
+  "author": "Tydwdh",
+  "homepage": "https://github.com/Tydwdh/serial_tool",
+  "repository": "https://github.com/Tydwdh/serial_tool",
+  "license": "MIT",
+  "category": "gcode",
+  "permissions": [
+    "bus",
+    "log",
+    "serial",
+    "ui",
+    "dialog",
+    "fs.read.user_selected",
+    "task",
+    "config"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "id": "gcode-sender.send_file",
+        "title": "G文件"
+      },
+      {
+        "id": "gcode-sender.send_single",
+        "title": "G单条"
+      },
+      {
+        "id": "gcode-sender.pause",
+        "title": "暂停/恢复"
+      },
+      {
+        "id": "gcode-sender.cancel",
+        "title": "取消"
+      }
+    ],
+    "settings": [
+      {
+        "id": "default_setup_gcode",
+        "title": "初始化 G-code",
+        "kind": "text",
+        "default": "",
+        "description": "文件和单条发送前执行的可选 G-code；默认留空，避免意外修改设备参数"
+      },
+      {
+        "id": "append_program_end",
+        "title": "自动追加 M2",
+        "kind": "boolean",
+        "default": true,
+        "description": "输入末尾没有 M2/M30 时自动追加 M2；默认开启"
+      },
+      {
+        "id": "omit_line_numbers",
+        "title": "不添加行号校验",
+        "kind": "boolean",
+        "default": false,
+        "description": "发送原始 G-code 行（不加 N 行号与 * 校验和），依赖固件无校验模式；注意此时无法检测丢行，设备也不会请求重传"
+      },
+      {
+        "id": "skip_line_number_sync",
+        "title": "跳过 M110 行号同步",
+        "kind": "boolean",
+        "default": false,
+        "description": "不发送 N0 M110 N0，但后续 G-code 仍按当前模式发送行号和校验和；设备请求 Resend:0 时会停止"
+      },
+      {
+        "id": "ack_timeout_ms",
+        "title": "ACK 超时 (ms)",
+        "kind": "number",
+        "default": 300000,
+        "step": 1000,
+        "description": "等待设备响应的空闲超时；收到 busy、keepalive 或运行中匹配后会重新计时，超时即停止，不自动重发"
+      },
+      {
+        "id": "start_timeout_ms",
+        "title": "启动同步超时 (ms)",
+        "kind": "number",
+        "default": 3000,
+        "step": 500,
+        "description": "M110 行号同步的单次超时，超时即停止"
+      },
+      {
+        "id": "error_followup_ms",
+        "title": "错误后续读取 (ms)",
+        "kind": "number",
+        "default": 2000,
+        "step": 100,
+        "description": "收到 Error 后继续读取响应的时间"
+      },
+      {
+        "id": "custom_success_patterns",
+        "title": "自定义成功匹配（正则）",
+        "kind": "textarea",
+        "default": "ok",
+        "description": "每行一个正则（Rust regex 语法），命中即视为命令执行成功，即使设备不回 ok。示例：^done$、completed。空行与 # 开头的行忽略"
+      },
+      {
+        "id": "custom_error_patterns",
+        "title": "自定义错误匹配（正则）",
+        "kind": "textarea",
+        "default": "FAILED",
+        "description": "每行一个正则（Rust regex 语法），命中即视为设备错误并停止发送。示例：thermal runaway、(?i)^!!。空行与 # 开头的行忽略"
+      },
+      {
+        "id": "custom_running_patterns",
+        "title": "运行中匹配（正则）",
+        "kind": "textarea",
+        "default": "echo:busy: processing",
+        "description": "每行一个正则（Rust regex 语法），命中表示设备仍在执行当前命令，会刷新 ACK 超时并继续等待；不会视为成功。空行与 # 开头的行忽略"
+      },
+      {
+        "id": "pause_gcode",
+        "title": "暂停指令",
+        "kind": "textarea",
+        "default": "N1 !M410 S0*69",
+        "description": "点击暂停时直接写入串口的内容；不解析、不加行号/校验和、不等待响应。恢复时不发送内容"
+      },
+      {
+        "id": "cancel_gcode",
+        "title": "取消指令",
+        "kind": "textarea",
+        "default": "N1 !M410 S0*69",
+        "description": "点击取消时直接写入串口的内容；不解析、不加行号/校验和、不等待响应"
+      }
+    ],
+    "ui": [
+      {
+        "id": "gcode-sender.progress",
+        "slot": "status_bar.left",
+        "kind": "progress",
+        "title": "",
+        "tooltip": "设备已确认接收的 G-code 行数",
+        "order": 10
+      },
+      {
+        "id": "gcode-sender.send_file.button",
+        "slot": "send.toolbar",
+        "kind": "button",
+        "command": "gcode-sender.send_file",
+        "tooltip": "选择并发送 Marlin G-code 文件；发送区中的单行文件路径也可直接使用",
+        "record_send_input": true,
+        "order": 20
+      },
+      {
+        "id": "gcode-sender.send_single.button",
+        "slot": "send.toolbar",
+        "kind": "button",
+        "command": "gcode-sender.send_single",
+        "tooltip": "发送初始化 G-code 和当前输入，并添加行号与校验；是否补 M2 由设置决定",
+        "record_send_input": true,
+        "order": 21
+      },
+      {
+        "id": "gcode-sender.pause.button",
+        "slot": "send.toolbar",
+        "kind": "button",
+        "command": "gcode-sender.pause",
+        "tooltip": "暂停或恢复发送；暂停时可按设置直接发送暂停指令",
+        "order": 23
+      },
+      {
+        "id": "gcode-sender.cancel.button",
+        "slot": "send.toolbar",
+        "kind": "button",
+        "command": "gcode-sender.cancel",
+        "tooltip": "取消发送；可按设置直接发送取消指令",
+        "order": 24
+      }
+    ]
+  }
+}

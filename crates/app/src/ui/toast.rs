@@ -30,7 +30,11 @@ struct Toast {
     level: StatusLevel,
     text: String,
     /// 使用绝对截止时间，窗口最小化、挂起或掉帧时倒计时仍按真实时间推进。
+    ///
+    /// 这是**卡片自己的**截止时间（`toast_lifetime_ms`），不是通知队列里那条
+    /// `Notification::deadline_ms` —— 状态栏那行字留得比卡片久。
     deadline_ms: Option<u64>,
+    /// 读条的分母，与 `deadline_ms` 是同一个窗口（悬停暂停只延长 `deadline_ms`）。
     lifetime_ms: Option<u64>,
     last_update_ms: u64,
     visibility: f32,
@@ -102,9 +106,9 @@ impl ToastOverlay {
                 continue;
             }
             self.last_notification_id = notification.id;
-            let deadline_ms = notification.deadline_ms;
-            let lifetime_ms = notification.level.ttl_ms();
             let now_ms = tool_core::now_timestamp_ms();
+            let lifetime_ms = toast_lifetime_ms(notification.level);
+            let deadline_ms = lifetime_ms.map(|ttl| now_ms.saturating_add(ttl));
 
             // 同样的通知重复到达时，只刷新原卡片及倒计时，避免连续错误堆叠。
             if let Some(toast) =
@@ -135,6 +139,18 @@ impl ToastOverlay {
             self.toasts.pop_front();
         }
     }
+}
+
+/// 卡片展示时长 = 该级别通知 TTL 的 `TOAST_LIFETIME_DIVISOR` 分之一，读条（那条 2px 的进度条）
+/// 按它走完。
+///
+/// 为什么不与状态栏共用同一个时长：状态栏那行字按 `StatusLevel::ttl_ms()` 留 1.5s / 2s / 4s，
+/// 而卡片浮在面板上方、会挡住内容 —— 同一条消息不需要在屏幕上停那么久。要留住它，把指针停在
+/// 卡片上即可暂停倒计时，也可以直接点右上角的关闭。
+const TOAST_LIFETIME_DIVISOR: u64 = 2;
+
+fn toast_lifetime_ms(level: StatusLevel) -> Option<u64> {
+    level.ttl_ms().map(|ttl| ttl / TOAST_LIFETIME_DIVISOR)
 }
 
 fn render_toast(ui: &mut egui::Ui, toast: &mut Toast, now_ms: u64) {
@@ -214,6 +230,34 @@ mod tests {
 
         assert_eq!(overlay.toasts.len(), 1);
         assert_eq!(overlay.toasts.back().unwrap().text, "access denied");
+    }
+
+    #[test]
+    fn toast_lifetime_is_half_of_the_status_message_lifetime() {
+        for (level, status_ttl) in [
+            (StatusLevel::Info, 1_500),
+            (StatusLevel::Warn, 2_000),
+            (StatusLevel::Error, 4_000),
+        ] {
+            let mut queue = NotificationQueue::new();
+            let mut overlay = ToastOverlay::default();
+            queue.push("test", level, "一条消息");
+            overlay.collect_new_notifications(&mut queue);
+
+            let toast = overlay.toasts.front().expect("一条通知应产生一张卡片");
+            assert_eq!(
+                toast.lifetime_ms,
+                Some(status_ttl / 2),
+                "卡片的读条窗口应是状态栏 TTL 的一半（{level:?}）"
+            );
+            assert_eq!(
+                toast
+                    .deadline_ms
+                    .map(|deadline| deadline - toast.last_update_ms),
+                Some(status_ttl / 2),
+                "卡片一出现就应带着完整的半个窗口，而不是接状态栏那条的截止时间"
+            );
+        }
     }
 
     #[test]

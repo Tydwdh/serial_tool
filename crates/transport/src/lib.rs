@@ -322,10 +322,68 @@ struct PortHandle {
     join: Option<JoinHandle<()>>,
 }
 
+/// 端口关闭的**原因**：这条 `transport.serial.closed` 是用户自己关的，还是设备被拔/链路
+/// 失效带走的。
+///
+/// 为什么要分成两种：UI 只该为后者报警并触发自动重连。从前这条事件没有 `reason` 字段
+/// （payload 只有 `port`/`baud_rate`），`reap_dead_ports` 又只发一条纯文本日志，于是
+/// "设备消失"在事件层根本区分不出来 —— 全仓也没有任何订阅者。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseReason {
+    /// 用户点了关闭 / 程序退出。
+    UserClose,
+    /// 设备或链路失效（读失败、句柄失效、worker 意外退出）。
+    DeviceLost,
+}
+
+impl CloseReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UserClose => "user_close",
+            Self::DeviceLost => "device_lost",
+        }
+    }
+}
+
+/// `transport.serial.closed` 的结构化负载。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SerialClosed {
+    pub port: String,
+    pub baud_rate: u32,
+    pub reason: CloseReason,
+}
+
+/// 解析 `transport.serial.closed`；不是这条事件或负载不成形时给 `None`。
+/// 形状只在这里定义一次，消费方（UI 事件订阅）不自己读 JSON 字段名。
+pub fn serial_closed_from_event(event: &Event) -> Option<SerialClosed> {
+    if event.topic != tool_core::topics::SERIAL_CLOSED {
+        return None;
+    }
+    let Payload::Json(value) = &event.payload else {
+        return None;
+    };
+    let port = value.get("port")?.as_str()?.to_owned();
+    let baud_rate = value.get("baud_rate").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let reason = match value.get("reason").and_then(|v| v.as_str()) {
+        // 缺字段（老生产者）按用户关闭处理：不报警、不自动重连是更保守的一侧。
+        Some("device_lost") => CloseReason::DeviceLost,
+        _ => CloseReason::UserClose,
+    };
+    Some(SerialClosed {
+        port,
+        baud_rate,
+        reason,
+    })
+}
+
 struct ClosingHandle {
     port_name: String,
     baud_rate: u32,
     join: JoinHandle<()>,
+    /// `Some` 表示这条句柄的 `closed` 事件还没发（由 `reap_closing` 发）；
+    /// `None` 表示调用方已经自己发过了（`reap_dead_ports` 那条设备失效路径）。
+    notify: Option<CloseReason>,
 }
 
 impl PortHandle {
@@ -486,7 +544,9 @@ impl TransportManager {
             if closing[i].join.is_finished() {
                 let h = closing.swap_remove(i);
                 let _ = h.join.join();
-                self.publish_closed(&h.port_name, h.baud_rate);
+                if let Some(reason) = h.notify {
+                    self.publish_closed(&h.port_name, h.baud_rate, reason);
+                }
                 // swap_remove 把最后一个元素移到了 i，不递增 i
             } else {
                 i += 1;
@@ -494,12 +554,19 @@ impl TransportManager {
         }
     }
 
-    fn publish_closed(&self, port_name: &str, baud_rate: u32) {
-        self.bus.publish(Event::system_log(
-            LogLevel::Info,
-            "transport.serial",
-            format!("已关闭 {} @ {}", port_name, baud_rate),
-        ));
+    fn publish_closed(&self, port_name: &str, baud_rate: u32, reason: CloseReason) {
+        let (level, text) = match reason {
+            CloseReason::UserClose => (
+                LogLevel::Info,
+                format!("已关闭 {} @ {}", port_name, baud_rate),
+            ),
+            CloseReason::DeviceLost => (
+                LogLevel::Error,
+                format!("{port_name} @ {baud_rate} 已断开：设备或链路失效"),
+            ),
+        };
+        self.bus
+            .publish(Event::system_log(level, "transport.serial", text));
         self.bus.publish(Event::new(
             tool_core::topics::SERIAL_CLOSED,
             format!("serial:{port_name}"),
@@ -507,6 +574,7 @@ impl TransportManager {
             Payload::Json(serde_json::json!({
                 "port": port_name,
                 "baud_rate": baud_rate,
+                "reason": reason.as_str(),
             })),
         ));
     }
@@ -837,7 +905,9 @@ impl TransportManager {
         };
         for h in handles {
             let _ = h.join.join();
-            self.publish_closed(&h.port_name, h.baud_rate);
+            if let Some(reason) = h.notify {
+                self.publish_closed(&h.port_name, h.baud_rate, reason);
+            }
         }
     }
 
@@ -862,6 +932,7 @@ impl TransportManager {
                 port_name,
                 baud_rate,
                 join,
+                notify: Some(CloseReason::UserClose),
             });
         }
     }
@@ -894,6 +965,8 @@ impl TransportManager {
                     port_name: old_name,
                     baud_rate: old_baud,
                     join,
+                    // 事件由 `reap_closing` 在 worker 真正退出后发；原因此刻已知。
+                    notify: Some(CloseReason::UserClose),
                 });
                 return Err(TransportError::Io(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
@@ -903,7 +976,7 @@ impl TransportManager {
             std::thread::sleep(Duration::from_millis(10));
         }
         let _ = join.join();
-        self.publish_closed(&old_name, old_baud);
+        self.publish_closed(&old_name, old_baud, CloseReason::UserClose);
         Ok(())
     }
 
@@ -952,8 +1025,10 @@ impl TransportManager {
             // 下面那次为 `wake` 的第二次 `ports.lock()`，以及判死不再依赖单个信号 ——
             // `join` 已被 `take()` 走的句柄由 `alive` 兜住，忘了置位的线程由
             // `is_finished()` 兜住。
-            // 仍然漏掉的是**卡住却没退出**的 worker（`alive` 为 true、`is_finished()` 为
-            // false，`bounded(1024)` 照旧无声填满）：那需要心跳/超时，不在本改动范围内。
+            // "卡住却没退出"的 worker（`alive` 为 true、`is_finished()` 为 false）不再靠这里
+            // 兜住：Windows worker 现在每秒做一次存活探测（`IDLE_PROBE_MS` /
+            // `NativeSerialPort::probe_alive`），设备消失后它会自己退出并发布
+            // `transport.serial.closed`（reason = device_lost），本判定照旧只看两个信号。
             if port_is_dead(worker) {
                 return Err(TransportError::WorkerClosed);
             }
@@ -1115,16 +1190,15 @@ impl TransportManager {
                 .collect()
         };
         for (name, baud, join) in dead {
-            self.bus.publish(Event::system_log(
-                LogLevel::Error,
-                "transport.serial",
-                format!("串口 {name} @ {baud} 已断开连接"),
-            ));
+            // 这里是**唯一**能区分「用户关闭」与「设备失效」的地方：用户关闭的句柄早已被
+            // 移出 `ports` 表（`close_port*`），所以还留在表里却已死亡的句柄必然是意外。
+            self.publish_closed(&name, baud, CloseReason::DeviceLost);
             if let Some(join) = join {
                 self.closing.lock().push(ClosingHandle {
                     port_name: name,
                     baud_rate: baud,
                     join,
+                    notify: None,
                 });
             }
         }
@@ -2484,5 +2558,94 @@ mod transport_tests {
         let status = tm.status_port("COM3");
         assert!(status.open);
         assert_eq!(status.port_name.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn reaping_a_dead_handle_reports_a_device_loss_with_reason() {
+        let bus = DataBus::new();
+        let closed = bus.subscribe(TopicFilter::exact(tool_core::topics::SERIAL_CLOSED));
+        let logs = bus.subscribe(TopicFilter::prefix("log."));
+        let tm = TransportManager::new(bus.clone());
+        let mut dead = make_test_handle(false);
+        dead.config.port_name = "COM3".to_owned();
+        tm.ports.lock().insert("COM3".to_owned(), dead);
+
+        tm.reap_dead_ports();
+
+        let events: Vec<SerialClosed> = closed
+            .drain()
+            .iter()
+            .filter_map(serial_closed_from_event)
+            .collect();
+        assert_eq!(events.len(), 1, "一次意外死亡只该发一条 closed 事件");
+        assert_eq!(events[0].port, "COM3");
+        assert_eq!(
+            events[0].reason,
+            CloseReason::DeviceLost,
+            "留在 ports 表里的死句柄必然是设备/链路失效，不是用户关闭"
+        );
+        let text = logs
+            .drain()
+            .iter()
+            .filter_map(|event| match &event.payload {
+                Payload::Text(message) => Some(message.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("COM3") && text.contains("已断开"),
+            "用户要在日志里看到是哪条链路断了，实际 {text:?}"
+        );
+    }
+
+    #[test]
+    fn user_close_and_device_loss_are_told_apart_in_the_event() {
+        let bus = DataBus::new();
+        let closed = bus.subscribe(TopicFilter::exact(tool_core::topics::SERIAL_CLOSED));
+        let tm = TransportManager::new(bus.clone());
+
+        // 用户关闭：worker 已被要求退出，句柄不在 ports 表里（close_port 移走了它）。
+        let mut handle = make_test_handle(true);
+        handle.config.port_name = "COM4".to_owned();
+        handle.join = Some(std::thread::spawn(|| {}));
+        tm.ports.lock().insert("COM4".to_owned(), handle);
+        tm.close_port("COM4");
+
+        // reap_closing 有 100ms 节流：轮询到事件出现为止。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut events: Vec<SerialClosed> = Vec::new();
+        while std::time::Instant::now() < deadline && events.is_empty() {
+            tm.reap_closing();
+            events = closed
+                .drain()
+                .iter()
+                .filter_map(serial_closed_from_event)
+                .collect();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(events.len(), 1, "用户关闭同样要发 closed 事件");
+        assert_eq!(events[0].port, "COM4");
+        assert_eq!(
+            events[0].reason,
+            CloseReason::UserClose,
+            "用户自己关的端口不该被当成失联（否则 UI 会报警并自动重连回去）"
+        );
+    }
+
+    #[test]
+    fn a_closed_event_without_a_reason_field_is_treated_as_user_close() {
+        let event = Event::new(
+            tool_core::topics::SERIAL_CLOSED,
+            "serial:COM9",
+            Direction::Internal,
+            Payload::Json(serde_json::json!({ "port": "COM9", "baud_rate": 115200 })),
+        );
+        let closed = serial_closed_from_event(&event).expect("负载成形");
+        assert_eq!(
+            closed.reason,
+            CloseReason::UserClose,
+            "缺 reason 的旧生产者按保守一侧处理：不报警、不自动重连"
+        );
     }
 }

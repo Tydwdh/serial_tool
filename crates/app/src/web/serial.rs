@@ -126,15 +126,19 @@ impl WorkbenchApp {
                     .filter(|pending| pending.port == port)
                 {
                     pending.attempts = pending.attempts.saturating_add(1);
-                    if pending.attempts >= 10 {
+                    if pending.attempts >= crate::reconnect::RECONNECT_MAX_ATTEMPTS {
                         stop = true;
                     } else {
-                        pending.next_attempt_at = now + web_reconnect_delay(pending.attempts);
+                        pending.next_attempt_at =
+                            now + crate::reconnect::reconnect_delay(pending.attempts);
                     }
                 }
                 if stop {
                     serial.reconnect = None;
-                    serial.status = format!("自动重连失败（已尝试 10 次）：{error}");
+                    serial.status = format!(
+                        "自动重连失败（已尝试 {} 次）：{error}",
+                        crate::reconnect::RECONNECT_MAX_ATTEMPTS
+                    );
                 } else {
                     serial.status = format!("自动重连失败，将稍后重试：{error}");
                 }
@@ -386,9 +390,14 @@ impl WorkbenchApp {
                 port: PortId::new(port),
                 value,
             },
-            SerialAction::CancelReconnect { port } => AppCommand::CancelReconnect {
-                port: PortId::new(port),
-            },
+            // 与顶栏 chip 的 × 同一条路径：先丢掉待重连状态再撤任务。
+            // 从前这里只派发命令，任务被取消后 `handle_web_reconnect_task_cancelled`
+            // 又把它当成"这次尝试失败"，于是"取消"实际变成"稍后重试"。
+            SerialAction::CancelReconnect { port } => {
+                let port = PortId::new(port);
+                self.cancel_web_reconnect(Some(port.clone()), ctx);
+                AppCommand::CancelReconnect { port }
+            }
             SerialAction::RemoveNetwork { port } => {
                 let port = PortId::new(port);
                 {
@@ -426,10 +435,6 @@ impl WorkbenchApp {
                 self.serial_panel_ui(ui, true, true);
             });
     }
-}
-
-fn web_reconnect_delay(attempts: u32) -> f64 {
-    (0.5 * 2_f64.powi(attempts.min(4) as i32)).min(8.0)
 }
 
 pub(crate) fn select_web_port_state(serial: &mut WebSerialState, selected: Option<PortId>) {
@@ -526,7 +531,7 @@ pub(crate) fn forget_web_network_port(serial: &mut WebSerialState, port: PortId)
     serial.status = "网络串口已移除".to_owned();
 }
 
-/// 挂起的自动重连任务失败：记一次尝试并安排下一次，满 10 次就放弃。
+/// 挂起的自动重连任务失败：记一次尝试并安排下一次，满 `RECONNECT_MAX_ATTEMPTS` 次就放弃。
 /// 返回 false 表示这条失败与重连无关，由调用方回落到通用文案。
 pub(crate) fn handle_web_reconnect_task_failed(
     serial: &mut WebSerialState,
@@ -544,10 +549,11 @@ pub(crate) fn handle_web_reconnect_task_failed(
     if let Some(pending) = serial.reconnect.as_mut() {
         pending.task_id = None;
         pending.attempts = pending.attempts.saturating_add(1);
-        if pending.attempts >= 10 {
+        if pending.attempts >= crate::reconnect::RECONNECT_MAX_ATTEMPTS {
             stop = true;
         } else {
-            pending.next_attempt_at = web_now_seconds() + web_reconnect_delay(pending.attempts);
+            pending.next_attempt_at =
+                web_now_seconds() + crate::reconnect::reconnect_delay(pending.attempts);
         }
     }
     if stop {
@@ -574,7 +580,8 @@ pub(crate) fn handle_web_reconnect_task_cancelled(
     };
     pending.task_id = None;
     pending.attempts = pending.attempts.saturating_add(1);
-    pending.next_attempt_at = web_now_seconds() + web_reconnect_delay(pending.attempts);
+    pending.next_attempt_at =
+        web_now_seconds() + crate::reconnect::reconnect_delay(pending.attempts);
     serial.status = "自动重连任务已取消，将稍后重试".to_owned();
     true
 }
@@ -621,7 +628,7 @@ pub(crate) fn web_reconnect_chip_ui(
         port,
         remaining,
         attempts + 1,
-        10
+        crate::reconnect::RECONNECT_MAX_ATTEMPTS
     );
     ui.label(egui::RichText::new(label).color(theme::yellow()))
         .on_hover_text("点击取消自动重连");

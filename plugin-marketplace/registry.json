@@ -1,7 +1,7 @@
 {
     "$schema":  "./registry.schema.json",
     "version":  1,
-    "updated":  "2026-08-26T00:00:00.0000000Z",
+    "updated":  "2026-10-15T09:30:11.7568158Z",
     "plugins":  [
                     {
                         "id":  "demo.widget-showcase",
@@ -109,7 +109,7 @@
                     {
                         "id":  "gcode-sender",
                         "name":  "G-code Sender",
-                        "version":  "0.7.0",
+                        "version":  "0.9.0",
                         "api_version":  "0.1",
                         "description":  "面向 Marlin 固件的 G-code 发送器：支持文件/单条发送、行号校验、暂停/恢复/取消、进度显示",
                         "author":  "Tydwdh",
@@ -128,12 +128,12 @@
                                             "task",
                                             "config"
                                         ],
-                        "download_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugin-marketplace/plugins/gcode-sender/0.7.0/gcode-sender-0.7.0.zip",
-                        "sha256":  "2a4f5265f406442549b53d573acf46b3169095066c3d605078a7555ca7d75f03",
-                        "size":  14068,
+                        "download_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugin-marketplace/plugins/gcode-sender/0.9.0/gcode-sender-0.9.0.zip",
                         "manifest_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugins/gcode-sender/plugin.json",
                         "main_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugins/gcode-sender/main.lua",
-                        "published":  "2026-08-24T17:22:21.4374164Z"
+                        "sha256":  "dea90a54b3af3dc085ee0bce138ec5363f47df2d4b286e682decacb9db3c8f80",
+                        "size":  15927,
+                        "published":  "2026-10-15T09:30:11.7568158Z"
                     }
                 ]
 }

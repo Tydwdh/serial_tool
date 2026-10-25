@@ -102,8 +102,16 @@ crates/app ──────────> crates/panels ───────�
 - 错误翻译：`translate_error` 产出可操作中文（判定读 kind、文案降级为细节）；`Serial` 臂的残留见
   [known-gaps.md](known-gaps.md)。
 - RX/TX 以 `tool_core::Event` 发布到 `transport.serial.default.rx/tx` 等 topic。
-- 自动重连：app 侧检测配置端口重现 → `AppCommand::Reconnect`（在端口有序队列内执行；
-  网络路径只对「仍在关闭」做限时重试）；`CancelReconnect` 走任务取消。
+- 设备存活：Windows worker 的空闲等待有 1s 上限，到点调 `probe_alive()`；连续 2 次失败判定
+  设备消失，并把 `reason` 写进 `transport.serial.closed`（`device_lost` / `user_close`）。
+  `reap_dead_ports` 是「用户关闭 vs 设备失效」的唯一判据，UI 因此能在拔线后立刻变灰，
+  而不是等下一次 I/O 失败。
+- 自动重连是 app 侧状态机 `ReconnectTracker`（`crates/app/src/reconnect.rs`；纯逻辑，`now`
+  由调用方给）：按端口记账、退避 `0.5·2ⁿ` 封顶 8s、最多 10 次；触发点是 `device_lost` 或
+  端口从枚举列表消失，到点派发 `AppCommand::Connect`（仍走端口有序队列），取消统一走
+  `AppCommand::CancelReconnect`。native 与浏览器共用同一套退避与上限。
+  `Workbench::start_reconnect` 只是一次尝试、失败即返回中文原因——原先那个「3 秒预算 +
+  10ms 轮询」的循环判据（`Io(WouldBlock)`）没有生产者，已删除。
 
 ## 6. 录制与回放
 

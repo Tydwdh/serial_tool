@@ -4,6 +4,158 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **截断提醒不再逐帧重发，清空数据后也真正结束这一轮（接收区 / 日志面板）**：满载期间每条新事件
+  都会裁掉一条最旧条目，两个面板因此**每条事件**都把 `truncated` 置位；状态栏每帧消费并复位它，
+  于是通知队列每帧都收到一条同 source 的新消息（新 id），Toast 的截止时间被反复续期 —— 用户看到
+  的就是"数据到达上限之后，无论做什么都一直弹截断"。`clear()` 原先也不重置 `truncated`、不清订阅
+  侧待发的丢事件计数，所以清空后仍可能补报一次上一轮的截断。
+  修法：两个面板各加 `limit_episode_reported` 闩锁 —— 每轮越界只在第一次裁剪时置位；条目数回到
+  上限以下（清空、调高上限）才重新武装；`clear()` 复位闩锁与 `truncated`，并丢弃订阅侧的丢事件
+  计数。提醒的语义因此回到"进入满载时提醒一次"，而不是"满载期间每帧提醒一次"。
+  **证据是先红后绿**：新增
+  `terminal::tests::truncation_notice_fires_once_per_over_capacity_episode` 与
+  `log::tests::truncation_notice_fires_once_per_over_capacity_episode`，改之前两条都红在
+  「同一轮满载只应提醒一次，实际 5 次」；改之后两条绿。
+  另一路「接收区缓冲已满，丢失 N 条最旧事件」走订阅环的丢事件计数，也按同一契约收口：
+  `take_dropped_events(now_ms)` 在同一轮持续丢包里只返回一次计数，连续 3 秒没有新丢包
+  （`DROP_EPISODE_QUIET_MS`）才算这一轮结束；否则通知文本里的计数每帧都变，Toast 无法
+  按文本去重，屏幕会被红条刷满。对应用例
+  `terminal/log::tests::data_loss_fires_once_per_drop_episode`：把丢包闩锁去掉 ⇒ 红在
+  「持续丢包不应逐帧重复上报」（实际 10 次）。`tool-panels` 全量 216 通过；
+  `cargo test --workspace --all-targets`、native 与 wasm 两套 clippy `-D warnings` 均 EXIT=0。
+
+### 文档
+
+- **文档集重启（第 62 轮）：docs/ 从零重写为 13 个文件——架构正文 + 已知差异登记册 +
+  插件四件套 + 在线/性能/发布/安装文档 + 发布说明模板；旧的 148KB 架构台账与 75KB 执行计划不再继承。**
+  （生产行为零变化；代码面唯一改动是生成物路径：`crates/extension/src/spec.rs` 两行。）
+  * 新结构：`docs/README.md`（索引）、`docs/ARCHITECTURE.md`、`docs/known-gaps.md`、
+    `docs/web.md`、`docs/performance.md`、`docs/RELEASE.md`、`docs/INSTALLER.md`、
+    `docs/plugins/{README,manifest,lua-api,scenarios}.md`、`docs/plugins/spec.generated.md`（生成物）、
+    `docs/releases/TEMPLATE.md`；上游 v1.3.1 / v1.3.2 的两份发布说明随合并保留。
+  * 不重建：`architecture-refactor-baseline.md`、`superpowers/plans/*`、历史 `releases/v1.0.0–v1.3.0.md`
+    （历史由本 CHANGELOG 与 GitHub Releases 承担）；根 README 的旧发布说明链接改指 Releases 页。
+  * 引用对账：代码/测试/CI 里所有指向旧文档的注释（「发送路径的残留差异」「预检的规则来源」
+    「Linux clippy 缺口」「ExpectNoTx 半条契约」「Serial 臂权限修法」等）与根 README 链接逐一改指
+    `docs/known-gaps.md` / 新路径；`plugin-spec.generated.md` 迁至 `docs/plugins/`，生成器与
+    `include_str!` 用例随路径同步。
+  * 合并上游后对账：`docs/ARCHITECTURE.md` 的自动重连段改写成 `ReconnectTracker`
+    （`crates/app/src/reconnect.rs`，退避与上限 native/web 共用），并补上 Windows 的 1s 探活与
+    `transport.serial.closed` 的 `device_lost` / `user_close` 判据。
+  * 验证：`cargo test -p tool-extension` 45 通过（生成物用例转绿）、`cargo check --workspace --all-targets`
+    通过；README + docs 共 16 份 Markdown 的 63 条相对链接经脚本体检全部可解析；全仓旧路径清扫后
+    只剩指向新文档的有意引用。
+
+## [1.3.2] - 2026-10-15
+
+### 新增
+
+- **gcode-sender v0.9.0：G文件 在"发送区不是文件"时自动打开文件选择框。**
+  （`plugins/gcode-sender/plugin.json` + `main.lua`；市场 0.9.0 的 zip 与 `registry.json` 由
+  `publish.ps1` 重新生成。）
+  * 判定收敛成一条：发送区那一行**能不能当文件打开**。探一次 `ctx.fs.read_lines_stream` ——
+    它在调用时就 `open`、不读内容，而且只认宿主已授权的路径，所以"路径不存在"与"宿主没授权"
+    两种打不开都覆盖在内。开得出就直接发；开不出（空、G-code 片段、多行程序、写错的路径、
+    `G1 X1.5` 这种带小数点的单行命令）就打开选择框，选中的文件由宿主授权后照常发送。
+  * 旧行为里"内容不像文件路径"只记一条警告，要求用户先清空发送区再点一次按钮。现在改为先记
+    一句解释（多行内容仍提示改用 G单条）再打开选择框；在选择框里取消则一行都不发，仍留
+    「未选择 G-code 文件」。按钮 tooltip 同步改成新语义。
+  * `plugins/gcode-sender/tests/main_test.lua` 补 6 格：非文件内容 / 空发送区 / 打不开的路径
+    三种输入各开一次选择框并发送选中的文件、能打开的路径不得弹框、多行内容要提示 G单条、
+    取消后不得发送。**红证明（四条变异各自红在自己的断言上，均逐字节还原后回绿）**：退回旧行为
+    ⇒ 红在「发送区不是文件时必须打开文件选择框」；去掉探针 ⇒ 红在「打不开的路径必须打开文件
+    选择框」；路径也走选择框 ⇒ 红在「能打开的文件路径不得再弹选择框」；去掉空发送区的早返回
+    ⇒ 红在「空发送区没有内容问题，不该补一句解释」。
+  * 新用例 `crates/extension/tests/gcode_file_dialog.rs` 把这条链路钉在**真实宿主**上：自己起
+    `PluginManager` + 虚拟串口 + 宿主侧的文件授权，另起一个线程扮演 UI 回答选择框请求
+    （`ctx.dialog.open_file` 是阻塞式的，场景运行器又没有 `set_host_services`，插件在它那里连
+    `ctx.dialog` / `ctx.fs` 都不会被暴露，所以这条链路的端到端只能在宿主测试里做）。三格：
+    不是文件的一行、`G1 X1.5` 这种"像路径却打不开"的一行、在选择框里取消。**红证明**：把插件
+    退回旧行为 ⇒ 三格全红在「插件必须请求文件选择框: Timeout」。
+
+### 调整
+
+- **右上角通知卡片的读条时间减半**：卡片按该级别 TTL 的一半展示（提示 1.5s → 0.75s、
+  警告 2s → 1s、错误 4s → 2s）。用户反馈卡片挡在面板上太久。
+  （只动 `crates/app/src/ui/toast.rs`：卡片自己的窗口 = `StatusLevel::ttl_ms()` /
+  `TOAST_LIFETIME_DIVISOR`，状态栏那行字仍按原 TTL 留 1.5s / 2s / 4s —— 两者从此各管各的。）
+  * 为什么分成两个时长：卡片浮在面板上方、会挡住内容，同一条消息不需要停那么久；想留住它，
+    指针停在卡片上仍会暂停倒计时（每帧最多补偿 250ms 的那段没动），也可以点右上角关闭。
+  * 新用例 `toast_lifetime_is_half_of_the_status_message_lifetime` 逐级别钉住"卡片窗口 = 半个 TTL，
+    且一出现就带着完整的半个窗口"。**红证明**：把 `toast_lifetime_ms` 退回完整 TTL ⇒ 红在
+    「卡片的读条窗口应是状态栏 TTL 的一半（Info）」，`left: Some(1500) / right: Some(750)`。
+  * 浏览器端没有浮层卡片（通知只在状态栏那一行 + 「通知 N 条」列表里），本次未动。
+
+- **删掉重连里那段"3 秒预算 + 10ms 轮询"的死循环（判据 `Io(WouldBlock)` 没有任何生产者）。**
+  （`crates/application/src/workbench.rs` 净 −90 行：循环、判据 `reconnect_is_worth_retrying` 与它的两条单测；
+  `headless.rs` 的注释与用例名按新语义改写。）
+  * 为什么是死代码：串口的错误在 `platform/src/native.rs::operation_error` 就被折成字符串（`kind` 已丢），
+    网络的 `open_network_serial` 连接失败时照样返回 `Ok`（失败以日志事件发布）—— 循环体恒等于
+    "一次 open"，只是把失败结果压在手里最多 3 秒才报。
+  * 现在 `Workbench::start_reconnect` 是一次尝试、失败即返回中文原因；要重试的是**自动重连**那套
+    （`crates/app/src/reconnect.rs`：真退避 + 上限 + 可取消）。`headless.rs` 三条公开面用例保留
+    （立刻放弃 / 失败文案中文化 / 网络端口走网络分支）。
+  * `docs/ARCHITECTURE.md` 第 9 轮留下的两个待拍板问题（① 要不要把 `WouldBlock` 生产者接到路上、
+    ② `TimedOut` 算不算可重试）随这次删除一起收口 —— 现在没有"重试预算"这回事。
+- **重连系统：native 的"单槽 + 死字段"换成真状态机（多端口 / 真退避 / 真上限 / 能取消），退避与上限与浏览器共用一份。**
+  * 旧的 `PendingReconnect.attempts` / `next_try_at` 自创建后再无写入点：顶栏与设备面板永远显示
+    `0.0s (1/10)`；派发只发生在"端口回到枚举列表"那一帧，失败就再也不试；而且只认
+    `selected_port` 一个端口。
+  * 新的 `crate::reconnect::ReconnectTracker`（纯状态机 + 5 条单测）：按端口记账、退避
+    `0.5·2ⁿ` 封顶 8s、最多 10 次、到点派发 `Connect`（不是 `Reconnect` —— 后者在"同名句柄还
+    活着"时直接返回 `Ok`，"重连"可能是 no-op 成功）、失败与被取消都算一次尝试、超限放弃并给
+    用户一句准话；顶栏优先展示选中端口，多端口时带 `+N`。
+  * 触发点从"枚举 diff"扩到"枚举 diff **或** `device_lost` 事件"，覆盖"设备死了但端口还在系统
+    列表里"这一类（正是用户报的那一类），非选中端口同样会重连。
+  * `manual_disconnects` 的清理从 1 处补到所有连接入口（`note_manual_connect`）；三条取消入口
+    （顶栏 ×、端口行 ⟳、关掉勾选）收成一条路径（`cancel_auto_reconnect`）。浏览器侧端口行的
+    「取消重连」从前只派发命令、状态没清，取消后立刻被排成"稍后重试"。
+  * 接线由 `crates/app/tests/reconnect_wiring.rs` 四条形状守卫钉住（帧循环里驱动恰好一次、
+    断开事件流只有一个消费者、死状态不许回来、退避公式只有一份）。**红证明**：删掉帧循环里那行
+    ⇒ 红在「每帧必须推进一次自动重连」；把 `PendingReconnect {` 写回 `commands.rs` ⇒ 红在
+    「又出现了 PendingReconnect」；把浏览器侧上限改回写死 `10` ⇒ 红在「必须用共享常量」。
+
+### 修复
+
+- **接收区不再把未封存的数据压成一行（"…"）：超过一行的数据现在按原样折行显示。**
+  （`crates/panels/src/terminal.rs`：删掉 LiveTail 单行预览的三件套与 `RowMeasure.glyph_width`，
+  净 −40 行左右；`data_settings.rs` 的阈值说明补一句"封存不影响显示"。）
+  * 症状：未封存的行被压成"最后一段 + 超宽前缀 `…`"，而封存只在**有后续数据**时才发生
+    （`seal_live` 只从 `ingest` 调用），于是"收到超过一行的数据后没有下文"就永远停在那个
+    压缩形态上 —— 用户看到的是数据没法读、也等不来变化。
+  * 现在未封存的行与已封存的行**同样渲染**（`row.live` 这个只为压缩存在的字段一并删掉）；
+    `merge_window_ms` 只决定后续数据是否并入同一行，不再影响显示，设置里的悬停说明同步改写。
+  * 新用例 `an_unsealed_long_line_is_laid_out_in_full`：喂一行 200 字符（无换行，因此保持未封存），
+    断言**真正交给 layout 的 galley** 文本逐字完整、且行高真的折成多行（用默认字体度量，
+    不用 `__run_test_ui` 的空字体）。**红证明**：把压缩写回 `build_row_galleys` ⇒ 红在
+    「未封存的长行必须整段进 layout，而不是只剩尾部 + 省略号」（`left: "…01234567890123456789"`）。
+
+### 修复
+
+- **串口断连不再"只有手动重连才发现"：Windows worker 每秒探一次设备存活，失效自己退出并发布带原因的断开事件。**
+  （`crates/transport/src/windows_native.rs` + `lib.rs`、`crates/application/src/workbench.rs`、`crates/app/src/commands.rs`。）
+  * 根因：空闲期没有任何存活探测 —— 读挂在 `WaitForMultipleObjects(.., INFINITE)` 上，设备被
+    拔出后驱动**不一定会完成**那次 overlapped 读，于是 worker 活着、`alive` 为真、`status_for`
+    照旧报 `open: true`，顶栏一直显示"已连接"，直到用户手动点重连、那次 `open_serial` 才失败。
+    这条缺口此前就写在 `lib.rs` 的注释里（"卡住却没退出的 worker … 那需要心跳/超时，不在本改动范围内"）。
+  * 现在：等待带 1s 上限，到点用 `ClearCommError` 探一次设备对象（**连续两次失败**才判死 ——
+    一次驱动打嗝不该掐掉一条还能用的链路）；非 stop 的 `ERROR_OPERATION_ABORTED` 从"静默
+    `return Ok(())`"改成记一条"读操作被系统取消（设备可能已被拔出或链路失效）"再退出；
+    `run_impl` 的任何退出路径（含 `?` 冒出的失败）都先把挂起的读 `CancelIoEx` +
+    `GetOverlappedResult` 收干净（OVERLAPPED 在栈上，带着未完成 IRP 返回是 MSDN 明写的地雷）。
+  * `transport.serial.closed` 从此带 `reason`（`user_close` / `device_lost`），并**第一次有了
+    消费者**：`reap_dead_ports` 是唯一能区分两者的地方（用户关闭的句柄早已被移出 `ports` 表），
+    UI 只对 `device_lost` 报警 + 自动重连，"用户自己关的"照旧安静。
+  * 用例：`tool-transport` 三条（死句柄 → `device_lost` 且日志点名端口；`close_port` →
+    `user_close`；缺 `reason` 的旧负载按保守一侧当作用户关闭）+ Windows 一条（非 COM 句柄上
+    `probe_alive` 必须失败）。**红证明**：把 `DeviceLost` 写成 `UserClose` ⇒ 红在「留在 ports
+    表里的死句柄必然是设备/链路失效」（`left: UserClose / right: DeviceLost`）；把 `probe_alive`
+    改成恒 `Ok(())` ⇒ 红在「非 COM 设备上的 ClearCommError 必须失败」。
+
+## [1.3.1] - 2026-10-15
+
 ### 安全
 
 - **可直接动手的清扫/收口批（第 60 轮）：发布构建开整数溢出检查、zip 越界条目留痕、正则缓存不再永久泄漏。**
@@ -17,6 +169,21 @@
     旧条目随引用计数释放；此前每轮清空都永久泄漏最多 256 个已编译正则。
 
 ### 调整
+
+- **gcode-sender v0.8.0：默认设置改成开箱即用的 Marlin 配置（默认暂停/取消 = `N1 !M410 S0*69`）。**
+  （`plugins/gcode-sender/plugin.json` 与 `main.lua` 的 `DEFAULTS` 同步改；市场 0.8.0 的 zip 与
+  `registry.json` 由 `publish.ps1` 重新生成。）
+  * 三条应答匹配不再留空：成功 `ok`、错误 `FAILED`、运行中 `echo:busy: processing`。留空时只有内置
+    `^ok`/`^Error`/`busy` 生效：回 `done`、`FAILED` 这类字样的固件要一直等到 ACK 超时（默认 300s）。
+  * 暂停/取消默认写 `N1 !M410 S0*69`（Marlin quickstop：`!` 前缀 + 行号 + 校验和；`xor8("N1 !M410 S0")`
+    = 69 已核对）。此前默认留空，点暂停/取消不会给设备任何指令。
+  * 暂停/取消是原样写串口（不加行号、不等 ACK），默认值里的 `N1` 就是写给固件的行号；插件恢复后
+    不会重发 M110 行号同步。
+  * `plugins/gcode-sender/tests/main_test.lua` 钉住这些默认值（清空配置后暂停/取消必须发出该行、
+    三条正则必须以 ok/error/running 注册）。红证明：`DEFAULTS` 的 `custom_success_patterns` 改回空 ⇒
+    红在 "default success pattern must be ok"；`pause_gcode` 改回空 ⇒ 红在 "default pause must send
+    one direct control payload"。另外用场景运行器（真实 PluginManager + Lua 运行时的内存串口）跑通
+    一次端到端：暂停/取消各发出 `N1 !M410 S0*69`，设备回 `echo:busy: processing` 时刷新等待而不完成该行。
 
 - **死件/死边清扫（第 60 轮）：2 条可证明的死 Cargo 边 + 3 处死件 + 两处 `unreachable!()`。**
   （生产行为零变化；测试入口改走生产路径。）
@@ -1515,25 +1682,25 @@
 
 ### 修复
 
-- **截断提醒不再逐帧重发，清空数据后也真正结束这一轮（接收区 / 日志面板）**：满载期间每条新事件
-  都会裁掉一条最旧条目，两个面板因此**每条事件**都把 `truncated` 置位；状态栏每帧消费并复位它，
-  于是通知队列每帧都收到一条同 source 的新消息（新 id），Toast 的截止时间被反复续期 —— 用户看到
-  的就是"数据到达上限之后，无论做什么都一直弹截断"。`clear()` 原先也不重置 `truncated`、不清订阅
-  侧待发的丢事件计数，所以清空后仍可能补报一次上一轮的截断。
-  修法：两个面板各加 `limit_episode_reported` 闩锁 —— 每轮越界只在第一次裁剪时置位；条目数回到
-  上限以下（清空、调高上限）才重新武装；`clear()` 复位闩锁与 `truncated`，并丢弃订阅侧的丢事件
-  计数。提醒的语义因此回到"进入满载时提醒一次"，而不是"满载期间每帧提醒一次"。
-  **证据是先红后绿**：新增
-  `terminal::tests::truncation_notice_fires_once_per_over_capacity_episode` 与
-  `log::tests::truncation_notice_fires_once_per_over_capacity_episode`，改之前两条都红在
-  「同一轮满载只应提醒一次，实际 5 次」；改之后两条绿。
-  另一路「接收区缓冲已满，丢失 N 条最旧事件」走订阅环的丢事件计数，也按同一契约收口：
-  `take_dropped_events(now_ms)` 在同一轮持续丢包里只返回一次计数，连续 3 秒没有新丢包
-  （`DROP_EPISODE_QUIET_MS`）才算这一轮结束；否则通知文本里的计数每帧都变，Toast 无法
-  按文本去重，屏幕会被红条刷满。对应用例
-  `terminal/log::tests::data_loss_fires_once_per_drop_episode`：把丢包闩锁去掉 ⇒ 红在
-  「持续丢包不应逐帧重复上报」（实际 10 次）。`tool-panels` 全量 216 通过；
-  `cargo test --workspace --all-targets`、native 与 wasm 两套 clippy `-D warnings` 均 EXIT=0。
+- **四条用例的"打不开的路径"夹具把 Windows 的行为当成了两边的行为：Linux 作业从第 43 轮起一直红。**
+  （不涉及生产代码；被挡下的是 v1.3.1 的发布流水线 —— `Ubuntu .deb` 作业红在 `Linux tests`，
+  `GitHub Release` 因依赖它而整个跳过。）
+  * 第 43 轮那三条（`crates/recorder/src/replay.rs` 两条、`crates/application/tests/headless.rs` 一条）
+    拿**目录**当"`metadata` 拿得到、当文件打不开"的夹具，注释里写"Linux 是目录 ⇒ `EISDIR`" ——
+    POSIX 只在**写**打开时给 `EISDIR`，`open(目录, O_RDONLY)` 是成功的，于是
+    `File::open(&dir).expect_err(..)` 在 Linux 上当场 panic：**红在测试前提上，不在被测代码上**。
+  * `crates/recorder/src/recorder.rs` 的 `create_recording_file_frames_both_io_exits_in_chinese` 把
+    "普通文件之下建目录"的 POSIX 答案记成了 `EEXIST` ⇒ `AlreadyExists`，实际是"路径前缀不是目录"的
+    `ENOTDIR` ⇒ `NotADirectory`（`mkdir` 只有**最后一段**已存在时才给 `EEXIST`）。
+  * **取证（本机 WSL，`cargo test --workspace --all-targets --no-fail-fast`）**：四条红分别是
+    `headless.rs:1025 测试前提：这个目录必须打不开`、`replay.rs:1153`、`replay.rs:1208`、`recorder.rs:1108`；
+    同一份命令在 Windows 侧全绿 —— 这就是"夹具编码了平台答案"的形状。
+  * **修法**：跨平台的"能 stat、打不开"夹具收进 `tool_testing::UnopenablePath` 一份（Windows 用目录；
+    Unix 用 Unix 域套接字，`open(O_RDONLY)` 给 `ENXIO` 且 **root 也拦得住** —— 权限类夹具在 root 下会被
+    `CAP_DAC_OVERRIDE` 绕过，本机与容器里的 root 复跑会得到假绿）；递归建目录那一格改成逐平台钉 kind；
+    "不是 `Other`"那两处断言改成只钉"等于裸操作给的 kind"（`io::Error::other(..)` 会把任何 kind 折成
+    `Other`，两边立刻不等，判据没变弱，也不再依赖某个平台恰好给出可命名的变体）。
+  * 夹具只有一份实现，为此给 `tool-recorder` 加了一条 `[dev-dependencies] tool-testing` 边。
 - **修掉一个"从旧版本升级上来、第一次开机就丢设置"的缺陷**：`schema_version` 改名之前写的
   `workspace.json` 只用历史键 `version` 声明版本，这样的文件在本版本读不出来 ——
   `parse_persisted_config` 会无条件往 map 里 `insert("schema_version", …)`，而
@@ -1649,25 +1816,6 @@
   加串行锁前红 **6** 次，加锁后 **0** 次；空闲单跑很难复现（15 次 0 次），所以以前它只在 CI
   机器紧张时露一次脸——上一次发布就出现过"同一批代码先红后绿"。现在碰主题状态的用例共用一把
   测试专用锁，锁的注释里写着这组数字与失效模式。
-
-### 文档
-
-- **文档集重启（第 61 轮）：docs/ 从零重写为 13 个文件——架构正文 + 已知差异登记册 +
-  插件四件套 + 在线/性能/发布/安装文档 + 发布说明模板；旧的 148KB 架构台账与 75KB 执行计划不再继承。**
-  （生产行为零变化；代码面唯一改动是生成物路径：`crates/extension/src/spec.rs` 两行。）
-  * 新结构：`docs/README.md`（索引）、`docs/ARCHITECTURE.md`、`docs/known-gaps.md`、
-    `docs/web.md`、`docs/performance.md`、`docs/RELEASE.md`、`docs/INSTALLER.md`、
-    `docs/plugins/{README,manifest,lua-api,scenarios}.md`、`docs/plugins/spec.generated.md`（生成物）、
-    `docs/releases/TEMPLATE.md`。
-  * 不重建：`architecture-refactor-baseline.md`、`superpowers/plans/*`、历史 `releases/v1.0.0–v1.3.0.md`
-    （历史由本 CHANGELOG 与 GitHub Releases 承担）；根 README 的旧发布说明链接改指 Releases 页。
-  * 引用对账：代码/测试/CI 里所有指向旧文档的注释（「发送路径的残留差异」「预检的规则来源」
-    「Linux clippy 缺口」「ExpectNoTx 半条契约」「Serial 臂权限修法」等）与根 README 链接逐一改指
-    `docs/known-gaps.md` / 新路径；`plugin-spec.generated.md` 迁至 `docs/plugins/`，生成器与
-    `include_str!` 用例随路径同步。
-  * 验证：`cargo test -p tool-extension` 42 通过（生成物用例转绿）、`cargo check --workspace --all-targets`
-    通过；README + docs 共 14 份 Markdown 的 63 条相对链接经脚本体检全部可解析；全仓旧路径清扫后
-    只剩指向新文档的有意引用。
 
 ## [1.3.0] - 2026-09-22
 
@@ -1808,7 +1956,9 @@
 - 支持左键拖选文本或跨行选择时继续使用滚轮滚动。
 - 修复设置导航、工具栏按钮和插件统计切换时的布局抖动。
 
-[Unreleased]: https://github.com/Tydwdh/serial_tool/compare/v1.2.0...HEAD
+[1.3.2]: https://github.com/Tydwdh/serial_tool/compare/v1.3.1...v1.3.2
+[1.3.1]: https://github.com/Tydwdh/serial_tool/compare/v1.3.0...v1.3.1
+[1.3.0]: https://github.com/Tydwdh/serial_tool/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/Tydwdh/serial_tool/compare/v1.1.2...v1.2.0
 [1.1.2]: https://github.com/Tydwdh/serial_tool/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/Tydwdh/serial_tool/compare/v1.1.0...v1.1.1
