@@ -29,6 +29,9 @@ pub(crate) const MAX_INGEST_PER_FRAME: usize = 500;
 /// 接收区和日志区的发布侧环形缓冲容量。窗口最小化时仍由 DataBus 发布线程写入，
 /// 队列满后丢最旧事件并通过面板通知用户。
 pub(crate) const MESSAGE_EVENT_BUFFER_CAPACITY: usize = 65_536;
+/// 丢事件提醒的「同一轮」判定：连续这么久没有新的丢包，才算上一轮结束。
+/// 快速接收时 UI 追不上生产端，丢包会持续很多帧；每帧都提醒会把通知刷屏。
+pub(crate) const DROP_EPISODE_QUIET_MS: u64 = 3_000;
 
 pub use attitude::AttitudePanel;
 pub use chart::ChartPanel;

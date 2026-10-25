@@ -1111,7 +1111,8 @@ impl WorkbenchApp {
     /// 状态栏每帧检查一次：缓冲满导致的丢事件是持续性故障，只推送一条短通知，
     /// 并把面板自己的截断标志复位，避免同一次截断反复刷屏。
     fn push_web_overflow_notifications(&mut self) {
-        let terminal_dropped = self.terminal_panel.take_dropped_events();
+        let now_ms = tool_core::now_timestamp_ms();
+        let terminal_dropped = self.terminal_panel.take_dropped_events(now_ms);
         if terminal_dropped > 0 {
             self.push_web_notification(
                 "terminal-data-loss",
@@ -1119,7 +1120,7 @@ impl WorkbenchApp {
                 format!("接收区缓冲已满，丢失 {terminal_dropped} 条最旧事件"),
             );
         }
-        let log_dropped = self.bottom_log_panel.take_dropped_events();
+        let log_dropped = self.bottom_log_panel.take_dropped_events(now_ms);
         if log_dropped > 0 {
             self.push_web_notification(
                 "log-data-loss",

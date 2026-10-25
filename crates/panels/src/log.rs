@@ -1,5 +1,6 @@
 use crate::{
-    MAX_INGEST_PER_FRAME, MESSAGE_EVENT_BUFFER_CAPACITY, TerminalExportFormat, design, fmt_ts,
+    DROP_EPISODE_QUIET_MS, MAX_INGEST_PER_FRAME, MESSAGE_EVENT_BUFFER_CAPACITY,
+    TerminalExportFormat, design, fmt_ts,
     table::{
         AutoScrollState, MessageSearch, RowHighlight, RowSelection, TextSelectionRows,
         bulk_copy_button, claim_copy_focus, copy_text_with_feedback, edge_scroll_delta,
@@ -67,6 +68,13 @@ pub struct LogPanel {
     virtual_rows: VirtualRowIndex,
     /// 是否发生过截断（用于状态栏提示，显示后清除）
     pub truncated: bool,
+    /// 当前这轮「越界」是否已经提醒过：满载期间每条日志都会裁掉一条最旧条目，
+    /// 只有第一次置位 `truncated`；回到上限以下才重新武装，否则通知会被逐帧刷新。
+    limit_episode_reported: bool,
+    /// 同一轮持续丢包是否已经上报过。快速接收时每帧都会丢，只报第一次。
+    drop_episode_reported: bool,
+    /// 最近一次观测到丢事件的时刻（ms），用于判定这一轮丢包是否已经结束。
+    last_drop_ms: u64,
 }
 
 #[derive(Clone)]
@@ -261,6 +269,9 @@ impl LogPanel {
             text_selection_rows: TextSelectionRows::default(),
             virtual_rows: VirtualRowIndex::default(),
             truncated: false,
+            limit_episode_reported: false,
+            drop_episode_reported: false,
+            last_drop_ms: 0,
         }
     }
     pub fn ingest_all_pending(&mut self) -> usize {
@@ -277,6 +288,12 @@ impl LogPanel {
     }
     pub fn clear(&mut self) {
         self.subscription.clear();
+        // 清空结束当前这轮截断：残留的提醒标志与丢事件计数都不该越过清空继续提示。
+        self.truncated = false;
+        self.limit_episode_reported = false;
+        self.drop_episode_reported = false;
+        self.last_drop_ms = 0;
+        let _ = self.subscription.take_dropped_count();
         self.entry_order.clear();
         self.entries.clear();
         self.source_counts.clear();
@@ -304,8 +321,24 @@ impl LogPanel {
         self.ingest()
     }
 
-    pub fn take_dropped_events(&self) -> u64 {
-        self.subscription.take_dropped_count()
+    /// 与接收区同一契约：同一轮持续丢包只上报一次，静默 `DROP_EPISODE_QUIET_MS`
+    /// 之后才重新武装。
+    pub fn take_dropped_events(&mut self, now_ms: u64) -> u64 {
+        let dropped = self.subscription.take_dropped_count();
+        if dropped > 0 {
+            self.last_drop_ms = now_ms;
+            if self.drop_episode_reported {
+                return 0;
+            }
+            self.drop_episode_reported = true;
+            return dropped;
+        }
+        if self.drop_episode_reported
+            && now_ms.saturating_sub(self.last_drop_ms) >= DROP_EPISODE_QUIET_MS
+        {
+            self.drop_episode_reported = false;
+        }
+        0
     }
 
     pub fn take_export_request(&mut self) -> Option<TerminalExportFormat> {
@@ -392,7 +425,15 @@ impl LogPanel {
                 self.visible_rows_cache.pop_front();
                 self.visible_rows_generation = self.visible_rows_generation.wrapping_add(1);
             }
-            self.truncated = true;
+            // 满载是持续状态：只在进入这轮越界时置位一次，避免通知逐帧刷新。
+            if !self.limit_episode_reported {
+                self.limit_episode_reported = true;
+                self.truncated = true;
+            }
+        }
+        // 回到上限以下（清空或调高上限）说明这轮越界结束，下一轮要重新提醒。
+        if self.entry_order.len() < self.max_entries {
+            self.limit_episode_reported = false;
         }
     }
 
@@ -2277,5 +2318,98 @@ mod tests {
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].message, "msg 2");
         assert_eq!(rows[2].message, "msg 4");
+    }
+
+    /// 与接收区同一契约：每轮越界只提醒一次，`clear()` 结束当前一轮。
+    ///
+    /// 满载后每条日志都裁掉一条最旧条目；若每条都重新置位 `truncated`，状态栏
+    /// 每帧都会刷新「日志已截断」通知，清空后也停不下来。
+    #[test]
+    fn truncation_notice_fires_once_per_over_capacity_episode() {
+        let bus = DataBus::new();
+        let mut panel = LogPanel::new(&bus);
+        panel.set_max_entries(100);
+        let publish = |index: usize| {
+            bus.publish(Event::system_log(
+                LogLevel::Info,
+                "test",
+                format!("msg {index}"),
+            ));
+        };
+
+        for index in 0..100 {
+            publish(index);
+        }
+        panel.ingest_all_pending();
+        assert!(!panel.truncated, "装满但未越界不应提醒截断");
+
+        let mut notices = 0;
+        for index in 100..105 {
+            publish(index);
+            panel.ingest_all_pending();
+            if panel.truncated {
+                notices += 1;
+                panel.truncated = false;
+            }
+        }
+        assert_eq!(notices, 1, "同一轮满载只应提醒一次，实际 {notices} 次");
+
+        panel.clear();
+        assert!(!panel.truncated, "清空应复位待发提醒");
+        publish(200);
+        panel.ingest_all_pending();
+        assert!(!panel.truncated, "清空后未越界不应提醒截断");
+
+        for index in 201..302 {
+            publish(index);
+        }
+        panel.ingest_all_pending();
+        assert!(panel.truncated, "清空后再次越界应重新提醒截断");
+    }
+
+    /// 与接收区同一契约：同一轮持续丢包只上报一次。
+    #[test]
+    fn data_loss_fires_once_per_drop_episode() {
+        let bus = DataBus::new();
+        let mut panel = LogPanel::new(&bus);
+        let publish = |index: usize| {
+            bus.publish(Event::system_log(
+                LogLevel::Info,
+                "test",
+                format!("msg {index}"),
+            ));
+        };
+
+        for index in 0..(crate::MESSAGE_EVENT_BUFFER_CAPACITY + 1_000) {
+            publish(index);
+        }
+        assert_eq!(
+            panel.take_dropped_events(1_000),
+            1_000,
+            "本轮第一次丢包要上报计数"
+        );
+
+        for index in 0..10 {
+            publish(1_000_000 + index);
+        }
+        assert_eq!(
+            panel.take_dropped_events(2_000),
+            0,
+            "持续丢包不应逐帧重复上报"
+        );
+
+        assert_eq!(
+            panel.take_dropped_events(2_000 + crate::DROP_EPISODE_QUIET_MS),
+            0,
+            "静默窗口内没有新丢包时不应上报"
+        );
+        for index in 0..5 {
+            publish(2_000_000 + index);
+        }
+        assert_eq!(
+            panel.take_dropped_events(2_001 + crate::DROP_EPISODE_QUIET_MS),
+            5,
+            "新一轮丢包应重新上报"
+        );
     }
 }

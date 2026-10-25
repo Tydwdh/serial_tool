@@ -100,8 +100,9 @@ impl WorkbenchApp {
 
     /// 通知队列的写入侧：缓冲丢事件与面板截断提醒都推成通知。
     fn push_overflow_notifications(&mut self) {
+        let now_ms = tool_core::now_timestamp_ms();
         // 截断提醒也走通知队列
-        let terminal_dropped = self.terminal_panel.take_dropped_events();
+        let terminal_dropped = self.terminal_panel.take_dropped_events(now_ms);
         if terminal_dropped > 0 {
             self.notifications.push(
                 "terminal-data-loss",
@@ -109,7 +110,7 @@ impl WorkbenchApp {
                 format!("接收区缓冲已满，丢失 {terminal_dropped} 条最旧事件"),
             );
         }
-        let log_dropped = self.bottom_log_panel.take_dropped_events();
+        let log_dropped = self.bottom_log_panel.take_dropped_events(now_ms);
         if log_dropped > 0 {
             self.notifications.push(
                 "log-data-loss",

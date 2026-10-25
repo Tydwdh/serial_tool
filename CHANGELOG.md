@@ -1515,6 +1515,25 @@
 
 ### 修复
 
+- **截断提醒不再逐帧重发，清空数据后也真正结束这一轮（接收区 / 日志面板）**：满载期间每条新事件
+  都会裁掉一条最旧条目，两个面板因此**每条事件**都把 `truncated` 置位；状态栏每帧消费并复位它，
+  于是通知队列每帧都收到一条同 source 的新消息（新 id），Toast 的截止时间被反复续期 —— 用户看到
+  的就是"数据到达上限之后，无论做什么都一直弹截断"。`clear()` 原先也不重置 `truncated`、不清订阅
+  侧待发的丢事件计数，所以清空后仍可能补报一次上一轮的截断。
+  修法：两个面板各加 `limit_episode_reported` 闩锁 —— 每轮越界只在第一次裁剪时置位；条目数回到
+  上限以下（清空、调高上限）才重新武装；`clear()` 复位闩锁与 `truncated`，并丢弃订阅侧的丢事件
+  计数。提醒的语义因此回到"进入满载时提醒一次"，而不是"满载期间每帧提醒一次"。
+  **证据是先红后绿**：新增
+  `terminal::tests::truncation_notice_fires_once_per_over_capacity_episode` 与
+  `log::tests::truncation_notice_fires_once_per_over_capacity_episode`，改之前两条都红在
+  「同一轮满载只应提醒一次，实际 5 次」；改之后两条绿。
+  另一路「接收区缓冲已满，丢失 N 条最旧事件」走订阅环的丢事件计数，也按同一契约收口：
+  `take_dropped_events(now_ms)` 在同一轮持续丢包里只返回一次计数，连续 3 秒没有新丢包
+  （`DROP_EPISODE_QUIET_MS`）才算这一轮结束；否则通知文本里的计数每帧都变，Toast 无法
+  按文本去重，屏幕会被红条刷满。对应用例
+  `terminal/log::tests::data_loss_fires_once_per_drop_episode`：把丢包闩锁去掉 ⇒ 红在
+  「持续丢包不应逐帧重复上报」（实际 10 次）。`tool-panels` 全量 216 通过；
+  `cargo test --workspace --all-targets`、native 与 wasm 两套 clippy `-D warnings` 均 EXIT=0。
 - **修掉一个"从旧版本升级上来、第一次开机就丢设置"的缺陷**：`schema_version` 改名之前写的
   `workspace.json` 只用历史键 `version` 声明版本，这样的文件在本版本读不出来 ——
   `parse_persisted_config` 会无条件往 map 里 `insert("schema_version", …)`，而

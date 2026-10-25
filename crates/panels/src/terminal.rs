@@ -1,5 +1,5 @@
 use crate::{
-    MAX_INGEST_PER_FRAME, MESSAGE_EVENT_BUFFER_CAPACITY,
+    DROP_EPISODE_QUIET_MS, MAX_INGEST_PER_FRAME, MESSAGE_EVENT_BUFFER_CAPACITY,
     design::{self, ButtonKind},
     fmt_ts,
     table::{
@@ -105,6 +105,14 @@ pub struct TerminalPanel {
     pub height: f32,
     /// 是否发生过截断（用于状态栏提示，显示后清除）
     pub truncated: bool,
+    /// 当前这轮「越界」是否已经提醒过。满载期间每条新事件都会裁掉一条最旧条目，
+    /// 只有第一次置位 `truncated`；回到上限以下（清空或调高上限）才重新武装，
+    /// 否则状态栏每帧都会重新推送同一条截断通知。
+    limit_episode_reported: bool,
+    /// 同一轮持续丢包是否已经上报过。快速接收时每帧都会丢，只报第一次。
+    drop_episode_reported: bool,
+    /// 最近一次观测到丢事件的时刻（ms），用于判定这一轮丢包是否已经结束。
+    last_drop_ms: u64,
 
     /// 双击搜索匹配行时设置：下帧清除搜索并滚动到该行。
     pending_navigate_to_id: Option<u64>,
@@ -420,6 +428,9 @@ impl TerminalPanel {
 
             height: 350.0,
             truncated: false,
+            limit_episode_reported: false,
+            drop_episode_reported: false,
+            last_drop_ms: 0,
 
             pending_navigate_to_id: None,
             navigate_highlight: None,
@@ -470,6 +481,12 @@ impl TerminalPanel {
 
     pub fn clear(&mut self) {
         self.subscription.clear();
+        // 清空结束当前这轮截断：残留的提醒标志与丢事件计数都不该越过清空继续提示。
+        self.truncated = false;
+        self.limit_episode_reported = false;
+        self.drop_episode_reported = false;
+        self.last_drop_ms = 0;
+        let _ = self.subscription.take_dropped_count();
         self.store.clear();
         self.view_index.clear();
         self.auto_scroll.reset();
@@ -484,8 +501,28 @@ impl TerminalPanel {
         self.text_selection_rows.clear();
     }
 
-    pub fn take_dropped_events(&self) -> u64 {
-        self.subscription.take_dropped_count()
+    /// 取走自上次调用以来新丢弃的事件数；同一轮持续丢包只返回一次正数。
+    ///
+    /// 快速接收时 UI 消费不过来，`take_dropped_count` 每帧都会非零。若每帧都上报，
+    /// 通知文本里的计数每帧都在变，Toast 无法按文本去重，屏幕上会滚出一串新红条。
+    /// 因此本轮第一次丢包立即返回计数；之后持续丢包只更新静默计时、不重复上报；
+    /// 连续 `DROP_EPISODE_QUIET_MS` 没有新丢包才算这一轮结束，下一轮重新上报。
+    pub fn take_dropped_events(&mut self, now_ms: u64) -> u64 {
+        let dropped = self.subscription.take_dropped_count();
+        if dropped > 0 {
+            self.last_drop_ms = now_ms;
+            if self.drop_episode_reported {
+                return 0;
+            }
+            self.drop_episode_reported = true;
+            return dropped;
+        }
+        if self.drop_episode_reported
+            && now_ms.saturating_sub(self.last_drop_ms) >= DROP_EPISODE_QUIET_MS
+        {
+            self.drop_episode_reported = false;
+        }
+        0
     }
 
     /// 设置接收区的全局保留上限，并立即清理所有端口中最旧的条目。
@@ -503,6 +540,10 @@ impl TerminalPanel {
         let removed = self.store.set_max_entries(self.max_entries);
         self.view_index.mark_removed(removed.iter().copied());
         self.forget_removed_entries(&removed);
+        // 回到上限以下（清空或调高上限）说明这轮越界结束，下一轮要重新提醒。
+        if self.store.len() < self.max_entries {
+            self.limit_episode_reported = false;
+        }
     }
 
     /// 条目已从 Store 移除后，清掉仍指向它们的面板状态并标记发生过截断。
@@ -510,7 +551,12 @@ impl TerminalPanel {
         if removed.is_empty() {
             return;
         }
-        self.truncated = true;
+        // 满载是持续状态：只在进入这轮越界时置位一次。逐条置位会让状态栏每帧
+        // 重新推送截断通知，Toast 的截止时间被不断续期，看起来就是「一直弹」。
+        if !self.limit_episode_reported {
+            self.limit_episode_reported = true;
+            self.truncated = true;
+        }
         for &id in removed {
             if self.selected_entry_id == Some(id) {
                 self.selected_entry_id = None;
@@ -2814,6 +2860,115 @@ mod tests {
             .collect();
         assert!(visible_ids.windows(2).all(|pair| pair[0] < pair[1]));
         assert!(panel.truncated);
+    }
+
+    /// 截断提醒每轮「越界」只发生一次，不是每个被裁掉的事件都发生一次。
+    ///
+    /// 状态栏每帧消费 `truncated` 后把它复位；如果面板在满载期间（每条新事件都要裁掉
+    /// 一条最旧条目）继续逐条置位，通知就会被逐帧重新推送、Toast 的截止时间被反复续期，
+    /// 用户看到的是「清空数据后也一直弹截断」。`clear()` 还必须结束当前这轮，
+    /// 否则清空后残留的标志会再报一次上一轮的截断。
+    #[test]
+    fn truncation_notice_fires_once_per_over_capacity_episode() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+        panel.set_max_entries(100);
+        let publish = |index: u64| {
+            bus.publish(Event::with_timestamp(
+                index,
+                serial_topics::SERIAL_RX,
+                "serial:COM1",
+                Direction::Rx,
+                Payload::Text(format!("message-{index}\n")),
+            ));
+        };
+
+        // 恰好填满：还没裁掉任何条目，不该提醒。
+        for index in 0..100 {
+            publish(index);
+        }
+        assert_eq!(panel.ingest_all_pending(), 100);
+        assert!(!panel.truncated, "装满但未越界不应提醒截断");
+
+        // 满载后每来一条裁一条；状态栏每帧消费并复位标志。
+        let mut notices = 0;
+        for index in 100..105 {
+            publish(index);
+            assert_eq!(panel.ingest_all_pending(), 1);
+            if panel.truncated {
+                notices += 1;
+                panel.truncated = false;
+            }
+        }
+        assert_eq!(notices, 1, "同一轮满载只应提醒一次，实际 {notices} 次");
+
+        // 清空结束这一轮：后续未越界的数据不得再报截断。
+        panel.clear();
+        assert!(!panel.truncated, "清空应复位待发提醒");
+        publish(200);
+        assert_eq!(panel.ingest_all_pending(), 1);
+        assert!(!panel.truncated, "清空后未越界不应提醒截断");
+
+        // 再次越界属于新一轮，应重新提醒一次（闩锁会复位，不是一次性用完）。
+        for index in 201..302 {
+            publish(index);
+        }
+        panel.ingest_all_pending();
+        assert!(panel.truncated, "清空后再次越界应重新提醒截断");
+    }
+
+    /// 快速接收时丢包是持续状态：同一轮只上报一次，静默窗口过后才重新武装。
+    ///
+    /// 每帧都上报会让通知文本里的计数不断变化，Toast 无法按文本去重，
+    /// 屏幕上会滚出一串红条（用户看到的「一直刷屏」）。
+    #[test]
+    fn data_loss_fires_once_per_drop_episode() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+        let publish = |index: u64| {
+            bus.publish(Event::with_timestamp(
+                index,
+                serial_topics::SERIAL_RX,
+                "serial:COM1",
+                Direction::Rx,
+                Payload::Bytes(b"x".to_vec()),
+            ));
+        };
+
+        // 不摄入：把订阅环灌满并多发布 1000 条。
+        for index in 0..(crate::MESSAGE_EVENT_BUFFER_CAPACITY as u64 + 1_000) {
+            publish(index);
+        }
+        assert_eq!(
+            panel.take_dropped_events(1_000),
+            1_000,
+            "本轮第一次丢包要上报计数"
+        );
+
+        // 同一轮继续丢：不再上报。
+        for index in 0..10 {
+            publish(1_000_000 + index);
+        }
+        assert_eq!(
+            panel.take_dropped_events(2_000),
+            0,
+            "持续丢包不应逐帧重复上报"
+        );
+
+        // 静默窗口走完，这一轮结束；新的丢包重新上报。
+        assert_eq!(
+            panel.take_dropped_events(2_000 + crate::DROP_EPISODE_QUIET_MS),
+            0,
+            "静默窗口内没有新丢包时不应上报"
+        );
+        for index in 0..5 {
+            publish(2_000_000 + index);
+        }
+        assert_eq!(
+            panel.take_dropped_events(2_001 + crate::DROP_EPISODE_QUIET_MS),
+            5,
+            "新一轮丢包应重新上报"
+        );
     }
 
     #[test]
