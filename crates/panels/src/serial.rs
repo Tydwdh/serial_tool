@@ -6,7 +6,8 @@
 
 use egui::Ui;
 use egui_material_icons::icons::{
-    ICON_CABLE, ICON_CHEVRON_RIGHT, ICON_LINK_OFF, ICON_POWER_SETTINGS_NEW, ICON_REFRESH,
+    ICON_CABLE, ICON_CHEVRON_RIGHT, ICON_EXPAND_MORE, ICON_LINK_OFF, ICON_POWER_SETTINGS_NEW,
+    ICON_REFRESH,
 };
 use std::collections::BTreeMap;
 use tool_platform::{SerialParity, SerialSettings, TransportCapabilities};
@@ -165,17 +166,48 @@ impl SerialPanel {
         } else {
             crate::theme::red()
         };
-        if ui
-            .selectable_label(
-                !*collapsed,
-                egui::RichText::new(format!(
-                    "{} 串口 {} {}",
-                    ICON_CABLE.codepoint, ICON_CHEVRON_RIGHT.codepoint, connected_label,
-                ))
-                .color(color),
-            )
-            .clicked()
-        {
+        // 连接状态做成一个独立的胶囊：图标 + 端口状态 + 折叠箭头。原先的
+        // selectable_label 会在选中时整块变蓝，和「打开」按钮抢注意力。
+        let chip = egui::Frame::new()
+            .fill(color.gamma_multiply(0.10))
+            .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.32)))
+            .corner_radius(14.0)
+            .inner_margin(egui::Margin::symmetric(10, 4))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.label(
+                        egui::RichText::new(ICON_CABLE.codepoint)
+                            .size(17.0)
+                            .color(color),
+                    );
+                    ui.label(
+                        egui::RichText::new("串口")
+                            .size(13.5)
+                            .color(crate::theme::text_secondary()),
+                    );
+                    ui.label(
+                        egui::RichText::new(&connected_label)
+                            .size(13.5)
+                            .strong()
+                            .color(color),
+                    );
+                    let chevron = if *collapsed {
+                        ICON_CHEVRON_RIGHT.codepoint
+                    } else {
+                        ICON_EXPAND_MORE.codepoint
+                    };
+                    ui.label(
+                        egui::RichText::new(chevron)
+                            .size(16.0)
+                            .color(crate::theme::text_secondary()),
+                    );
+                });
+            })
+            .response
+            .interact(egui::Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if chip.clicked() {
             let was_collapsed = *collapsed;
             *collapsed = !*collapsed;
             if was_collapsed {
@@ -239,7 +271,7 @@ impl SerialPanel {
                     ui,
                     ICON_POWER_SETTINGS_NEW,
                     "打开",
-                    crate::design::ButtonKind::Ghost,
+                    crate::design::ButtonKind::Primary,
                 )
                 .clicked()
                 {
@@ -252,10 +284,17 @@ impl SerialPanel {
                 );
             }
 
-            let mut close = ui.add_enabled(
-                selected_open,
-                egui::Button::new(crate::design::icon_text(ICON_LINK_OFF, "关闭")),
-            );
+            let close = ui
+                .add_enabled_ui(selected_open, |ui| {
+                    crate::design::button(
+                        ui,
+                        ICON_LINK_OFF,
+                        "关闭",
+                        crate::design::ButtonKind::Secondary,
+                    )
+                })
+                .inner;
+            let mut close = close;
             if !selected_open {
                 close = close.on_disabled_hover_text("端口未打开");
             }
@@ -763,54 +802,67 @@ impl SerialPanel {
             118.0
         };
         ui.horizontal_wrapped(|ui| {
-            ui.label("串口参数");
-            egui::ComboBox::from_id_salt("shared-serial-baud-rate")
-                .width(combo_width)
-                .selected_text(settings.baud_rate.to_string())
-                .show_ui(ui, |ui| {
-                    for baud_rate in [
-                        9_600, 19_200, 38_400, 57_600, 115_200, 230_400, 460_800, 921_600,
-                        1_000_000, 2_000_000, 3_000_000,
-                    ] {
-                        ui.selectable_value(
-                            &mut settings.baud_rate,
-                            baud_rate,
-                            baud_rate.to_string(),
-                        );
-                    }
-                });
-            egui::ComboBox::from_id_salt("shared-serial-data-bits")
-                .width(combo_width)
-                .selected_text(settings.data_bits.to_string())
-                .show_ui(ui, |ui| {
-                    for data_bits in [5, 6, 7, 8] {
-                        ui.selectable_value(
-                            &mut settings.data_bits,
-                            data_bits,
-                            data_bits.to_string(),
-                        );
-                    }
-                });
-            egui::ComboBox::from_id_salt("shared-serial-stop-bits")
-                .width(combo_width)
-                .selected_text(settings.stop_bits.to_string())
-                .show_ui(ui, |ui| {
-                    for stop_bits in [1, 2] {
-                        ui.selectable_value(
-                            &mut settings.stop_bits,
-                            stop_bits,
-                            stop_bits.to_string(),
-                        );
-                    }
-                });
-            egui::ComboBox::from_id_salt("shared-serial-parity")
-                .width(combo_width)
-                .selected_text(parity_label(settings.parity))
-                .show_ui(ui, |ui| {
-                    for parity in [SerialParity::None, SerialParity::Odd, SerialParity::Even] {
-                        ui.selectable_value(&mut settings.parity, parity, parity_label(parity));
-                    }
-                });
+            // 四个参数各带字段名；原先只有最前面的「串口参数」一个标签，
+            // 读起来像「串口参数 115200 8 1 无」一整串数值。
+            ui.label("波特率");
+            crate::design::combo_slot(ui, combo_width, |ui| {
+                egui::ComboBox::from_id_salt("shared-serial-baud-rate")
+                    .width(combo_width)
+                    .selected_text(settings.baud_rate.to_string())
+                    .show_ui(ui, |ui| {
+                        for baud_rate in [
+                            9_600, 19_200, 38_400, 57_600, 115_200, 230_400, 460_800, 921_600,
+                            1_000_000, 2_000_000, 3_000_000,
+                        ] {
+                            ui.selectable_value(
+                                &mut settings.baud_rate,
+                                baud_rate,
+                                baud_rate.to_string(),
+                            );
+                        }
+                    });
+            });
+            ui.label("数据位");
+            crate::design::combo_slot(ui, combo_width, |ui| {
+                egui::ComboBox::from_id_salt("shared-serial-data-bits")
+                    .width(combo_width)
+                    .selected_text(settings.data_bits.to_string())
+                    .show_ui(ui, |ui| {
+                        for data_bits in [5, 6, 7, 8] {
+                            ui.selectable_value(
+                                &mut settings.data_bits,
+                                data_bits,
+                                data_bits.to_string(),
+                            );
+                        }
+                    });
+            });
+            ui.label("停止位");
+            crate::design::combo_slot(ui, combo_width, |ui| {
+                egui::ComboBox::from_id_salt("shared-serial-stop-bits")
+                    .width(combo_width)
+                    .selected_text(settings.stop_bits.to_string())
+                    .show_ui(ui, |ui| {
+                        for stop_bits in [1, 2] {
+                            ui.selectable_value(
+                                &mut settings.stop_bits,
+                                stop_bits,
+                                stop_bits.to_string(),
+                            );
+                        }
+                    });
+            });
+            ui.label("校验");
+            crate::design::combo_slot(ui, combo_width, |ui| {
+                egui::ComboBox::from_id_salt("shared-serial-parity")
+                    .width(combo_width)
+                    .selected_text(parity_label(settings.parity))
+                    .show_ui(ui, |ui| {
+                        for parity in [SerialParity::None, SerialParity::Odd, SerialParity::Even] {
+                            ui.selectable_value(&mut settings.parity, parity, parity_label(parity));
+                        }
+                    });
+            });
         });
     }
 

@@ -3,6 +3,7 @@
 //! 从 `mod.rs` 抽出的纯 UI 渲染逻辑。
 
 use super::schema::{DynamicField, DynamicFieldKind, FieldOption, compact_number};
+use crate::design;
 use crate::dynamic::PortItem;
 use crate::theme;
 use egui::{Color32, ComboBox, DragValue, ProgressBar, RichText, Slider, TextEdit};
@@ -166,35 +167,43 @@ fn render_file(
     field: &DynamicField,
     enabled: bool,
 ) {
-    ui.horizontal(|ui| {
-        ui.label(&field.label);
-        let path = field.value.as_str().unwrap_or("").to_owned();
-        let mut status = file_browse_status(&path);
-        ui.add_enabled(
-            false,
-            TextEdit::singleline(&mut status).desired_width(200.0),
-        )
-        .on_hover_text(if path.is_empty() {
-            String::new()
-        } else {
-            format!("完整路径: {path}")
-        });
-        if ui.add_enabled(enabled, egui::Button::new("浏览")).clicked() {
-            bus.publish_event(Event::new(
-                topics::UI_FORM_FILE_BROWSE,
-                format!("ui.panel:{panel_id}"),
-                Direction::Internal,
-                Payload::Json(serde_json::json!({
-                    "panel_id": panel_id,
-                    "field_id": field.id,
-                    "filters": field.filters.iter().map(|f| serde_json::json!({
-                        "name": f.name,
-                        "extensions": f.extensions,
-                    })).collect::<Vec<_>>(),
-                })),
-            ));
-        }
-    });
+    let path = field.value.as_str().unwrap_or("").to_owned();
+    let row = design::FieldRow::new(&field.label)
+        .label_width(120.0)
+        .min_value_width(180.0)
+        .min_actions_width(72.0)
+        .actions(1)
+        .show(
+            ui,
+            |ui| {
+                let mut status = file_browse_status(&path);
+                ui.add_enabled(
+                    false,
+                    TextEdit::singleline(&mut status).desired_width(ui.available_width()),
+                )
+                .on_hover_text(if path.is_empty() {
+                    String::new()
+                } else {
+                    format!("完整路径: {path}")
+                });
+            },
+            |ui| ui.add_enabled(enabled, egui::Button::new("浏览")).clicked(),
+        );
+    if row.actions {
+        bus.publish_event(Event::new(
+            topics::UI_FORM_FILE_BROWSE,
+            format!("ui.panel:{panel_id}"),
+            Direction::Internal,
+            Payload::Json(serde_json::json!({
+                "panel_id": panel_id,
+                "field_id": field.id,
+                "filters": field.filters.iter().map(|f| serde_json::json!({
+                    "name": f.name,
+                    "extensions": f.extensions,
+                })).collect::<Vec<_>>(),
+            })),
+        ));
+    }
 }
 
 /// 可编辑控件的统一行布局：label 在左、控件在右。返回本次交互是否改值。
@@ -205,20 +214,23 @@ fn render_input_row(
     ports: &[PortItem],
     enabled: bool,
 ) -> bool {
-    ui.horizontal(|ui| {
-        ui.label(&field.label);
-
-        match field.kind {
-            DynamicFieldKind::Text => render_text_field(ui, field, enabled),
-            DynamicFieldKind::Number => render_number_field(ui, field, enabled),
-            DynamicFieldKind::Boolean => render_boolean_field(ui, field, enabled),
-            DynamicFieldKind::Select => render_select_field(ui, field, panel_id),
-            DynamicFieldKind::Slider => render_slider_field(ui, field, enabled),
-            DynamicFieldKind::Serial => render_serial_field(ui, field, panel_id, ports),
-            _ => false, // Button, TextArea 等已在上面处理
-        }
-    })
-    .inner
+    // 标签先克隆：值闭包要可变借用 field，不能同时保留 &field.label。
+    let label = field.label.clone();
+    design::FieldRow::new(&label)
+        .label_width(120.0)
+        .min_value_width(220.0)
+        .show_value(ui, |ui| {
+            match field.kind {
+                DynamicFieldKind::Text => render_text_field(ui, field, enabled),
+                DynamicFieldKind::Number => render_number_field(ui, field, enabled),
+                DynamicFieldKind::Boolean => render_boolean_field(ui, field, enabled),
+                DynamicFieldKind::Select => render_select_field(ui, field, panel_id),
+                DynamicFieldKind::Slider => render_slider_field(ui, field, enabled),
+                DynamicFieldKind::Serial => render_serial_field(ui, field, panel_id, ports),
+                _ => false, // Button, TextArea 等已在上面处理
+            }
+        })
+        .value
 }
 
 /// 单行文本。
@@ -226,7 +238,7 @@ fn render_text_field(ui: &mut egui::Ui, field: &mut DynamicField, enabled: bool)
     let mut text = field.value.as_str().unwrap_or("").to_owned();
     let resp = ui.add_enabled(
         enabled,
-        TextEdit::singleline(&mut text).desired_width(220.0),
+        TextEdit::singleline(&mut text).desired_width(ui.available_width().min(220.0)),
     );
     let changed = resp.changed();
     if changed {
@@ -274,7 +286,7 @@ fn render_select_field(ui: &mut egui::Ui, field: &mut DynamicField, panel_id: &s
     let mut field_changed = false;
 
     ComboBox::from_id_salt((panel_id, &field.id))
-        .width(180.0)
+        .width(ui.available_width().min(180.0))
         .selected_text(selected_text)
         .show_ui(ui, |ui| {
             for option in options {
@@ -299,6 +311,7 @@ fn render_slider_field(ui: &mut egui::Ui, field: &mut DynamicField, enabled: boo
     let max = field.max.unwrap_or(100.0);
     let mut value = field.value.as_f64().unwrap_or(min).clamp(min, max);
 
+    ui.spacing_mut().slider_width = ui.available_width().min(180.0);
     let resp = ui.add_enabled(
         enabled,
         Slider::new(&mut value, min..=max)
@@ -339,7 +352,7 @@ fn render_serial_field(
     let mut field_changed = false;
 
     egui::ComboBox::from_id_salt((panel_id, &field.id))
-        .width(180.0)
+        .width(ui.available_width().min(180.0))
         .selected_text(selected_text)
         .show_ui(ui, |ui| {
             if ports.is_empty() {
@@ -484,5 +497,66 @@ pub(super) fn status_color(level: &str) -> Color32 {
         "warn" => theme::yellow(),
         "error" => theme::red(),
         _ => theme::text_secondary(), // idle
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn dynamic_form_text_row_fits_narrow_panel() {
+        let bus = tool_databus::DataBus::new();
+        let mut fields = vec![
+            DynamicField {
+                id: "name".to_owned(),
+                label: "名称".to_owned(),
+                kind: DynamicFieldKind::Text,
+                value: json!("hello"),
+                options: Vec::new(),
+                min: None,
+                max: None,
+                step: None,
+                rows: None,
+                variant: None,
+                text: None,
+                filters: Vec::new(),
+                enabled: true,
+                visible: true,
+                action: None,
+            },
+            DynamicField {
+                id: "path".to_owned(),
+                label: "文件".to_owned(),
+                kind: DynamicFieldKind::File,
+                value: json!(""),
+                options: Vec::new(),
+                min: None,
+                max: None,
+                step: None,
+                rows: None,
+                variant: None,
+                text: None,
+                filters: Vec::new(),
+                enabled: true,
+                visible: true,
+                action: None,
+            },
+        ];
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(240.0, 200.0),
+            )),
+            ..Default::default()
+        };
+        let mut right = 0.0;
+        let _ = ctx.run_ui(raw, |ui| {
+            dynamic_form_ui(ui, &bus, "panel", &mut fields, true, &[]);
+            right = ui.min_rect().right();
+        });
+        assert!(right <= 240.5, "dynamic form row overflowed: {right}");
     }
 }

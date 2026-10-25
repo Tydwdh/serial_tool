@@ -6,6 +6,21 @@
 
 ### 修复
 
+- **配置路径行不再被右侧裁切：图标按钮按真实 32px 计宽，标签/路径列显式占位。**
+  全局 `button_padding`（14px）与 `interact_size.x`（44px）把 `design::icon_button`
+  撑到约 47px，而配置行按 32px 计算操作列宽，于是「打开目录」被推出卡片（窄面板下
+  整行越界）。修法：
+  * `design::icon_button` 在局部样式中重置 `button_padding` / `interact_size`，并用
+    `min_size` 固定 32×32；
+  * 配置行拆成显式标签列（96px）、路径列、两个图标列；标签/路径列用 `set_min_size`
+    撑满分配宽度，路径按实际字形宽度做中间省略；低于最小路径列宽时自动改为
+    「标签一行、路径 + 按钮一行」；
+  * 新增 `config_location_rows_fit_the_card_at_all_widths`：在 484/360/280 三种宽度、
+    真实主题样式下断言两行标签/路径起点一致、路径不压按钮、两个图标都在卡片内。
+  验证：`cargo test -p hardware-workbench-app` 全部通过、
+  `cargo test -p tool-panels` 216 通过、`cargo clippy ... -D warnings` 通过；
+  native 截图确认两行路径与「打开目录」图标完整可见。
+
 - **截断提醒不再逐帧重发，清空数据后也真正结束这一轮（接收区 / 日志面板）**：满载期间每条新事件
   都会裁掉一条最旧条目，两个面板因此**每条事件**都把 `truncated` 置位；状态栏每帧消费并复位它，
   于是通知队列每帧都收到一条同 source 的新消息（新 id），Toast 的截止时间被反复续期 —— 用户看到
@@ -47,6 +62,46 @@
   * 验证：`cargo test -p tool-extension` 45 通过（生成物用例转绿）、`cargo check --workspace --all-targets`
     通过；README + docs 共 16 份 Markdown 的 63 条相对链接经脚本体检全部可解析；全仓旧路径清扫后
     只剩指向新文档的有意引用。
+
+### 调整
+
+- **行级布局收口为无状态布局组件：`design::FieldRow` / `fitted_label` / `toolbar`。**
+  之前每个面板各写 `horizontal_wrapped` + `add_sized` + 固定宽度，配置行/工具栏的
+  宽度假设与实际控件尺寸脱节时就会裁切。新增 `crates/panels/src/design/layout.rs`：
+  * `FieldRow`：固定标签列 + 弹性值列 + 右侧动作列；右侧动作先布局（`Sides::shrink_left`），
+    值列只拿剩余宽度；不足最小宽度时自动改为「标签一行、值 + 动作一行」；动作组内部
+    强制 left-to-right，复制/打开不会被镜像。
+  * `fitted_label`：按实际字形宽度做中间省略，悬停显示全文。
+  * `toolbar`：统一工具栏最小高度与换行策略。
+  * 迁移：设置页配置路径/布局恢复/主题/代理/关于等工具栏、顶栏、终端/日志两行工具栏、
+    发送器选项与动作行、插件动态表单的输入行与文件行；动态表单控件宽度改为
+    `available_width().min(...)`，窄面板不再溢出。
+  * 回归：`design::layout` 在 484/360/280/240 宽度下断言列对齐、动作不越界、窄面板堆叠；
+    设置页配置行测试保留；动态表单 240px 冒烟测试。
+  验证：`cargo test -p tool-panels` 219 通过、`cargo test -p hardware-workbench-app` 全部通过、
+  `cargo clippy ... -D warnings` 通过；native 启动核对设置页与顶部/终端/发送器工具栏。
+
+- **界面视觉统一：控件高度、圆角、字号与层级色收口到同一套设计标记。**
+  * 全局样式（`crates/app/src/bootstrap.rs`）：正文 14.5→15px、按钮 13.5→14px、
+    等宽 13.5→14px；控件交互高度 28→30px、行距 8→10px、按钮内边距 12/6→14/7px；
+    窗口/菜单圆角 10/8px，弹出层加投影；默认按钮底色由 `bg_input` 提到 `bg_tertiary`，
+    不再只在深色面板上留一圈看不见的描边。
+  * 组件层（`crates/panels/src/design.rs`）：`CONTROL_HEIGHT`/`ICON_BUTTON_SIZE` 30→32、
+    `CARD_RADIUS` 8→10、`SECTION_GAP` 12→14；卡片内边距与外框提高一个色阶；
+    `button`/`icon_button`/`segmented_toggle` 改为按状态改局部 style，恢复悬停与按下反馈
+    （`Button::fill/stroke` 原先会覆盖所有状态）；`segmented_toggle` 未选中项保留底框，
+    不再退化成纯文字；新增 `choice_toggle` 与 `empty_state_with_hint`。
+  * 顶栏（`crates/panels/src/serial.rs`）：连接状态改为独立的色调胶囊（图标 + 端口状态 +
+    折叠箭头），「打开」用主色实心按钮，「关闭」降为次级按钮；串口参数四个下拉框补上
+    「波特率 / 数据位 / 停止位 / 校验」字段名，并用 `combo_slot` 保证窄面板下正常换行。
+  * 接收区 / 日志（`terminal.rs`、`log.rs`）：空状态改为居中的图标 + 标题 + 说明；
+    内容高度铺满视口，避免「内容高于视口」触发自动跟随的逐帧滚动修复（原先会造成
+    `Harness::run` 超过 max_steps）。
+  * 发送区（`sender.rs`）：发送按钮在可发送时为蓝色主按钮，不可发送时退为中性色；
+    文本/HEX 改用统一的 `choice_toggle`。状态栏高度 30→34px（`shared_shell.rs`），
+    Dock 标签栏 36→40px。
+  * 验证：`cargo test -p tool-panels` 216 通过（1 ignored）、`cargo test -p hardware-workbench-app`
+    全通过；native 启动截图逐页核对（设备 / 设置 / 插件 / 接收区）。
 
 ## [1.3.2] - 2026-10-15
 

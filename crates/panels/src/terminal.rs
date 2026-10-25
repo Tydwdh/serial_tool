@@ -13,7 +13,7 @@ use crate::{
 use egui::text_selection::LabelSelectionState;
 use egui::{Color32, RichText, ScrollArea, Sense, Stroke};
 use egui_material_icons::icons::{
-    ICON_DELETE_SWEEP, ICON_DOWNLOAD, ICON_FILTER_ALT_OFF, ICON_SEARCH,
+    ICON_DELETE_SWEEP, ICON_DOWNLOAD, ICON_FILTER_ALT_OFF, ICON_SEARCH, ICON_TERMINAL,
 };
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
@@ -693,7 +693,7 @@ impl TerminalPanel {
             pointer_inside && crate::scroll_delta_moves_towards_bottom(scroll_delta_y);
         let mut force_scroll_to_bottom = self.auto_scroll.take_pending(&scroll_key);
 
-        ui.horizontal_wrapped(|ui| {
+        design::toolbar(ui, |ui| {
             design::segmented_toggle(ui, &mut self.show_rx, "RX", "RX");
             design::segmented_toggle(ui, &mut self.show_tx, "TX", "TX");
             design::segmented_toggle(ui, &mut self.show_hex, "HEX", "HEX");
@@ -737,7 +737,7 @@ impl TerminalPanel {
 
         force_scroll_to_bottom |= self.auto_scroll.enabled && wheel_moves_towards_bottom;
 
-        ui.horizontal_wrapped(|ui| {
+        design::toolbar(ui, |ui| {
             ui.label(design::icon_only(
                 ICON_SEARCH,
                 theme::text_secondary(),
@@ -809,10 +809,10 @@ impl TerminalPanel {
 
             let scroll_height = ui.available_height().max(40.0);
             // 空状态引导：从未收到任何数据 vs 有数据但被筛选/搜索过滤光。
-            let empty_hint = if self.store.is_empty() {
-                "暂无数据 · 选择并打开串口后开始接收"
+            let (empty_title, empty_hint) = if self.store.is_empty() {
+                ("暂无数据", "选择并打开串口后开始接收")
             } else {
-                "无匹配数据 · 试着清除筛选或搜索条件"
+                ("无匹配数据", "试着清除筛选或搜索条件")
             };
             render_rows_view(
                 ui,
@@ -830,6 +830,7 @@ impl TerminalPanel {
                     wheel_scroll_delta_y: scroll_delta_y,
                     font_size: self.font_size,
                     port_aliases: &self.port_aliases,
+                    empty_title,
                     empty_hint,
                     navigate_highlight: self.navigate_highlight,
                 },
@@ -1097,6 +1098,7 @@ struct RowsViewInputs<'a> {
     wheel_scroll_delta_y: f32,
     font_size: f32,
     port_aliases: &'a HashMap<String, String>,
+    empty_title: &'a str,
     empty_hint: &'a str,
     navigate_highlight: Option<(u64, f64)>,
 }
@@ -1111,7 +1113,16 @@ fn render_empty_rows_view(ui: &mut egui::Ui, inputs: &RowsViewInputs<'_>) -> Ren
         .auto_shrink([false, false])
         .id_salt((scroll_key, "v2"))
         .show(ui, |ui| {
-            ui.label(RichText::new(empty_hint).color(theme::text_secondary()));
+            // 内容高度铺满视口，空状态才不会触发「内容高于视口」的自动跟随修复；
+            // 引导块在剩余空间里垂直居中。
+            ui.set_min_height(height);
+            ui.add_space(((height - 96.0) * 0.5).clamp(8.0, 96.0));
+            design::empty_state_compact_with_hint(
+                ui,
+                ICON_TERMINAL,
+                inputs.empty_title,
+                empty_hint,
+            );
         });
 
     RenderOutcome {
@@ -2798,6 +2809,7 @@ mod tests {
             wheel_scroll_delta_y: 0.0,
             font_size: 13.0,
             port_aliases: &aliases,
+            empty_title: "",
             empty_hint: "",
             navigate_highlight: None,
         };

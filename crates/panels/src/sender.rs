@@ -8,7 +8,8 @@ use egui::widgets::text_edit::TextEditState;
 use egui::{Id, Ui};
 use egui_material_icons::icons::{ICON_DELETE, ICON_DELETE_SWEEP};
 
-use crate::design::combo_slot;
+use crate::design::{self, combo_slot};
+use crate::theme;
 
 // 行尾符表已收进 `tool-core`（桌面与浏览器设置共用同一份持久化形状）；
 // 这里保留旧名字，使 `tool_panels::SendLineEnding` 继续可导入。
@@ -179,8 +180,12 @@ fn render_options(ui: &mut Ui, view: &mut SendView<'_>) {
                 });
         });
         ui.separator();
-        ui.selectable_value(view.hex_mode, false, "文本");
-        ui.selectable_value(view.hex_mode, true, "HEX");
+        if design::choice_toggle(ui, !*view.hex_mode, "文本").clicked() {
+            *view.hex_mode = false;
+        }
+        if design::choice_toggle(ui, *view.hex_mode, "HEX").clicked() {
+            *view.hex_mode = true;
+        }
         if *view.hex_mode {
             ui.checkbox(view.hex_strict, "严格")
                 .on_hover_text("严格模式：每个 HEX token 必须是完整的两位字节");
@@ -202,7 +207,7 @@ fn render_options(ui: &mut Ui, view: &mut SendView<'_>) {
     // 选项行一律换行（原先 Horizontal 档走横向 ScrollArea）：控件总宽可以超过面板
     // —— Vertical 档的窄面板，或 HEX 档多出一个「严格」勾选框 —— 横向滚动会把溢出
     // 的控件藏到视野外，换行则始终可见，也不多出滚动条。
-    ui.horizontal_wrapped(|ui| row(ui, view));
+    design::toolbar(ui, |ui| row(ui, view));
 }
 
 /// 读取文本框当前光标所在的字符下标；该文本框尚未布局过时返回 `None`。
@@ -309,8 +314,21 @@ fn render_actions(ui: &mut Ui, view: &mut SendView<'_>, actions: &mut Vec<SendAc
     let target = view.target_port.clone();
 
     let render_main_row = |ui: &mut Ui, view: &mut SendView<'_>, actions: &mut Vec<SendAction>| {
+        // 发送是主操作：蓝色实心按钮把它和同排的「清空 / 历史 / 插件」分开。
+        let (send_fill, send_stroke, send_text) = if can_send {
+            (theme::blue(), theme::blue(), egui::Color32::WHITE)
+        } else {
+            (theme::bg_tertiary(), theme::border(), theme::text_dimmed())
+        };
         if ui
-            .add_enabled(can_send, egui::Button::new("发送"))
+            .add_enabled(
+                can_send,
+                egui::Button::new(egui::RichText::new("发送").strong().color(send_text))
+                    .fill(send_fill)
+                    .stroke(egui::Stroke::new(1.0, send_stroke))
+                    .corner_radius(design::CARD_RADIUS)
+                    .min_size(egui::vec2(64.0, design::CONTROL_HEIGHT)),
+            )
             .on_disabled_hover_text(
                 hex_error
                     .as_deref()
@@ -418,8 +436,8 @@ fn render_actions(ui: &mut Ui, view: &mut SendView<'_>, actions: &mut Vec<SendAc
     // 主操作行与次操作行一律换行：插件贡献的按钮（G文件/G单条/暂停恢复/取消等）
     // 会把行撑过可用宽度，用横向 ScrollArea 会把它们裁到视野外，只能靠拖动滚动条
     // 才能点到；换行则始终可见。
-    ui.horizontal_wrapped(|ui| render_main_row(ui, view, actions));
-    ui.horizontal_wrapped(|ui| render_secondary_row(ui, view, actions));
+    design::toolbar(ui, |ui| render_main_row(ui, view, actions));
+    design::toolbar(ui, |ui| render_secondary_row(ui, view, actions));
 }
 
 /// 历史弹层：标题 + 条数、过滤框、定高行列表、两步「清空全部」。

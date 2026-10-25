@@ -32,7 +32,7 @@ impl WorkbenchApp {
         let mut collapsed = self.serial.top_bar_serial_collapsed;
         let mut serial_actions = Vec::new();
 
-        ui.horizontal_wrapped(|ui| {
+        design::toolbar(ui, |ui| {
             let mut view = SerialTopBarView {
                 ports: &ports,
                 aliases: &aliases,

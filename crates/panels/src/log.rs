@@ -12,6 +12,7 @@ use crate::{
 };
 use egui::text_selection::LabelSelectionState;
 use egui::{RichText, ScrollArea, Sense, Stroke};
+use egui_material_icons::icons::ICON_ARTICLE;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use tool_core::{Event, LogLevel};
 use tool_databus::{DataBus, RingSubscription, TopicFilter};
@@ -499,7 +500,7 @@ impl LogPanel {
     /// 返回自动滚动按钮本帧是否要求强制滚到底。
     fn level_filter_toolbar(&mut self, ui: &mut egui::Ui) -> bool {
         let mut force_scroll_to_bottom = false;
-        ui.horizontal_wrapped(|ui| {
+        design::toolbar(ui, |ui| {
             self.level_filter_buttons(ui);
 
             ui.separator();
@@ -527,7 +528,7 @@ impl LogPanel {
             LogLevel::Error,
         ] {
             ui.allocate_ui_with_layout(
-                egui::vec2(btn_w, 30.0),
+                egui::vec2(btn_w, design::CONTROL_HEIGHT),
                 egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
                 |ui| {
                     if ui
@@ -582,7 +583,7 @@ impl LogPanel {
 
     /// ── 第二行：搜索 + 来源过滤 ──
     fn search_filter_toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
+        design::toolbar(ui, |ui| {
             ui.label("搜索");
             self.search.toolbar(ui, 120.0, "关键词", "区分大小写");
 
@@ -1401,17 +1402,21 @@ fn log_selected_row_indices(selection: &RowSelection) -> Vec<usize> {
 
 /// 空列表视图：无日志与无匹配共用同一条滚动路径，返回的几何与其它分支一致。
 fn render_empty_log_rows(ui: &mut egui::Ui, has_any_entries: bool) -> LogRenderOutcome {
+    let height = ui.available_height().max(40.0);
     let scroll_output = ScrollArea::vertical()
         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
         .auto_shrink([false, false])
         .id_salt(LOG_SCROLL_ID)
         .show(ui, |ui| {
-            let hint = if has_any_entries {
-                "无匹配日志 · 试着清除搜索或来源过滤"
+            let (title, hint) = if has_any_entries {
+                ("无匹配日志", "试着清除搜索或来源过滤")
             } else {
-                "应用日志会显示在这里"
+                ("暂无日志", "应用日志会显示在这里")
             };
-            ui.label(RichText::new(hint).color(theme::text_secondary()));
+            // 与终端接收区一致：内容铺满视口并居中，避免自动跟随持续重绘。
+            ui.set_min_height(height);
+            ui.add_space(((height - 96.0) * 0.5).clamp(8.0, 96.0));
+            design::empty_state_compact_with_hint(ui, ICON_ARTICLE, title, hint);
         });
 
     LogRenderOutcome {

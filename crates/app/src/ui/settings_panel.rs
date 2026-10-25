@@ -17,8 +17,6 @@ use tool_panels::{
     keymap_ui, plugin_settings_ui, theme,
 };
 
-const CONFIG_LOCATION_LABEL_WIDTH: f32 = 96.0;
-
 /// 两步确认按钮在 egui 临时记忆里的 salt。wasm 侧（`web.rs`）用同名字符串，
 /// 两侧各自渲染、互不共享状态，但读起来能认出是同一个动作。
 const LAYOUT_RESET_CONFIRM_ID: &str = "reset_workspace_layout_confirm";
@@ -34,7 +32,7 @@ impl WorkbenchApp {
             .unwrap_or(0)
             .min(4);
         design::elevated_card().show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
+            design::toolbar(ui, |ui| {
                 for (index, icon, label) in SETTINGS_NAV_ITEMS {
                     if settings_nav_button(ui, category == index, icon, label).clicked() {
                         category = index;
@@ -93,7 +91,7 @@ impl WorkbenchApp {
                 ui.set_min_width(ui.available_width());
                 design::section_header(ui, ICON_INFO, "关于");
                 ui.separator();
-                ui.horizontal_wrapped(|ui| {
+                design::toolbar(ui, |ui| {
                     ui.label(format!("硬件调试工作台 v{}", env!("CARGO_PKG_VERSION")));
                     ui.hyperlink_to(REPOSITORY_URL, REPOSITORY_URL)
                         .on_hover_text("打开项目仓库");
@@ -129,7 +127,7 @@ impl WorkbenchApp {
     /// 确认态只换成等宽标签、不插入「取消」按钮：取消由 3 秒超时 / Esc / 点击别处负责，
     /// 多一个按钮会在窄面板里把整组控件折到下一行。
     fn render_layout_reset_row(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
+        design::toolbar(ui, |ui| {
             ui.label("工作区布局");
             let armed = design::confirm_armed(ui, LAYOUT_RESET_CONFIRM_ID);
             let label = if armed {
@@ -179,7 +177,7 @@ impl WorkbenchApp {
         let mut to_remove: Option<usize> = None;
         for (index, path) in &paths {
             let path_str = path.display().to_string();
-            ui.horizontal_wrapped(|ui| {
+            design::toolbar(ui, |ui| {
                 if ui.small_button("打开").clicked() {
                     match self.load_config_from_path(path) {
                         Ok(()) => {
@@ -221,7 +219,7 @@ impl WorkbenchApp {
                 }
             }
             ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
+            design::toolbar(ui, |ui| {
                 ui.label("等宽字体大小");
                 let mut size = self.monospace_font_size;
                 let response = ui.add(
@@ -243,7 +241,7 @@ impl WorkbenchApp {
 
     /// 主题下拉框（列出主题目录下的 JSON）+ 打开主题目录。
     fn render_theme_rows(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
+        design::toolbar(ui, |ui| {
             ui.label("界面主题");
             let selected_label =
                 theme::current_theme_name().unwrap_or_else(|| "选择主题…".to_owned());
@@ -274,7 +272,7 @@ impl WorkbenchApp {
                     }
                 });
         });
-        ui.horizontal_wrapped(|ui| {
+        design::toolbar(ui, |ui| {
             if ui
                 .button("打开主题目录")
                 .on_hover_text("将 JSON 主题文件放入此目录")
@@ -292,7 +290,7 @@ impl WorkbenchApp {
             ui.set_min_width(ui.available_width());
             design::section_header(ui, ICON_NETWORK_CHECK, "网络");
             ui.separator();
-            ui.horizontal_wrapped(|ui| {
+            design::toolbar(ui, |ui| {
                 ui.label("代理地址");
                 let proxy_width = (ui.available_width() - 8.0).clamp(140.0, 260.0);
                 let response = ui
@@ -340,7 +338,7 @@ impl WorkbenchApp {
     ///
     /// 一次点击就清空全部用户配置且无法撤销，所以走两步确认（`design::confirm_*`）。
     fn render_restore_defaults_row(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
+        design::toolbar(ui, |ui| {
             let armed = design::confirm_armed(ui, RESTORE_DEFAULTS_CONFIRM_ID);
             let label = if armed {
                 "确认恢复默认设置"
@@ -400,45 +398,17 @@ impl WorkbenchApp {
         open_self: bool,
     ) {
         let path_text = path.to_owned();
-        ui.horizontal(|ui| {
-            // 固定标签列并关闭自动换行，保证两条路径的起点和右侧操作列对齐。
-            ui.add_sized(
-                egui::vec2(CONFIG_LOCATION_LABEL_WIDTH, ui.spacing().interact_size.y),
-                egui::Label::new(label).halign(egui::Align::LEFT),
-            );
-
-            // 等宽路径
-            let item_spacing = ui.spacing().item_spacing.x;
-            let action_width = design::ICON_BUTTON_SIZE * 2.0 + item_spacing * 2.0;
-            let available_width = (ui.available_width() - action_width).max(64.0);
-            let display_path = tool_panels::compact_middle(
-                &path_text,
-                ((available_width / 8.0) as usize).clamp(20, 80),
-            );
-            ui.add_sized(
-                egui::vec2(available_width, ui.spacing().interact_size.y),
-                egui::Label::new(
-                    egui::RichText::new(display_path)
-                        .monospace()
-                        .color(theme::text_primary()),
-                )
-                .truncate()
-                .halign(egui::Align::LEFT),
-            )
-            .on_hover_text(&path_text);
-            if design::icon_button(ui, ICON_CONTENT_COPY, "复制路径").clicked() {
-                copy_text_with_feedback(ui, path_text.clone(), format!("已复制{label}路径"));
+        let row = config_location_row_ui(ui, label, path);
+        if row.actions.0.clicked() {
+            copy_text_with_feedback(ui, path_text.clone(), format!("已复制{label}路径"));
+        }
+        if row.actions.1.clicked() {
+            match open_config_location(Path::new(&path_text), open_self) {
+                Ok(target) => self
+                    .set_status_force(StatusLevel::Info, format!("已打开: {}", target.display())),
+                Err(error) => self.set_status_force(StatusLevel::Error, error),
             }
-            if design::icon_button(ui, ICON_FOLDER_OPEN, "打开所在目录").clicked() {
-                match open_config_location(Path::new(&path_text), open_self) {
-                    Ok(target) => self.set_status_force(
-                        StatusLevel::Info,
-                        format!("已打开: {}", target.display()),
-                    ),
-                    Err(error) => self.set_status_force(StatusLevel::Error, error),
-                }
-            }
-        });
+        }
     }
 
     /// 快捷键编辑器：表格展示所有命令及其绑定，支持录制新快捷键。
@@ -547,6 +517,25 @@ impl WorkbenchApp {
     }
 }
 
+/// 设置页的配置路径行：布局交给 `design::FieldRow`，这里只负责绑定动作。
+fn config_location_row_ui(
+    ui: &mut egui::Ui,
+    label: &str,
+    path: &str,
+) -> design::FieldRowResponse<egui::Response, (egui::Response, egui::Response)> {
+    let font = egui::TextStyle::Monospace.resolve(ui.style());
+    design::FieldRow::new(label).actions(2).show(
+        ui,
+        |ui| design::fitted_label(ui, path, font, theme::text_primary()),
+        |ui| {
+            (
+                design::icon_button(ui, ICON_CONTENT_COPY, "复制路径"),
+                design::icon_button(ui, ICON_FOLDER_OPEN, "打开所在目录"),
+            )
+        },
+    )
+}
+
 fn open_config_location(path: &Path, open_self: bool) -> Result<PathBuf, String> {
     let target = if open_self {
         path.to_path_buf()
@@ -598,6 +587,87 @@ mod tests {
             );
             assert!(
                 (after.height() - crate::shared_settings::SETTINGS_NAV_BUTTON_SIZE.y).abs() < 0.1
+            );
+        }
+    }
+
+    #[test]
+    fn config_location_rows_fit_the_card_at_all_widths() {
+        for width in [484.0, 360.0, 280.0] {
+            let ctx = egui::Context::default();
+            egui_material_icons::initialize(&ctx);
+            // 用真实主题的 button_padding / interact_size 复现应用内布局；
+            // 默认 Context 的样式会让图标按钮恰好 32px，掩盖全局样式回归。
+            apply_theme(&ctx, theme::AppTheme::OneDarkPro);
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 300.0),
+                )),
+                ..Default::default()
+            };
+            let mut content_right = 0.0;
+            let mut rows = None;
+            let _ = ctx.run_ui(raw, |ui| {
+                design::card().show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    content_right = ui.max_rect().right();
+                    let first = config_location_row_ui(
+                        ui,
+                        "工作区配置",
+                        r"C:\Users\tyd27\AppData\Roaming\HardwareWorkbench\workspace.json",
+                    );
+                    let second = config_location_row_ui(
+                        ui,
+                        "插件配置",
+                        r"C:\Users\tyd27\AppData\Roaming\HardwareWorkbench\plugin-config",
+                    );
+                    rows = Some((first, second));
+                });
+            });
+            let (first, second) = rows.expect("两条配置路径都要渲染");
+            for row in [&first, &second] {
+                assert!(
+                    row.actions.1.rect.right() <= content_right + 0.5,
+                    "width={width}: 打开目录按钮被裁到卡片外：{:?} > {content_right}",
+                    row.actions.1.rect
+                );
+                assert!(
+                    row.actions.1.rect.left() >= row.actions.0.rect.right() - 0.5,
+                    "width={width}: 操作按钮重叠：copy={:?} open={:?}",
+                    row.actions.0.rect,
+                    row.actions.1.rect
+                );
+                assert!(
+                    row.value.rect.right() <= row.actions.0.rect.left() + 0.5,
+                    "width={width}: 路径压到复制按钮"
+                );
+                assert!(
+                    (row.actions.0.rect.width() - design::ICON_BUTTON_SIZE).abs() <= 2.0,
+                    "width={width}: 图标按钮宽度 {} 偏离 {}",
+                    row.actions.0.rect.width(),
+                    design::ICON_BUTTON_SIZE
+                );
+                assert!(
+                    (row.actions.1.rect.width() - design::ICON_BUTTON_SIZE).abs() <= 2.0,
+                    "width={width}: 图标按钮宽度 {} 偏离 {}",
+                    row.actions.1.rect.width(),
+                    design::ICON_BUTTON_SIZE
+                );
+            }
+            assert!(
+                (first.label.rect.left() - second.label.rect.left()).abs() < 0.5,
+                "width={width}: 两行标签起点不一致：{:?} vs {:?}",
+                first.label.rect,
+                second.label.rect
+            );
+            assert!(
+                (first.value.rect.left() - second.value.rect.left()).abs() < 0.5,
+                "width={width}: 两行路径起点不一致：{:?} vs {:?}（标签 {:?} / {:?}）",
+                first.value.rect,
+                second.value.rect,
+                first.label.rect,
+                second.label.rect
             );
         }
     }

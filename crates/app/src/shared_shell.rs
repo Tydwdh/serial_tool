@@ -31,15 +31,20 @@ pub(crate) fn show_shell<H: AppShellHost>(host: &mut H, ui: &mut egui::Ui) {
             egui::Frame::new()
                 .fill(theme::bg_secondary())
                 .stroke(egui::Stroke::new(1.0, theme::border()))
-                .inner_margin(egui::Margin::symmetric(10, 7)),
+                .inner_margin(egui::Margin::symmetric(14, 8)),
         )
         .show(ui, |ui| host.render_top_bar(ui));
 
     // Fixed status bar: it must not participate in the resizable bottom dock.
     egui::Panel::bottom("status-bar")
         .resizable(false)
-        .exact_size(30.0)
+        .exact_size(34.0)
         .show_separator_line(true)
+        .frame(
+            egui::Frame::new()
+                .fill(theme::bg_secondary())
+                .inner_margin(egui::Margin::symmetric(14, 4)),
+        )
         .show(ui, |ui| host.render_status_bar(ui));
 
     egui::CentralPanel::default()
@@ -142,11 +147,11 @@ impl<H: DockHost> Behavior<PanelId> for SharedTiles<'_, H> {
     }
 
     fn tab_bar_height(&self, _style: &egui::Style) -> f32 {
-        36.0
+        40.0
     }
 
     fn tab_title_spacing(&self, _visuals: &egui::Visuals) -> f32 {
-        12.0
+        14.0
     }
 
     fn tab_bar_color(&self, _visuals: &egui::Visuals) -> egui::Color32 {
