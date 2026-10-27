@@ -5,98 +5,56 @@ use crate::panel_registry::BuiltinPanel;
 use crate::shared_shell::DockHost;
 use crate::state::StatusLevel;
 use eframe::egui;
-use tool_panels::{PanelId, PluginPanelEvent, send_layout_for_width, theme};
+use tool_panels::{PluginPanelEvent, send_layout_for_width};
 
 impl WorkbenchApp {
-    fn tile_panel_body(&mut self, ui: &mut egui::Ui, id: &PanelId) {
-        self.panels.active_tab = id.clone();
-        if !self.panel_registry.is_available(id) {
-            ui.vertical_centered(|ui| {
-                ui.add_space(32.0);
-                ui.heading(self.panel_registry.title(id));
-                ui.label("当前运行环境暂不支持此功能");
-            });
-            return;
-        }
-        match self.panel_registry.kind_for(id) {
-            Some(crate::panel_registry::PanelKind::Builtin(kind)) => match kind {
-                BuiltinPanel::Devices => {
-                    egui::ScrollArea::vertical()
-                        .id_salt("scroll-devices")
-                        .show(ui, |ui| self.device_panel(ui));
-                }
-                BuiltinPanel::Replay => {
-                    let replay_status = self.workbench.query_replay();
-                    egui::ScrollArea::vertical()
-                        .id_salt("scroll-replay")
-                        .show(ui, |ui| self.replay_panel.ui(ui, &replay_status));
-                }
-                BuiltinPanel::Plugins => {
-                    let plugin_view = self.workbench.query_plugins();
-                    let summaries = plugin_view.summaries;
-                    let diagnostics = plugin_view.diagnostics;
-                    let events = egui::ScrollArea::vertical()
-                        .id_salt("scroll-plugins")
-                        .show(ui, |ui| {
-                            self.plugins_panel
-                                .ui_with_view(ui, &summaries, &diagnostics)
-                        })
-                        .inner;
-                    for plugin_id in self.plugins_panel.take_pending_restart() {
-                        // 旧运行时还在退出就把重启请求留给下一帧。判定取自 PluginManager
-                        // 的 stopping_plugins，而不是错误文案：文案一换（例如翻译成中文），
-                        // 靠子串匹配的分支会静默变成永假，「重启」就再也不生效。
-                        if self.workbench.plugin_is_stopping(&plugin_id) {
-                            self.plugins_panel.push_pending_restart(plugin_id);
-                        } else {
-                            // 其余失败保持原行为：这里不报错，插件没起来由面板状态本身呈现。
-                            let _ = self
-                                .workbench
-                                .dispatch(tool_application::AppCommand::EnablePlugin { plugin_id });
-                        }
+    fn render_platform_panel_body(&mut self, ui: &mut egui::Ui, kind: BuiltinPanel) {
+        match kind {
+            BuiltinPanel::Devices => {
+                egui::ScrollArea::vertical()
+                    .id_salt("scroll-devices")
+                    .show(ui, |ui| self.device_panel(ui));
+            }
+            BuiltinPanel::Replay => {
+                let replay_status = self.workbench.query_replay();
+                egui::ScrollArea::vertical()
+                    .id_salt("scroll-replay")
+                    .show(ui, |ui| self.replay_panel.ui(ui, &replay_status));
+            }
+            BuiltinPanel::Plugins => {
+                let plugin_view = self.workbench.query_plugins();
+                let summaries = plugin_view.summaries;
+                let diagnostics = plugin_view.diagnostics;
+                let events = egui::ScrollArea::vertical()
+                    .id_salt("scroll-plugins")
+                    .show(ui, |ui| {
+                        self.plugins_panel
+                            .ui_with_view(ui, &summaries, &diagnostics)
+                    })
+                    .inner;
+                for plugin_id in self.plugins_panel.take_pending_restart() {
+                    // 旧运行时还在退出就把重启请求留给下一帧。判定取自 PluginManager
+                    // 的 stopping_plugins，而不是错误文案。
+                    if self.workbench.plugin_is_stopping(&plugin_id) {
+                        self.plugins_panel.push_pending_restart(plugin_id);
+                    } else {
+                        let _ = self
+                            .workbench
+                            .dispatch(tool_application::AppCommand::EnablePlugin { plugin_id });
                     }
-                    self.handle_plugin_panel_events(events);
                 }
-                BuiltinPanel::Settings => {
-                    egui::ScrollArea::vertical()
-                        .id_salt("scroll-settings")
-                        .show(ui, |ui| self.settings_panel(ui));
-                }
-                BuiltinPanel::Terminal => {
-                    let started = self.perf.begin_frame();
-                    self.terminal_panel
-                        .set_port_aliases(&self.serial.port_aliases);
-                    self.terminal_panel.ui(ui);
-                    self.perf.record_terminal_render(started);
-                }
-                BuiltinPanel::Sender => match send_layout_for_width(ui.available_width()) {
-                    tool_panels::SendLayout::Horizontal => self.send_panel_horizontal(ui),
-                    tool_panels::SendLayout::Vertical => self.send_panel_vertical(ui),
-                },
-                BuiltinPanel::Logs => {
-                    let started = self.perf.begin_frame();
-                    self.bottom_log_panel.ui(ui);
-                    self.perf.record_log_render(started);
-                }
-                BuiltinPanel::Chart => {
-                    let started = self.perf.begin_frame();
-                    self.chart_panel.ui(ui);
-                    self.perf.record_chart_render(started);
-                }
+                self.handle_plugin_panel_events(events);
+            }
+            BuiltinPanel::Settings => {
+                egui::ScrollArea::vertical()
+                    .id_salt("scroll-settings")
+                    .show(ui, |ui| self.settings_panel(ui));
+            }
+            BuiltinPanel::Sender => match send_layout_for_width(ui.available_width()) {
+                tool_panels::SendLayout::Horizontal => self.send_panel_horizontal(ui),
+                tool_panels::SendLayout::Vertical => self.send_panel_vertical(ui),
             },
-            Some(crate::panel_registry::PanelKind::Dynamic { suffix }) => {
-                if self.dynamic_panels.contains(&suffix) {
-                    let started = self.perf.begin_frame();
-                    let _ = egui::ScrollArea::vertical()
-                        .show(ui, |ui| self.dynamic_panels.ui_body(ui, &suffix));
-                    self.perf.record_chart_render(started);
-                } else {
-                    ui.colored_label(theme::red(), format!("动态面板不存在：{suffix}"));
-                }
-            }
-            None => {
-                ui.colored_label(theme::red(), format!("面板不存在：{id}"));
-            }
+            BuiltinPanel::Terminal | BuiltinPanel::Chart | BuiltinPanel::Logs => {}
         }
     }
 
@@ -171,6 +129,8 @@ impl WorkbenchApp {
 }
 
 impl DockHost for WorkbenchApp {
+    type RenderStart = std::time::Instant;
+
     fn panels(&mut self) -> &mut tool_panels::PanelManager {
         &mut self.panels
     }
@@ -183,8 +143,39 @@ impl DockHost for WorkbenchApp {
         &self.panel_registry
     }
 
-    fn render_panel(&mut self, ui: &mut egui::Ui, id: &PanelId) {
-        self.tile_panel_body(ui, id);
+    fn shared_panels(&mut self) -> crate::shared_shell::SharedPanels<'_> {
+        crate::shared_shell::SharedPanels {
+            terminal: &mut self.terminal_panel,
+            chart: &mut self.chart_panel,
+            log: &mut self.bottom_log_panel,
+            dynamic: &mut self.dynamic_panels,
+        }
+    }
+
+    fn render_platform_panel(&mut self, ui: &mut egui::Ui, kind: BuiltinPanel) {
+        self.render_platform_panel_body(ui, kind);
+    }
+
+    fn prepare_terminal_panel(&mut self) {
+        self.terminal_panel
+            .set_port_aliases(&self.serial.port_aliases);
+    }
+
+    fn panel_render_start(&self) -> Self::RenderStart {
+        self.perf.begin_frame()
+    }
+
+    fn note_panel_render(&mut self, kind: BuiltinPanel, started: Self::RenderStart) {
+        match kind {
+            BuiltinPanel::Terminal => self.perf.record_terminal_render(started),
+            BuiltinPanel::Chart => self.perf.record_chart_render(started),
+            BuiltinPanel::Logs => self.perf.record_log_render(started),
+            _ => {}
+        }
+    }
+
+    fn note_dynamic_panel_render(&mut self, started: Self::RenderStart) {
+        self.perf.record_chart_render(started);
     }
 
     fn mark_layout_dirty(&mut self) {

@@ -12,21 +12,6 @@ use crate::{
     TransportCapabilities, TransportError, TransportFuture, TransportResult,
 };
 
-#[derive(Clone)]
-pub struct NativeTransportBackend {
-    manager: TransportManager,
-}
-
-impl NativeTransportBackend {
-    pub fn new(manager: TransportManager) -> Self {
-        Self { manager }
-    }
-
-    pub fn manager(&self) -> &TransportManager {
-        &self.manager
-    }
-}
-
 fn spawn_blocking<T, F>(work: F) -> TransportFuture<T>
 where
     T: Send + 'static,
@@ -76,13 +61,13 @@ fn settings_to_native(port: PortId, settings: SerialSettings) -> SerialConfig {
     }
 }
 
-impl TransportBackend for NativeTransportBackend {
+impl TransportBackend for TransportManager {
     fn capabilities(&self) -> TransportCapabilities {
         TransportCapabilities::NATIVE_SERIAL
     }
 
     fn list_known_ports(&self) -> TransportFuture<Vec<PortDescriptor>> {
-        let manager = self.manager.clone();
+        let manager = self.clone();
         spawn_blocking(move || {
             manager
                 .list_serial_ports()
@@ -118,7 +103,7 @@ impl TransportBackend for NativeTransportBackend {
     }
 
     fn connect(&self, port: PortId, settings: SerialSettings) -> TransportFuture<()> {
-        let manager = self.manager.clone();
+        let manager = self.clone();
         spawn_blocking(move || {
             manager
                 .open_serial(settings_to_native(port, settings))
@@ -127,7 +112,7 @@ impl TransportBackend for NativeTransportBackend {
     }
 
     fn disconnect(&self, port: PortId) -> TransportFuture<()> {
-        let manager = self.manager.clone();
+        let manager = self.clone();
         spawn_blocking(move || {
             // `close_port` only signals the worker and returns. Reconnect can
             // therefore race the still-running native handle and get
@@ -140,7 +125,7 @@ impl TransportBackend for NativeTransportBackend {
     }
 
     fn send(&self, port: PortId, bytes: Vec<u8>) -> TransportFuture<()> {
-        let manager = self.manager.clone();
+        let manager = self.clone();
         spawn_blocking(move || {
             manager
                 .send_to(port.as_str(), bytes)
@@ -149,7 +134,7 @@ impl TransportBackend for NativeTransportBackend {
     }
 
     fn set_dtr(&self, port: PortId, value: bool) -> TransportFuture<()> {
-        let manager = self.manager.clone();
+        let manager = self.clone();
         spawn_blocking(move || {
             manager
                 .set_dtr_blocking(port.as_str(), value, Duration::from_secs(5))
@@ -158,7 +143,7 @@ impl TransportBackend for NativeTransportBackend {
     }
 
     fn set_rts(&self, port: PortId, value: bool) -> TransportFuture<()> {
-        let manager = self.manager.clone();
+        let manager = self.clone();
         spawn_blocking(move || {
             manager
                 .set_rts_blocking(port.as_str(), value, Duration::from_secs(5))

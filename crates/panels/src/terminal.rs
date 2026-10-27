@@ -1,5 +1,6 @@
+use crate::scrollback::{ExportChunkState, Scrollback};
 use crate::{
-    DROP_EPISODE_QUIET_MS, MAX_INGEST_PER_FRAME, MESSAGE_EVENT_BUFFER_CAPACITY,
+    MAX_INGEST_PER_FRAME, MESSAGE_EVENT_BUFFER_CAPACITY,
     design::{self, ButtonKind},
     fmt_ts,
     table::{
@@ -23,7 +24,7 @@ use tool_application::service::terminal_store::{
 };
 use tool_core::topics as serial_topics;
 use tool_core::{Direction, Event};
-use tool_databus::{DataBus, RingSubscription, TopicFilter};
+use tool_databus::{DataBus, TopicFilter};
 
 const TIME_COL_WIDTH: f32 = 118.0;
 const PORT_COL_WIDTH: f32 = 52.0;
@@ -82,7 +83,7 @@ const NAV_HIGHLIGHT_DURATION: f64 = 1.5;
 const NAV_FADE: f64 = 0.3;
 
 pub struct TerminalPanel {
-    subscription: RingSubscription,
+    scrollback: Scrollback,
     store: TerminalStore,
     assembler: TerminalAssembler,
     view_index: TerminalViewIndex,
@@ -100,19 +101,7 @@ pub struct TerminalPanel {
     search: MessageSearch,
     port_filter: Option<String>,
 
-    pub max_entries: usize,
-
     pub height: f32,
-    /// 是否发生过截断（用于状态栏提示，显示后清除）
-    pub truncated: bool,
-    /// 当前这轮「越界」是否已经提醒过。满载期间每条新事件都会裁掉一条最旧条目，
-    /// 只有第一次置位 `truncated`；回到上限以下（清空或调高上限）才重新武装，
-    /// 否则状态栏每帧都会重新推送同一条截断通知。
-    limit_episode_reported: bool,
-    /// 同一轮持续丢包是否已经上报过。快速接收时每帧都会丢，只报第一次。
-    drop_episode_reported: bool,
-    /// 最近一次观测到丢事件的时刻（ms），用于判定这一轮丢包是否已经结束。
-    last_drop_ms: u64,
 
     /// 双击搜索匹配行时设置：下帧清除搜索并滚动到该行。
     pending_navigate_to_id: Option<u64>,
@@ -153,9 +142,7 @@ pub struct TerminalExportCursor {
     filter: TerminalViewFilter,
     last_id: Option<u64>,
     max_id: Option<u64>,
-    started: bool,
-    emitted: bool,
-    done: bool,
+    progress: ExportChunkState,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -401,9 +388,11 @@ struct RenderOutcome {
 impl TerminalPanel {
     pub fn new(bus: &DataBus) -> Self {
         Self {
-            subscription: bus.subscribe_ring_bounded(
+            scrollback: Scrollback::new(
+                bus,
                 TopicFilter::prefix("transport.serial."),
                 MESSAGE_EVENT_BUFFER_CAPACITY,
+                50_000,
             ),
             store: TerminalStore::new(50_000),
             assembler: TerminalAssembler {
@@ -423,13 +412,7 @@ impl TerminalPanel {
             search: MessageSearch::default(),
             port_filter: None,
 
-            max_entries: 50_000,
-
             height: 350.0,
-            truncated: false,
-            limit_episode_reported: false,
-            drop_episode_reported: false,
-            last_drop_ms: 0,
 
             pending_navigate_to_id: None,
             navigate_highlight: None,
@@ -458,8 +441,8 @@ impl TerminalPanel {
 
     fn ingest(&mut self, budget: usize) -> usize {
         let mut count = 0;
-
-        for event in self.subscription.drain_limited(budget) {
+        let mut batch = self.scrollback.take_batch(budget);
+        for event in batch.drain(..) {
             if !matches!(
                 event.topic.as_str(),
                 serial_topics::SERIAL_RX | serial_topics::SERIAL_TX
@@ -470,6 +453,7 @@ impl TerminalPanel {
             self.push_event(event);
             count += 1;
         }
+        self.scrollback.recycle_batch(batch);
 
         if count > 0 {
             self.enforce_max_entries();
@@ -479,13 +463,7 @@ impl TerminalPanel {
     }
 
     pub fn clear(&mut self) {
-        self.subscription.clear();
-        // 清空结束当前这轮截断：残留的提醒标志与丢事件计数都不该越过清空继续提示。
-        self.truncated = false;
-        self.limit_episode_reported = false;
-        self.drop_episode_reported = false;
-        self.last_drop_ms = 0;
-        let _ = self.subscription.take_dropped_count();
+        self.scrollback.clear();
         self.store.clear();
         self.view_index.clear();
         self.auto_scroll.reset();
@@ -507,26 +485,38 @@ impl TerminalPanel {
     /// 因此本轮第一次丢包立即返回计数；之后持续丢包只更新静默计时、不重复上报；
     /// 连续 `DROP_EPISODE_QUIET_MS` 没有新丢包才算这一轮结束，下一轮重新上报。
     pub fn take_dropped_events(&mut self, now_ms: u64) -> u64 {
-        let dropped = self.subscription.take_dropped_count();
-        if dropped > 0 {
-            self.last_drop_ms = now_ms;
-            if self.drop_episode_reported {
-                return 0;
-            }
-            self.drop_episode_reported = true;
-            return dropped;
-        }
-        if self.drop_episode_reported
-            && now_ms.saturating_sub(self.last_drop_ms) >= DROP_EPISODE_QUIET_MS
-        {
-            self.drop_episode_reported = false;
-        }
-        0
+        self.scrollback.take_dropped_events(now_ms)
+    }
+
+    pub fn max_entries(&self) -> usize {
+        self.scrollback.max_entries()
+    }
+
+    pub fn max_entries_mut(&mut self) -> &mut usize {
+        self.scrollback.max_entries_mut()
+    }
+
+    /// Split borrow for the shared data-settings view: the merge window and
+    /// the retention cap live in different fields, so hand both out at once.
+    pub fn data_settings_mut(&mut self) -> (&mut u64, &mut usize) {
+        (&mut self.merge_window_ms, self.scrollback.max_entries_mut())
+    }
+
+    pub fn take_truncated(&mut self) -> bool {
+        self.scrollback.take_truncated()
+    }
+
+    pub fn truncated(&self) -> bool {
+        self.scrollback.truncated()
+    }
+
+    pub fn clear_truncated(&mut self) {
+        self.scrollback.clear_truncated();
     }
 
     /// 设置接收区的全局保留上限，并立即清理所有端口中最旧的条目。
     pub fn set_max_entries(&mut self, max_entries: usize) {
-        self.max_entries = max_entries.max(100);
+        self.scrollback.set_max_entries(max_entries);
         self.enforce_max_entries();
     }
 
@@ -536,25 +526,17 @@ impl TerminalPanel {
     }
 
     fn enforce_max_entries(&mut self) {
-        let removed = self.store.set_max_entries(self.max_entries);
+        let removed = self.store.set_max_entries(self.scrollback.max_entries());
         self.view_index.mark_removed(removed.iter().copied());
         self.forget_removed_entries(&removed);
-        // 回到上限以下（清空或调高上限）说明这轮越界结束，下一轮要重新提醒。
-        if self.store.len() < self.max_entries {
-            self.limit_episode_reported = false;
-        }
+        self.scrollback
+            .note_trimmed(removed.len(), self.store.len());
     }
 
     /// 条目已从 Store 移除后，清掉仍指向它们的面板状态并标记发生过截断。
     fn forget_removed_entries(&mut self, removed: &[u64]) {
         if removed.is_empty() {
             return;
-        }
-        // 满载是持续状态：只在进入这轮越界时置位一次。逐条置位会让状态栏每帧
-        // 重新推送截断通知，Toast 的截止时间被不断续期，看起来就是「一直弹」。
-        if !self.limit_episode_reported {
-            self.limit_episode_reported = true;
-            self.truncated = true;
         }
         for &id in removed {
             if self.selected_entry_id == Some(id) {
@@ -599,9 +581,7 @@ impl TerminalPanel {
             filter: self.current_view_filter(),
             last_id: None,
             max_id: self.store.iter().next_back().map(TerminalItem::id),
-            started: false,
-            emitted: false,
-            done: false,
+            progress: ExportChunkState::new(),
         }
     }
 
@@ -615,7 +595,7 @@ impl TerminalPanel {
         format: TerminalExportFormat,
         scan_budget: usize,
     ) -> (String, bool, usize) {
-        if cursor.done {
+        if cursor.progress.done() {
             return (String::new(), true, 0);
         }
         let query = self.search.query();
@@ -637,14 +617,12 @@ impl TerminalPanel {
                 rows.push(VisibleRow::from_item(item));
             }
         }
-        cursor.done = iter
+        let done = iter
             .peek()
             .is_none_or(|item| cursor.max_id.is_some_and(|max_id| item.id() > max_id));
-        let first = !cursor.started;
-        let has_previous = cursor.emitted;
-        cursor.started = true;
+        let (first, has_previous) = cursor.progress.begin();
         let exported = rows.len();
-        cursor.emitted |= exported > 0;
+        cursor.progress.finish(done, exported);
         (
             render_terminal_export_chunk(
                 format,
@@ -653,9 +631,9 @@ impl TerminalPanel {
                 cursor.filter.show_raw,
                 first,
                 has_previous,
-                cursor.done,
+                done,
             ),
-            cursor.done,
+            done,
             exported,
         )
     }
@@ -895,6 +873,8 @@ impl TerminalPanel {
         self.view_index
             .mark_removed(update.removed_ids.iter().copied());
         self.forget_removed_entries(&update.removed_ids);
+        self.scrollback
+            .note_trimmed(update.removed_ids.len(), self.store.len());
         // 全局上限裁掉的条目走与 set_max_entries 相同的清理路径。
         self.enforce_max_entries();
     }
@@ -2889,7 +2869,7 @@ mod tests {
             .map(|row| row.id)
             .collect();
         assert!(visible_ids.windows(2).all(|pair| pair[0] < pair[1]));
-        assert!(panel.truncated);
+        assert!(panel.truncated());
     }
 
     /// 截断提醒每轮「越界」只发生一次，不是每个被裁掉的事件都发生一次。
@@ -2918,33 +2898,33 @@ mod tests {
             publish(index);
         }
         assert_eq!(panel.ingest_all_pending(), 100);
-        assert!(!panel.truncated, "装满但未越界不应提醒截断");
+        assert!(!panel.truncated(), "装满但未越界不应提醒截断");
 
         // 满载后每来一条裁一条；状态栏每帧消费并复位标志。
         let mut notices = 0;
         for index in 100..105 {
             publish(index);
             assert_eq!(panel.ingest_all_pending(), 1);
-            if panel.truncated {
+            if panel.truncated() {
                 notices += 1;
-                panel.truncated = false;
+                panel.clear_truncated();
             }
         }
         assert_eq!(notices, 1, "同一轮满载只应提醒一次，实际 {notices} 次");
 
         // 清空结束这一轮：后续未越界的数据不得再报截断。
         panel.clear();
-        assert!(!panel.truncated, "清空应复位待发提醒");
+        assert!(!panel.truncated(), "清空应复位待发提醒");
         publish(200);
         assert_eq!(panel.ingest_all_pending(), 1);
-        assert!(!panel.truncated, "清空后未越界不应提醒截断");
+        assert!(!panel.truncated(), "清空后未越界不应提醒截断");
 
         // 再次越界属于新一轮，应重新提醒一次（闩锁会复位，不是一次性用完）。
         for index in 201..302 {
             publish(index);
         }
         panel.ingest_all_pending();
-        assert!(panel.truncated, "清空后再次越界应重新提醒截断");
+        assert!(panel.truncated(), "清空后再次越界应重新提醒截断");
     }
 
     /// 快速接收时丢包是持续状态：同一轮只上报一次，静默窗口过后才重新武装。

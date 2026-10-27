@@ -1,19 +1,101 @@
 //! Shared egui/egui_tiles shell used by Native and Web.
 
-use crate::panel_registry::PanelRegistry;
+use crate::panel_registry::{BuiltinPanel, PanelKind, PanelRegistry};
 use eframe::egui;
 use egui_tiles::{
     Behavior, Container, ContainerKind, DragPreview, EditAction, ResizeState,
     SimplificationOptions, TabState, Tile, TileId, Tiles, UiResponse,
 };
-use tool_panels::{PanelId, PanelManager, theme};
+use tool_panels::{
+    ChartPanel, DynamicPanels, LogPanel, PanelId, PanelManager, TerminalPanel, theme,
+};
 
 pub(crate) trait DockHost {
+    /// Native measures with `Instant`; web measures with a JS timestamp.
+    type RenderStart: Copy;
+
     fn panels(&mut self) -> &mut PanelManager;
     fn panels_ref(&self) -> &PanelManager;
     fn panel_registry(&self) -> &PanelRegistry;
-    fn render_panel(&mut self, ui: &mut egui::Ui, id: &PanelId);
+    fn shared_panels(&mut self) -> SharedPanels<'_>;
+    /// Render the panels whose bodies genuinely differ per platform.
+    fn render_platform_panel(&mut self, ui: &mut egui::Ui, kind: BuiltinPanel);
+    /// Push platform-specific state into the shared Terminal panel.
+    fn prepare_terminal_panel(&mut self) {}
+    fn panel_render_start(&self) -> Self::RenderStart;
+    fn note_panel_render(&mut self, _kind: BuiltinPanel, _started: Self::RenderStart) {}
+    fn note_dynamic_panel_render(&mut self, _started: Self::RenderStart) {}
     fn mark_layout_dirty(&mut self);
+}
+
+/// The shared panel bodies, handed to the shell through one accessor.
+pub(crate) struct SharedPanels<'a> {
+    pub terminal: &'a mut TerminalPanel,
+    pub chart: &'a mut ChartPanel,
+    pub log: &'a mut LogPanel,
+    pub dynamic: &'a mut DynamicPanels,
+}
+
+impl SharedPanels<'_> {
+    fn render_dynamic(&mut self, ui: &mut egui::Ui, suffix: &str) {
+        let _ = egui::ScrollArea::vertical().show(ui, |ui| self.dynamic.ui_body(ui, suffix));
+    }
+}
+
+/// The single built-in panel dispatch. Shared bodies are rendered here; the
+/// platform leaves are delegated to [`DockHost::render_platform_panel`].
+pub(crate) fn render_panel<H: DockHost>(host: &mut H, ui: &mut egui::Ui, id: &PanelId) {
+    host.panels().active_tab = id.clone();
+    let (available, title, kind) = {
+        let registry = host.panel_registry();
+        (
+            registry.is_available(id),
+            registry.title(id),
+            registry.kind_for(id),
+        )
+    };
+    if !available {
+        ui.vertical_centered(|ui| {
+            ui.add_space(32.0);
+            ui.heading(title);
+            ui.label("当前运行环境没有提供这个面板所需的平台能力");
+            ui.small("这不是布局占位；请检查浏览器权限、设备能力或插件运行状态。");
+        });
+        return;
+    }
+    match kind {
+        Some(PanelKind::Builtin(kind)) => match kind {
+            BuiltinPanel::Terminal => {
+                host.prepare_terminal_panel();
+                let started = host.panel_render_start();
+                host.shared_panels().terminal.ui(ui);
+                host.note_panel_render(kind, started);
+            }
+            BuiltinPanel::Chart => {
+                let started = host.panel_render_start();
+                host.shared_panels().chart.ui(ui);
+                host.note_panel_render(kind, started);
+            }
+            BuiltinPanel::Logs => {
+                let started = host.panel_render_start();
+                host.shared_panels().log.ui(ui);
+                host.note_panel_render(kind, started);
+            }
+            _ => host.render_platform_panel(ui, kind),
+        },
+        Some(PanelKind::Dynamic { suffix }) => {
+            if host.shared_panels().dynamic.contains(&suffix) {
+                let started = host.panel_render_start();
+                host.shared_panels().render_dynamic(ui, &suffix);
+                host.note_dynamic_panel_render(started);
+            } else {
+                ui.colored_label(theme::red(), format!("动态面板不存在：{suffix}"));
+            }
+        }
+        None => {
+            ui.colored_label(theme::red(), format!("面板不存在：{id}"));
+        }
+    }
 }
 
 /// Shared application chrome. Native and Web provide only the contents of the
@@ -104,7 +186,7 @@ impl<H: DockHost> SharedTiles<'_, H> {
 
 impl<H: DockHost> Behavior<PanelId> for SharedTiles<'_, H> {
     fn pane_ui(&mut self, ui: &mut egui::Ui, _tile_id: TileId, pane: &mut PanelId) -> UiResponse {
-        self.host.render_panel(ui, pane);
+        render_panel(self.host, ui, pane);
         UiResponse::None
     }
 

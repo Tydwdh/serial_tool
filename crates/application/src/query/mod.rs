@@ -1,115 +1,20 @@
-//! Query — 只读视图，UI 通过 `Workbench::query_*()` 读取状态。
-
-use tool_platform::NetworkSerialConfig;
-use tool_transport::{SerialPortDescriptor, TransportStatus};
-
-pub use crate::recording::{RecordModeView, RecorderStatsView, RecordingStatusView};
+//! Query — 只读视图，UI 通过 `AppRuntime::query_*()` 读取状态。
 
 pub use crate::plugin::{
     PluginCommandView, PluginContributesView, PluginDiagnosticSeverityView, PluginDiagnosticView,
     PluginPanelContributionView, PluginSettingView, PluginStateView, PluginSummaryView,
     PluginUiContributionView, PluginView,
 };
+pub use crate::recording::{RecordModeView, RecorderStatsView, RecordingStatusView};
 pub use crate::replay::{
     ReplayBlockReasonView, ReplayBookmarkView, ReplayLoadReportView, ReplayPolicyView,
     ReplayStateView, ReplayStatusView,
 };
+pub use crate::transport::{
+    PortStatusView, PortTypeView, PortView, SerialConfigView, TransportView,
+};
 
-pub type NetworkPortConfig = NetworkSerialConfig;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PortTypeView {
-    Usb(String),
-    Bluetooth,
-    Pci,
-    Network,
-    Unknown,
-}
-
-impl PortTypeView {
-    pub fn is_network(&self) -> bool {
-        matches!(self, Self::Network)
-    }
-}
-
-impl std::fmt::Display for PortTypeView {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Usb(product) if !product.is_empty() => write!(f, "{product}"),
-            Self::Usb(_) => write!(f, "USB"),
-            Self::Bluetooth => write!(f, "Bluetooth"),
-            Self::Pci => write!(f, "PCI"),
-            Self::Network => write!(f, "网络"),
-            Self::Unknown => Ok(()),
-        }
-    }
-}
-
-impl From<tool_transport::PortType> for PortTypeView {
-    fn from(port_type: tool_transport::PortType) -> Self {
-        match port_type {
-            tool_transport::PortType::Usb(product) => Self::Usb(product),
-            tool_transport::PortType::Bluetooth => Self::Bluetooth,
-            tool_transport::PortType::Pci => Self::Pci,
-            tool_transport::PortType::Network => Self::Network,
-            tool_transport::PortType::Unknown => Self::Unknown,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PortView {
-    pub port_name: String,
-    pub port_type: PortTypeView,
-}
-
-impl From<SerialPortDescriptor> for PortView {
-    fn from(port: SerialPortDescriptor) -> Self {
-        Self {
-            port_name: port.port_name,
-            port_type: port.port_type.into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TransportStatusView {
-    pub open: bool,
-    pub port_name: Option<String>,
-    pub baud_rate: Option<u32>,
-    pub connecting: bool,
-}
-
-impl TransportStatusView {
-    pub fn closed() -> Self {
-        Self {
-            open: false,
-            port_name: None,
-            baud_rate: None,
-            connecting: false,
-        }
-    }
-}
-
-impl From<TransportStatus> for TransportStatusView {
-    fn from(status: TransportStatus) -> Self {
-        Self {
-            open: status.open,
-            port_name: status.port_name,
-            baud_rate: status.baud_rate,
-            connecting: status.connecting,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SerialConfigView {
-    pub port_name: String,
-    pub baud_rate: u32,
-    pub data_bits: String,
-    pub stop_bits: String,
-    pub parity: String,
-}
+pub type NetworkPortConfig = tool_platform::NetworkSerialConfig;
 
 impl From<tool_recorder::ReplayState> for ReplayStateView {
     fn from(state: tool_recorder::ReplayState) -> Self {
@@ -160,15 +65,6 @@ impl From<tool_recorder::ReplayLoadReport> for ReplayLoadReportView {
             first_errors: report.first_errors,
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct TransportView {
-    pub ports: Vec<PortView>,
-    pub open_ports: Vec<String>,
-    pub statuses: Vec<TransportStatusView>,
-    pub config: SerialConfigView,
-    pub auto_reconnect: bool,
 }
 
 // 插件清单的应用层只读视图。

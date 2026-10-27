@@ -53,8 +53,10 @@ impl WorkbenchApp {
             .is_some_and(|handle| !handle.is_finished());
 
         self.poll_replay_analyzer_result();
-        self.replay_panel
-            .set_load_pending(self.workbench.has_active_task_kind("load_replay"));
+        self.replay_panel.set_load_pending(
+            self.workbench
+                .has_active_task_kind(tool_application::TaskKind::LoadReplay.as_str()),
+        );
 
         let was_playing = self.workbench.query_replay().state == ReplayStateView::Playing;
         let published = self.workbench.tick_replay();

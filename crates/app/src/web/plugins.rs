@@ -115,7 +115,10 @@ impl WorkbenchApp {
         record.loading = true;
         record.error = None;
         record.load_task = runtime.as_ref().map(|runtime| {
-            runtime.begin_task("plugin_load", format!("正在加载 Lua 插件：{plugin_name}"))
+            runtime.begin_task(
+                tool_application::TaskKind::PluginLoad,
+                format!("正在加载 Lua 插件：{plugin_name}"),
+            )
         });
 
         if runtime_name != "lua" {
@@ -1092,9 +1095,6 @@ impl WorkbenchApp {
                         .map(|value| value.to_string())
                         .unwrap_or_default()
                 );
-            }
-            Ok(PluginCallResult::Yielded { .. }) => {
-                self.serial.borrow_mut().status = format!("{plugin_id}：命令已进入异步任务");
             }
             Err(error) => self.serial.borrow_mut().status = error.to_string(),
         }

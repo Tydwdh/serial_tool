@@ -15,6 +15,7 @@ mod recording;
 mod replay;
 mod replay_policy;
 mod replay_view;
+mod scrollback;
 mod search;
 pub mod sender;
 pub mod serial;

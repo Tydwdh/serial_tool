@@ -16,7 +16,7 @@ impl WorkbenchApp {
             .ports
             .iter()
             .map(|port| tool_panels::PortItem {
-                port_name: port.port_name.clone(),
+                port_name: port.id.to_string(),
             })
             .collect();
         self.dynamic_panels.set_ports(&port_items);

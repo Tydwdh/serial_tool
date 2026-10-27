@@ -233,7 +233,7 @@ impl WorkbenchApp {
             .serial
             .ports
             .iter()
-            .map(|port| port.port_name.as_str())
+            .map(|port| port.id.as_str())
             .collect();
         let stale: Vec<&String> = transport_open
             .iter()

@@ -19,6 +19,116 @@ pub enum TaskState {
     Cancelled,
 }
 
+/// Stable task-kind vocabulary shared by both composition roots.
+///
+/// The snapshot keeps a `String` so existing UI/serde consumers stay
+/// compatible, but producers no longer spell the names by hand: native and
+/// web pass the same variants, so `reconnect_serial` cannot drift into
+/// `reconnect` on one side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TaskKind {
+    RefreshPorts,
+    RequestPort,
+    ConnectSerial,
+    ConnectNetwork,
+    ReconnectSerial,
+    ReconnectNetwork,
+    DisconnectSerial,
+    DisconnectNetwork,
+    CancelReconnect,
+    SetDtr,
+    SetRts,
+    SendSerial,
+    SendNetwork,
+    LoadReplay,
+    ReloadPlugins,
+    DiscoverPlugins,
+    ExportRecording,
+    ExportTerminal,
+    ExportLog,
+    PluginLoad,
+    ReplayAnalyzer,
+    MarketplaceRefresh,
+    MarketplaceInstall,
+    UpdateCheck,
+    RemoveNetworkPort,
+}
+
+impl TaskKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RefreshPorts => "refresh_ports",
+            Self::RequestPort => "request_port",
+            Self::ConnectSerial => "connect_serial",
+            Self::ConnectNetwork => "connect_network",
+            Self::ReconnectSerial => "reconnect_serial",
+            Self::ReconnectNetwork => "reconnect_network",
+            Self::DisconnectSerial => "disconnect_serial",
+            Self::DisconnectNetwork => "disconnect_network",
+            Self::CancelReconnect => "cancel_reconnect",
+            Self::SetDtr => "set_dtr",
+            Self::SetRts => "set_rts",
+            Self::SendSerial => "send_serial",
+            Self::SendNetwork => "send_network",
+            Self::LoadReplay => "load_replay",
+            Self::ReloadPlugins => "reload_plugins",
+            Self::DiscoverPlugins => "discover_plugins",
+            Self::ExportRecording => "export_recording",
+            Self::ExportTerminal => "export_terminal",
+            Self::ExportLog => "export_log",
+            Self::PluginLoad => "plugin_load",
+            Self::ReplayAnalyzer => "replay_analyzer",
+            Self::MarketplaceRefresh => "marketplace_refresh",
+            Self::MarketplaceInstall => "marketplace_install",
+            Self::UpdateCheck => "update_check",
+            Self::RemoveNetworkPort => "remove_network_port",
+        }
+    }
+
+    pub fn from_name(value: &str) -> Option<Self> {
+        Some(match value {
+            "refresh_ports" => Self::RefreshPorts,
+            "request_port" => Self::RequestPort,
+            "connect_serial" => Self::ConnectSerial,
+            "connect_network" => Self::ConnectNetwork,
+            "reconnect_serial" => Self::ReconnectSerial,
+            "reconnect_network" => Self::ReconnectNetwork,
+            "disconnect_serial" => Self::DisconnectSerial,
+            "disconnect_network" => Self::DisconnectNetwork,
+            "cancel_reconnect" => Self::CancelReconnect,
+            "set_dtr" => Self::SetDtr,
+            "set_rts" => Self::SetRts,
+            "send_serial" => Self::SendSerial,
+            "send_network" => Self::SendNetwork,
+            "load_replay" => Self::LoadReplay,
+            "reload_plugins" => Self::ReloadPlugins,
+            "discover_plugins" => Self::DiscoverPlugins,
+            "export_recording" => Self::ExportRecording,
+            "export_terminal" => Self::ExportTerminal,
+            "export_log" => Self::ExportLog,
+            "plugin_load" => Self::PluginLoad,
+            "replay_analyzer" => Self::ReplayAnalyzer,
+            "marketplace_refresh" => Self::MarketplaceRefresh,
+            "marketplace_install" => Self::MarketplaceInstall,
+            "update_check" => Self::UpdateCheck,
+            "remove_network_port" => Self::RemoveNetworkPort,
+            _ => return None,
+        })
+    }
+}
+
+impl std::fmt::Display for TaskKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<TaskKind> for String {
+    fn from(kind: TaskKind) -> Self {
+        kind.as_str().to_owned()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSnapshot {
     pub id: TaskId,

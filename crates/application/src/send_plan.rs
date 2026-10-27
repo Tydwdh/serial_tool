@@ -10,28 +10,21 @@
 //! HEX 规则本身在 `tool_core::{parse_hex, parse_hex_strict}`（见 [`decode_hex`]）。
 
 use crate::command::AppCommand;
+use crate::task_model::TaskKind;
 use std::fmt;
 use tool_platform::PortId;
 
-/// 网络端口的任务种类标签。字面值必须与 `spawn_ordered(.., "send_network", ..)` 以及
-/// `crates/application/tests/headless.rs` 的 `task_kind` 断言逐字一致，
-/// 由 `task_kind_literals_are_the_ones_the_task_registry_sees` 钉住。
-pub const NETWORK_TASK_KIND: &str = "send_network";
-
-/// 普通串口的任务种类标签，同上。
-pub const SERIAL_TASK_KIND: &str = "send_serial";
-
-/// 路由结果：任务种类标签与实际待发送的字节。
+/// 路由结果：任务种类与实际待发送的字节。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedSend {
-    pub task_kind: &'static str,
+    pub task_kind: TaskKind,
     pub bytes: Vec<u8>,
 }
 
 impl PlannedSend {
     /// 本计划是否投向网络端口。平台据此选投递后端，不再各自判定一次。
     pub fn targets_network_port(&self) -> bool {
-        self.task_kind == NETWORK_TASK_KIND
+        self.task_kind == TaskKind::SendNetwork
     }
 }
 
@@ -117,9 +110,9 @@ pub fn plan_send(command: &AppCommand, is_network: bool) -> Result<PlannedSend, 
     };
     Ok(PlannedSend {
         task_kind: if is_network {
-            NETWORK_TASK_KIND
+            TaskKind::SendNetwork
         } else {
-            SERIAL_TASK_KIND
+            TaskKind::SendSerial
         },
         bytes,
     })
@@ -146,11 +139,14 @@ mod tests {
         assert_eq!(
             plan_send(&command, false).unwrap(),
             PlannedSend {
-                task_kind: "send_serial",
+                task_kind: TaskKind::SendSerial,
                 bytes: b"AT\r\n".to_vec()
             }
         );
-        assert_eq!(plan_send(&command, true).unwrap().task_kind, "send_network");
+        assert_eq!(
+            plan_send(&command, true).unwrap().task_kind,
+            TaskKind::SendNetwork
+        );
         assert!(!plan_send(&command, false).unwrap().targets_network_port());
         assert!(plan_send(&command, true).unwrap().targets_network_port());
     }
@@ -303,15 +299,15 @@ mod tests {
     /// 字面值本身也要钉住：平台侧的分支与 headless 用例的 `task_kind` 断言都比对字符串。
     #[test]
     fn task_kind_literals_are_the_ones_the_task_registry_sees() {
-        assert_eq!(NETWORK_TASK_KIND, "send_network");
-        assert_eq!(SERIAL_TASK_KIND, "send_serial");
+        assert_eq!(TaskKind::SendNetwork.as_str(), "send_network");
+        assert_eq!(TaskKind::SendSerial.as_str(), "send_serial");
         let unknown = PlannedSend {
-            task_kind: "send_something_else",
+            task_kind: TaskKind::RefreshPorts,
             bytes: Vec::new(),
         };
         assert!(
             !unknown.targets_network_port(),
-            "未知种类不得被当成网络分支（会静默改投递后端）"
+            "非发送种类不得被当成网络分支（会静默改投递后端）"
         );
     }
 

@@ -103,7 +103,12 @@ impl WebPluginHost {
         let devices = transport
             .ports
             .into_iter()
-            .map(PluginSerialDevice::from)
+            .map(|port| PluginSerialDevice {
+                id: port.id,
+                label: port.label,
+                kind: format!("{:?}", port.kind).to_lowercase(),
+                authorized: port.authorized,
+            })
             .collect::<Vec<_>>();
         PluginValue::from_json(
             &serde_json::to_value(devices).unwrap_or_else(|_| serde_json::Value::Array(vec![])),

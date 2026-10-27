@@ -94,10 +94,8 @@ fn load(
 }
 
 fn completed(result: PluginCallResult) -> PluginValue {
-    match result {
-        PluginCallResult::Completed(value) => value,
-        other => panic!("expected a synchronous result, got {other:?}"),
-    }
+    let PluginCallResult::Completed(value) = result;
+    value
 }
 
 fn object(fields: impl IntoIterator<Item = (&'static str, PluginValue)>) -> PluginValue {

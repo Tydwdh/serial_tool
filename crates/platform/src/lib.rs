@@ -69,51 +69,22 @@ pub enum PortKind {
     Unknown,
 }
 
-/// Configuration for the optional WebSocket-backed network serial endpoint.
-///
-/// The native transport crate has the same wire protocol, but the
-/// configuration belongs here so both composition roots can use the same
-/// platform-neutral value. A network port is represented as a normal
-/// [`PortDescriptor`] with [`PortKind::Network`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct NetworkSerialConfig {
-    pub host: String,
-    pub port: u16,
-    #[serde(default)]
-    pub api_key: Option<String>,
+pub use tool_core::NetworkSerialConfig;
+
+/// Stable browser identity for a network endpoint.
+pub fn network_port_id(config: &NetworkSerialConfig) -> PortId {
+    PortId::new(format!("network://{}:{}", config.host, config.port))
 }
 
-impl Default for NetworkSerialConfig {
-    fn default() -> Self {
-        Self {
-            host: String::new(),
-            port: 7125,
-            api_key: None,
-        }
-    }
-}
-
-impl NetworkSerialConfig {
-    pub fn display_name(&self) -> String {
-        format!("{}:{}", self.host, self.port)
-    }
-
-    /// Stable browser identity. The prefix prevents a network endpoint from
-    /// colliding with a browser-owned SerialPort whose opaque id happens to
-    /// have the same display text.
-    pub fn port_id(&self) -> PortId {
-        PortId::new(format!("network://{}:{}", self.host, self.port))
-    }
-
-    pub fn descriptor(&self) -> PortDescriptor {
-        PortDescriptor {
-            id: self.port_id(),
-            label: self.display_name(),
-            kind: PortKind::Network,
-            vendor_id: None,
-            product_id: None,
-            authorized: true,
-        }
+/// Platform descriptor for a network endpoint.
+pub fn network_descriptor(config: &NetworkSerialConfig) -> PortDescriptor {
+    PortDescriptor {
+        id: network_port_id(config),
+        label: config.display_name(),
+        kind: PortKind::Network,
+        vendor_id: None,
+        product_id: None,
+        authorized: true,
     }
 }
 
@@ -245,13 +216,14 @@ fn serial_event(
     port: &PortId,
     bytes: Vec<u8>,
 ) -> tool_core::Event {
-    tool_core::Event::new(
-        topic,
-        format!("serial:{port}"),
-        direction,
-        tool_core::Payload::Bytes(bytes),
-    )
-    .with_metadata(serde_json::json!({ "port": port.as_str() }))
+    let source = port.as_str();
+    let source = if source.starts_with("serial:") {
+        source.to_owned()
+    } else {
+        format!("serial:{source}")
+    };
+    tool_core::Event::new(topic, source, direction, tool_core::Payload::Bytes(bytes))
+        .with_metadata(serde_json::json!({ "port": port.as_str() }))
 }
 
 /// Build the canonical RX event without depending on the Native serial crate.

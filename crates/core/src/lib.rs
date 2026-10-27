@@ -416,6 +416,34 @@ pub fn monotonic_now_nanos() -> u64 {
 
 /// Topic 匹配：`*` 后缀按前缀匹配，不带 `*` 精确匹配。
 /// 供实时事件路由、replay analyzer、Lua callback 统一使用。
+/// Configuration for the WebSocket-backed network serial endpoint.
+///
+/// One definition lives here because both the shared platform layer and the
+/// native transport crate need it; each used to carry an identical copy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetworkSerialConfig {
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+impl Default for NetworkSerialConfig {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: 7125,
+            api_key: None,
+        }
+    }
+}
+
+impl NetworkSerialConfig {
+    pub fn display_name(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+}
+
 pub fn topic_matches(pattern: &str, topic: &str) -> bool {
     if let Some(prefix) = pattern.strip_suffix('*') {
         topic.starts_with(prefix)

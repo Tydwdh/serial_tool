@@ -20,7 +20,6 @@ pub mod config;
 pub mod convert;
 pub mod globals;
 pub mod host_services;
-mod mlua_engine;
 pub mod replay;
 pub(crate) use crate::api::bus::create_bus_api;
 pub(crate) use crate::api::commands::create_commands_api;
@@ -44,7 +43,6 @@ use crate::globals::{
 };
 use crate::host_services::line_buffer_key;
 pub use config::ConfigStore;
-pub use mlua_engine::MluaEngine;
 pub use replay::{run_replay_analyzer, run_replay_analyzer_with_cancel};
 use tool_transport::{TransportManager, serial_topics};
 
@@ -103,10 +101,8 @@ fn default_lua_permissions() -> Vec<String> {
 }
 
 fn has_permission(config: &LuaRunConfig, permission: &str) -> bool {
-    config
-        .permissions
-        .iter()
-        .any(|candidate| candidate == permission)
+    tool_plugin_api::PluginPermissions::from_permission_names(&config.permissions)
+        .allows_ctx(permission)
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -277,7 +273,7 @@ pub(crate) fn harden_globals(lua: &Lua) -> mlua::Result<()> {
 
 /// 生产代码里**唯一**合法的 Lua VM 构造点：把 `Lua::new_with(子集)` 和 `harden_globals`
 /// 焊在同一个函数里，"建了 VM 却忘了加固" 就没法再顺手写出来。计划里数了两处构造点，实际
-/// 有四处插件可达的 VM（插件事件循环、阻塞式运行、`MluaEngine`、replay analyzer），各自
+/// 有三处插件可达的 VM（插件事件循环、阻塞式运行、replay analyzer），各自
 /// 抄一遍 stdlib 子集；其中 `replay.rs` 那一处连加固都没抄，`dofile` 至今活着。新增任何
 /// 能跑插件源码的 VM，一律调用本函数，不要自己 `new_with`；`mod tests` 里的静态守卫按
 /// 本函数的名字与全 crate 的出现次数把关，并把 `Lua::new()`、`Lua::default()`、
@@ -916,7 +912,7 @@ fn install_ctx(
         )?;
     }
 
-    if has_permission(config, "fs.read.user_selected")
+    if has_permission(config, "fs")
         && let Some(broker) = host_services.file_broker.clone()
     {
         ctx.set(

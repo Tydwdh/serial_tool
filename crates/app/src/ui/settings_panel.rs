@@ -316,10 +316,12 @@ impl WorkbenchApp {
             design::section_header(ui, ICON_TUNE, "数据");
             ui.separator();
             let (changed, terminal_max_entries, log_max_entries) = {
+                let (merge_window_ms, terminal_max_entries) =
+                    self.terminal_panel.data_settings_mut();
                 let mut view = DataSettingsView {
-                    merge_window_ms: &mut self.terminal_panel.merge_window_ms,
-                    terminal_max_entries: &mut self.terminal_panel.max_entries,
-                    log_max_entries: &mut self.bottom_log_panel.max_entries,
+                    merge_window_ms,
+                    terminal_max_entries,
+                    log_max_entries: self.bottom_log_panel.max_entries_mut(),
                 };
                 let changed = data_settings_ui(ui, &mut view);
                 (changed, *view.terminal_max_entries, *view.log_max_entries)
@@ -468,7 +470,7 @@ impl WorkbenchApp {
             .serial
             .ports
             .iter()
-            .map(|port| port.port_name.clone())
+            .map(|port| port.id.to_string())
             .collect::<Vec<_>>();
         for (plugin_id, plugin_name, settings) in &plugin_settings {
             // Application 提供当前值；共享面板只负责 manifest 表单展示。

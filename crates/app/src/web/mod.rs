@@ -5,7 +5,7 @@
 //! local settings, Blob export, lossless in-memory recording and JSONL replay.
 
 use crate::bootstrap;
-use crate::panel_registry::{BuiltinPanel, PanelKind, PanelRegistry};
+use crate::panel_registry::{BuiltinPanel, PanelRegistry};
 use crate::shared_keymap::{
     BUILTIN_KEYMAP_COMMANDS, CMD_CLEAR_TERMINAL, CMD_COMMAND_PALETTE, CMD_OPEN_PORT,
     CMD_RECONNECT_PORT, CMD_REFRESH_PORTS, CMD_SEND, CMD_TOGGLE_BOTTOM_PANEL,
@@ -41,7 +41,7 @@ use tool_application::plugin::{
 use tool_application::replay::ReplayPolicyView;
 use tool_application::send_plan;
 use tool_application::web::{SignalKind, WebAppEvent, WebRuntime};
-use tool_application::{AppCommand, AppRuntime, CommandOutcome, TaskId};
+use tool_application::{AppCommand, AppRuntime, CommandOutcome, PortView, TaskId, TaskKind};
 use tool_core::Event;
 // 行尾符表已收进 `tool-core`；`WebSettings` 仍以 `WebLineEnding` 这个名字持久化
 // 裸变体名（浏览器设置），合并前的表与 `tool_core` 那份逐字节相同。
@@ -1022,7 +1022,7 @@ impl WorkbenchApp {
             .map(WebRuntime::query_terminal_settings)
             .unwrap_or((
                 self.terminal_panel.merge_window_ms,
-                self.terminal_panel.max_entries,
+                self.terminal_panel.max_entries(),
             ));
         let mut plugin_records = self.plugins.persisted();
         for record in &mut plugin_records {
@@ -1059,7 +1059,7 @@ impl WorkbenchApp {
             command_usage_order: self.command_usage_order.clone(),
             terminal_merge_window_ms,
             terminal_max_entries,
-            log_max_entries: self.bottom_log_panel.max_entries,
+            log_max_entries: self.bottom_log_panel.max_entries(),
             font_size: self.terminal_panel.font_size,
             panels: self.panels.clone(),
             web_plugins: plugin_records,
@@ -1128,27 +1128,25 @@ impl WorkbenchApp {
                 format!("日志缓冲已满，丢失 {log_dropped} 条最旧事件"),
             );
         }
-        if self.terminal_panel.truncated {
+        if self.terminal_panel.take_truncated() {
             self.push_web_notification(
                 "terminal",
                 WebNotificationLevel::Warn,
                 format!(
                     "终端已截断，仅保留最近 {} 条",
-                    self.terminal_panel.max_entries
+                    self.terminal_panel.max_entries()
                 ),
             );
-            self.terminal_panel.truncated = false;
         }
-        if self.bottom_log_panel.truncated {
+        if self.bottom_log_panel.take_truncated() {
             self.push_web_notification(
                 "log",
                 WebNotificationLevel::Warn,
                 format!(
                     "日志已截断，仅保留最近 {} 条",
-                    self.bottom_log_panel.max_entries
+                    self.bottom_log_panel.max_entries()
                 ),
             );
-            self.bottom_log_panel.truncated = false;
         }
     }
 
@@ -1273,7 +1271,8 @@ impl WorkbenchApp {
         let mut theme_import = None;
         let mut serial = self.serial.borrow_mut();
         match event {
-            WebAppEvent::TaskStateChanged(snapshot) if snapshot.kind == "refresh_ports" => {}
+            WebAppEvent::TaskStateChanged(snapshot)
+                if snapshot.kind == TaskKind::RefreshPorts.as_str() => {}
             WebAppEvent::TaskStateChanged(snapshot) => {
                 serial.status = snapshot.message;
             }
@@ -1940,7 +1939,34 @@ fn take_web_lua_resolutions(
     (file, lua_serial)
 }
 
+impl WorkbenchApp {
+    fn render_platform_panel_body(&mut self, ui: &mut egui::Ui, kind: BuiltinPanel) {
+        match kind {
+            BuiltinPanel::Devices => self.serial_ui(ui),
+            BuiltinPanel::Replay => {
+                egui::ScrollArea::vertical()
+                    .id_salt("scroll-replay")
+                    .show(ui, |ui| self.web_replay_panel_ui(ui));
+            }
+            BuiltinPanel::Plugins => {
+                egui::ScrollArea::vertical()
+                    .id_salt("scroll-plugins")
+                    .show(ui, |ui| self.web_plugins_ui(ui));
+            }
+            BuiltinPanel::Sender => self.shared_sender_ui(ui),
+            BuiltinPanel::Settings => {
+                egui::ScrollArea::vertical()
+                    .id_salt("scroll-settings")
+                    .show(ui, |ui| self.settings_ui(ui));
+            }
+            BuiltinPanel::Terminal | BuiltinPanel::Chart | BuiltinPanel::Logs => {}
+        }
+    }
+}
+
 impl DockHost for WorkbenchApp {
+    type RenderStart = f64;
+
     fn panels(&mut self) -> &mut PanelManager {
         &mut self.panels
     }
@@ -1953,72 +1979,45 @@ impl DockHost for WorkbenchApp {
         &self.panel_registry
     }
 
-    fn render_panel(&mut self, ui: &mut egui::Ui, id: &PanelId) {
-        self.panels.active_tab = id.clone();
-        if !self.panel_registry.is_available(id) {
-            ui.vertical_centered(|ui| {
-                ui.add_space(32.0);
-                ui.heading(self.panel_registry.title(id));
-                ui.label("当前运行环境没有提供这个面板所需的平台能力");
-                ui.small("这不是布局占位；请检查浏览器权限、设备能力或插件运行状态。");
-            });
-            return;
+    fn shared_panels(&mut self) -> crate::shared_shell::SharedPanels<'_> {
+        crate::shared_shell::SharedPanels {
+            terminal: &mut self.terminal_panel,
+            chart: &mut self.chart_panel,
+            log: &mut self.bottom_log_panel,
+            dynamic: &mut self.dynamic_panels,
         }
-        match self.panel_registry.kind_for(id) {
-            Some(PanelKind::Builtin(BuiltinPanel::Devices)) => self.serial_ui(ui),
-            Some(PanelKind::Builtin(BuiltinPanel::Replay)) => {
-                egui::ScrollArea::vertical()
-                    .id_salt("scroll-replay")
-                    .show(ui, |ui| self.web_replay_panel_ui(ui));
-            }
-            Some(PanelKind::Builtin(BuiltinPanel::Plugins)) => {
-                egui::ScrollArea::vertical()
-                    .id_salt("scroll-plugins")
-                    .show(ui, |ui| self.web_plugins_ui(ui));
-            }
-            Some(PanelKind::Builtin(BuiltinPanel::Chart)) => {
-                let started = self.perf.begin_frame();
-                self.chart_panel.ui(ui);
-                self.perf.record_chart_render(started);
-            }
-            Some(PanelKind::Builtin(BuiltinPanel::Terminal)) => {
-                let started = self.perf.begin_frame();
-                let port_aliases: HashMap<String, String> = self
-                    .serial
-                    .borrow()
-                    .port_aliases
-                    .clone()
-                    .into_iter()
-                    .collect();
-                self.terminal_panel.set_port_aliases(&port_aliases);
-                self.terminal_panel.ui(ui);
-                self.perf.record_terminal_render(started);
-            }
-            Some(PanelKind::Builtin(BuiltinPanel::Sender)) => self.shared_sender_ui(ui),
-            Some(PanelKind::Builtin(BuiltinPanel::Logs)) => {
-                let started = self.perf.begin_frame();
-                self.bottom_log_panel.ui(ui);
-                self.perf.record_log_render(started);
-            }
-            Some(PanelKind::Builtin(BuiltinPanel::Settings)) => {
-                egui::ScrollArea::vertical()
-                    .id_salt("scroll-settings")
-                    .show(ui, |ui| self.settings_ui(ui));
-            }
-            Some(PanelKind::Dynamic { suffix }) => {
-                if self.dynamic_panels.contains(&suffix) {
-                    let started = self.perf.begin_frame();
-                    let _ = egui::ScrollArea::vertical()
-                        .show(ui, |ui| self.dynamic_panels.ui_body(ui, &suffix));
-                    self.perf.record_chart_render(started);
-                } else {
-                    ui.colored_label(theme::red(), format!("动态面板不存在：{suffix}"));
-                }
-            }
-            _ => {
-                ui.colored_label(theme::red(), format!("面板不存在：{id}"));
-            }
+    }
+
+    fn render_platform_panel(&mut self, ui: &mut egui::Ui, kind: BuiltinPanel) {
+        self.render_platform_panel_body(ui, kind);
+    }
+
+    fn prepare_terminal_panel(&mut self) {
+        let port_aliases: HashMap<String, String> = self
+            .serial
+            .borrow()
+            .port_aliases
+            .clone()
+            .into_iter()
+            .collect();
+        self.terminal_panel.set_port_aliases(&port_aliases);
+    }
+
+    fn panel_render_start(&self) -> Self::RenderStart {
+        self.perf.begin_frame()
+    }
+
+    fn note_panel_render(&mut self, kind: BuiltinPanel, started: Self::RenderStart) {
+        match kind {
+            BuiltinPanel::Terminal => self.perf.record_terminal_render(started),
+            BuiltinPanel::Chart => self.perf.record_chart_render(started),
+            BuiltinPanel::Logs => self.perf.record_log_render(started),
+            _ => {}
         }
+    }
+
+    fn note_dynamic_panel_render(&mut self, started: Self::RenderStart) {
+        self.perf.record_chart_render(started);
     }
 
     fn mark_layout_dirty(&mut self) {
@@ -2052,7 +2051,7 @@ impl AppShellHost for WorkbenchApp {
                 transport_view
                     .as_ref()
                     .map(|view| view.ports.clone())
-                    .unwrap_or_else(|| serial.ports.clone()),
+                    .unwrap_or_else(|| serial.ports.iter().cloned().map(PortView::from).collect()),
                 serial.port_aliases.clone(),
                 transport_view
                     .as_ref()
@@ -2186,7 +2185,7 @@ impl AppShellHost for WorkbenchApp {
                 transport_view
                     .as_ref()
                     .map(|view| view.ports.clone())
-                    .unwrap_or_else(|| serial.ports.clone()),
+                    .unwrap_or_else(|| serial.ports.iter().cloned().map(PortView::from).collect()),
                 serial.port_aliases.clone(),
                 transport_view
                     .as_ref()
@@ -2313,7 +2312,7 @@ impl eframe::App for WorkbenchApp {
             && self.web_export.is_none()
             && let Some(runtime) = self.runtime.as_ref()
         {
-            let task_id = runtime.begin_task("export_terminal", "正在准备导出终端");
+            let task_id = runtime.begin_task(TaskKind::ExportTerminal, "正在准备导出终端");
             self.web_export = Some(WebExportState {
                 task_id,
                 stem: "terminal",
@@ -2327,7 +2326,7 @@ impl eframe::App for WorkbenchApp {
             && self.web_export.is_none()
             && let Some(runtime) = self.runtime.as_ref()
         {
-            let task_id = runtime.begin_task("export_log", "正在准备导出日志");
+            let task_id = runtime.begin_task(TaskKind::ExportLog, "正在准备导出日志");
             self.web_export = Some(WebExportState {
                 task_id,
                 stem: "logs",
@@ -2824,10 +2823,12 @@ impl WorkbenchApp {
         design::card().show(ui, |ui| {
             web_card_header(ui, ICON_TUNE, "数据");
             let (changed, terminal_max_entries, log_max_entries) = {
+                let (merge_window_ms, terminal_max_entries) =
+                    self.terminal_panel.data_settings_mut();
                 let mut view = DataSettingsView {
-                    merge_window_ms: &mut self.terminal_panel.merge_window_ms,
-                    terminal_max_entries: &mut self.terminal_panel.max_entries,
-                    log_max_entries: &mut self.bottom_log_panel.max_entries,
+                    merge_window_ms,
+                    terminal_max_entries,
+                    log_max_entries: self.bottom_log_panel.max_entries_mut(),
                 };
                 let changed = data_settings_ui(ui, &mut view);
                 (changed, *view.terminal_max_entries, *view.log_max_entries)
@@ -2963,7 +2964,7 @@ impl WorkbenchApp {
             let network_ports = serial
                 .network_ports
                 .iter()
-                .map(NetworkSerialConfig::port_id)
+                .map(tool_platform::network_port_id)
                 .collect::<Vec<_>>();
             serial.selected_port = None;
             serial.settings = SerialSettings::default();
@@ -3144,10 +3145,11 @@ impl WorkbenchApp {
         let transport = self.runtime.as_ref().map(WebRuntime::query_transport);
         let (ports, connected) = {
             let serial = self.serial.borrow();
-            let ports = transport
+            let view_ports: Vec<PortView> = transport
                 .as_ref()
-                .map(|view| &view.ports)
-                .unwrap_or(&serial.ports)
+                .map(|view| view.ports.clone())
+                .unwrap_or_else(|| serial.ports.iter().cloned().map(PortView::from).collect());
+            let ports = view_ports
                 .iter()
                 .map(|port| SendPortItem {
                     id: port.id.to_string(),

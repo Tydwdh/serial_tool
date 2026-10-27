@@ -88,6 +88,15 @@ impl PluginPermissions {
         self.requested.iter().copied()
     }
 
+    /// Whether a `ctx.<domain>` table may be installed. The domain table is
+    /// shared with both Lua engines; unknown domains are denied.
+    pub fn allows_ctx(&self, domain: &str) -> bool {
+        crate::ctx::CTX_DOMAINS
+            .iter()
+            .find(|entry| entry.name == domain)
+            .is_some_and(|entry| self.contains(entry.capability))
+    }
+
     pub fn missing_from(
         &self,
         available: impl IntoIterator<Item = PluginCapability>,

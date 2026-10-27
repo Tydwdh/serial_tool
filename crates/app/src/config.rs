@@ -402,8 +402,8 @@ impl WorkbenchApp {
                     .to_string()
             }),
             terminal_merge_window_ms: self.terminal_panel.merge_window_ms,
-            terminal_max_entries: self.terminal_panel.max_entries,
-            log_max_entries: self.bottom_log_panel.max_entries,
+            terminal_max_entries: self.terminal_panel.max_entries(),
+            log_max_entries: self.bottom_log_panel.max_entries(),
             command_usage_order: self.command_palette.usage_order.clone(),
             network_proxy_url: (!network_proxy_url.is_empty())
                 .then(|| network_proxy_url.to_owned()),

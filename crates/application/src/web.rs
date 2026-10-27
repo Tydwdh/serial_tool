@@ -7,16 +7,16 @@ use std::rc::Rc;
 
 use tool_core::{Direction, Event, Payload};
 use tool_databus::{DataBus, RingSubscription, Subscription, TopicFilter};
+use tool_platform::storage::FileHandle;
 use tool_platform::web_network::WebNetworkTransport;
 use tool_platform::web_serial::{WebSerialEvent, WebSerialTransport};
 use tool_platform::{
-    NetworkSerialConfig, PortDescriptor, PortId, TransportBackend, TransportCapabilities,
-    serial_rx_event, serial_tx_event,
+    NetworkSerialConfig, PortDescriptor, PortId, SerialSettings, TransportBackend,
+    TransportCapabilities, serial_rx_event, serial_tx_event,
 };
 use wasm_bindgen_futures::spawn_local;
 
-use crate::TransportView;
-use crate::command::{AppCommand, CommandOutcome};
+use crate::command::{AppCommand, CommandError, CommandOutcome};
 use crate::marketplace::{MarketplacePluginView, MarketplaceStatusView, MarketplaceView};
 use crate::plugin::{PluginCommand, PluginView};
 use crate::recording::{RecordModeView, RecorderStatsView, RecordingStatusView};
@@ -26,8 +26,9 @@ use crate::replay::{
 };
 use crate::send_plan::{self, PlannedSend};
 use crate::task_model::{
-    TaskId, TaskSnapshot, TaskState, cancel_deregistered_task, prune_finished_snapshots,
+    TaskId, TaskKind, TaskSnapshot, TaskState, cancel_deregistered_task, prune_finished_snapshots,
 };
+use crate::transport::{PortView, TransportView};
 use crate::updater::UpdateStatusView;
 use serde::Deserialize;
 use tool_recorder::{ReplayManager, ReplayPolicy, ReplayTextLoader};
@@ -518,6 +519,10 @@ impl WebApplication {
         self.transport_view.borrow().clone()
     }
 
+    pub fn task_snapshots(&self) -> Vec<TaskSnapshot> {
+        self.tasks.borrow().snapshots.values().cloned().collect()
+    }
+
     pub fn query_terminal_settings(&self) -> (u64, usize) {
         (
             *self.terminal_merge_window_ms.borrow(),
@@ -545,19 +550,21 @@ impl WebApplication {
                     .borrow_mut()
                     .retain(|_, task_id| *task_id != snapshot.id);
                 if matches!(
-                    snapshot.kind.as_str(),
-                    "connect_serial"
-                        | "reconnect_serial"
-                        | "connect_network"
-                        | "reconnect_network"
-                        | "cancel_reconnect_disconnect"
+                    TaskKind::from_name(snapshot.kind.as_str()),
+                    Some(
+                        TaskKind::ConnectSerial
+                            | TaskKind::ReconnectSerial
+                            | TaskKind::ConnectNetwork
+                            | TaskKind::ReconnectNetwork
+                            | TaskKind::CancelReconnect
+                    )
                 ) {
                     view.connecting = false;
                 }
                 view.status = snapshot.message.clone();
             }
             WebAppEvent::PortsRefreshed(ports) => {
-                view.ports = ports.clone();
+                view.ports = ports.iter().cloned().map(PortView::from).collect();
                 view.status = format!("已授权设备 {} 个", ports.len());
             }
             WebAppEvent::PortRequested { port, .. }
@@ -734,7 +741,7 @@ impl WebApplication {
                 .and_then(|text| parse_marketplace_registry(&text));
             Ok::<Result<MarketplaceView, String>, String>(result)
         };
-        let task_id = self.spawn_result("marketplace_refresh", future, move |_, result| {
+        let task_id = self.spawn_result(TaskKind::MarketplaceRefresh, future, move |_, result| {
             let mut status = view.borrow_mut();
             status.refreshing = false;
             match result {
@@ -807,7 +814,7 @@ impl WebApplication {
             .await;
             Ok::<Result<Vec<(String, String)>, String>, String>(result)
         };
-        let task_id = self.spawn_result("marketplace_install", future, move |id, result| {
+        let task_id = self.spawn_result(TaskKind::MarketplaceInstall, future, move |id, result| {
             let mut status = view.borrow_mut();
             match result {
                 Ok(files) => WebAppEvent::MarketplaceFilesLoaded {
@@ -848,7 +855,7 @@ impl WebApplication {
                 });
             Ok::<Result<WebUpdateInfo, String>, String>(result)
         };
-        let task_id = self.spawn_result("update_check", future, move |_, result| {
+        let task_id = self.spawn_result(TaskKind::UpdateCheck, future, move |_, result| {
             let mut status = view.borrow_mut();
             status.checking = false;
             match result {
@@ -1053,7 +1060,7 @@ impl WebApplication {
 
     fn spawn<T, F>(
         &self,
-        kind: &str,
+        kind: impl Into<String>,
         future: F,
         complete: impl FnOnce(TaskId, T) -> WebAppEvent + 'static,
     ) -> TaskId
@@ -1075,7 +1082,7 @@ impl WebApplication {
 
     fn spawn_result<T, F, E>(
         &self,
-        kind: &str,
+        kind: impl Into<String>,
         future: F,
         complete: impl FnOnce(TaskId, T) -> WebAppEvent + 'static,
     ) -> TaskId
@@ -1090,7 +1097,7 @@ impl WebApplication {
             tasks.next_id += 1;
             let snapshot = TaskSnapshot {
                 id,
-                kind: kind.to_owned(),
+                kind: kind.into(),
                 state: TaskState::Pending,
                 message: "等待异步操作启动".to_owned(),
             };
@@ -1293,7 +1300,7 @@ impl WebApplication {
         incomplete: bool,
         reason: Option<String>,
     ) -> Result<CommandOutcome, String> {
-        let task_id = self.begin_task("export_recording", "正在分帧整理录制");
+        let task_id = self.begin_task(TaskKind::ExportRecording, "正在分帧整理录制");
         let mut recording = self.recording.borrow_mut();
         if !recording.running && recording.subscription.is_none() {
             drop(recording);
@@ -1484,179 +1491,12 @@ impl WebApplication {
     /// 几行的短分支留在原地。新增 `AppCommand` 时这里要与 native 的 `Workbench::dispatch`
     /// 同步；HEX 解码与发送路由的判定都不在这里做，本函数的 send 分支只调
     /// `crate::send_plan::plan_send`，判定规则的唯一真相在那儿。
+    /// One command plan for both roots: [`crate::command::execute`] resolves
+    /// validation, routing and outcome text; this adapter performs the browser
+    /// effects through [`crate::command::CommandEffects`].
     pub fn dispatch(&self, command: AppCommand) -> Result<CommandOutcome, String> {
-        match command {
-            AppCommand::StartRecording { file, mode } => {
-                self.start_recording(file.name().to_owned(), mode)
-            }
-            AppCommand::SetSerialSettings { settings } => {
-                *self.serial_settings.borrow_mut() = settings;
-                self.transport_view.borrow_mut().settings = settings;
-                self.wake();
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::SetRecordingMode { mode } => {
-                self.recording.borrow_mut().mode = mode.into();
-                self.notify(WebAppEvent::RecordingChanged);
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::EnablePlugin { plugin_id } => {
-                self.queue_plugin_command(PluginCommand::Enable { plugin_id })
-            }
-            AppCommand::DisablePlugin { plugin_id } => {
-                self.queue_plugin_command(PluginCommand::Disable { plugin_id })
-            }
-            AppCommand::ReloadPlugins => self.queue_plugin_command(PluginCommand::Reload),
-            AppCommand::RefreshMarketplace { url } => self.start_marketplace_refresh(url),
-            #[cfg(target_arch = "wasm32")]
-            AppCommand::InstallMarketplacePlugin {
-                plugin_id,
-                manifest_url,
-                main_url,
-            } => self.start_marketplace_install(plugin_id, manifest_url, main_url),
-            AppCommand::CheckForUpdate => self.start_update_check(),
-            AppCommand::ExecutePluginCommand {
-                plugin_id,
-                command_id,
-                context,
-            } => {
-                self.plugin_commands
-                    .borrow_mut()
-                    .push(PluginCommand::Execute {
-                        plugin_id,
-                        command_id,
-                        context,
-                    });
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::StopRecording => self.request_recording_stop(false, None),
-            AppCommand::PauseRecording => self.pause_recording(),
-            AppCommand::ResumeRecording => self.resume_recording(),
-            AppCommand::AddBookmark { name } => {
-                self.bus.publish(Event::new(
-                    "recorder.bookmark",
-                    "recorder",
-                    Direction::Internal,
-                    Payload::Text(name.unwrap_or_default()),
-                ));
-                self.wake();
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::LoadReplayText { name, text } => self.load_replay_text(name, text),
-            AppCommand::ReplayPlay => {
-                self.replay.borrow_mut().play();
-                self.notify(WebAppEvent::ReplayChanged { rebuild: false });
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::ReplayPause => {
-                self.replay.borrow_mut().pause();
-                self.notify(WebAppEvent::ReplayChanged { rebuild: false });
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::ReplayStop => {
-                self.replay.borrow_mut().stop();
-                self.notify(WebAppEvent::ReplayChanged { rebuild: true });
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::ClearTerminal => {
-                self.notify(WebAppEvent::TerminalCleared);
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::ReplaySeek { position_ms } => {
-                self.replay.borrow_mut().seek_with_replay(position_ms);
-                self.notify(WebAppEvent::ReplayChanged { rebuild: true });
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::ReplaySeekBy { delta_ms } => self.replay_seek_by(delta_ms),
-            AppCommand::ReplayStep { delta } => self.replay_step(delta),
-            AppCommand::AddReplayBookmark { name } => {
-                self.replay.borrow_mut().add_bookmark(name);
-                self.wake();
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::RemoveReplayBookmark { position_ms } => {
-                self.replay.borrow_mut().remove_bookmark(position_ms);
-                self.wake();
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::SetReplaySpeed { speed } => {
-                self.replay.borrow_mut().set_speed(speed);
-                self.wake();
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::SetReplayPolicy { policy } => self.set_replay_policy(policy),
-            AppCommand::SetTerminalMergeWindow { ms } => {
-                *self.terminal_merge_window_ms.borrow_mut() = ms;
-                let max_entries = *self.terminal_max_entries.borrow();
-                self.notify(WebAppEvent::TerminalSettingsChanged {
-                    merge_window_ms: ms,
-                    max_entries,
-                });
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::SetTerminalMaxEntries { max } => {
-                *self.terminal_max_entries.borrow_mut() = max;
-                let merge_window_ms = *self.terminal_merge_window_ms.borrow();
-                self.notify(WebAppEvent::TerminalSettingsChanged {
-                    merge_window_ms,
-                    max_entries: max,
-                });
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::CancelTask { task_id } => {
-                if self.cancel_task(task_id) {
-                    Ok(CommandOutcome::Done)
-                } else {
-                    Err(format!("任务不存在：{task_id:?}"))
-                }
-            }
-            AppCommand::CancelReconnect { port } => self.cancel_reconnect(port),
-            AppCommand::RefreshPorts => self.refresh_ports(),
-            AppCommand::RegisterNetworkPort { config } => {
-                let descriptor = config.descriptor();
-                self.network_ports
-                    .borrow_mut()
-                    .insert(descriptor.id.to_string(), config);
-                self.notify(WebAppEvent::NetworkPortAdded(descriptor));
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::RemoveNetworkPort { port } => self.remove_network_port(port),
-            AppCommand::RequestPort => self.request_serial_port(),
-            AppCommand::Connect { port, settings } => self.connect(port, settings),
-            AppCommand::Reconnect { port } => self.reconnect(port),
-            AppCommand::Disconnect { port } => self.disconnect(port),
-            // 三条 send 分支与 native 完全同源：路由与 HEX 解码都由 `send_plan::plan_send`
-            // 判定（此前这里是本文件的手抄副本，同一串输入两端判定相反）。
-            // 不合并成 `cmd @ (SendText { port, .. } | ..)`：1.92.0 对非 Copy 的 `port`
-            // 报 E0382；三个各 4 行的分支也好过一个会静默返回空端口名的 helper。
-            AppCommand::SendText { port, text } => {
-                let is_network = self.is_network_port(&port);
-                let task_port = port.clone();
-                let plan = send_plan::plan_send(&AppCommand::SendText { port, text }, is_network)
-                    .map_err(|error| error.to_string())?;
-                self.send(task_port, plan)
-            }
-            AppCommand::SendHex { port, hex, strict } => {
-                let is_network = self.is_network_port(&port);
-                let task_port = port.clone();
-                let plan =
-                    send_plan::plan_send(&AppCommand::SendHex { port, hex, strict }, is_network)
-                        .map_err(|error| error.to_string())?;
-                self.send(task_port, plan)
-            }
-            AppCommand::SendRaw { port, bytes } => {
-                let is_network = self.is_network_port(&port);
-                let task_port = port.clone();
-                let plan = send_plan::plan_send(&AppCommand::SendRaw { port, bytes }, is_network)
-                    .map_err(|error| error.to_string())?;
-                self.send(task_port, plan)
-            }
-            AppCommand::SetDtr { port, value } => self.set_dtr(port, value),
-            AppCommand::SetRts { port, value } => self.set_rts(port, value),
-            AppCommand::DiscoverPlugins { .. } => {
-                Err("浏览器插件通过导入或插件市场加载".to_owned())
-            }
-        }
+        let mut effects = WebCommandEffects(self);
+        crate::command::execute(&mut effects, command).map_err(|error| error.to_string())
     }
 
     /// 插件命令的统一排队入口：`dispatch` 的插件分支只把命令写进这条队列，
@@ -1701,7 +1541,7 @@ impl WebApplication {
             return Err("已有回放文件正在加载".to_owned());
         }
         let loader = ReplayTextLoader::new(name, text).map_err(|error| error.to_string())?;
-        let task_id = self.begin_task("load_replay", "正在解析回放文件");
+        let task_id = self.begin_task(TaskKind::LoadReplay, "正在解析回放文件");
         *self.replay_load.borrow_mut() = Some(WebReplayLoadTask {
             id: task_id,
             loader,
@@ -1768,7 +1608,7 @@ impl WebApplication {
         if self.network_ports.borrow().contains_key(port.as_str()) {
             let network = self.network_transport.clone();
             let task_id = self.spawn_result(
-                "cancel_reconnect_disconnect",
+                TaskKind::CancelReconnect,
                 async move {
                     let _ = network.disconnect(port).await;
                     Ok::<(), String>(())
@@ -1785,7 +1625,7 @@ impl WebApplication {
         }
         if let Some(transport) = self.transport.clone() {
             let task_id = self.spawn_result(
-                "cancel_reconnect_disconnect",
+                TaskKind::CancelReconnect,
                 async move {
                     let _ = transport.disconnect(port).await;
                     Ok::<(), String>(())
@@ -1816,7 +1656,7 @@ impl WebApplication {
                     network_ports
                         .borrow()
                         .values()
-                        .map(NetworkSerialConfig::descriptor),
+                        .map(tool_platform::network_descriptor),
                 );
                 Ok(ports)
             },
@@ -1835,7 +1675,7 @@ impl WebApplication {
             let network = self.network_transport.clone();
             let task_port = port.clone();
             let task_id = self.spawn(
-                "remove_network_port",
+                TaskKind::RemoveNetworkPort,
                 async move { network.disconnect(port).await },
                 move |_, _| WebAppEvent::NetworkPortRemoved(task_port),
             );
@@ -1858,7 +1698,7 @@ impl WebApplication {
         // deliberately constructs the Promise in request_port(),
         // before returning the future to this scheduler.
         let future = transport.request_port();
-        let task_id = self.spawn("request_port", future, |id, port| {
+        let task_id = self.spawn(TaskKind::RequestPort, future, |id, port| {
             WebAppEvent::PortRequested { id, port }
         });
         Ok(CommandOutcome::Pending {
@@ -1915,7 +1755,7 @@ impl WebApplication {
         let task_events = self.tasks.clone();
         let repaint_waker = self.repaint_waker.clone();
         let task_id = self.spawn(
-            "connect_serial",
+            TaskKind::ConnectSerial,
             async move {
                 transport.connect(port.clone(), settings).await?;
                 let rx_port = port.clone();
@@ -1966,7 +1806,7 @@ impl WebApplication {
         let task_events = self.tasks.clone();
         let repaint_waker = self.repaint_waker.clone();
         let task_id = self.spawn(
-            "reconnect_serial",
+            TaskKind::ReconnectSerial,
             async move {
                 let _ = transport.disconnect(port.clone()).await;
                 transport.connect(port.clone(), settings).await?;
@@ -2006,7 +1846,7 @@ impl WebApplication {
             let network = self.network_transport.clone();
             let task_port = port.clone();
             let task_id = self.spawn(
-                "disconnect_network",
+                TaskKind::DisconnectNetwork,
                 async move { network.disconnect(port).await },
                 move |_, _| WebAppEvent::Disconnected {
                     port: task_port,
@@ -2021,7 +1861,7 @@ impl WebApplication {
         let transport = self.serial_transport()?;
         let task_port = port.clone();
         let task_id = self.spawn(
-            "disconnect_serial",
+            TaskKind::DisconnectSerial,
             async move { transport.disconnect(port).await },
             move |_, _| WebAppEvent::Disconnected {
                 port: task_port,
@@ -2039,7 +1879,7 @@ impl WebApplication {
         let transport = self.serial_transport()?;
         let task_port = port.clone();
         let task_id = self.spawn(
-            "set_dtr",
+            TaskKind::SetDtr,
             async move { transport.set_dtr(port, value).await },
             move |_, _| WebAppEvent::SignalsChanged {
                 port: task_port,
@@ -2058,7 +1898,7 @@ impl WebApplication {
         let transport = self.serial_transport()?;
         let task_port = port.clone();
         let task_id = self.spawn(
-            "set_rts",
+            TaskKind::SetRts,
             async move { transport.set_rts(port, value).await },
             move |_, _| WebAppEvent::SignalsChanged {
                 port: task_port,
@@ -2153,7 +1993,7 @@ impl WebApplication {
         let rx_port = port.clone();
         let reconnect_port = port.clone();
         let task_id = self.spawn(
-            "connect_network",
+            TaskKind::ConnectNetwork,
             async move {
                 let rx_bus = bus.clone();
                 let rx_waker = repaint_waker.clone();
@@ -2194,7 +2034,7 @@ impl WebApplication {
         let rx_port = port.clone();
         let reconnect_port = port.clone();
         let task_id = self.spawn(
-            "reconnect_network",
+            TaskKind::ReconnectNetwork,
             async move {
                 let _ = network.disconnect(port.clone()).await;
                 let rx_bus = bus.clone();
@@ -2225,27 +2065,333 @@ impl WebApplication {
 
 fn is_transport_task_kind(kind: &str) -> bool {
     matches!(
-        kind,
-        "refresh_ports"
-            | "request_port"
-            | "connect_serial"
-            | "reconnect_serial"
-            | "connect_network"
-            | "reconnect_network"
-            | "disconnect_serial"
-            | "disconnect_network"
-            | "cancel_reconnect_disconnect"
-            | "remove_network_port"
-            | "send_serial"
-            | "send_network"
-            | "set_dtr"
-            | "set_rts"
+        TaskKind::from_name(kind),
+        Some(
+            TaskKind::RefreshPorts
+                | TaskKind::RequestPort
+                | TaskKind::ConnectSerial
+                | TaskKind::ReconnectSerial
+                | TaskKind::ConnectNetwork
+                | TaskKind::ReconnectNetwork
+                | TaskKind::DisconnectSerial
+                | TaskKind::DisconnectNetwork
+                | TaskKind::CancelReconnect
+                | TaskKind::RemoveNetworkPort
+                | TaskKind::SendSerial
+                | TaskKind::SendNetwork
+                | TaskKind::SetDtr
+                | TaskKind::SetRts
+        )
     )
+}
+
+/// Browser adapter for the shared command plan. Wraps a shared reference
+/// because `WebApplication` is interior-mutable; the trait's `&mut self`
+/// methods still only perform `&self` operations on the runtime.
+struct WebCommandEffects<'a>(&'a WebApplication);
+
+fn transport_error(message: String) -> CommandError {
+    CommandError::Transport(message)
+}
+
+impl crate::command::CommandEffects for WebCommandEffects<'_> {
+    fn refresh_ports(&mut self) -> Result<CommandOutcome, CommandError> {
+        self.0.refresh_ports().map_err(transport_error)
+    }
+
+    fn request_port(&mut self) -> Result<CommandOutcome, CommandError> {
+        self.0.request_serial_port().map_err(transport_error)
+    }
+
+    fn register_network_port(&mut self, config: NetworkSerialConfig) -> Result<(), CommandError> {
+        let descriptor = tool_platform::network_descriptor(&config);
+        self.0
+            .network_ports
+            .borrow_mut()
+            .insert(descriptor.id.to_string(), config);
+        self.0.notify(WebAppEvent::NetworkPortAdded(descriptor));
+        Ok(())
+    }
+
+    fn remove_network_port(&mut self, port: PortId) -> Result<(), CommandError> {
+        self.0
+            .remove_network_port(port)
+            .map(|_| ())
+            .map_err(transport_error)
+    }
+
+    fn connect(
+        &mut self,
+        port: PortId,
+        settings: SerialSettings,
+    ) -> Result<CommandOutcome, CommandError> {
+        self.0.connect(port, settings).map_err(transport_error)
+    }
+
+    fn apply_serial_settings(&mut self, settings: SerialSettings) {
+        *self.0.serial_settings.borrow_mut() = settings;
+        self.0.transport_view.borrow_mut().settings = settings;
+        self.0.wake();
+    }
+
+    fn disconnect(&mut self, port: PortId) -> Result<CommandOutcome, CommandError> {
+        self.0.disconnect(port).map_err(transport_error)
+    }
+
+    fn reconnect(&mut self, port: PortId) -> Result<CommandOutcome, CommandError> {
+        self.0.reconnect(port).map_err(transport_error)
+    }
+
+    fn cancel_reconnect(&mut self, port: PortId) -> Result<CommandOutcome, CommandError> {
+        self.0.cancel_reconnect(port).map_err(transport_error)
+    }
+
+    fn cancel_task(&mut self, task_id: TaskId) -> bool {
+        WebApplication::cancel_task(self.0, task_id)
+    }
+
+    fn is_network_port(&self, port: &PortId) -> bool {
+        WebApplication::is_network_port(self.0, port)
+    }
+
+    fn send_planned(
+        &mut self,
+        port: PortId,
+        plan: PlannedSend,
+    ) -> Result<CommandOutcome, CommandError> {
+        self.0.send(port, plan).map_err(transport_error)
+    }
+
+    fn set_signal(
+        &mut self,
+        port: PortId,
+        value: bool,
+        dtr: bool,
+    ) -> Result<CommandOutcome, CommandError> {
+        if dtr {
+            self.0.set_dtr(port, value).map_err(transport_error)
+        } else {
+            self.0.set_rts(port, value).map_err(transport_error)
+        }
+    }
+
+    fn start_recording(
+        &mut self,
+        file: FileHandle,
+        mode: RecordModeView,
+    ) -> Result<CommandOutcome, CommandError> {
+        self.0
+            .start_recording(file.name().to_owned(), mode)
+            .map_err(CommandError::Recording)
+    }
+
+    fn set_recording_mode(&mut self, mode: RecordModeView) {
+        self.0.recording.borrow_mut().mode = mode.into();
+        self.0.notify(WebAppEvent::RecordingChanged);
+    }
+
+    fn stop_recording(&mut self) -> Result<CommandOutcome, CommandError> {
+        self.0
+            .request_recording_stop(false, None)
+            .map_err(CommandError::Recording)
+    }
+
+    fn pause_recording(&mut self) -> Result<CommandOutcome, CommandError> {
+        self.0.pause_recording().map_err(CommandError::Recording)
+    }
+
+    fn resume_recording(&mut self) -> Result<CommandOutcome, CommandError> {
+        self.0.resume_recording().map_err(CommandError::Recording)
+    }
+
+    fn add_recording_bookmark(&mut self, name: Option<String>) {
+        self.0.bus.publish(Event::new(
+            "recorder.bookmark",
+            "recorder",
+            Direction::Internal,
+            Payload::Text(name.unwrap_or_default()),
+        ));
+        self.0.wake();
+    }
+
+    fn load_replay_text(
+        &mut self,
+        name: String,
+        text: String,
+    ) -> Result<CommandOutcome, CommandError> {
+        self.0
+            .load_replay_text(name, text)
+            .map_err(CommandError::Replay)
+    }
+
+    fn replay_play(&mut self) -> Result<(), CommandError> {
+        self.0.replay.borrow_mut().play();
+        self.0.notify(WebAppEvent::ReplayChanged { rebuild: false });
+        Ok(())
+    }
+
+    fn replay_pause(&mut self) -> Result<(), CommandError> {
+        self.0.replay.borrow_mut().pause();
+        self.0.notify(WebAppEvent::ReplayChanged { rebuild: false });
+        Ok(())
+    }
+
+    fn replay_stop(&mut self) -> Result<(), CommandError> {
+        self.0.replay.borrow_mut().stop();
+        self.0.notify(WebAppEvent::ReplayChanged { rebuild: true });
+        Ok(())
+    }
+
+    fn replay_seek(&mut self, position_ms: u64) -> Result<(), CommandError> {
+        self.0.replay.borrow_mut().seek_with_replay(position_ms);
+        self.0.notify(WebAppEvent::ReplayChanged { rebuild: true });
+        Ok(())
+    }
+
+    fn replay_seek_by(&mut self, delta_ms: i64) -> Result<(), CommandError> {
+        self.0
+            .replay_seek_by(delta_ms)
+            .map(|_| ())
+            .map_err(CommandError::Replay)
+    }
+
+    fn replay_step(&mut self, delta: i32) -> Result<(), CommandError> {
+        self.0
+            .replay_step(delta)
+            .map(|_| ())
+            .map_err(CommandError::Replay)
+    }
+
+    fn replay_set_speed(&mut self, speed: f64) {
+        self.0.replay.borrow_mut().set_speed(speed);
+        self.0.wake();
+    }
+
+    fn replay_set_policy(&mut self, policy: ReplayPolicyView) -> Result<(), CommandError> {
+        self.0
+            .set_replay_policy(policy)
+            .map(|_| ())
+            .map_err(CommandError::Replay)
+    }
+
+    fn replay_add_bookmark(&mut self, name: Option<String>) {
+        self.0.replay.borrow_mut().add_bookmark(name);
+        self.0.wake();
+    }
+
+    fn replay_remove_bookmark(&mut self, position_ms: u64) {
+        self.0.replay.borrow_mut().remove_bookmark(position_ms);
+        self.0.wake();
+    }
+
+    fn enable_plugin(&mut self, plugin_id: String) -> Result<(), CommandError> {
+        self.0
+            .queue_plugin_command(PluginCommand::Enable { plugin_id })
+            .map(|_| ())
+            .map_err(CommandError::Plugin)
+    }
+
+    fn disable_plugin(&mut self, plugin_id: String) -> Result<(), CommandError> {
+        self.0
+            .queue_plugin_command(PluginCommand::Disable { plugin_id })
+            .map(|_| ())
+            .map_err(CommandError::Plugin)
+    }
+
+    fn reload_plugins(&mut self) -> Result<CommandOutcome, CommandError> {
+        self.0
+            .queue_plugin_command(PluginCommand::Reload)
+            .map_err(CommandError::Plugin)
+    }
+
+    fn execute_plugin_command(
+        &mut self,
+        plugin_id: String,
+        command_id: String,
+        context: serde_json::Value,
+    ) -> Result<(), CommandError> {
+        self.0
+            .plugin_commands
+            .borrow_mut()
+            .push(PluginCommand::Execute {
+                plugin_id,
+                command_id,
+                context,
+            });
+        Ok(())
+    }
+
+    fn refresh_marketplace(&mut self, url: String) -> Result<CommandOutcome, CommandError> {
+        self.0
+            .start_marketplace_refresh(url)
+            .map_err(CommandError::InvalidCommand)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn install_marketplace_plugin(
+        &mut self,
+        plugin_id: String,
+        manifest_url: String,
+        main_url: String,
+    ) -> Result<CommandOutcome, CommandError> {
+        self.0
+            .start_marketplace_install(plugin_id, manifest_url, main_url)
+            .map_err(CommandError::InvalidCommand)
+    }
+
+    fn check_for_update(&mut self) -> Result<CommandOutcome, CommandError> {
+        self.0
+            .start_update_check()
+            .map_err(CommandError::InvalidCommand)
+    }
+
+    fn clear_terminal(&mut self) -> Result<(), CommandError> {
+        self.0.notify(WebAppEvent::TerminalCleared);
+        Ok(())
+    }
+
+    fn set_terminal_merge_window(&mut self, ms: u64) {
+        *self.0.terminal_merge_window_ms.borrow_mut() = ms;
+        let max_entries = *self.0.terminal_max_entries.borrow();
+        self.0.notify(WebAppEvent::TerminalSettingsChanged {
+            merge_window_ms: ms,
+            max_entries,
+        });
+    }
+
+    fn set_terminal_max_entries(&mut self, max: usize) {
+        *self.0.terminal_max_entries.borrow_mut() = max;
+        let merge_window_ms = *self.0.terminal_merge_window_ms.borrow();
+        self.0.notify(WebAppEvent::TerminalSettingsChanged {
+            merge_window_ms,
+            max_entries: max,
+        });
+    }
 }
 
 impl crate::AppRuntime for WebApplication {
     fn capabilities(&self) -> crate::AppCapabilities {
         crate::AppCapabilities::web()
+    }
+
+    fn query_transport(&self) -> TransportView {
+        WebApplication::query_transport(self)
+    }
+
+    fn query_recording(&self) -> RecordingStatusView {
+        WebApplication::query_recording(self)
+    }
+
+    fn query_replay(&self) -> ReplayStatusView {
+        WebApplication::query_replay(self)
+    }
+
+    fn query_plugins(&self) -> PluginView {
+        WebApplication::query_plugins(self)
+    }
+
+    fn task_snapshots(&self) -> Vec<TaskSnapshot> {
+        WebApplication::task_snapshots(self)
     }
 
     fn tick(&mut self) {

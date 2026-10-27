@@ -80,7 +80,7 @@ impl WebNetworkTransport {
     ) -> TransportFuture<()> {
         let connections = self.connections.clone();
         Box::pin(async move {
-            let port = config.port_id();
+            let port = crate::network_port_id(&config);
             if let Some(existing) = connections.borrow_mut().remove(&port) {
                 existing.close();
             }

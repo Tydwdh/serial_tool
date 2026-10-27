@@ -18,7 +18,7 @@ use tool_recorder::ReplayLoadData;
 use tool_transport::SerialPortDescriptor;
 
 use crate::task_model::prune_finished_snapshots;
-pub use crate::task_model::{TaskId, TaskSnapshot, TaskState};
+pub use crate::task_model::{TaskId, TaskKind, TaskSnapshot, TaskState};
 
 /// worker 完成后交给 UI/Workbench 应用的结果。
 #[derive(Debug)]

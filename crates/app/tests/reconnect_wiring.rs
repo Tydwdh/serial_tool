@@ -77,7 +77,7 @@ fn the_dead_pending_reconnect_state_is_gone() {
     // 端口行那个 ⟳ 必须来自重连表（`pending_reconnect` 是 tool-panels 的展示字段，这里钉的是它的来源）。
     let ui = read("src/ui/mod.rs");
     assert!(
-        ui.contains("self.serial.reconnects.entry(&port.port_name).is_some()"),
+        ui.contains("self.serial.reconnects.entry(port.id.as_str()).is_some()"),
         "端口行的重连标记必须由重连表算出"
     );
 }

@@ -13,7 +13,7 @@ pub mod updater;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 
-pub use task_model::{TaskId, TaskSnapshot, TaskState};
+pub use task_model::{TaskId, TaskKind, TaskSnapshot, TaskState};
 
 pub mod command;
 #[cfg(not(target_arch = "wasm32"))]
@@ -39,7 +39,7 @@ pub use error::AppError;
 pub use runtime::AppRuntime;
 #[cfg(not(target_arch = "wasm32"))]
 pub use task::{AppEvent, TaskManager, TaskResult};
-pub use transport::TransportView;
+pub use transport::{PortTypeView, PortView, SerialConfigView, TransportView};
 #[cfg(not(target_arch = "wasm32"))]
 pub use workbench::{
     ApplicationConfig, EventSink, TransportEndpoint, UiEventSubscriptions, Workbench,

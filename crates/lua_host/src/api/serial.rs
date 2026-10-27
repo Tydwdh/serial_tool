@@ -18,69 +18,15 @@ use crate::globals::{
 };
 use crate::host_services::{LineBufferMap, LuaHostServices, line_buffer_key};
 
-/// 简单 Lua pattern 匹配：支持 `^` 锚点和子串匹配。
-///
-/// 响应模式匹配。三种形态：
-///
-/// - `re:<regex>`：正则匹配（Rust regex 语法）。同样先跳过行首可选的 `(...)`
-///   前缀再做匹配；正则内自行用 `^`/`$` 锚定。编译结果按模式字符串缓存。
-/// - `^xxx`：行首匹配。部分固件（如某些 Marlin 分支）会在每行响应前加一个
-///   `(数字)` 调试/时间戳前缀（如 `(0.00000)ok*43`）。为兼容这类固件，`^` 锚定
-///   会先跳过行首一个可选的 `(...)` 前缀（以 `(` 开头、`)` 结尾、内部无换行），
-///   再做 starts_with。行首无 `(` 时行为不变，向后兼容。
-/// - 无前缀：子串匹配（contains）。
-pub(crate) fn match_pat(line: &str, pat: &str) -> bool {
-    if let Some(regex) = pat.strip_prefix("re:") {
-        let after_prefix = strip_leading_paren_prefix(line);
-        return compile_cached_regex(regex).is_some_and(|re| re.is_match(after_prefix));
-    }
-    if let Some(suffix) = pat.strip_prefix('^') {
-        // 跳过行首可选的 (...) 前缀，兼容带 (0.00000) 前缀的固件响应。
-        let after_prefix = strip_leading_paren_prefix(line);
-        after_prefix.starts_with(suffix)
-    } else {
-        line.contains(pat)
-    }
-}
-
-/// 按模式字符串缓存编译结果；非法正则返回 None（并记录一次警告）。
-///
-/// 缓存有上限（[`REGEX_CACHE_MAX_ENTRIES`]），超限时清空重建，避免 Lua 插件
-/// 用可变的 pattern 拼接导致无界内存增长。缓存持有 `Arc` 所有权：清空或整表丢弃时
-/// 旧条目随引用计数释放，不再像 `Box::leak` 那样每轮清空都永久泄漏最多 256 个已编译正则。
-fn compile_cached_regex(pattern: &str) -> Option<Arc<regex::Regex>> {
-    use std::sync::{LazyLock, Mutex};
-
-    /// 缓存条目上限。达到后整个清空（保证有界），由插件正常使用的 pattern 数量远小于此。
-    const REGEX_CACHE_MAX_ENTRIES: usize = 256;
-
-    static CACHE: LazyLock<Mutex<std::collections::HashMap<String, Option<Arc<regex::Regex>>>>> =
-        LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
-    let mut map = CACHE.lock().expect("regex cache poisoned");
-    if map.len() >= REGEX_CACHE_MAX_ENTRIES {
-        map.clear();
-    }
-    if let Some(entry) = map.get(pattern) {
-        return entry.clone();
-    }
-    let compiled = match regex::Regex::new(pattern) {
-        Ok(re) => Some(Arc::new(re)),
-        Err(e) => {
-            log::warn!("serial expect: invalid regex pattern {pattern:?}: {e}");
-            None
-        }
-    };
-    map.insert(pattern.to_owned(), compiled.clone());
-    compiled
-}
+/// Shared ctx pattern matcher (native and web use the same rules).
+pub(crate) use tool_plugin_api::ctx::match_pattern as match_pat;
 
 /// 端口名大小写不敏感比较（Windows 串口号 `com3` / `COM3` 视为同一端口）。
-/// 事件 metadata 里的端口名来自 worker（真实大小写），而 Lua 侧可能传入小写。
 fn same_port(a: &str, b: &str) -> bool {
     a.eq_ignore_ascii_case(b)
 }
 
-/// 事件是否来自指定端口。metadata 里没有 `port` 时按空串比较（与原内联判定一致）。
+/// 事件是否来自指定端口。metadata 里没有 `port` 时按空串比较。
 fn event_matches_port(event: &tool_core::Event, port: &str) -> bool {
     let event_port = event
         .metadata
@@ -88,19 +34,6 @@ fn event_matches_port(event: &tool_core::Event, port: &str) -> bool {
         .and_then(|value| value.as_str())
         .unwrap_or("");
     same_port(event_port, port)
-}
-
-/// 若 `line` 以 `(...)` 开头（`(` 到第一个 `)`，内部无换行），返回去掉该前缀
-/// 后的剩余部分；否则原样返回。
-fn strip_leading_paren_prefix(line: &str) -> &str {
-    if line.starts_with('(')
-        && let Some(close) = line.find(')')
-    {
-        // 前缀内不能跨行（find 到的 ) 必须在同一行内，line 本身已是单行）
-        &line[close + 1..]
-    } else {
-        line
-    }
 }
 
 /// 超时轮询串口事件直到匹配成功或超时。

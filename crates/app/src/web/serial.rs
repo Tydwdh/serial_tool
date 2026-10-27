@@ -12,7 +12,7 @@ use eframe::egui;
 use egui_material_icons::icons::{ICON_CABLE, ICON_CANCEL, ICON_REFRESH, ICON_TUNE};
 use std::collections::BTreeMap;
 use tool_application::web::WebRuntime;
-use tool_application::{AppCommand, CommandOutcome, TaskId, TransportView};
+use tool_application::{AppCommand, CommandOutcome, PortView, TaskId, TransportView};
 use tool_panels::{
     NetworkSerialAction, NetworkSerialFormView, SerialAction, SerialPanel, SerialPortItem,
     SerialPortMetadata, SerialTopBarAction, SerialView, design, network_serial_form_ui, theme,
@@ -197,10 +197,11 @@ impl WorkbenchApp {
                 .reconnect
                 .as_ref()
                 .map(|pending| pending.port.clone());
-            let ports: Vec<SerialPortItem> = transport_view
+            let view_ports: Vec<PortView> = transport_view
                 .as_ref()
-                .map(|view| &view.ports)
-                .unwrap_or(&serial.ports)
+                .map(|view| view.ports.clone())
+                .unwrap_or_else(|| serial.ports.iter().cloned().map(PortView::from).collect());
+            let ports: Vec<SerialPortItem> = view_ports
                 .iter()
                 .map(|port| SerialPortItem {
                     id: port.id.to_string(),
@@ -287,11 +288,10 @@ impl WorkbenchApp {
                     };
                     match network_action {
                         Some(NetworkSerialAction::Submit(config)) => {
-                            if state
-                                .network_ports
-                                .iter()
-                                .any(|item| item.port_id() == config.port_id())
-                            {
+                            if state.network_ports.iter().any(|item| {
+                                tool_platform::network_port_id(item)
+                                    == tool_platform::network_port_id(&config)
+                            }) {
                                 state.status = "网络串口已存在，正在连接".to_owned();
                             }
                             network_to_add = Some(config);
@@ -337,13 +337,13 @@ impl WorkbenchApp {
 
     /// 登记网络串口并立刻连接：已登记过的端点不再重复写入 `network_ports`。
     fn add_web_network_port(&mut self, config: NetworkSerialConfig, ctx: &egui::Context) {
-        let port = config.port_id();
+        let port = tool_platform::network_port_id(&config);
         {
             let mut serial = self.serial.borrow_mut();
             if !serial
                 .network_ports
                 .iter()
-                .any(|item| item.port_id() == port)
+                .any(|item| tool_platform::network_port_id(item) == port)
             {
                 serial.network_ports.push(config.clone());
             }
@@ -404,7 +404,7 @@ impl WorkbenchApp {
                     let mut serial = self.serial.borrow_mut();
                     serial
                         .network_ports
-                        .retain(|config| config.port_id() != port);
+                        .retain(|config| tool_platform::network_port_id(config) != port);
                     if serial.selected_port.as_ref() == Some(&port) {
                         serial.selected_port = None;
                     }
@@ -589,7 +589,7 @@ pub(crate) fn handle_web_reconnect_task_cancelled(
 /// 顶栏端口条目的三个标记：`open` 来自运行时看到的已连接端口，`connecting`
 /// 只在「正在连接的就是这一项」时点亮，`pending_reconnect` 来自待重连的端口名。
 pub(crate) fn web_top_bar_port_items(
-    ports: &[PortDescriptor],
+    ports: &[PortView],
     connected_id: Option<&str>,
     connecting: bool,
     selected: Option<&PortId>,
@@ -672,10 +672,7 @@ pub(crate) fn web_serial_status_label(
     }
 }
 
-pub(crate) fn web_port_display_name(
-    port: &PortDescriptor,
-    aliases: &BTreeMap<String, String>,
-) -> String {
+pub(crate) fn web_port_display_name(port: &PortView, aliases: &BTreeMap<String, String>) -> String {
     let alias = aliases
         .get(port.id.as_str())
         .map(|alias| alias.trim())

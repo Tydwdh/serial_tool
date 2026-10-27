@@ -5,7 +5,7 @@ use egui_material_icons::icons::{
     ICON_CHECK_CIRCLE, ICON_CLOUD_DOWNLOAD, ICON_ERROR, ICON_NOTIFICATIONS, ICON_REFRESH,
     ICON_SYSTEM_UPDATE, ICON_WARNING,
 };
-use tool_application::query::{RecorderStatsView, TransportStatusView};
+use tool_application::query::{PortStatusView, RecorderStatsView};
 use tool_panels::{
     StatusBarAction, StatusBarView, StatusSignalView, design, status_bar_contents_ui, theme,
 };
@@ -21,7 +21,7 @@ impl WorkbenchApp {
             .selected_port
             .as_deref()
             .map(|p| self.workbench.transport_status(p))
-            .unwrap_or_else(TransportStatusView::closed);
+            .unwrap_or_else(PortStatusView::closed);
         let selected_port = self.serial.selected_port.clone();
         let recording = self.workbench.query_recording();
         let (serial_color, serial_label) = self.serial_segment(&st, selected_port.as_deref());
@@ -67,7 +67,7 @@ impl WorkbenchApp {
     /// 串口段的颜色与文案：连接中优先；已打开时网络端口显示“网络”而非波特率。
     fn serial_segment(
         &self,
-        st: &TransportStatusView,
+        st: &PortStatusView,
         selected_port: Option<&str>,
     ) -> (egui::Color32, String) {
         let Some(port) = selected_port else {
@@ -118,27 +118,25 @@ impl WorkbenchApp {
                 format!("日志缓冲已满，丢失 {log_dropped} 条最旧事件"),
             );
         }
-        if self.terminal_panel.truncated {
+        if self.terminal_panel.take_truncated() {
             self.notifications.push(
                 "terminal",
                 StatusLevel::Warn,
                 format!(
                     "终端已截断，仅保留最近 {} 条",
-                    self.terminal_panel.max_entries
+                    self.terminal_panel.max_entries()
                 ),
             );
-            self.terminal_panel.truncated = false;
         }
-        if self.bottom_log_panel.truncated {
+        if self.bottom_log_panel.take_truncated() {
             self.notifications.push(
                 "log",
                 StatusLevel::Warn,
                 format!(
                     "日志已截断，仅保留最近 {} 条",
-                    self.bottom_log_panel.max_entries
+                    self.bottom_log_panel.max_entries()
                 ),
             );
-            self.bottom_log_panel.truncated = false;
         }
     }
 

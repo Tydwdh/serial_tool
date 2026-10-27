@@ -49,9 +49,12 @@ fn network_port_identity_cannot_collide_with_a_serial_port() {
     };
 
     assert_eq!(config.display_name(), "nexus.local:7125");
-    assert_eq!(config.port_id(), PortId::new("network://nexus.local:7125"));
+    assert_eq!(
+        tool_platform::network_port_id(&config),
+        PortId::new("network://nexus.local:7125")
+    );
 
-    let descriptor = config.descriptor();
+    let descriptor = tool_platform::network_descriptor(&config);
     assert_eq!(descriptor.kind, PortKind::Network);
     assert_eq!(descriptor.label, "nexus.local:7125");
     assert!(descriptor.authorized, "配置过的网络端点不需要额外授权");
@@ -115,7 +118,7 @@ fn rx_and_tx_events_carry_topic_direction_and_port_metadata() {
 
     let rx = serial_rx_event(&port, b"hello".to_vec());
     assert_eq!(rx.topic, tool_core::topics::SERIAL_RX);
-    assert_eq!(rx.source, "serial:serial:COM3");
+    assert_eq!(rx.source, "serial:COM3");
     assert_eq!(rx.direction, tool_core::Direction::Rx);
     assert_eq!(rx.metadata["port"], "serial:COM3");
     match rx.payload {

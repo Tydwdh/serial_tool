@@ -8,7 +8,6 @@
 
 use crate::{RepaintWaker, SerialCommand, TransportResult, serial_rx_event, serial_tx_event};
 use crossbeam_channel::Receiver;
-use serde::{Deserialize, Serialize};
 use std::io;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
@@ -19,33 +18,7 @@ use tool_core::{Event, LogLevel, parse_gcode_response};
 use tool_databus::DataBus;
 use tungstenite::Message;
 
-/// 网络串口配置。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct NetworkSerialConfig {
-    /// 服务器主机名或 IP。
-    pub host: String,
-    /// 服务器端口（Nexus Prime 默认 7125）。
-    pub port: u16,
-    /// 可选的 API 密钥（服务器未启用认证时留空）。
-    pub api_key: Option<String>,
-}
-
-impl Default for NetworkSerialConfig {
-    fn default() -> Self {
-        Self {
-            host: String::new(),
-            port: 7125,
-            api_key: None,
-        }
-    }
-}
-
-impl NetworkSerialConfig {
-    /// 端口显示名，例如 `192.168.1.100:7125`。
-    pub fn display_name(&self) -> String {
-        format!("{}:{}", self.host, self.port)
-    }
-}
+pub use tool_core::NetworkSerialConfig;
 
 /// 网络串口的错误一律以 `transport.network` 为来源、以端口名为前缀发布日志。
 fn publish_network_error(bus: &DataBus, port_name: &str, detail: impl std::fmt::Display) {

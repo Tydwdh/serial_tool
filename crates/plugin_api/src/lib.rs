@@ -6,6 +6,7 @@
 //! when the underlying Lua VM changes.
 
 mod capability;
+pub mod ctx;
 mod engine;
 mod error;
 mod file;
@@ -15,8 +16,7 @@ mod value;
 
 pub use capability::{PluginCapability, PluginPermissions};
 pub use engine::{
-    CoroutineId, LuaEngine, PluginCallResult, PluginFunctionId, PluginInstanceId, PluginLoadConfig,
-    PluginYield,
+    LuaEngine, PluginCallResult, PluginFunctionId, PluginInstanceId, PluginLoadConfig,
 };
 pub use error::{PluginError, PluginResult};
 pub use file::FileHandle;

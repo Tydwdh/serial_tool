@@ -28,14 +28,14 @@ impl WorkbenchApp {
             .ports
             .iter()
             .map(|port| {
-                let status = self.workbench.transport_status(&port.port_name);
+                let status = self.workbench.transport_status(port.id.as_str());
                 tool_panels::SerialPortItem {
-                    id: port.port_name.clone(),
-                    label: port.port_name.clone(),
-                    kind: port.port_type.to_string(),
+                    id: port.id.to_string(),
+                    label: port.label.clone(),
+                    kind: port.detail.to_string(),
                     open: status.open,
                     connecting: status.connecting,
-                    pending_reconnect: self.serial.reconnects.entry(&port.port_name).is_some(),
+                    pending_reconnect: self.serial.reconnects.entry(port.id.as_str()).is_some(),
                 }
             })
             .collect()

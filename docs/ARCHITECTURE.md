@@ -54,16 +54,19 @@ crates/app ──────────> crates/panels ───────�
 
 ## 2. 控制面：AppCommand / 后台任务 / 查询
 
-- UI 动作 → `AppCommand`（`crates/application/src/command/mod.rs`）→ `Workbench::dispatch`
-  → `CommandOutcome::Done | Pending { task_id, .. }`。
+- UI 动作 → `AppCommand`（`crates/application/src/command/mod.rs`）→
+  `command::execute`（唯一匹配）→ 平台 `CommandEffects` 适配 →
+  `CommandOutcome::Done | Pending { task_id, .. }`。任务种类用共享 `TaskKind`，两端不再各拼字符串。
 - 后台任务由 `TaskManager`（`crates/application/src/task.rs`）执行：`spawn` 并发；
   `spawn_ordered` 按端口键 FIFO——保证同端口的 `Write → SetDtr` 顺序与多段发送顺序。
 - 完成经 `AppEvent`（`TaskStateChanged`/`TaskCompleted`/`TaskFailed`/`TaskCancelled`）→
   `Workbench::poll_tasks`（每帧）→ 结果落到各 manager；UI 在下一帧通过查询读取。
-- 读侧没有 `AppQuery` 类型：`Workbench::query_transport / query_recording / query_replay / query_plugins`
-  返回 `crates/application/src/query/` 的只读 DTO。
-- 平台契约：UI 侧只依赖 `AppRuntime`（`capabilities/tick/dispatch`，`crates/application/src/runtime.rs`）——
-  native `Workbench` 与 web `WebApplication` 各自实现。
+- 读侧统一走 `AppRuntime::query_transport / query_recording / query_replay / query_plugins /
+  task_snapshots`（`crates/application/src/runtime.rs`）；`TransportView` 只有一份
+  （`crates/application/src/transport.rs`），native 填 `statuses/open_ports/config/auto_reconnect`，
+  web 填 `ports/connected/connecting/settings/status`。
+- 平台契约：UI 侧只依赖 `AppRuntime`（`capabilities / query_* / tick / dispatch`，
+  `crates/application/src/runtime.rs`）——native `Workbench` 与 web `WebApplication` 各自实现。
 
 ## 3. 数据面：DataBus（唯一事件总线）
 
@@ -101,6 +104,11 @@ crates/app ──────────> crates/panels ───────�
   **虚拟串口**（内存实现，供插件场景测试与 CI）。
 - 错误翻译：`translate_error` 产出可操作中文（判定读 kind、文案降级为细节）；`Serial` 臂的残留见
   [known-gaps.md](known-gaps.md)。
+- `TransportManager` 本身实现 `tool_platform::TransportBackend`；`Workbench` 不再另持
+  `NativeTransportBackend`，同一端口状态只有一个接口。命令执行只能经 `CommandEffects` 的
+  `connect/disconnect/send/set_signal`，平台差异留在适配器里。
+- `NetworkSerialConfig` 只有一份（`tool_core`），`tool_platform` / `tool_transport` 都再导出；
+  平台事件构造器的 source 不再出现 `serial:serial:` 双前缀。
 - RX/TX 以 `tool_core::Event` 发布到 `transport.serial.default.rx/tx` 等 topic。
 - 设备存活：Windows worker 的空闲等待有 1s 上限，到点调 `probe_alive()`；连续 2 次失败判定
   设备消失，并把 `reason` 写进 `transport.serial.closed`（`device_lost` / `user_close`）。
@@ -133,6 +141,9 @@ crates/app ──────────> crates/panels ───────�
     协程任务每 tick 最多 resume 50 个。
   - web `crates/plugin_runtime`：纯 Rust omniLua（指令/内存限制）；模块**刻意不 cfg**，
     由 `cargo test` 在宿主上执行，并与 native 引擎做差分（`crates/plugin_runtime/tests/lua_api_parity.rs`）。
+- `ctx.*` 的纯规则（HEX、topic、串口 pattern + 有界正则缓存）与 domain→permission 表在
+  `crates/plugin_api/src/ctx.rs`，两引擎共用；没有生产调用者的 `MluaEngine` 与死掉的
+  `LuaEngine::resume` 路径已删除。
 - 管理：`crates/extension`——扫描 `<dir>/<plugin>/plugin.json`、校验 api_version（当前 `"0.1"`）/
   runtime（`lua`）/权限/contributions、enable/disable 生命周期、事件泵
   （`ui.*`/`log.*`/`plugin.command.*` 恒转发）、诊断中文化。
@@ -174,14 +185,16 @@ crates/app ──────────> crates/panels ───────�
 
 ## 10. 如何新增能力 / 面板
 
-- **新增能力（命令）**：`AppCommand` 加变体 → `Workbench::dispatch` 实现（重活走 `TaskManager`）→
-  需要异步结果就加 `AppEvent` 分支并在 `poll_tasks` 落账 → 读侧加 `query_*` DTO →
+- **新增能力（命令）**：`AppCommand` 加变体 → 在 `command::execute` 里写唯一决策 →
+  平台差异实现为 `CommandEffects` 方法（native `Workbench` / web `WebCommandEffects`）→
+  需要异步结果就加 `AppEvent` 分支并在 `poll_tasks` 落账 → 读侧加 `AppRuntime::query_*` DTO →
   app 层 handler（native `src/ui` / `src/runtime`，web `src/web`）接线 → 浏览器需要等价物时更新
   `capability.rs` 与 `web.rs`。
 - **新增内置面板**：在 `crates/panels` 实现 View（返回 Action，不依赖 Workbench）→
   定义 `PanelId` / `PANEL_*` 常量（`crates/panels/src/manager.rs`）→ 在
   `crates/app/src/panel_registry.rs` 注册 `PanelDef`（可挂 capability 门控）→
-  `crates/app/src/ui/tiles.rs` 的 `tile_panel_body` 分发渲染。动态面板走插件路径，不进注册表。
+  共享面板加进 `shared_shell::SharedPanels`（由 `render_panel` 统一分发），平台专属面板
+  实现 `DockHost::render_platform_panel`。动态面板走插件路径，不进注册表。
 
 ## 11. 测试与验证策略
 

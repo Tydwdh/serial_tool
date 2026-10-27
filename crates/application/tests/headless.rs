@@ -299,7 +299,7 @@ fn send_routing_dispatches_by_port_kind_and_rejects_invalid_hex() {
         wb.query_transport()
             .ports
             .iter()
-            .any(|port| port.port_name == network_name && port.port_type.is_network()),
+            .any(|port| port.id.as_str() == network_name && port.detail.is_network()),
         "注册后 query_transport().ports 应包含类型为 Network 的 {network_name}"
     );
 
@@ -351,7 +351,7 @@ fn network_port_ids_are_recognized_in_both_naming_forms() {
         api_key: None,
     };
     let display = config.display_name();
-    let network_id = config.port_id().to_string();
+    let network_id = tool_platform::network_port_id(&config).to_string();
     expect_done(&mut wb, AppCommand::RegisterNetworkPort { config });
 
     let display_task = expect_pending(
@@ -1819,7 +1819,7 @@ fn sending_to_a_port_that_was_never_opened_reads_in_chinese_on_both_entry_points
     let bus = DataBus::new();
     let mut wb = Workbench::new(bus);
 
-    // ① 一次性发送：走 `NativeTransportBackend::send` → `operation_error`。
+    // ① 一次性发送：走 `TransportBackend::send` → `operation_error`。
     let task = expect_pending(
         &mut wb,
         AppCommand::SendText {
@@ -1894,7 +1894,7 @@ fn reconnect_gives_up_at_once_on_a_port_that_cannot_be_opened() {
     );
     assert_eq!(
         task_kind(&wb, task).as_deref(),
-        Some("reconnect"),
+        Some("reconnect_serial"),
         "Reconnect 必须落到重连任务本身，否则下面测的不是这次尝试"
     );
 
@@ -1990,7 +1990,7 @@ fn network_reconnect_takes_the_network_branch() {
             port: PortId::new(name.clone()),
         },
     );
-    assert_eq!(task_kind(&wb, task).as_deref(), Some("reconnect"));
+    assert_eq!(task_kind(&wb, task).as_deref(), Some("reconnect_network"));
     let ended = tick_until(&mut wb, Duration::from_secs(10), |wb| {
         matches!(
             task_state(wb, task),
@@ -2517,9 +2517,14 @@ fn toggling_dtr_or_rts_on_a_port_that_was_never_opened_reads_in_chinese() {
         ),
     ] {
         let task = expect_pending(&mut wb, command);
+        let expected_kind = if signal == "DTR" {
+            "set_dtr"
+        } else {
+            "set_rts"
+        };
         assert_eq!(
             task_kind(&wb, task).as_deref(),
-            Some("set_serial_signal"),
+            Some(expected_kind),
             "{signal} 必须落到设信号任务本身，否则测的不是 `backend.set_dtr`/`set_rts` 那条出口"
         );
         assert_eq!(
@@ -2595,7 +2600,7 @@ fn refreshing_and_requesting_ports_do_not_leak_the_platform_display_frame() {
 /// （`network://host:port`），而 `connect` 与 `start_reconnect` 只按 `display_name()` 匹配，
 /// 于是同一个 id 点名时连接/重连/关闭静默降级到串口后端，发送虽然走对分支也会因端口表查不到
 /// 这个名字而拿到 `PortNotOpen`。这不只是理论：wasm 侧的网络端口
-/// 列表就是以 `port_id()` 为键的（`crates/app/src/web/serial.rs` 里 `let port = config.port_id()`），
+/// 列表就是以 `network_port_id()` 为键的（`crates/app/src/web/serial.rs` 里 `let port = network_port_id(&config)`），
 /// 所以浏览器中点这一行的「连接」走的就是串口分支。
 ///
 /// 本用例钉的是两件事：**认定只有一处判定**（两种形态都要认出来），且**写回的名字只有一个规范形**
@@ -2610,7 +2615,7 @@ fn network_ports_connect_and_reconnect_in_both_naming_forms() {
         api_key: None,
     };
     let display = config.display_name();
-    let network_id = config.port_id().to_string();
+    let network_id = tool_platform::network_port_id(&config).to_string();
     expect_done(&mut wb, AppCommand::RegisterNetworkPort { config });
 
     // ① 连接：必须落到 `connect_network`，不得降级成 `connect_serial`。
@@ -2662,7 +2667,7 @@ fn network_ports_connect_and_reconnect_in_both_naming_forms() {
     );
     assert_eq!(
         task_kind(&wb, reconnect).as_deref(),
-        Some("reconnect"),
+        Some("reconnect_network"),
         "重连命令必须被接受并起一个 reconnect 任务"
     );
     let ended = tick_until(&mut wb, Duration::from_secs(15), |wb| {
@@ -2707,7 +2712,7 @@ fn network_port_commands_in_the_id_form_share_the_canonical_port() {
         api_key: None,
     };
     let display = config.display_name();
-    let network_id = config.port_id().to_string();
+    let network_id = tool_platform::network_port_id(&config).to_string();
     expect_done(&mut wb, AppCommand::RegisterNetworkPort { config });
 
     // ⓪ 先把端口真的打开（连的是活着的 loopback 服务器）。形态问题归上一条用例，

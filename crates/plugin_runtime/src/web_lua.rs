@@ -16,10 +16,11 @@ use omnilua::{
     ThreadStatus, Value, Variadic,
 };
 use tool_platform::PortId;
+use tool_plugin_api::ctx::{match_pattern, parse_hex, topic_matches};
 use tool_plugin_api::{
-    CoroutineId, FileHandle, LogLevel, LuaEngine, PluginCallResult, PluginCapability, PluginError,
-    PluginFunctionId, PluginHostApi, PluginHostRequest, PluginInstanceId, PluginLoadConfig,
-    PluginParity, PluginResult, PluginSerialSettings, PluginUiCommand, PluginValue,
+    FileHandle, LogLevel, LuaEngine, PluginCallResult, PluginError, PluginFunctionId,
+    PluginHostApi, PluginHostRequest, PluginInstanceId, PluginLoadConfig, PluginParity,
+    PluginResult, PluginSerialSettings, PluginUiCommand, PluginValue,
 };
 
 struct WebLuaInstance {
@@ -167,16 +168,6 @@ impl LuaEngine for WebLuaEngine {
         let returns: Vec<Value> = function.call(Variadic::from(args)).map_err(lua_error)?;
         Ok(PluginCallResult::Completed(
             values_to_plugin(&returns).map_err(lua_error)?,
-        ))
-    }
-
-    fn resume(
-        &mut self,
-        _coroutine: CoroutineId,
-        _value: PluginValue,
-    ) -> PluginResult<PluginCallResult> {
-        Err(PluginError::UnsupportedCapability(
-            "coroutine resume is not wired to the Web scheduler yet".to_owned(),
         ))
     }
 
@@ -744,18 +735,6 @@ fn current_task_state(lua: &Lua) -> omnilua::Result<Table> {
     tasks.get(task_id.as_str())
 }
 
-fn match_pattern(line: &str, pattern: &str) -> bool {
-    if let Some(pattern) = pattern.strip_prefix("re:") {
-        return regex::Regex::new(pattern)
-            .map(|regex| regex.is_match(line))
-            .unwrap_or(false);
-    }
-    pattern
-        .strip_prefix('^')
-        .map(|pattern| line.starts_with(pattern))
-        .unwrap_or_else(|| line.contains(pattern))
-}
-
 fn install_replay_ctx(
     lua: &Lua,
     config: &PluginLoadConfig,
@@ -896,31 +875,31 @@ fn install_ctx(
     ctx.set("now_ms", now_fn.clone())?;
     globals.set("__now_ms", now_fn)?;
 
-    if config.permissions.contains(PluginCapability::Log) {
+    if config.permissions.allows_ctx("log") {
         ctx.set("log", create_log_api(lua, host.clone())?)?;
     }
-    if config.permissions.contains(PluginCapability::Bus) {
+    if config.permissions.allows_ctx("bus") {
         ctx.set("bus", create_bus_api(lua, host.clone())?)?;
     }
-    if config.permissions.contains(PluginCapability::Serial) {
+    if config.permissions.allows_ctx("serial") {
         ctx.set(
             "serial",
             create_serial_api(lua, host.clone(), line_buffers.clone())?,
         )?;
     }
-    if config.permissions.contains(PluginCapability::Ui) {
+    if config.permissions.allows_ctx("ui") {
         ctx.set("ui", create_ui_api(lua, host.clone())?)?;
     }
-    if config.permissions.contains(PluginCapability::Storage) {
+    if config.permissions.allows_ctx("storage") {
         ctx.set("session", create_storage_api(lua, host.clone())?)?;
     }
-    if config.permissions.contains(PluginCapability::Config) {
+    if config.permissions.allows_ctx("config") {
         ctx.set("config", create_config_api(lua, host.clone())?)?;
     }
-    if config.permissions.contains(PluginCapability::Dialog) {
+    if config.permissions.allows_ctx("dialog") {
         ctx.set("dialog", create_dialog_api(lua, host.clone())?)?;
     }
-    if config.permissions.contains(PluginCapability::Filesystem) {
+    if config.permissions.allows_ctx("fs") {
         ctx.set("fs", create_fs_api(lua, host.clone())?)?;
     }
 
@@ -1020,10 +999,10 @@ fn install_ctx(
             Ok(())
         })?,
     )?;
-    if config.permissions.contains(PluginCapability::Timer) {
+    if config.permissions.allows_ctx("timer") {
         ctx.set("timer", create_timer_api(lua)?)?;
     }
-    if config.permissions.contains(PluginCapability::Task) {
+    if config.permissions.allows_ctx("task") {
         ctx.set("task", create_task_api(lua)?)?;
     }
     globals.set("ctx", ctx)?;
@@ -1325,7 +1304,9 @@ fn register_serial_send_api(
     api.set(
         "send_hex_to",
         lua.create_function(move |_, (port, text): (String, String)| {
-            let bytes = parse_hex(&text).map_err(host_error)?;
+            let bytes = parse_hex(&text)
+                .map_err(PluginError::InvalidValue)
+                .map_err(host_error)?;
             send_hex_host
                 .serial_send(&PortId::new(port), &bytes)
                 .map_err(host_error)
@@ -2479,32 +2460,6 @@ fn value_to_string(value: &PluginValue) -> String {
             .map(|value| value.to_string())
             .unwrap_or_default(),
     }
-}
-
-fn parse_hex(value: &str) -> PluginResult<Vec<u8>> {
-    let compact = value
-        .chars()
-        .filter(|character| {
-            !character.is_ascii_whitespace() && *character != '_' && *character != '-'
-        })
-        .collect::<String>();
-    if compact.is_empty() || !compact.len().is_multiple_of(2) {
-        return Err(PluginError::InvalidValue("invalid hex input".to_owned()));
-    }
-    (0..compact.len())
-        .step_by(2)
-        .map(|index| {
-            u8::from_str_radix(&compact[index..index + 2], 16)
-                .map_err(|_| PluginError::InvalidValue("invalid hex input".to_owned()))
-        })
-        .collect()
-}
-
-fn topic_matches(pattern: &str, topic: &str) -> bool {
-    pattern == topic
-        || pattern
-            .strip_suffix('*')
-            .is_some_and(|prefix| topic.starts_with(prefix))
 }
 
 fn lua_error(error: LuaError) -> PluginError {

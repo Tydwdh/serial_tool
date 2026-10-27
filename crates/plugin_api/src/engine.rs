@@ -8,9 +8,6 @@ pub struct PluginInstanceId(pub u64);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PluginFunctionId(pub String);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CoroutineId(pub u64);
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct PluginLoadConfig {
     pub plugin_id: String,
@@ -21,27 +18,9 @@ pub struct PluginLoadConfig {
     pub permissions: PluginPermissions,
 }
 
-/// Explicit suspension requests shared by Native and Web schedulers.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PluginYield {
-    SleepMs(u64),
-    WaitBus {
-        topic: String,
-        timeout_ms: Option<u64>,
-    },
-    WaitSerialLine {
-        port: String,
-        timeout_ms: Option<u64>,
-    },
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum PluginCallResult {
     Completed(PluginValue),
-    Yielded {
-        coroutine: CoroutineId,
-        request: PluginYield,
-    },
 }
 
 /// Engine boundary. No `mlua::Value` or VM-specific table/function handle may
@@ -59,12 +38,6 @@ pub trait LuaEngine {
         instance: PluginInstanceId,
         function: PluginFunctionId,
         args: &[PluginValue],
-    ) -> PluginResult<PluginCallResult>;
-
-    fn resume(
-        &mut self,
-        coroutine: CoroutineId,
-        value: PluginValue,
     ) -> PluginResult<PluginCallResult>;
 
     fn stop(&mut self, instance: PluginInstanceId) -> PluginResult<()>;

@@ -16,4 +16,7 @@ path = "src/lib.rs"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+log.workspace = true
+regex = "1"
+tool-core = { path = "../core" }
 tool-platform = { path = "../platform" }

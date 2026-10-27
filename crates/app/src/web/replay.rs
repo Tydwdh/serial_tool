@@ -109,10 +109,12 @@ impl WorkbenchApp {
             return;
         }
 
-        let task_id = self
-            .runtime
-            .as_ref()
-            .map(|runtime| runtime.begin_task("replay_analyzer", "正在启动 Web Replay Analyzer"));
+        let task_id = self.runtime.as_ref().map(|runtime| {
+            runtime.begin_task(
+                tool_application::TaskKind::ReplayAnalyzer,
+                "正在启动 Web Replay Analyzer",
+            )
+        });
         self.replay_analyzer = WebReplayAnalyzerState {
             running: true,
             task_id,

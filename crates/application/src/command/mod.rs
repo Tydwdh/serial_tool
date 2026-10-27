@@ -1,8 +1,36 @@
 //! Application Command — 业务意图（不含 UI 操作）。
 
+mod execute;
+
+pub use execute::{CommandEffects, execute};
+
 use crate::TaskId;
+use thiserror::Error;
 use tool_platform::storage::FileHandle;
 use tool_platform::{NetworkSerialConfig, PortId, SerialSettings};
+
+/// Platform-neutral command failure.
+///
+/// `Display` is the bare Chinese body; the native composition root wraps it in
+/// `AppError` to add its classification prefix, while web maps it straight to
+/// the string its existing callers expect.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum CommandError {
+    #[error("{0}")]
+    Transport(String),
+    #[error("{0}")]
+    Recording(String),
+    #[error("{0}")]
+    Replay(String),
+    #[error("{0}")]
+    Storage(String),
+    #[error("{0}")]
+    Plugin(String),
+    #[error("{0}")]
+    InvalidState(String),
+    #[error("{0}")]
+    InvalidCommand(String),
+}
 
 /// 应用层命令：描述“我要做什么”，由 `Workbench::dispatch` 执行。
 #[derive(Debug, Clone)]

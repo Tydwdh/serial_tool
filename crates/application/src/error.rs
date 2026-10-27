@@ -32,3 +32,32 @@ pub enum AppError {
     #[error("命令不支持：{0}")]
     InvalidCommand(String),
 }
+
+impl From<crate::command::CommandError> for AppError {
+    fn from(error: crate::command::CommandError) -> Self {
+        use crate::command::CommandError;
+        match error {
+            CommandError::Transport(message) => Self::Transport(message),
+            CommandError::Recording(message) => Self::Recording(message),
+            CommandError::Replay(message) => Self::Replay(message),
+            CommandError::Storage(message) => Self::Storage(message),
+            CommandError::Plugin(message) => Self::Plugin(message),
+            CommandError::InvalidState(message) => Self::InvalidState(message),
+            CommandError::InvalidCommand(message) => Self::InvalidCommand(message),
+        }
+    }
+}
+
+impl From<AppError> for crate::command::CommandError {
+    fn from(error: AppError) -> Self {
+        match error {
+            AppError::Transport(message) => Self::Transport(message),
+            AppError::Recording(message) => Self::Recording(message),
+            AppError::Replay(message) => Self::Replay(message),
+            AppError::Storage(message) => Self::Storage(message),
+            AppError::Plugin(message) => Self::Plugin(message),
+            AppError::InvalidState(message) => Self::InvalidState(message),
+            AppError::InvalidCommand(message) => Self::InvalidCommand(message),
+        }
+    }
+}

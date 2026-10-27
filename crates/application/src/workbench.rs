@@ -4,7 +4,7 @@ use tool_core::LogLevel;
 use tool_databus::{DataBus, TopicFilter};
 use tool_extension::PluginManager;
 use tool_lua_host::{DialogRequest, FileAccessBroker};
-use tool_platform::native::{NativeTransportBackend, block_on_transport};
+use tool_platform::native::block_on_transport;
 use tool_platform::storage::{FileBlob, FileHandle, native::NativeFileService};
 use tool_platform::{PortDescriptor, PortId, SerialParity, SerialSettings, TransportBackend};
 use tool_recorder::{JsonlRecorder, ReplayManager};
@@ -12,13 +12,11 @@ use tool_transport::{SerialPortDescriptor, TransportManager};
 
 use crate::command::{AppCommand, CommandOutcome};
 use crate::error::AppError;
-use crate::query::{
-    NetworkPortConfig, PluginView, RecordingStatusView, ReplayStatusView, TransportStatusView,
-    TransportView,
-};
+use crate::query::{NetworkPortConfig, PluginView, RecordingStatusView, ReplayStatusView};
 use crate::send_plan::{self, PlannedSend};
-use crate::task::{AppEvent, TaskContext, TaskId, TaskManager, TaskResult, TaskSnapshot};
+use crate::task::{AppEvent, TaskContext, TaskId, TaskKind, TaskManager, TaskResult, TaskSnapshot};
 use crate::task_model::cancel_deregistered_task;
+use crate::transport::{PortStatusView, PortView, SerialConfigView, TransportView};
 
 #[derive(Debug, Clone)]
 pub struct ApplicationConfig {
@@ -65,7 +63,6 @@ impl Default for ApplicationConfig {
 pub struct Workbench {
     bus: DataBus,
     transport: TransportManager,
-    transport_backend: NativeTransportBackend,
     file_service: NativeFileService,
     recorder: JsonlRecorder,
     replay: ReplayManager,
@@ -171,7 +168,6 @@ impl TransportEndpoint {
 impl Workbench {
     pub fn new(bus: DataBus) -> Self {
         let transport = TransportManager::new(bus.clone());
-        let transport_backend = NativeTransportBackend::new(transport.clone());
         let (dialog_sender, dialog_receiver) = crossbeam_channel::unbounded::<DialogRequest>();
         let file_broker = std::sync::Arc::new(FileAccessBroker::default());
         let mut pm = PluginManager::new(bus.clone(), transport.clone());
@@ -181,7 +177,6 @@ impl Workbench {
         Self {
             bus,
             transport,
-            transport_backend,
             file_service: NativeFileService::new("."),
             recorder,
             replay,
@@ -264,180 +259,46 @@ impl Workbench {
         Ok(pending(task_id, "正在导出文件"))
     }
 
+    /// One command plan for both roots: [`crate::command::execute`] resolves
+    /// validation, routing and outcome text; this adapter performs the native
+    /// effects through [`crate::command::CommandEffects`].
     pub fn dispatch(&mut self, command: AppCommand) -> Result<CommandOutcome, AppError> {
-        match command {
-            AppCommand::RegisterNetworkPort { config } => {
-                self.register_network_port(config);
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::RemoveNetworkPort { port } => {
-                self.remove_network_port(port);
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::RefreshPorts => Ok(self.spawn_refresh_ports()),
-            AppCommand::RequestPort => Ok(self.spawn_request_port()),
-            AppCommand::Connect { port, settings } => self.connect(port.as_str(), settings),
-            AppCommand::SetSerialSettings { settings } => {
-                self.apply_serial_settings(settings);
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::Disconnect { port } => Ok(self.disconnect_port(port.to_string())),
-            AppCommand::Reconnect { port } => self.start_reconnect(port.to_string()),
-            AppCommand::CancelReconnect { port } => {
-                self.cancel_reconnect(port.to_string());
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::CancelTask { task_id } => self.dispatch_cancel_task(task_id),
-            // 三条 send 分支：路由（serial/network）与 HEX 解码都交给 `send_plan::plan_send`，
-            // wasm 侧的 `dispatch` 调的是同一个函数；本平台只负责「按已定的种类把字节投出去」。
-            //
-            // 为什么不合并成 `cmd @ (SendText { port, .. } | SendHex { port, .. }
-            // | SendRaw { port, .. })`：1.92.0 报 E0382（`port` 非 Copy，`cmd` 被部分移动），
-            // 改成 `ref cmd` 就要为 payload 多付一次克隆。三个各 3 行的分支（都只调
-            // `dispatch_send`），也胜过在一个带 `_ => String::new()` 兜底的 helper 里
-            // 还原命令 —— 发送路径上的静默错值不可接受。
-            AppCommand::SendText { port, text } => {
-                let port_name = port.to_string();
-                self.dispatch_send(AppCommand::SendText { port, text }, port_name)
-            }
-            AppCommand::SendHex { port, hex, strict } => {
-                let port_name = port.to_string();
-                self.dispatch_send(AppCommand::SendHex { port, hex, strict }, port_name)
-            }
-            AppCommand::SendRaw { port, bytes } => {
-                let port_name = port.to_string();
-                self.dispatch_send(AppCommand::SendRaw { port, bytes }, port_name)
-            }
-            AppCommand::SetDtr { port, value } => {
-                self.set_transport_signal(port.to_string(), value, true)
-            }
-            AppCommand::SetRts { port, value } => {
-                self.set_transport_signal(port.to_string(), value, false)
-            }
-            AppCommand::StartRecording { file, mode } => self.dispatch_start_recording(file, mode),
-            AppCommand::SetRecordingMode { mode } => {
-                self.recorder.set_mode(mode.into());
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::StopRecording => {
-                self.recorder.stop();
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::PauseRecording => {
-                self.recorder.pause();
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::ResumeRecording => {
-                self.recorder.resume();
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::AddBookmark { name } => {
-                self.recorder.add_bookmark(&name.unwrap_or_default());
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::AddReplayBookmark { name } => {
-                self.replay.add_bookmark(name);
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::LoadReplay { file } => self.dispatch_load_replay(file),
-            AppCommand::ReplayPlay => {
-                let _ = self.replay.play();
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::ReplayPause => {
-                self.replay.pause();
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::ReplayStop => {
-                self.replay.stop();
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::ReplaySeek { position_ms } => {
-                self.replay.seek_ms(position_ms);
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::ReplaySeekBy { delta_ms } => {
-                self.replay_seek_by(delta_ms);
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::ReplayStep { delta } => {
-                self.replay_step(delta);
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::SetReplaySpeed { speed } => {
-                self.replay.set_speed(speed);
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::SetReplayPolicy { policy } => {
-                self.replay.set_policy(policy.into());
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::RemoveReplayBookmark { position_ms } => {
-                self.replay.remove_bookmark(position_ms);
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::EnablePlugin { plugin_id } => self
-                .plugin_manager
-                .enable(&plugin_id)
-                .map(|()| CommandOutcome::Done)
-                .map_err(|e| AppError::Plugin(tool_extension::translate_error(&e))),
-            AppCommand::DisablePlugin { plugin_id } => self
-                .plugin_manager
-                .disable(&plugin_id)
-                .map(|()| CommandOutcome::Done)
-                .map_err(|e| AppError::Plugin(tool_extension::translate_error(&e))),
-            AppCommand::ReloadPlugins => Ok(self.spawn_reload_plugins()),
-            AppCommand::RefreshMarketplace { .. } | AppCommand::CheckForUpdate => Err(
-                AppError::InvalidCommand("市场和更新由桌面组合根负责".to_owned()),
-            ),
-            AppCommand::DiscoverPlugins { roots } => Ok(self.spawn_discover_plugins(roots)),
-            AppCommand::ExecutePluginCommand {
-                plugin_id,
-                command_id,
-                context,
-            } => {
-                self.publish_plugin_command(plugin_id, command_id, context);
-                Ok(CommandOutcome::Done)
-            }
-            // 三个终端命令都不在这里改动用户看到的终端：渲染中的 `TerminalPanel`
-            // 自订阅 `transport.serial.*`，两项设置由组合根直接落到面板
-            // （`app/mod.rs::apply_persisted_panel_settings` 启动回填、
-            // `config.rs::load_config_from_path` 重载、`ui/settings_panel.rs` 用户改值），
-            // 这里只把值记进 `app_config`。`ClearTerminal` 因此在 native 侧无可见效果
-            // ——wasm 侧同名分支靠 `notify(TerminalCleared)` 让组合根清面板，桌面侧没有
-            // 这条回路（原先它清的是 Application 内那份零使用者的重复 store，第 46 轮删除），
-            // 要不要补上这条回路属产品决定，别把它当成漏接线重新接回幻影管道。
-            AppCommand::ClearTerminal => Ok(CommandOutcome::Done),
-            AppCommand::SetTerminalMergeWindow { ms } => {
-                self.app_config.terminal_merge_window_ms = ms;
-                Ok(CommandOutcome::Done)
-            }
-            AppCommand::SetTerminalMaxEntries { max } => {
-                self.app_config.terminal_max_entries = max;
-                Ok(CommandOutcome::Done)
-            }
-        }
+        crate::command::execute(self, command).map_err(AppError::from)
     }
 
     pub fn query_transport(&self) -> TransportView {
-        TransportView {
-            ports: self.ports.clone().into_iter().map(Into::into).collect(),
-            open_ports: self.transport.open_ports(),
-            statuses: self
-                .transport
-                .status_all()
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-            config: crate::query::SerialConfigView {
-                port_name: self.selected_port.clone().unwrap_or_default(),
-                baud_rate: self.app_config.baud_rate.parse().unwrap_or(115_200),
-                data_bits: self.app_config.data_bits.clone(),
-                stop_bits: self.app_config.stop_bits.clone(),
-                parity: self.app_config.parity.clone(),
-            },
-            auto_reconnect: self.app_config.auto_reconnect,
-        }
+        let statuses: Vec<PortStatusView> = self
+            .transport
+            .status_all()
+            .into_iter()
+            .map(PortStatusView::from)
+            .collect();
+        let selected = self.selected_port.as_deref();
+        let selected_status = selected.and_then(|port| {
+            statuses
+                .iter()
+                .find(|status| status.port_name.as_deref() == Some(port))
+        });
+        let mut view = TransportView::new(tool_platform::TransportCapabilities::NATIVE_SERIAL);
+        view.ports = self.ports.iter().cloned().map(PortView::from).collect();
+        view.open_ports = self.transport.open_ports();
+        let connected = selected_status
+            .filter(|status| status.open)
+            .and_then(|_| selected.map(|port| PortId::new(port.to_owned())));
+        let connecting = selected_status.is_some_and(|status| status.connecting);
+        view.statuses = statuses;
+        view.connected = connected;
+        view.connecting = connecting;
+        view.settings = self.platform_serial_settings();
+        view.config = SerialConfigView {
+            port_name: self.selected_port.clone().unwrap_or_default(),
+            baud_rate: view.settings.baud_rate,
+            data_bits: self.app_config.data_bits.clone(),
+            stop_bits: self.app_config.stop_bits.clone(),
+            parity: self.app_config.parity.clone(),
+        };
+        view.auto_reconnect = self.app_config.auto_reconnect;
+        view
     }
 
     pub fn query_recording(&self) -> RecordingStatusView {
@@ -603,7 +464,7 @@ impl Workbench {
         self.transport.open_ports()
     }
 
-    pub fn transport_status(&self, port: &str) -> TransportStatusView {
+    pub fn transport_status(&self, port: &str) -> PortStatusView {
         self.transport.status_port(port).into()
     }
 
@@ -757,11 +618,11 @@ impl Workbench {
     /// 刷新串口列表。同一时刻只允许一个 `refresh_ports` 任务：重复提交复用已在跑的那个，
     /// 而不是再起一份互相覆盖结果的扫描。
     fn spawn_refresh_ports(&mut self) -> CommandOutcome {
-        if let Some(task_id) = self.tasks.active_task_id("refresh_ports") {
+        if let Some(task_id) = self.tasks.active_task_id(TaskKind::RefreshPorts.as_str()) {
             return pending(task_id, "正在刷新串口列表");
         }
-        let backend = self.transport_backend.clone();
-        let task_id = self.tasks.spawn("refresh_ports", move |_context| {
+        let backend = self.transport.clone();
+        let task_id = self.tasks.spawn(TaskKind::RefreshPorts, move |_context| {
             block_on_transport(backend.list_known_ports())
                 .map(TaskResult::PlatformPortsRefreshed)
                 .map_err(|error| tool_platform::translate_error(&error))
@@ -773,11 +634,11 @@ impl Workbench {
         // Native has no browser permission prompt. Returning the first
         // known port keeps the command portable while preserving the
         // user-driven request semantics on Web.
-        if let Some(task_id) = self.tasks.active_task_id("request_port") {
+        if let Some(task_id) = self.tasks.active_task_id(TaskKind::RequestPort.as_str()) {
             return pending(task_id, "正在获取串口");
         }
-        let backend = self.transport_backend.clone();
-        let task_id = self.tasks.spawn("request_port", move |_context| {
+        let backend = self.transport.clone();
+        let task_id = self.tasks.spawn(TaskKind::RequestPort, move |_context| {
             block_on_transport(backend.request_port())
                 .map(|port| TaskResult::PlatformPortsRefreshed(vec![port]))
                 .map_err(|error| tool_platform::translate_error(&error))
@@ -815,7 +676,7 @@ impl Workbench {
             let transport = self.transport.clone();
             self.tasks.spawn_ordered(
                 format!("serial:{task_port}"),
-                "disconnect",
+                TaskKind::DisconnectNetwork,
                 move |_context| {
                     transport
                         .close_port_blocking(&task_port, std::time::Duration::from_secs(3))
@@ -826,11 +687,11 @@ impl Workbench {
                 },
             )
         } else {
-            let backend = self.transport_backend.clone();
+            let backend = self.transport.clone();
             let port = PortId::new(task_port.clone());
             self.tasks.spawn_ordered(
                 format!("serial:{task_port}"),
-                "disconnect",
+                TaskKind::DisconnectSerial,
                 move |_context| {
                     block_on_transport(backend.disconnect(port.clone()))
                         .map_err(|error| tool_platform::translate_error(&error))?;
@@ -859,7 +720,7 @@ impl Workbench {
             let task_port = port_name.clone();
             self.tasks.spawn_ordered(
                 format!("serial:{task_port}"),
-                "cancel_reconnect",
+                TaskKind::CancelReconnect,
                 move |_context| {
                     transport.close_port(&task_port);
                     Ok(TaskResult::Disconnected {
@@ -868,16 +729,6 @@ impl Workbench {
                 },
             );
         }
-    }
-
-    fn dispatch_cancel_task(&mut self, task_id: TaskId) -> Result<CommandOutcome, AppError> {
-        if !self.tasks.cancel(task_id) {
-            return Err(AppError::InvalidState(format!(
-                "后台任务 {:?} 不存在或已经结束",
-                task_id
-            )));
-        }
-        Ok(CommandOutcome::Done)
     }
 
     fn dispatch_start_recording(
@@ -902,7 +753,7 @@ impl Workbench {
             .native_path()
             .ok_or_else(|| AppError::Replay("Native 回放需要路径型文件句柄".to_owned()))?
             .to_path_buf();
-        let task_id = self.tasks.spawn("load_replay", move |_context| {
+        let task_id = self.tasks.spawn(TaskKind::LoadReplay, move |_context| {
             ReplayManager::prepare_load(&path)
                 .map(TaskResult::ReplayLoaded)
                 .map_err(|error| error.to_string())
@@ -935,7 +786,7 @@ impl Workbench {
     /// 用应用侧记录的插件根目录重扫一次（与 `DiscoverPlugins` 的区别只在根从哪来）。
     fn spawn_reload_plugins(&mut self) -> CommandOutcome {
         let roots = self.plugin_manager.roots();
-        let task_id = self.tasks.spawn("reload_plugins", move |_context| {
+        let task_id = self.tasks.spawn(TaskKind::ReloadPlugins, move |_context| {
             tool_extension::PluginManager::scan_roots(&roots)
                 .map(TaskResult::PluginsDiscovered)
                 .map_err(|error| tool_extension::translate_error(&error))
@@ -944,11 +795,13 @@ impl Workbench {
     }
 
     fn spawn_discover_plugins(&mut self, roots: Vec<std::path::PathBuf>) -> CommandOutcome {
-        let task_id = self.tasks.spawn("discover_plugins", move |_context| {
-            tool_extension::PluginManager::scan_roots(&roots)
-                .map(TaskResult::PluginsDiscovered)
-                .map_err(|error| tool_extension::translate_error(&error))
-        });
+        let task_id = self
+            .tasks
+            .spawn(TaskKind::DiscoverPlugins, move |_context| {
+                tool_extension::PluginManager::scan_roots(&roots)
+                    .map(TaskResult::PluginsDiscovered)
+                    .map_err(|error| tool_extension::translate_error(&error))
+            });
         pending(task_id, "正在扫描插件")
     }
 
@@ -1027,15 +880,11 @@ impl Workbench {
             //   队列上，`spawn_ordered` 保证的「关闭不与仍在排队的发送交错」静默失效。
             let port_name = registered.display_name();
             let transport = self.transport.clone();
-            let net = tool_transport::NetworkSerialConfig {
-                host: registered.host,
-                port: registered.port,
-                api_key: registered.api_key,
-            };
+            let net = registered;
             let task_port = port_name.clone();
             let task_id = self.tasks.spawn_ordered(
                 format!("serial:{task_port}"),
-                "connect_network",
+                TaskKind::ConnectNetwork,
                 move |_context| {
                     transport
                         .open_network_serial(net)
@@ -1048,11 +897,11 @@ impl Workbench {
             Ok(pending(task_id, format!("正在连接 {port_name}")))
         } else {
             let task_port = port_name.to_owned();
-            let backend = self.transport_backend.clone();
+            let backend = self.transport.clone();
             let port = PortId::new(task_port.clone());
             let task_id = self.tasks.spawn_ordered(
                 format!("serial:{task_port}"),
-                "connect_serial",
+                TaskKind::ConnectSerial,
                 move |_context| {
                     block_on_transport(backend.connect(port.clone(), settings))
                         .map_err(|error| tool_platform::translate_error(&error))?;
@@ -1093,19 +942,6 @@ impl Workbench {
         self.find_network_port(port_name).is_some()
     }
 
-    /// 一次发送只 plan 一次：路由与解码全在 `send_plan::plan_send`，本平台只负责
-    /// 把它的错误类型换成本侧的 `AppError::Transport`（句串仍是 `SendPlanError` 的
-    /// `Display`，由 `tests/headless.rs` 钉住），再把计划交给 `send_transport_bytes`。
-    fn dispatch_send(
-        &mut self,
-        command: AppCommand,
-        port_name: String,
-    ) -> Result<CommandOutcome, AppError> {
-        let plan = send_plan::plan_send(&command, self.is_network_port(&port_name))
-            .map_err(|error| AppError::Transport(error.to_string()))?;
-        self.send_transport_bytes(port_name, plan)
-    }
-
     /// 按 `plan_send` 算出的种类与字节投递。走哪个后端由 `PlannedSend::targets_network_port()`
     /// 决定（那是 `send_plan` 里被单测钉住的判定），本平台不再比一次字符串，
     /// 也不再对照一次端口名单。
@@ -1140,13 +976,13 @@ impl Workbench {
             return Ok(pending(task_id, format!("正在发送到 {port_name}")));
         }
 
-        let backend = self.transport_backend.clone();
+        let backend = self.transport.clone();
         let port = PortId::new(port_name.clone());
         let byte_count = bytes.len();
         let task_id =
             self.tasks
                 .spawn_ordered(format!("serial:{port_name}"), task_kind, move |_context| {
-                    block_on_transport(backend.send(port.clone(), bytes))
+                    block_on_transport(TransportBackend::send(&backend, port.clone(), bytes))
                         .map_err(|error| tool_platform::translate_error(&error))?;
                     Ok(TaskResult::TransportSent {
                         port,
@@ -1165,17 +1001,21 @@ impl Workbench {
         if self.is_network_port(&port_name) {
             return Err(AppError::Transport("网络端口不支持 DTR/RTS".to_owned()));
         }
-        let backend = self.transport_backend.clone();
+        let backend = self.transport.clone();
         let port = PortId::new(port_name.clone());
         let task_port = port.clone();
         let task_id = self.tasks.spawn_ordered(
             format!("serial:{port_name}"),
-            "set_serial_signal",
+            if dtr {
+                TaskKind::SetDtr
+            } else {
+                TaskKind::SetRts
+            },
             move |_context| {
                 let result = if dtr {
-                    block_on_transport(backend.set_dtr(port, value))
+                    block_on_transport(TransportBackend::set_dtr(&backend, port, value))
                 } else {
-                    block_on_transport(backend.set_rts(port, value))
+                    block_on_transport(TransportBackend::set_rts(&backend, port, value))
                 };
                 result.map_err(|error| tool_platform::translate_error(&error))?;
                 Ok(TaskResult::TransportSignalChanged { port: task_port })
@@ -1201,17 +1041,17 @@ impl Workbench {
             self.tasks.cancel(task_id);
         });
 
-        let network = registered.map(|config| tool_transport::NetworkSerialConfig {
-            host: config.host,
-            port: config.port,
-            api_key: config.api_key,
-        });
-        let backend = self.transport_backend.clone();
+        let network = registered;
+        let backend = self.transport.clone();
         let serial_settings = network.is_none().then(|| self.platform_serial_settings());
         let task_port = port_name.clone();
         let task_id = self.tasks.spawn_ordered(
             format!("serial:{port_name}"),
-            "reconnect",
+            if network.is_some() {
+                TaskKind::ReconnectNetwork
+            } else {
+                TaskKind::ReconnectSerial
+            },
             move |context: TaskContext| {
                 let port = PortId::new(task_port.clone());
                 // 一次尝试，不重试。原先这里是一段「3 秒预算 + 10ms 轮询」的循环，判据是
@@ -1235,7 +1075,7 @@ impl Workbench {
                         .map_err(|error| tool_platform::translate_error(&error))?;
                     return Ok(TaskResult::TransportConnected { port });
                 };
-                let transport = backend.manager().clone();
+                let transport = backend.clone();
                 transport
                     .open_network_serial(network)
                     .map(|_| TaskResult::Reconnected {
@@ -1316,9 +1156,237 @@ impl Workbench {
     }
 }
 
+impl crate::command::CommandEffects for Workbench {
+    fn refresh_ports(&mut self) -> Result<CommandOutcome, crate::command::CommandError> {
+        Ok(self.spawn_refresh_ports())
+    }
+
+    fn request_port(&mut self) -> Result<CommandOutcome, crate::command::CommandError> {
+        Ok(self.spawn_request_port())
+    }
+
+    fn register_network_port(
+        &mut self,
+        config: NetworkPortConfig,
+    ) -> Result<(), crate::command::CommandError> {
+        Workbench::register_network_port(self, config);
+        Ok(())
+    }
+
+    fn remove_network_port(&mut self, port: PortId) -> Result<(), crate::command::CommandError> {
+        Workbench::remove_network_port(self, port);
+        Ok(())
+    }
+
+    fn connect(
+        &mut self,
+        port: PortId,
+        settings: SerialSettings,
+    ) -> Result<CommandOutcome, crate::command::CommandError> {
+        Workbench::connect(self, port.as_str(), settings).map_err(Into::into)
+    }
+
+    fn apply_serial_settings(&mut self, settings: SerialSettings) {
+        Workbench::apply_serial_settings(self, settings);
+    }
+
+    fn disconnect(&mut self, port: PortId) -> Result<CommandOutcome, crate::command::CommandError> {
+        Ok(self.disconnect_port(port.to_string()))
+    }
+
+    fn reconnect(&mut self, port: PortId) -> Result<CommandOutcome, crate::command::CommandError> {
+        self.start_reconnect(port.to_string()).map_err(Into::into)
+    }
+
+    fn cancel_reconnect(
+        &mut self,
+        port: PortId,
+    ) -> Result<CommandOutcome, crate::command::CommandError> {
+        Workbench::cancel_reconnect(self, port.to_string());
+        Ok(CommandOutcome::Done)
+    }
+
+    fn cancel_task(&mut self, task_id: TaskId) -> bool {
+        self.tasks.cancel(task_id)
+    }
+
+    fn is_network_port(&self, port: &PortId) -> bool {
+        Workbench::is_network_port(self, port.as_str())
+    }
+
+    fn send_planned(
+        &mut self,
+        port: PortId,
+        plan: PlannedSend,
+    ) -> Result<CommandOutcome, crate::command::CommandError> {
+        self.send_transport_bytes(port.to_string(), plan)
+            .map_err(Into::into)
+    }
+
+    fn set_signal(
+        &mut self,
+        port: PortId,
+        value: bool,
+        dtr: bool,
+    ) -> Result<CommandOutcome, crate::command::CommandError> {
+        self.set_transport_signal(port.to_string(), value, dtr)
+            .map_err(Into::into)
+    }
+
+    fn start_recording(
+        &mut self,
+        file: FileHandle,
+        mode: crate::recording::RecordModeView,
+    ) -> Result<CommandOutcome, crate::command::CommandError> {
+        self.dispatch_start_recording(file, mode)
+            .map_err(Into::into)
+    }
+
+    fn set_recording_mode(&mut self, mode: crate::recording::RecordModeView) {
+        self.recorder.set_mode(mode.into());
+    }
+
+    fn stop_recording(&mut self) -> Result<CommandOutcome, crate::command::CommandError> {
+        self.recorder.stop();
+        Ok(CommandOutcome::Done)
+    }
+
+    fn pause_recording(&mut self) -> Result<CommandOutcome, crate::command::CommandError> {
+        self.recorder.pause();
+        Ok(CommandOutcome::Done)
+    }
+
+    fn resume_recording(&mut self) -> Result<CommandOutcome, crate::command::CommandError> {
+        self.recorder.resume();
+        Ok(CommandOutcome::Done)
+    }
+
+    fn add_recording_bookmark(&mut self, name: Option<String>) {
+        self.recorder.add_bookmark(&name.unwrap_or_default());
+    }
+
+    fn load_replay(
+        &mut self,
+        file: FileHandle,
+    ) -> Result<CommandOutcome, crate::command::CommandError> {
+        self.dispatch_load_replay(file).map_err(Into::into)
+    }
+
+    fn replay_play(&mut self) -> Result<(), crate::command::CommandError> {
+        let _ = self.replay.play();
+        Ok(())
+    }
+
+    fn replay_pause(&mut self) -> Result<(), crate::command::CommandError> {
+        self.replay.pause();
+        Ok(())
+    }
+
+    fn replay_stop(&mut self) -> Result<(), crate::command::CommandError> {
+        self.replay.stop();
+        Ok(())
+    }
+
+    fn replay_seek(&mut self, position_ms: u64) -> Result<(), crate::command::CommandError> {
+        self.replay.seek_ms(position_ms);
+        Ok(())
+    }
+
+    fn replay_seek_by(&mut self, delta_ms: i64) -> Result<(), crate::command::CommandError> {
+        Workbench::replay_seek_by(self, delta_ms);
+        Ok(())
+    }
+
+    fn replay_step(&mut self, delta: i32) -> Result<(), crate::command::CommandError> {
+        Workbench::replay_step(self, delta);
+        Ok(())
+    }
+
+    fn replay_set_speed(&mut self, speed: f64) {
+        self.replay.set_speed(speed);
+    }
+
+    fn replay_set_policy(
+        &mut self,
+        policy: crate::replay::ReplayPolicyView,
+    ) -> Result<(), crate::command::CommandError> {
+        self.replay.set_policy(policy.into());
+        Ok(())
+    }
+
+    fn replay_add_bookmark(&mut self, name: Option<String>) {
+        self.replay.add_bookmark(name);
+    }
+
+    fn replay_remove_bookmark(&mut self, position_ms: u64) {
+        self.replay.remove_bookmark(position_ms);
+    }
+
+    fn enable_plugin(&mut self, plugin_id: String) -> Result<(), crate::command::CommandError> {
+        self.plugin_manager
+            .enable(&plugin_id)
+            .map_err(|e| crate::command::CommandError::Plugin(tool_extension::translate_error(&e)))
+    }
+
+    fn disable_plugin(&mut self, plugin_id: String) -> Result<(), crate::command::CommandError> {
+        self.plugin_manager
+            .disable(&plugin_id)
+            .map_err(|e| crate::command::CommandError::Plugin(tool_extension::translate_error(&e)))
+    }
+
+    fn reload_plugins(&mut self) -> Result<CommandOutcome, crate::command::CommandError> {
+        Ok(self.spawn_reload_plugins())
+    }
+
+    fn discover_plugins(
+        &mut self,
+        roots: Vec<std::path::PathBuf>,
+    ) -> Result<CommandOutcome, crate::command::CommandError> {
+        Ok(self.spawn_discover_plugins(roots))
+    }
+
+    fn execute_plugin_command(
+        &mut self,
+        plugin_id: String,
+        command_id: String,
+        context: serde_json::Value,
+    ) -> Result<(), crate::command::CommandError> {
+        self.publish_plugin_command(plugin_id, command_id, context);
+        Ok(())
+    }
+
+    fn set_terminal_merge_window(&mut self, ms: u64) {
+        self.app_config.terminal_merge_window_ms = ms;
+    }
+
+    fn set_terminal_max_entries(&mut self, max: usize) {
+        self.app_config.terminal_max_entries = max;
+    }
+}
+
 impl crate::AppRuntime for Workbench {
     fn capabilities(&self) -> crate::AppCapabilities {
         crate::AppCapabilities::native()
+    }
+
+    fn query_transport(&self) -> TransportView {
+        Workbench::query_transport(self)
+    }
+
+    fn query_recording(&self) -> RecordingStatusView {
+        Workbench::query_recording(self)
+    }
+
+    fn query_replay(&self) -> ReplayStatusView {
+        Workbench::query_replay(self)
+    }
+
+    fn query_plugins(&self) -> PluginView {
+        Workbench::query_plugins(self)
+    }
+
+    fn task_snapshots(&self) -> Vec<TaskSnapshot> {
+        Workbench::task_snapshots(self)
     }
 
     fn tick(&mut self) {
@@ -1385,5 +1453,6 @@ fn pending(task_id: TaskId, message: impl Into<String>) -> CommandOutcome {
 /// `network_ports_connect_and_reconnect_in_both_naming_forms` 钉住 connect / reconnect
 /// 两条分支同样两形态都认。
 fn network_config_matches(config: &NetworkPortConfig, port_name: &str) -> bool {
-    config.display_name() == port_name || config.port_id().to_string() == port_name
+    config.display_name() == port_name
+        || tool_platform::network_port_id(config).to_string() == port_name
 }

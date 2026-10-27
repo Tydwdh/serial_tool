@@ -4,6 +4,26 @@
 
 ## [Unreleased]
 
+### 重构
+
+- **架构评审的六项深化全部落地**（读侧 / 命令执行 / 滚动缓冲 / 插件 ctx / 面板分发 / 传输 seam）：
+  * `AppRuntime` 现在承载读侧（`query_transport/recording/replay/plugins/task_snapshots`），
+    `TransportView` 只保留一份；native 填状态/配置，web 填连接/settings。
+  * `command::execute` 是 `AppCommand` 的唯一匹配；`CommandEffects` 承担平台差异，
+    `TaskKind` 统一任务种类（含 `reconnect_serial/network`、`set_dtr/rts` 等）。
+  * `panels/src/scrollback.rs` 收拢订阅批次、丢事件轮次、截断轮次与导出游标状态；
+    Terminal/Log 不再各抄一份。
+  * `plugin_api/src/ctx.rs` 收拢 HEX/topic/pattern（有界正则缓存）与 `ctx` domain→permission 表；
+    删除无生产调用者的 `MluaEngine` 与 `LuaEngine::resume`/`PluginYield` 死路径。
+  * 内置面板分发移到 `shared_shell::render_panel`：Terminal/Chart/Logs 共享，平台专属面板
+    只实现 `DockHost::render_platform_panel`；不可用占位文案只有一份。
+  * `TransportManager` 直接实现 `TransportBackend`，`Workbench` 不再另持 `NativeTransportBackend`；
+    `NetworkSerialConfig` 只有一份（`tool_core`），平台与传输层都再导出；平台事件构造器
+    不再生成 `serial:serial:` 双前缀。
+  验证：`cargo test -p tool-application`、`-p tool-panels`、`-p hardware-workbench-app`、
+  `-p tool-plugin-api -p tool-plugin-runtime -p tool-lua-host -p tool-extension`、
+  `-p tool-platform -p tool-transport` 全绿；native 与 wasm32 的 `cargo check` 通过。
+
 ### 修复
 
 - **配置路径行不再被右侧裁切：图标按钮按真实 32px 计宽，标签/路径列显式占位。**

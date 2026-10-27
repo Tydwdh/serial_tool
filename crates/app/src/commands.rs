@@ -24,10 +24,10 @@ impl NativeExportJob {
     }
 
     /// Workbench 后台任务 kind。
-    fn spawn_kind(&self) -> &'static str {
+    fn spawn_kind(&self) -> tool_application::TaskKind {
         match self {
-            Self::Terminal(_) => "export_terminal",
-            Self::Logs(_) => "export_log",
+            Self::Terminal(_) => tool_application::TaskKind::ExportTerminal,
+            Self::Logs(_) => tool_application::TaskKind::ExportLog,
         }
     }
 }
@@ -269,7 +269,9 @@ impl WorkbenchApp {
     pub(crate) fn sync_ports_from_workbench(&mut self, show_status: bool) {
         // 初始/周期刷新尚未完成时，Workbench 的旧列表可能还是空的；不能因此
         // 把配置中的 selected_port 误判为拔出。
-        if self.workbench.has_active_task_kind("refresh_ports")
+        if self
+            .workbench
+            .has_active_task_kind(tool_application::TaskKind::RefreshPorts.as_str())
             && self.workbench.query_transport().ports.is_empty()
         {
             return;
@@ -279,25 +281,20 @@ impl WorkbenchApp {
             .serial
             .ports
             .iter()
-            .map(|port| port.port_name.clone())
+            .map(|port| port.id.to_string())
             .collect();
 
         let old_selected = self.serial.selected_port.clone();
         let mut new_ports = self.workbench.query_transport().ports;
         for network in &self.serial.network_ports {
             let name = network.display_name();
-            if !new_ports.iter().any(|port| port.port_name == name) {
-                new_ports.push(tool_application::query::PortView {
-                    port_name: name,
-                    port_type: tool_application::query::PortTypeView::Network,
-                });
+            if !new_ports.iter().any(|port| port.id.as_str() == name) {
+                new_ports.push(tool_application::query::PortView::network(name));
             }
         }
-        new_ports.sort_by_key(|port| tool_transport::natural_sort_key(&port.port_name));
-        let new_names: BTreeSet<String> = new_ports
-            .iter()
-            .map(|port| port.port_name.clone())
-            .collect();
+        new_ports.sort_by_key(|port| tool_transport::natural_sort_key(port.id.as_str()));
+        let new_names: BTreeSet<String> =
+            new_ports.iter().map(|port| port.id.to_string()).collect();
         let added_ports: Vec<String> = new_names.difference(&old_names).cloned().collect();
         let removed_ports: Vec<String> = old_names.difference(&new_names).cloned().collect();
 
@@ -307,7 +304,7 @@ impl WorkbenchApp {
             .ports
             .iter()
             .map(|port| tool_panels::PortItem {
-                port_name: port.port_name.clone(),
+                port_name: port.id.to_string(),
             })
             .collect();
         self.dynamic_panels.set_ports(&port_items);
@@ -455,7 +452,7 @@ impl WorkbenchApp {
         let Some(p) = self.serial.selected_port.clone() else {
             return Err("请选择串口".to_owned());
         };
-        if !self.serial.ports.iter().any(|port| port.port_name == p) {
+        if !self.serial.ports.iter().any(|port| port.id.as_str() == p) {
             return Err(format!("{p} 不存在"));
         }
         if !self
@@ -550,7 +547,11 @@ impl WorkbenchApp {
             let port = closed.port.clone();
             // 选中的端口若已从系统列表消失，交给 `sync_ports_from_workbench` 的既有分支
             // 去清 selected（它还会用中文说清"已拔出/不在列表里"），这里只负责挂重连。
-            let vanished = !self.serial.ports.iter().any(|item| item.port_name == port);
+            let vanished = !self
+                .serial
+                .ports
+                .iter()
+                .any(|item| item.id.as_str() == port);
             let note = if vanished {
                 format!("{port} 已断开（设备或链路已失效）")
             } else {
@@ -681,7 +682,7 @@ impl WorkbenchApp {
             return;
         };
 
-        if !self.serial.ports.iter().any(|port| port.port_name == p) {
+        if !self.serial.ports.iter().any(|port| port.id.as_str() == p) {
             self.set_status_force(StatusLevel::Error, format!("串口 {p} 不存在"));
             return;
         }

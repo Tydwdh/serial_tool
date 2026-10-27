@@ -1,6 +1,6 @@
+use crate::scrollback::{ExportChunkState, Scrollback};
 use crate::{
-    DROP_EPISODE_QUIET_MS, MAX_INGEST_PER_FRAME, MESSAGE_EVENT_BUFFER_CAPACITY,
-    TerminalExportFormat, design, fmt_ts,
+    MAX_INGEST_PER_FRAME, MESSAGE_EVENT_BUFFER_CAPACITY, TerminalExportFormat, design, fmt_ts,
     table::{
         AutoScrollState, MessageSearch, RowHighlight, RowSelection, TextSelectionRows,
         bulk_copy_button, claim_copy_focus, copy_text_with_feedback, edge_scroll_delta,
@@ -15,7 +15,7 @@ use egui::{RichText, ScrollArea, Sense, Stroke};
 use egui_material_icons::icons::ICON_ARTICLE;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use tool_core::{Event, LogLevel};
-use tool_databus::{DataBus, RingSubscription, TopicFilter};
+use tool_databus::{DataBus, TopicFilter};
 
 const TIME_COL_WIDTH: f32 = 118.0;
 const LEVEL_COL_WIDTH: f32 = 52.0;
@@ -37,7 +37,7 @@ const NAV_HIGHLIGHT_DURATION: f64 = 1.5;
 const NAV_FADE: f64 = 0.3;
 
 pub struct LogPanel {
-    subscription: RingSubscription,
+    scrollback: Scrollback,
     entry_order: VecDeque<u64>,
     entries: HashMap<u64, LogEntry>,
     source_counts: HashMap<String, usize>,
@@ -50,7 +50,6 @@ pub struct LogPanel {
     min_level: LogLevel,
     auto_scroll: AutoScrollState,
     export_request: Option<TerminalExportFormat>,
-    pub max_entries: usize,
     /// 双击搜索匹配行时设置：下帧清除搜索并跳转到该行。
     pending_navigate_to_id: Option<u64>,
     /// 跳转目标行高亮：(目标行 id, 起始时间秒)。渲染时若命中且未超时画强调色并淡出。
@@ -67,15 +66,6 @@ pub struct LogPanel {
     text_selection_rows: TextSelectionRows,
     /// 日志消息流的共享虚拟渲染状态（与接收区共用实现）。
     virtual_rows: VirtualRowIndex,
-    /// 是否发生过截断（用于状态栏提示，显示后清除）
-    pub truncated: bool,
-    /// 当前这轮「越界」是否已经提醒过：满载期间每条日志都会裁掉一条最旧条目，
-    /// 只有第一次置位 `truncated`；回到上限以下才重新武装，否则通知会被逐帧刷新。
-    limit_episode_reported: bool,
-    /// 同一轮持续丢包是否已经上报过。快速接收时每帧都会丢，只报第一次。
-    drop_episode_reported: bool,
-    /// 最近一次观测到丢事件的时刻（ms），用于判定这一轮丢包是否已经结束。
-    last_drop_ms: u64,
 }
 
 #[derive(Clone)]
@@ -101,9 +91,7 @@ pub struct LogExportCursor {
     filter: LogFilterKey,
     limit: usize,
     index: usize,
-    started: bool,
-    emitted: bool,
-    done: bool,
+    progress: ExportChunkState,
 }
 
 /// 渲染一段导出内容：`first` 决定是否补表头/数组左括号，`has_previous` 决定是否补
@@ -246,8 +234,12 @@ fn log_wheel_scroll_delta_y(ui: &egui::Ui, panel_rect: egui::Rect) -> f32 {
 impl LogPanel {
     pub fn new(bus: &DataBus) -> Self {
         Self {
-            subscription: bus
-                .subscribe_ring_bounded(TopicFilter::prefix("log."), MESSAGE_EVENT_BUFFER_CAPACITY),
+            scrollback: Scrollback::new(
+                bus,
+                TopicFilter::prefix("log."),
+                MESSAGE_EVENT_BUFFER_CAPACITY,
+                MAX_LOG_ENTRIES,
+            ),
             entry_order: VecDeque::new(),
             entries: HashMap::new(),
             source_counts: HashMap::new(),
@@ -260,7 +252,6 @@ impl LogPanel {
             min_level: LogLevel::Info,
             auto_scroll: AutoScrollState::default(),
             export_request: None,
-            max_entries: MAX_LOG_ENTRIES,
             pending_navigate_to_id: None,
             navigate_highlight: None,
             search: MessageSearch::default(),
@@ -269,32 +260,22 @@ impl LogPanel {
             selection: RowSelection::new(0),
             text_selection_rows: TextSelectionRows::default(),
             virtual_rows: VirtualRowIndex::default(),
-            truncated: false,
-            limit_episode_reported: false,
-            drop_episode_reported: false,
-            last_drop_ms: 0,
         }
     }
     pub fn ingest_all_pending(&mut self) -> usize {
         // 每帧最多摄入 2000 条，防止大量日志突发时 UI 卡顿
         const MAX_INGEST_ALL: usize = 2000;
         let mut count = 0;
-
-        for event in self.subscription.drain_limited(MAX_INGEST_ALL) {
+        let mut batch = self.scrollback.take_batch(MAX_INGEST_ALL);
+        for event in batch.drain(..) {
             self.push_event(event);
             count += 1;
         }
-
+        self.scrollback.recycle_batch(batch);
         count
     }
     pub fn clear(&mut self) {
-        self.subscription.clear();
-        // 清空结束当前这轮截断：残留的提醒标志与丢事件计数都不该越过清空继续提示。
-        self.truncated = false;
-        self.limit_episode_reported = false;
-        self.drop_episode_reported = false;
-        self.last_drop_ms = 0;
-        let _ = self.subscription.take_dropped_count();
+        self.scrollback.clear();
         self.entry_order.clear();
         self.entries.clear();
         self.source_counts.clear();
@@ -325,21 +306,27 @@ impl LogPanel {
     /// 与接收区同一契约：同一轮持续丢包只上报一次，静默 `DROP_EPISODE_QUIET_MS`
     /// 之后才重新武装。
     pub fn take_dropped_events(&mut self, now_ms: u64) -> u64 {
-        let dropped = self.subscription.take_dropped_count();
-        if dropped > 0 {
-            self.last_drop_ms = now_ms;
-            if self.drop_episode_reported {
-                return 0;
-            }
-            self.drop_episode_reported = true;
-            return dropped;
-        }
-        if self.drop_episode_reported
-            && now_ms.saturating_sub(self.last_drop_ms) >= DROP_EPISODE_QUIET_MS
-        {
-            self.drop_episode_reported = false;
-        }
-        0
+        self.scrollback.take_dropped_events(now_ms)
+    }
+
+    pub fn max_entries(&self) -> usize {
+        self.scrollback.max_entries()
+    }
+
+    pub fn max_entries_mut(&mut self) -> &mut usize {
+        self.scrollback.max_entries_mut()
+    }
+
+    pub fn take_truncated(&mut self) -> bool {
+        self.scrollback.take_truncated()
+    }
+
+    pub fn truncated(&self) -> bool {
+        self.scrollback.truncated()
+    }
+
+    pub fn clear_truncated(&mut self) {
+        self.scrollback.clear_truncated();
     }
 
     pub fn take_export_request(&mut self) -> Option<TerminalExportFormat> {
@@ -351,9 +338,7 @@ impl LogPanel {
             filter: self.current_filter_key(),
             limit: self.entry_order.len(),
             index: 0,
-            started: false,
-            emitted: false,
-            done: false,
+            progress: ExportChunkState::new(),
         }
     }
 
@@ -366,7 +351,7 @@ impl LogPanel {
         format: TerminalExportFormat,
         scan_budget: usize,
     ) -> (String, bool, usize) {
-        if cursor.done {
+        if cursor.progress.done() {
             return (String::new(), true, 0);
         }
         let budget = scan_budget.max(1);
@@ -382,21 +367,19 @@ impl LogPanel {
             .cloned()
             .collect::<Vec<_>>();
         cursor.index = end;
-        cursor.done = end >= cursor.limit || end >= self.entry_order.len();
-        let first = !cursor.started;
-        let has_previous = cursor.emitted;
-        cursor.started = true;
+        let done = end >= cursor.limit || end >= self.entry_order.len();
+        let (first, has_previous) = cursor.progress.begin();
         let exported = entries.len();
-        cursor.emitted |= exported > 0;
+        cursor.progress.finish(done, exported);
         (
-            render_log_export_chunk(format, &entries, first, has_previous, cursor.done),
-            cursor.done,
+            render_log_export_chunk(format, &entries, first, has_previous, done),
+            done,
             exported,
         )
     }
 
     pub fn set_max_entries(&mut self, max_entries: usize) {
-        self.max_entries = max_entries.max(100);
+        self.scrollback.set_max_entries(max_entries);
         self.enforce_max_entries();
     }
 
@@ -404,10 +387,12 @@ impl LogPanel {
         // 丢弃最旧条目不会改变过滤条件，所以缓存是否可用只需判定一次。
         let cache_is_current = !self.visible_rows_dirty
             && self.visible_filter_key.as_ref() == Some(&self.current_filter_key());
-        while self.entry_order.len() > self.max_entries {
+        let mut removed = 0;
+        while self.entry_order.len() > self.scrollback.max_entries() {
             let Some(removed_id) = self.entry_order.pop_front() else {
                 break;
             };
+            removed += 1;
             if let Some(removed) = self.entries.remove(&removed_id)
                 && let Some(count) = self.source_counts.get_mut(&removed.source)
             {
@@ -426,16 +411,9 @@ impl LogPanel {
                 self.visible_rows_cache.pop_front();
                 self.visible_rows_generation = self.visible_rows_generation.wrapping_add(1);
             }
-            // 满载是持续状态：只在进入这轮越界时置位一次，避免通知逐帧刷新。
-            if !self.limit_episode_reported {
-                self.limit_episode_reported = true;
-                self.truncated = true;
-            }
         }
-        // 回到上限以下（清空或调高上限）说明这轮越界结束，下一轮要重新提醒。
-        if self.entry_order.len() < self.max_entries {
-            self.limit_episode_reported = false;
-        }
+        self.scrollback
+            .note_trimmed(removed, self.entry_order.len());
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
@@ -655,12 +633,12 @@ impl LogPanel {
 
     fn ingest(&mut self) -> usize {
         let mut count = 0;
-
-        for event in self.subscription.drain_limited(MAX_INGEST_PER_FRAME) {
+        let mut batch = self.scrollback.take_batch(MAX_INGEST_PER_FRAME);
+        for event in batch.drain(..) {
             self.push_event(event);
             count += 1;
         }
-
+        self.scrollback.recycle_batch(batch);
         count
     }
 
@@ -2309,7 +2287,7 @@ mod tests {
     fn max_entries_truncates_oldest() {
         let bus = DataBus::new();
         let mut panel = LogPanel::new(&bus);
-        panel.max_entries = 3;
+        *panel.max_entries_mut() = 3;
 
         for i in 0..5 {
             bus.publish(Event::system_log(
@@ -2346,30 +2324,30 @@ mod tests {
             publish(index);
         }
         panel.ingest_all_pending();
-        assert!(!panel.truncated, "装满但未越界不应提醒截断");
+        assert!(!panel.truncated(), "装满但未越界不应提醒截断");
 
         let mut notices = 0;
         for index in 100..105 {
             publish(index);
             panel.ingest_all_pending();
-            if panel.truncated {
+            if panel.truncated() {
                 notices += 1;
-                panel.truncated = false;
+                panel.clear_truncated();
             }
         }
         assert_eq!(notices, 1, "同一轮满载只应提醒一次，实际 {notices} 次");
 
         panel.clear();
-        assert!(!panel.truncated, "清空应复位待发提醒");
+        assert!(!panel.truncated(), "清空应复位待发提醒");
         publish(200);
         panel.ingest_all_pending();
-        assert!(!panel.truncated, "清空后未越界不应提醒截断");
+        assert!(!panel.truncated(), "清空后未越界不应提醒截断");
 
         for index in 201..302 {
             publish(index);
         }
         panel.ingest_all_pending();
-        assert!(panel.truncated, "清空后再次越界应重新提醒截断");
+        assert!(panel.truncated(), "清空后再次越界应重新提醒截断");
     }
 
     /// 与接收区同一契约：同一轮持续丢包只上报一次。

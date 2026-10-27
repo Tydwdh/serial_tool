@@ -16,7 +16,6 @@ crossbeam-channel.workspace = true
 log.workspace = true
 mlua.workspace = true
 parking_lot.workspace = true
-regex = "1"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
