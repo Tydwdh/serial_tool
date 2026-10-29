@@ -17,7 +17,6 @@ pub const LIVE_PERMISSIONS: &[&str] = &[
     "task",
     "config",
 ];
-pub const REPLAY_PERMISSIONS: &[&str] = &["log", "storage"];
 pub const PANEL_KINDS: &[&str] = &["chart", "form", "attitude", "gauge", "table"];
 pub const UI_SLOTS: &[&str] = &[
     "send.toolbar",
@@ -45,14 +44,12 @@ pub fn generated_reference() -> String {
 # 插件协议枚举（自动生成）\n\n\
 - runtime: {}\n\
 - live permissions: {}\n\
-- replay permissions: {}\n\
 - panel kinds: {}\n\
 - UI slots: {}\n\
 - UI kinds: {}\n\
 - setting kinds: {}\n",
         RUNTIMES.join(", "),
         LIVE_PERMISSIONS.join(", "),
-        REPLAY_PERMISSIONS.join(", "),
         PANEL_KINDS.join(", "),
         UI_SLOTS.join(", "),
         UI_KINDS.join(", "),
@@ -69,7 +66,6 @@ const SCHEMA_ENUMS: &[(&[&str], &[&str])] = &[
     ),
     (&["properties", "runtime", "enum"], RUNTIMES),
     (&["$defs", "permission", "enum"], LIVE_PERMISSIONS),
-    (&["$defs", "replayPermission", "enum"], REPLAY_PERMISSIONS),
     (
         &["$defs", "panelContribution", "properties", "kind", "enum"],
         PANEL_KINDS,
@@ -141,7 +137,6 @@ mod tests {
         // 有意重述一遍 schema 路径，不复用 SCHEMA_ENUMS：任一侧写错都不会被另一侧掩盖。
         let cases: &[(&[&str], &[&str])] = &[
             (&["$defs", "permission", "enum"], LIVE_PERMISSIONS),
-            (&["$defs", "replayPermission", "enum"], REPLAY_PERMISSIONS),
             (
                 &["$defs", "panelContribution", "properties", "kind", "enum"],
                 PANEL_KINDS,

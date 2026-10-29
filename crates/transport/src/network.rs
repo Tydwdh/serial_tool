@@ -1,7 +1,7 @@
 //! 网络模拟串口：通过 WebSocket + JSON-RPC 连接 Nexus Prime（Klipper/Moonraker 系
 //! 3D 打印机服务器，默认 7125 端口），把发送内容作为 `printer.gcode.script` 执行，
 //! 把 `notify_gcode_response` 推送作为 RX 字节流发布到 DataBus，
-//! 从而在终端 / 发送器 / 录制 / 回放中表现得像普通串口。
+//! 从而在终端 / 发送器 / 设备列表中表现得像普通串口。
 //!
 //! 显示策略：只转发 gcode 命令/响应（`notify_gcode_response`），
 //! 其余 notify（状态、进程统计、历史等）一律忽略，保持终端干净。

@@ -62,10 +62,6 @@ pub struct PluginManifest {
     /// 实时插件配置（可选，不填时回退到顶层 main/permissions）
     #[serde(default)]
     pub live: Option<LiveConfig>,
-
-    /// 回放解析器配置（可选）
-    #[serde(default)]
-    pub replay: Option<ReplayConfig>,
 }
 
 impl PluginManifest {
@@ -193,35 +189,6 @@ impl PluginManifest {
             .map(|live| live.subscriptions.as_slice())
             .unwrap_or(&[])
     }
-
-    pub fn has_replay_analyzer(&self) -> bool {
-        self.replay.is_some()
-    }
-
-    pub fn replay_main(&self) -> Option<&str> {
-        self.replay.as_ref().map(|replay| replay.main.as_str())
-    }
-
-    pub fn replay_permissions(&self) -> &[String] {
-        self.replay
-            .as_ref()
-            .map(|replay| replay.permissions.as_slice())
-            .unwrap_or(&[])
-    }
-
-    pub fn replay_subscriptions(&self) -> &[String] {
-        self.replay
-            .as_ref()
-            .map(|replay| replay.subscriptions.as_slice())
-            .unwrap_or(&[])
-    }
-
-    pub fn replay_outputs(&self) -> &[String] {
-        self.replay
-            .as_ref()
-            .map(|replay| replay.outputs.as_slice())
-            .unwrap_or(&[])
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -234,29 +201,6 @@ pub struct LiveConfig {
 
     #[serde(default)]
     pub subscriptions: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReplayConfig {
-    pub main: String,
-
-    #[serde(default)]
-    pub subscriptions: Vec<String>,
-
-    #[serde(default)]
-    pub outputs: Vec<String>,
-
-    #[serde(default)]
-    pub permissions: Vec<String>,
-}
-
-/// 已发现插件中 replay analyzer 的元信息。
-/// 不需要插件处于 enabled 状态。
-#[derive(Debug, Clone)]
-pub struct ReplayAnalyzerEntry {
-    pub plugin_id: String,
-    pub manifest: PluginManifest,
-    pub root: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -446,21 +390,11 @@ pub struct PluginSummary {
     #[serde(default)]
     pub icon: Option<String>,
 
-    // ── replay analyzer ──
-    pub has_replay_analyzer: bool,
-    pub replay_subscriptions: Vec<String>,
-    pub replay_outputs: Vec<String>,
-
-    // ── 命令状态 ──
-    /// 运行时已注册的命令 ID 列表（仅 Running 状态有意义）
+    // ── 命令状态（插件运行时诊断） ──
     #[serde(default)]
     pub registered_commands: Vec<String>,
-
-    /// 声明但未注册的命令 ID 列表
     #[serde(default)]
     pub missing_commands: Vec<String>,
-
-    /// 动态注册但未在 manifest 声明的命令 ID 列表
     #[serde(default)]
     pub undeclared_commands: Vec<String>,
 }

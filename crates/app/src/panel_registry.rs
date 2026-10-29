@@ -7,27 +7,24 @@
 use egui_material_icons::{
     MaterialIcon,
     icons::{
-        ICON_CABLE, ICON_EXTENSION, ICON_HISTORY, ICON_SEND, ICON_SETTINGS, ICON_TERMINAL,
-        ICON_USB, ICON_VIEW_IN_AR,
+        ICON_CABLE, ICON_EXTENSION, ICON_SEND, ICON_SETTINGS, ICON_TERMINAL, ICON_USB,
+        ICON_VIEW_IN_AR,
     },
 };
 use std::collections::{HashMap, HashSet};
 use tool_panels::DynamicPanels;
 use tool_panels::{
-    PANEL_CHART, PANEL_DEVICES, PANEL_LOGS, PANEL_PLUGINS, PANEL_REPLAY, PANEL_SENDER,
-    PANEL_SETTINGS, PANEL_TERMINAL, PanelId,
+    PANEL_DEVICES, PANEL_LOGS, PANEL_PLUGINS, PANEL_SENDER, PANEL_SETTINGS, PANEL_TERMINAL, PanelId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuiltinPanel {
     Devices,
-    Replay,
     Plugins,
     Settings,
     Terminal,
     Sender,
     Logs,
-    Chart,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,12 +69,6 @@ impl PanelRegistry {
             kind: PanelKind::Builtin(BuiltinPanel::Terminal),
         });
         registry.register(PanelDef {
-            id: PanelId::builtin(PANEL_REPLAY),
-            title: "回放".to_owned(),
-            icon: ICON_HISTORY,
-            kind: PanelKind::Builtin(BuiltinPanel::Replay),
-        });
-        registry.register(PanelDef {
             id: PanelId::builtin(PANEL_PLUGINS),
             title: "插件".to_owned(),
             icon: ICON_EXTENSION,
@@ -94,12 +85,6 @@ impl PanelRegistry {
             title: "日志".to_owned(),
             icon: ICON_VIEW_IN_AR,
             kind: PanelKind::Builtin(BuiltinPanel::Logs),
-        });
-        registry.register(PanelDef {
-            id: PanelId::builtin(PANEL_CHART),
-            title: "图表".to_owned(),
-            icon: ICON_VIEW_IN_AR,
-            kind: PanelKind::Builtin(BuiltinPanel::Chart),
         });
         registry
     }

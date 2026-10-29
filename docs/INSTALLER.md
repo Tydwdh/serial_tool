@@ -100,8 +100,7 @@ Set-Location <仓库目录>
 
 两个后果需要知道：
 
-- Windows 的用户数据目录就是安装目录，因此卸载会连带删除 `logs\` 中的
-  `session-*.jsonl` 录制文件与用户插件配置。
+- Windows 的用户数据目录就是安装目录，因此卸载会连带删除 `logs\` 中的日志文件与用户插件配置。
 - 该清单由 `crates/app/tests/installer_uninstall_scope.rs` 钉住：它从 `main.rs` 读出 `app_id`
   再在 `.iss` 中查找对应条目，因此改了 `with_app_id` 而未同步清单会直接测试失败。
 
@@ -179,10 +178,10 @@ sudo usermod -aG dialout $USER
 | 用户数据根 | 安装目录（Windows 取 exe 所在目录） | `~/.local/share/HardwareWorkbench/` | `crates/app/src/bootstrap.rs:38` |
 | 插件 | 用户数据根 `plugins\` | 用户数据根 `plugins/` | `bootstrap.rs:54` |
 | 主题 | 用户数据根 `themes\` | 用户数据根 `themes/` | `bootstrap.rs:58` |
-| 日志 / 录制 | 用户数据根 `logs\` | 用户数据根 `logs/` | `bootstrap.rs:64` |
+| 日志 | 用户数据根 `logs\` | 用户数据根 `logs/` | `bootstrap.rs:64` |
 | 更新下载与清单 | `%APPDATA%\HardwareWorkbench\update\` | `~/.config/HardwareWorkbench/update/` | `crates/updater/src/lib.rs:415` |
 | 更新 helper 日志 | `%APPDATA%\HardwareWorkbench\updater\` | `~/.config/HardwareWorkbench/updater/` | `crates/updater/src/lib.rs:437` |
 | eframe 窗口/记忆 | `%APPDATA%\hardware-workbench\` | `~/.local/share/hardware-workbench/` | `crates/app/src/main.rs:119` |
 
 Windows 上便携版与安装版的用户数据根都落在程序所在目录，因此便携包可整体搬移；Ubuntu 上程序
-安装在只读的 `/usr/lib/hardware-workbench`，插件、主题与录制文件统一写入用户数据目录，无需 root。
+安装在只读的 `/usr/lib/hardware-workbench`，插件、主题与日志文件统一写入用户数据目录，无需 root。

@@ -3,18 +3,17 @@
 use eframe::egui;
 use egui_material_icons::{
     MaterialIcon,
-    icons::{ICON_APPS, ICON_DATA_USAGE, ICON_INFO, ICON_KEYBOARD, ICON_SETTINGS},
+    icons::{ICON_APPS, ICON_DATA_USAGE, ICON_INFO, ICON_SETTINGS},
 };
 use tool_panels::design;
 
 pub(crate) const SETTINGS_NAV_BUTTON_SIZE: egui::Vec2 = egui::vec2(136.0, 32.0);
 
-pub(crate) const SETTINGS_NAV_ITEMS: [(usize, MaterialIcon, &str); 5] = [
+pub(crate) const SETTINGS_NAV_ITEMS: [(usize, MaterialIcon, &str); 4] = [
     (0, ICON_SETTINGS, "常规"),
     (1, ICON_DATA_USAGE, "连接与数据"),
-    (2, ICON_KEYBOARD, "快捷键"),
-    (3, ICON_APPS, "插件设置"),
-    (4, ICON_INFO, "关于与重置"),
+    (2, ICON_APPS, "插件设置"),
+    (3, ICON_INFO, "关于与重置"),
 ];
 
 pub(crate) fn settings_nav_button(

@@ -1,5 +1,4 @@
 mod bottom_panel;
-pub(crate) mod command_palette;
 mod contributions;
 mod device_panel;
 mod dialogs;

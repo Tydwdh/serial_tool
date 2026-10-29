@@ -6,7 +6,6 @@ pub use execute::{CommandEffects, execute};
 
 use crate::TaskId;
 use thiserror::Error;
-use tool_platform::storage::FileHandle;
 use tool_platform::{NetworkSerialConfig, PortId, SerialSettings};
 
 /// Platform-neutral command failure.
@@ -17,10 +16,6 @@ use tool_platform::{NetworkSerialConfig, PortId, SerialSettings};
 pub enum CommandError {
     #[error("{0}")]
     Transport(String),
-    #[error("{0}")]
-    Recording(String),
-    #[error("{0}")]
-    Replay(String),
     #[error("{0}")]
     Storage(String),
     #[error("{0}")]
@@ -103,65 +98,6 @@ pub enum AppCommand {
     SetRts {
         port: PortId,
         value: bool,
-    },
-
-    StartRecording {
-        /// The platform-specific FileService owns the actual handle/path
-        /// semantics. Native carries an opaque path-backed handle; Web keeps
-        /// only the browser download name.
-        file: FileHandle,
-        mode: crate::recording::RecordModeView,
-    },
-
-    /// Change the recorder format for the next/current recording. The
-    /// backend owns the actual recorder implementation; the UI only submits
-    /// the platform-neutral mode.
-    SetRecordingMode {
-        mode: crate::recording::RecordModeView,
-    },
-
-    StopRecording,
-
-    PauseRecording,
-
-    ResumeRecording,
-
-    AddBookmark {
-        name: Option<String>,
-    },
-    AddReplayBookmark {
-        name: Option<String>,
-    },
-
-    LoadReplay {
-        file: FileHandle,
-    },
-
-    ReplayPlay,
-    ReplayPause,
-    ReplayStop,
-
-    ReplaySeek {
-        position_ms: u64,
-    },
-
-    ReplaySeekBy {
-        delta_ms: i64,
-    },
-
-    ReplayStep {
-        delta: i32,
-    },
-    RemoveReplayBookmark {
-        position_ms: u64,
-    },
-
-    SetReplaySpeed {
-        speed: f64,
-    },
-
-    SetReplayPolicy {
-        policy: crate::replay::ReplayPolicyView,
     },
 
     EnablePlugin {

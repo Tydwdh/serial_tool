@@ -7,17 +7,11 @@ use thiserror::Error;
 /// `tests/headless.rs::send_routing_dispatches_by_port_kind_and_rejects_invalid_hex`。
 ///
 /// `AppError` 是 native 组合根的错误分类层：命令层的正文由它加上
-/// 「传输错误」「录制错误」等前缀后再展示。
+/// 「传输错误」「存储错误」等前缀后再展示。
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("传输错误：{0}")]
     Transport(String),
-
-    #[error("录制错误：{0}")]
-    Recording(String),
-
-    #[error("回放错误：{0}")]
-    Replay(String),
 
     #[error("存储错误：{0}")]
     Storage(String),
@@ -37,8 +31,6 @@ impl From<crate::command::CommandError> for AppError {
         use crate::command::CommandError;
         match error {
             CommandError::Transport(message) => Self::Transport(message),
-            CommandError::Recording(message) => Self::Recording(message),
-            CommandError::Replay(message) => Self::Replay(message),
             CommandError::Storage(message) => Self::Storage(message),
             CommandError::Plugin(message) => Self::Plugin(message),
             CommandError::InvalidState(message) => Self::InvalidState(message),
@@ -51,8 +43,6 @@ impl From<AppError> for crate::command::CommandError {
     fn from(error: AppError) -> Self {
         match error {
             AppError::Transport(message) => Self::Transport(message),
-            AppError::Recording(message) => Self::Recording(message),
-            AppError::Replay(message) => Self::Replay(message),
             AppError::Storage(message) => Self::Storage(message),
             AppError::Plugin(message) => Self::Plugin(message),
             AppError::InvalidState(message) => Self::InvalidState(message),

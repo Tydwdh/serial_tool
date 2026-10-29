@@ -1,6 +1,6 @@
 # plugin.json 字段参考
 
-`plugin.json` 是插件声明文件。主程序通过它识别插件 ID、入口脚本、权限、贡献面板与回放解析器（数据模型 `crates/extension/src/manifest.rs:17-72`，运行时校验 `crates/extension/src/manifest.rs:72-170`）。
+`plugin.json` 是插件声明文件。主程序通过它识别插件 ID、入口脚本、权限与贡献面板（数据模型 `crates/extension/src/manifest.rs:17-72`，运行时校验 `crates/extension/src/manifest.rs:72-170`）。
 
 模板在文件顶部包含：
 
@@ -30,7 +30,6 @@
 | `icon` | string | 否 | — | 图标相对插件根目录的路径，建议 PNG/SVG。 |
 | `contributes` | object | 否 | `{}` | 贡献项（命令、UI、面板、设置）。 |
 | `live` | object | 否 | — | 实时插件配置（`LiveConfig`）。 |
-| `replay` | object | 否 | — | 回放解析器配置（`ReplayConfig`）。 |
 
 市场元数据字段均为可选，仅供 UI 展示与市场索引（`manifest.rs:32-63`）。
 
@@ -56,26 +55,6 @@
 | `permissions` | string[] | 否 | 顶层 `permissions` | 实时权限。 |
 | `subscriptions` | string[] | 否 | `[]` | 声明订阅的 topic（元数据，`manifest.rs:228-238`）。 |
 
-## replay 配置
-
-```json
-"replay": {
-  "main": "replay.lua",
-  "subscriptions": ["transport.serial.default.rx"],
-  "outputs": ["protocol.demo.sample"],
-  "permissions": ["log", "storage"]
-}
-```
-
-| 字段 | 类型 | 必填 | 默认 | 说明 |
-|---|---|---:|---|---|
-| `main` | string | 是 | — | 回放入口脚本（`manifest.rs:240-249`）。 |
-| `subscriptions` | string[] | 否 | `[]` | 解析器接收的 topic。 |
-| `outputs` | string[] | 否 | `[]` | 解析器可能输出的 topic。 |
-| `permissions` | string[] | 否 | `[]` | 只接受 `log` / `storage`（`permission.rs:33-42`）。 |
-
-没有 `replay` 时插件不参与回放重解析（`manifest.rs:196-198`）。
-
 ## 权限
 
 宿主按权限挂载对应 `ctx.*` API，未在清单声明的权限不会挂载（`crates/lua_host/src/lib.rs:848-945`）。
@@ -95,8 +74,6 @@
 | `task` | `ctx.task.*` | 可暂停、可取消的长任务。 |
 | `config` | `ctx.config.*` | 读取与保存插件配置。 |
 | `testing` | `ctx.test.*` | 测试辅助 API，普通插件不建议使用。 |
-
-回放侧权限固定为 `log`、`storage`（`crates/extension/src/spec.rs:20`）。
 
 `ctx.commands` 不需要任何权限，始终挂载（`crates/lua_host/src/lib.rs:863-870`）。完整 API 清单见 [lua-api.md](lua-api.md)。
 
@@ -199,7 +176,7 @@
 
 ## 旧格式兼容
 
-没有 `live` 时，系统用顶层 `main` 与 `permissions` 作为实时插件配置；没有 `replay` 时该插件不支持回放重解析。
+没有 `live` 时，系统用顶层 `main` 与 `permissions` 作为实时插件配置。
 
 ```json
 {

@@ -811,7 +811,7 @@ impl TransportManager {
     /// 推送作为 RX 字节流发布。端口名使用 `host:port`，如 `192.168.1.100:7125`。
     ///
     /// 打开成功后与真实串口完全一致地接入 DataBus（TX/RX 事件、生命周期事件），
-    /// 终端 / 发送器 / 录制 / 回放无需任何改动即可复用。
+    /// 终端 / 发送器 / 设备列表无需任何改动即可复用。
     pub fn open_network_serial(&self, config: NetworkSerialConfig) -> TransportResult<String> {
         self.reap_closing();
         let port_name = config.display_name();
@@ -1511,9 +1511,8 @@ pub fn translate_error(err: &TransportError) -> String {
                 // 成 `ErrorKind::Other` —— 第 41 轮如实记下的那处收窄，根因在此）。
                 std::io::ErrorKind::PermissionDenied => serial_permission_message(&message),
                 // 「COM3 正在关闭中，请稍后重试」那句中文由 `open_serial` 直接 return
-                // （本轮普查：它是全仓唯一造出 `TransportError::Io(WouldBlock)` 的出口 ——
-                // `crates/recorder` 那句 WouldBlock 是 recorder 自己的 `io::Error`，进不来
-                // 这个变体），从不经过完成通道 —— 所以"文案已含中文"这个前提没有被
+                // （它是全仓唯一造出 `TransportError::Io(WouldBlock)` 的出口），
+                // 从不经过完成通道 —— 所以"文案已含中文"这个前提没有被
                 // 本轮换载荷牵连。
                 std::io::ErrorKind::WouldBlock => message,
                 std::io::ErrorKind::TimedOut => format!("操作超时：{message}"),
@@ -1613,7 +1612,7 @@ mod tests {
             ),
             (
                 std::io::ErrorKind::InvalidData,
-                "文件不是本工具写出的录制格式",
+                "文件不是本工具写出的数据格式",
             ),
         ] {
             let message = translate_error(&TransportError::Io(std::io::Error::new(kind, detail)));

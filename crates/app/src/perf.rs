@@ -22,10 +22,6 @@ pub(crate) struct PerfReport {
     pub subscriber_backlog_events: u64,
     pub subscriber_backlog_bytes: u64,
     pub subscriber_dropped: u64,
-    pub recorder_backlog_events: u64,
-    pub recorder_backlog_bytes: u64,
-    pub recorder_seconds_behind: f64,
-    pub recorder_write_bytes_per_sec: u64,
     pub plugin_callback_ms: f64,
     pub chart_render_ms: f64,
 }
@@ -144,7 +140,6 @@ impl PerfDiagnostics {
         }
         self.last_bus = Some((now, snapshot.databus));
 
-        let recorder = snapshot.recorder;
         let report = PerfReport {
             frame_p50_ms: self.frame.percentile(0.50),
             frame_p95_ms: self.frame.percentile(0.95),
@@ -162,10 +157,6 @@ impl PerfDiagnostics {
             subscriber_backlog_events: snapshot.databus.subscriber_queued_events,
             subscriber_backlog_bytes: snapshot.databus.subscriber_queued_bytes,
             subscriber_dropped: snapshot.databus.subscriber_dropped,
-            recorder_backlog_events: recorder.queued_events,
-            recorder_backlog_bytes: recorder.queued_bytes,
-            recorder_seconds_behind: recorder.seconds_behind,
-            recorder_write_bytes_per_sec: recorder.write_throughput_bytes_per_sec,
             plugin_callback_ms: self.plugin_callback.latest(),
             chart_render_ms: self.chart_render.latest(),
         };
@@ -179,7 +170,7 @@ impl PerfDiagnostics {
             // `last_report` 是这里唯一的读者：日志用的就是刚存进去的这份快照。
             let report = self.last_report.as_ref().expect("report just stored");
             log::info!(
-                "perf frame p50/p95/p99={:.2}/{:.2}/{:.2}ms rx={:.0}B/s tx={:.0}B/s events={:.0}/s databus={:.3}ms term_ingest={}/{:.2}ms term_render={:.2}ms log_ingest={}/{:.2}ms log_render={:.2}ms subscriber={}/{}B drop={} recorder={}/{}B/{:.1}s write={}/s plugin={:.2}ms chart={:.2}ms",
+                "perf frame p50/p95/p99={:.2}/{:.2}/{:.2}ms rx={:.0}B/s tx={:.0}B/s events={:.0}/s databus={:.3}ms term_ingest={}/{:.2}ms term_render={:.2}ms log_ingest={}/{:.2}ms log_render={:.2}ms subscriber={}/{}B drop={} plugin={:.2}ms chart={:.2}ms",
                 report.frame_p50_ms,
                 report.frame_p95_ms,
                 report.frame_p99_ms,
@@ -196,10 +187,6 @@ impl PerfDiagnostics {
                 report.subscriber_backlog_events,
                 report.subscriber_backlog_bytes,
                 report.subscriber_dropped,
-                report.recorder_backlog_events,
-                report.recorder_backlog_bytes,
-                report.recorder_seconds_behind,
-                report.recorder_write_bytes_per_sec,
                 report.plugin_callback_ms,
                 report.chart_render_ms,
             );

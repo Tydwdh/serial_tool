@@ -1,5 +1,4 @@
 use crate::app::WorkbenchApp;
-use crate::state::StatusLevel;
 use eframe::egui;
 
 impl WorkbenchApp {
@@ -11,20 +10,6 @@ impl WorkbenchApp {
             if let Err(e) = self.save_config() {
                 log::warn!("save_config failed: {e}")
             }
-        }
-    }
-
-    /// 录制状态检测：收割已停止的录制、worker 线程错误反馈。
-    pub(super) fn tick_recorder_status(&mut self) {
-        match self.workbench.reap_recording_stop() {
-            Some(Ok(path)) => {
-                self.set_status_force(StatusLevel::Info, format!("录制已保存: {path}"))
-            }
-            Some(Err(e)) => self.set_status_force(StatusLevel::Error, format!("录制失败: {e}")),
-            None => {}
-        }
-        if let Some(error) = self.workbench.reap_recording_error() {
-            self.set_status(StatusLevel::Error, format!("录制失败：{error}"));
         }
     }
 }

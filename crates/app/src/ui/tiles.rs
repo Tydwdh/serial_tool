@@ -15,12 +15,6 @@ impl WorkbenchApp {
                     .id_salt("scroll-devices")
                     .show(ui, |ui| self.device_panel(ui));
             }
-            BuiltinPanel::Replay => {
-                let replay_status = self.workbench.query_replay();
-                egui::ScrollArea::vertical()
-                    .id_salt("scroll-replay")
-                    .show(ui, |ui| self.replay_panel.ui(ui, &replay_status));
-            }
             BuiltinPanel::Plugins => {
                 let plugin_view = self.workbench.query_plugins();
                 let summaries = plugin_view.summaries;
@@ -54,7 +48,7 @@ impl WorkbenchApp {
                 tool_panels::SendLayout::Horizontal => self.send_panel_horizontal(ui),
                 tool_panels::SendLayout::Vertical => self.send_panel_vertical(ui),
             },
-            BuiltinPanel::Terminal | BuiltinPanel::Chart | BuiltinPanel::Logs => {}
+            BuiltinPanel::Terminal | BuiltinPanel::Logs => {}
         }
     }
 
@@ -105,6 +99,17 @@ impl WorkbenchApp {
                         ),
                     }
                 }
+                PluginPanelEvent::RefreshPlugins { root } => {
+                    match self
+                        .workbench
+                        .dispatch(tool_application::AppCommand::DiscoverPlugins {
+                            roots: vec![std::path::PathBuf::from(root)],
+                        }) {
+                        Ok(_) => self.set_status_force(StatusLevel::Info, "正在刷新插件..."),
+                        Err(error) => self
+                            .set_status_force(StatusLevel::Error, format!("刷新插件失败：{error}")),
+                    }
+                }
                 PluginPanelEvent::RefreshMarket => self.start_marketplace_refresh(),
                 PluginPanelEvent::ImportPlugin => self.set_status(
                     StatusLevel::Info,
@@ -146,7 +151,6 @@ impl DockHost for WorkbenchApp {
     fn shared_panels(&mut self) -> crate::shared_shell::SharedPanels<'_> {
         crate::shared_shell::SharedPanels {
             terminal: &mut self.terminal_panel,
-            chart: &mut self.chart_panel,
             log: &mut self.bottom_log_panel,
             dynamic: &mut self.dynamic_panels,
         }
@@ -168,7 +172,6 @@ impl DockHost for WorkbenchApp {
     fn note_panel_render(&mut self, kind: BuiltinPanel, started: Self::RenderStart) {
         match kind {
             BuiltinPanel::Terminal => self.perf.record_terminal_render(started),
-            BuiltinPanel::Chart => self.perf.record_chart_render(started),
             BuiltinPanel::Logs => self.perf.record_log_render(started),
             _ => {}
         }

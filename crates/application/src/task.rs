@@ -14,7 +14,6 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 use tool_extension::PluginScan;
 use tool_platform::storage::FileHandle;
 use tool_platform::{PortDescriptor, PortId};
-use tool_recorder::ReplayLoadData;
 use tool_transport::SerialPortDescriptor;
 
 use crate::task_model::prune_finished_snapshots;
@@ -32,7 +31,6 @@ pub enum TaskResult {
     TransportDisconnected { port: PortId },
     TransportSent { port: PortId, bytes: usize },
     TransportSignalChanged { port: PortId },
-    ReplayLoaded(ReplayLoadData),
     PluginsDiscovered(PluginScan),
     FileExported { file: FileHandle },
 }

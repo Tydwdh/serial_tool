@@ -116,7 +116,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[test]
-    fn old_manifest_without_live_replay_is_compatible() {
+    fn old_manifest_is_compatible() {
         let json = r#"{
           "id": "demo.test",
           "name": "Test",
@@ -135,8 +135,6 @@ mod tests {
         assert_eq!(manifest.live_main(), "main.lua");
         assert_eq!(manifest.live_permissions().len(), 3);
         assert!(manifest.contributes.ui.is_empty());
-        assert!(!manifest.has_replay_analyzer());
-        assert!(manifest.replay_main().is_none());
     }
 
     #[test]
@@ -267,15 +265,6 @@ mod tests {
                 manifest_path.display(),
                 manifest.live_main()
             );
-            if let Some(replay) = manifest.replay_main() {
-                let replay_path = path.join(replay);
-                assert!(
-                    replay_path.is_file(),
-                    "{} declares replay entry '{}' but it is missing",
-                    manifest_path.display(),
-                    replay
-                );
-            }
             checked += 1;
         }
 
@@ -284,40 +273,6 @@ mod tests {
             "expected bundled plugin manifests under {}",
             plugins_root.display()
         );
-    }
-
-    #[test]
-    fn new_manifest_with_live_and_replay() {
-        let json = r#"{
-          "id": "demo.test",
-          "name": "Test",
-          "version": "1.0.0",
-          "api_version": "0.1",
-          "runtime": "lua",
-          "main": "main.lua",
-          "permissions": ["bus"],
-          "live": {
-            "main": "live.lua",
-            "permissions": ["bus", "log", "serial", "ui"]
-          },
-          "replay": {
-            "main": "replay.lua",
-            "subscriptions": ["transport.serial.default.rx"],
-            "outputs": ["protocol.demo.sample"],
-            "permissions": ["log", "storage"]
-          }
-        }"#;
-
-        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
-        assert_eq!(manifest.api_version, "0.1");
-        assert!(manifest.api_version_supported());
-        assert_eq!(manifest.live_main(), "live.lua");
-        assert_eq!(manifest.live_permissions().len(), 4);
-        assert!(manifest.has_replay_analyzer());
-        assert_eq!(manifest.replay_main(), Some("replay.lua"));
-        assert_eq!(manifest.replay_subscriptions().len(), 1);
-        assert_eq!(manifest.replay_outputs().len(), 1);
-        assert_eq!(manifest.replay_permissions().len(), 2);
     }
 
     #[test]
@@ -368,7 +323,6 @@ mod tests {
             permissions: vec!["filesystem".to_owned()],
             contributes: PluginContributes::default(),
             live: None,
-            replay: None,
             description: None,
             author: None,
             homepage: None,

@@ -14,8 +14,6 @@ pub enum StatusBarAction {
 pub struct StatusBarView {
     pub serial_color: Color32,
     pub serial_label: String,
-    pub recording_color: Color32,
-    pub recording_label: String,
     pub signals: Option<StatusSignalView>,
 }
 
@@ -31,7 +29,6 @@ pub struct StatusSignalView {
 pub fn status_bar_contents_ui(ui: &mut Ui, view: &StatusBarView) -> Vec<StatusBarAction> {
     let mut actions = Vec::new();
     design::status_pill(ui, view.serial_color, &view.serial_label);
-    design::status_pill(ui, view.recording_color, &view.recording_label);
 
     if let Some(signals) = view.signals {
         ui.separator();

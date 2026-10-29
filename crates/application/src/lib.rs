@@ -3,8 +3,6 @@ mod task_model;
 
 pub mod marketplace;
 pub mod plugin;
-pub mod recording;
-pub mod replay;
 pub mod transport;
 pub mod updater;
 

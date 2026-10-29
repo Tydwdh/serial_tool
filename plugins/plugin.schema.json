@@ -221,39 +221,6 @@
       "type": "array",
       "uniqueItems": true
     },
-    "replayConfig": {
-      "additionalProperties": false,
-      "properties": {
-        "main": {
-          "$ref": "#/$defs/luaFile"
-        },
-        "outputs": {
-          "$ref": "#/$defs/topics"
-        },
-        "permissions": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/replayPermission"
-          },
-          "type": "array",
-          "uniqueItems": true
-        },
-        "subscriptions": {
-          "$ref": "#/$defs/topics"
-        }
-      },
-      "required": [
-        "main"
-      ],
-      "type": "object"
-    },
-    "replayPermission": {
-      "enum": [
-        "log",
-        "storage"
-      ],
-      "type": "string"
-    },
     "setting": {
       "additionalProperties": false,
       "properties": {
@@ -439,9 +406,6 @@
     },
     "permissions": {
       "$ref": "#/$defs/permissions"
-    },
-    "replay": {
-      "$ref": "#/$defs/replayConfig"
     },
     "repository": {
       "minLength": 1,

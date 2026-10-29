@@ -1,87 +1,17 @@
 use crate::app::WorkbenchApp;
-use crate::config::pick_recorder_path;
 use crate::reconnect::RECONNECT_MAX_ATTEMPTS;
 use crate::state::StatusLevel;
 use eframe::egui;
 use egui_material_icons::icons::{ICON_CABLE, ICON_TUNE, ICON_WARNING};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use tool_application::query::RecordModeView;
+use std::collections::BTreeSet;
 use tool_panels::{
-    NetworkSerialAction, NetworkSerialFormView, RecordingAction, RecordingMode, RecordingView,
-    SerialPanel, design, network_serial_form_ui, recording_ui, theme,
+    NetworkSerialAction, NetworkSerialFormView, SerialPanel, design, network_serial_form_ui, theme,
 };
 use tool_platform::{SerialParity, SerialSettings};
 
 impl WorkbenchApp {
-    fn recording_panel(&mut self, ui: &mut egui::Ui) {
-        let recording = self.workbench.query_recording();
-        let stats = recording.stats.clone();
-        let running = stats.running;
-        let stopping = stats.stopping;
-        let paused = stats.paused;
-        let mut mode = match recording.mode {
-            RecordModeView::StandardReplay => RecordingMode::StandardReplay,
-            RecordModeView::RawSerial => RecordingMode::RawSerial,
-        };
-        let actions = {
-            let mut view = RecordingView {
-                file_name: &mut self.recorder_path,
-                mode: &mut mode,
-                running,
-                stopping,
-                paused,
-                events_written: stats.events_written,
-                bytes_written: Some(stats.bytes_written),
-                flush_elapsed_ms: Some(stats.last_flush_elapsed_ms),
-                backlog_events: None,
-                backlog_bytes: None,
-                current_path: recording.path.as_deref(),
-                last_error: stats.last_error.as_deref(),
-                show_browse: true,
-            };
-            recording_ui(ui, &mut view)
-        };
-
-        let native_mode = match mode {
-            RecordingMode::StandardReplay => RecordModeView::StandardReplay,
-            RecordingMode::RawSerial => RecordModeView::RawSerial,
-        };
-        if native_mode != recording.mode
-            && let Err(error) = self
-                .workbench
-                .dispatch(tool_application::AppCommand::SetRecordingMode { mode: native_mode })
-        {
-            self.set_status_force(StatusLevel::Error, error.to_string());
-        }
-
-        for action in actions {
-            match action {
-                RecordingAction::Browse => {
-                    if let Some(path) = pick_recorder_path(&self.recorder_path) {
-                        self.recorder_path = path.display().to_string();
-                    }
-                }
-                RecordingAction::StartStop => self.start_or_stop_recording(),
-                RecordingAction::PauseResume => {
-                    let command = if paused {
-                        tool_application::AppCommand::ResumeRecording
-                    } else {
-                        tool_application::AppCommand::PauseRecording
-                    };
-                    if let Err(error) = self.workbench.dispatch(command) {
-                        self.set_status_force(StatusLevel::Error, error.to_string());
-                    }
-                }
-            }
-        }
-    }
-
     pub(crate) fn device_panel(&mut self, ui: &mut egui::Ui) {
         self.render_serial_settings_card(ui);
-
-        ui.add_space(8.0);
-
-        self.recording_panel(ui);
 
         ui.add_space(8.0);
 
@@ -301,15 +231,9 @@ impl WorkbenchApp {
         ui.separator();
     }
 
-    /// 分组端口行与 Web 端共用同一个共享组件：native 只把自己的字符串键状态
-    /// 适配进 SerialView，并分发组件返回的动作。
+    /// 单端口窗口只需要选择/连接/断开；别名与分组不再占界面。
     fn render_shared_port_list(&mut self, ui: &mut egui::Ui) {
         let shared_ports = self.native_port_items();
-        let previous_aliases = self.serial.port_aliases.clone();
-        let previous_groups = self.serial.port_groups.clone();
-        let mut aliases: BTreeMap<String, String> = previous_aliases.clone().into_iter().collect();
-        let mut groups: BTreeMap<String, String> = previous_groups.clone().into_iter().collect();
-        // SerialView 要求这些字段，但本面板只渲染端口列表（show_sender = false），故留空。
         let status = String::new();
         let mut settings = self.workbench.serial_settings();
         let mut send_input = String::new();
@@ -332,32 +256,9 @@ impl WorkbenchApp {
             },
             show_ports: true,
             show_sender: false,
-            metadata: Some(tool_panels::SerialPortMetadata {
-                aliases: &mut aliases,
-                groups: &mut groups,
-            }),
+            metadata: None,
         };
         let shared_actions = tool_panels::SerialPanel::port_list_ui(ui, &mut shared_view);
-        let metadata = shared_view
-            .metadata
-            .take()
-            .expect("shared grouped port view must return metadata");
-        let new_aliases: HashMap<String, String> = metadata
-            .aliases
-            .iter()
-            .map(|(port, alias)| (port.clone(), alias.clone()))
-            .collect();
-        let new_groups: HashMap<String, String> = metadata
-            .groups
-            .iter()
-            .map(|(port, group)| (port.clone(), group.clone()))
-            .collect();
-        let metadata_changed = previous_aliases != new_aliases || previous_groups != new_groups;
-        self.serial.port_aliases = new_aliases;
-        self.serial.port_groups = new_groups;
-        if metadata_changed && let Err(error) = self.save_config() {
-            log::warn!("save_config failed: {error}");
-        }
 
         for action in shared_actions {
             self.handle_port_list_action(action);

@@ -57,19 +57,3 @@ plugin-marketplace/
 安全模型：强制 https + 域白名单（`raw.githubusercontent.com` / `github.com` /
 `objects.githubusercontent.com`）+ SHA256 校验 + 拒绝 zip 内的可执行扩展名
 （dll/exe/sys/bat/ps1 等）。
-
-## Web Replay Analyzer
-
-Lua 插件如果需要参与原始回放重解析，可在 `plugin.json` 声明 `replay`：
-
-```json
-{
-  "replay": {
-    "subscriptions": ["transport.serial.default.rx"],
-    "outputs": ["protocol.example.*"]
-  }
-}
-```
-
-入口模块实现 `on_replay_begin(session)`、`on_replay_event(event)` 和
-`on_replay_end()`；Native/Web 使用同一 Lua API，平台差异只体现在 capability。

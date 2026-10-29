@@ -7,12 +7,11 @@ use tool_lua_host::{DialogRequest, FileAccessBroker};
 use tool_platform::native::block_on_transport;
 use tool_platform::storage::{FileBlob, FileHandle, native::NativeFileService};
 use tool_platform::{PortDescriptor, PortId, SerialParity, SerialSettings, TransportBackend};
-use tool_recorder::{JsonlRecorder, ReplayManager};
 use tool_transport::{SerialPortDescriptor, TransportManager};
 
 use crate::command::{AppCommand, CommandOutcome};
 use crate::error::AppError;
-use crate::query::{NetworkPortConfig, PluginView, RecordingStatusView, ReplayStatusView};
+use crate::query::{NetworkPortConfig, PluginView};
 use crate::send_plan::{self, PlannedSend};
 use crate::task::{AppEvent, TaskContext, TaskId, TaskKind, TaskManager, TaskResult, TaskSnapshot};
 use crate::task_model::cancel_deregistered_task;
@@ -30,7 +29,6 @@ pub struct ApplicationConfig {
     pub terminal_merge_window_ms: u64,
     pub terminal_max_entries: usize,
     pub log_max_entries: usize,
-    pub recorder_path: String,
     pub network_ports: Vec<NetworkPortConfig>,
     pub port_aliases: HashMap<String, String>,
     pub port_groups: HashMap<String, String>,
@@ -50,7 +48,6 @@ impl Default for ApplicationConfig {
             terminal_merge_window_ms: 5,
             terminal_max_entries: 50_000,
             log_max_entries: 50_000,
-            recorder_path: String::new(),
             network_ports: Vec::new(),
             port_aliases: HashMap::new(),
             port_groups: HashMap::new(),
@@ -64,8 +61,6 @@ pub struct Workbench {
     bus: DataBus,
     transport: TransportManager,
     file_service: NativeFileService,
-    recorder: JsonlRecorder,
-    replay: ReplayManager,
     plugin_manager: PluginManager,
     app_config: ApplicationConfig,
     ports: Vec<SerialPortDescriptor>,
@@ -79,8 +74,8 @@ pub struct Workbench {
 /// Application-owned handle for publishing an application event.
 ///
 /// The underlying bus remains an implementation detail of `Workbench`; callers
-/// only receive a cloneable publisher and cannot access transport/recorder
-/// state through it.
+/// only receive a cloneable publisher and cannot access transport state
+/// through it.
 #[derive(Clone)]
 pub struct EventSink {
     bus: DataBus,
@@ -172,14 +167,10 @@ impl Workbench {
         let file_broker = std::sync::Arc::new(FileAccessBroker::default());
         let mut pm = PluginManager::new(bus.clone(), transport.clone());
         pm.set_host_services(dialog_sender, file_broker.clone());
-        let recorder = JsonlRecorder::new(bus.clone());
-        let replay = ReplayManager::new(bus.clone());
         Self {
             bus,
             transport,
             file_service: NativeFileService::new("."),
-            recorder,
-            replay,
             plugin_manager: pm,
             app_config: ApplicationConfig::default(),
             ports: Vec::new(),
@@ -199,12 +190,6 @@ impl Workbench {
 
     pub fn tick(&mut self, _now_secs: f64) {
         self.poll_tasks();
-        self.recorder.tick_backpressure();
-    }
-
-    /// 推进唯一的 Application-owned 回放状态，并返回本帧发布的事件数。
-    pub fn tick_replay(&mut self) -> usize {
-        self.replay.tick()
     }
 
     pub fn task_snapshots(&self) -> Vec<TaskSnapshot> {
@@ -214,7 +199,6 @@ impl Workbench {
     pub fn perf_snapshot(&self) -> crate::perf::ApplicationPerfSnapshot {
         crate::perf::ApplicationPerfSnapshot {
             databus: self.bus.perf_snapshot(),
-            recorder: self.recorder.stats(),
         }
     }
 
@@ -299,90 +283,6 @@ impl Workbench {
         };
         view.auto_reconnect = self.app_config.auto_reconnect;
         view
-    }
-
-    pub fn query_recording(&self) -> RecordingStatusView {
-        RecordingStatusView {
-            stats: self.recorder.stats().into(),
-            path: self
-                .recorder
-                .current_path()
-                .map(|path| path.display().to_string()),
-            mode: self.recorder.mode().into(),
-        }
-    }
-
-    pub fn query_replay(&self) -> ReplayStatusView {
-        let status = self.replay.status();
-        ReplayStatusView {
-            state: status.state.into(),
-            path: status.path.map(|path| path.display().to_string()),
-            total_events: status.total_events,
-            cursor: status.cursor,
-            speed: status.speed,
-            position_ms: status.position_ms,
-            duration_ms: status.duration_ms,
-            policy: status.policy.into(),
-            effective_policy: status.effective_policy.into(),
-            has_recorded_protocol: status.has_recorded_protocol,
-            analyzer_cache_entries: status.analyzer_cache_entries,
-            analyzer_cache_valid: self.replay.analyzer_cache_valid(),
-            analyzer_error: status.analyzer_error,
-            analyzer_warning: status.analyzer_warning,
-            can_play: self.replay.can_play(),
-            can_seek: self.replay.can_seek(),
-            block_reason: self.replay.replay_block_reason().map(Into::into),
-            bookmarks: self
-                .replay
-                .bookmarks()
-                .iter()
-                .map(|bookmark| crate::query::ReplayBookmarkView {
-                    position_ms: bookmark.pos_ms,
-                    name: bookmark.name.clone(),
-                })
-                .collect(),
-            load_report: status.load_report.map(Into::into),
-        }
-    }
-
-    pub fn replay_raw_serial_events(&self) -> Vec<tool_core::Event> {
-        self.replay.raw_serial_events()
-    }
-
-    pub fn replay_set_analyzer_cache(&mut self, events: Vec<tool_core::Event>) {
-        self.replay.set_analyzer_cache(events);
-    }
-
-    pub fn replay_set_analyzer_error(&mut self, error: String) {
-        self.replay.set_analyzer_error(error);
-    }
-
-    pub fn replay_set_analyzer_warning(&mut self, warning: String) {
-        self.replay.set_analyzer_warning(warning);
-    }
-
-    pub fn replay_clear_analyzer_messages(&mut self) {
-        self.replay.clear_analyzer_error();
-    }
-
-    pub fn replay_seek_panel_phase(&mut self, position_ms: u64) -> usize {
-        self.replay.seek_panel_phase(position_ms)
-    }
-
-    pub fn replay_seek_data_phase(&mut self, position_ms: u64) -> usize {
-        self.replay.seek_data_phase(position_ms)
-    }
-
-    pub fn replay_seek_cursor_panel_phase(&mut self, target_cursor: usize) -> usize {
-        self.replay.seek_cursor_panel_phase(target_cursor)
-    }
-
-    pub fn replay_seek_cursor_data_phase(&mut self, target_cursor: usize) -> usize {
-        self.replay.seek_cursor_data_phase(target_cursor)
-    }
-
-    pub fn replay_backward_cursor_by(&self, steps: usize) -> Option<usize> {
-        self.replay.backward_cursor_by(steps)
     }
 
     pub fn query_plugins(&self) -> PluginView {
@@ -472,16 +372,6 @@ impl Workbench {
         self.platform_serial_settings()
     }
 
-    pub fn reap_recording_stop(&mut self) -> Option<Result<String, String>> {
-        self.recorder
-            .reap_stopping()
-            .map(|result| result.map(|path| path.display().to_string()))
-    }
-
-    pub fn reap_recording_error(&mut self) -> Option<String> {
-        self.recorder.reap_error()
-    }
-
     pub fn log(&self, lv: LogLevel, msg: impl Into<String>) {
         self.bus
             .publish(tool_core::Event::system_log(lv, "app", msg.into()));
@@ -551,10 +441,6 @@ impl Workbench {
             .config_store()
             .set(plugin_id, key, value)
             .map_err(|error| AppError::Plugin(error.to_string()))
-    }
-
-    pub fn replay_analyzer_entries(&self) -> Vec<tool_extension::manifest::ReplayAnalyzerEntry> {
-        self.plugin_manager.replay_analyzer_entries()
     }
 
     pub fn try_dialog_request(&self) -> Option<DialogRequest> {
@@ -731,58 +617,6 @@ impl Workbench {
         }
     }
 
-    fn dispatch_start_recording(
-        &mut self,
-        file: FileHandle,
-        mode: crate::recording::RecordModeView,
-    ) -> Result<CommandOutcome, AppError> {
-        let path = file
-            .native_path()
-            .ok_or_else(|| AppError::Recording("Native 录制需要路径型文件句柄".to_owned()))?
-            .to_path_buf();
-        self.recorder.set_mode(mode.into());
-        self.recorder
-            .start(path)
-            .map(|()| CommandOutcome::Done)
-            .map_err(|e| AppError::Recording(e.to_string()))
-    }
-
-    /// 回放文件的解析（读完整个 JSONL）交给后台任务，UI 线程上的 `dispatch` 只投递。
-    fn dispatch_load_replay(&mut self, file: FileHandle) -> Result<CommandOutcome, AppError> {
-        let path = file
-            .native_path()
-            .ok_or_else(|| AppError::Replay("Native 回放需要路径型文件句柄".to_owned()))?
-            .to_path_buf();
-        let task_id = self.tasks.spawn(TaskKind::LoadReplay, move |_context| {
-            ReplayManager::prepare_load(&path)
-                .map(TaskResult::ReplayLoaded)
-                .map_err(|error| error.to_string())
-        });
-        Ok(pending(task_id, "正在加载回放文件"))
-    }
-
-    fn replay_seek_by(&mut self, delta_ms: i64) {
-        let cur = self.replay.status().position_ms;
-        let next = if delta_ms < 0 {
-            cur.saturating_sub((-delta_ms) as u64)
-        } else {
-            cur.saturating_add(delta_ms as u64)
-        };
-        self.replay.seek_ms(next);
-    }
-
-    fn replay_step(&mut self, delta: i32) {
-        if delta > 0 {
-            for _ in 0..delta {
-                let _ = self.replay.step_forward();
-            }
-        } else {
-            for _ in 0..(-delta) {
-                self.replay.step_backward();
-            }
-        }
-    }
-
     /// 用应用侧记录的插件根目录重扫一次（与 `DiscoverPlugins` 的区别只在根从哪来）。
     fn spawn_reload_plugins(&mut self) -> CommandOutcome {
         let roots = self.plugin_manager.roots();
@@ -871,6 +705,15 @@ impl Workbench {
         port_name: &str,
         settings: SerialSettings,
     ) -> Result<CommandOutcome, AppError> {
+        let target_name = self
+            .find_network_port(port_name)
+            .map(NetworkPortConfig::display_name)
+            .unwrap_or_else(|| port_name.to_owned());
+        for open in self.transport.open_ports() {
+            if open != target_name {
+                self.transport.close_port(&open);
+            }
+        }
         if let Some(registered) = self.find_network_port(port_name).cloned() {
             // 之后一律用规范名 `display_name()`，两个理由各管一半：
             // - `TransportManager` 的端口表以它为键（`open_network_serial` 自己从配置算），
@@ -1121,9 +964,6 @@ impl Workbench {
                         }
                         TaskResult::TransportSent { .. }
                         | TaskResult::TransportSignalChanged { .. } => {}
-                        TaskResult::ReplayLoaded(data) => {
-                            self.replay.load_prepared(data);
-                        }
                         TaskResult::PluginsDiscovered(scan) => {
                             self.plugin_manager.apply_scan(scan);
                         }
@@ -1231,95 +1071,6 @@ impl crate::command::CommandEffects for Workbench {
     ) -> Result<CommandOutcome, crate::command::CommandError> {
         self.set_transport_signal(port.to_string(), value, dtr)
             .map_err(Into::into)
-    }
-
-    fn start_recording(
-        &mut self,
-        file: FileHandle,
-        mode: crate::recording::RecordModeView,
-    ) -> Result<CommandOutcome, crate::command::CommandError> {
-        self.dispatch_start_recording(file, mode)
-            .map_err(Into::into)
-    }
-
-    fn set_recording_mode(&mut self, mode: crate::recording::RecordModeView) {
-        self.recorder.set_mode(mode.into());
-    }
-
-    fn stop_recording(&mut self) -> Result<CommandOutcome, crate::command::CommandError> {
-        self.recorder.stop();
-        Ok(CommandOutcome::Done)
-    }
-
-    fn pause_recording(&mut self) -> Result<CommandOutcome, crate::command::CommandError> {
-        self.recorder.pause();
-        Ok(CommandOutcome::Done)
-    }
-
-    fn resume_recording(&mut self) -> Result<CommandOutcome, crate::command::CommandError> {
-        self.recorder.resume();
-        Ok(CommandOutcome::Done)
-    }
-
-    fn add_recording_bookmark(&mut self, name: Option<String>) {
-        self.recorder.add_bookmark(&name.unwrap_or_default());
-    }
-
-    fn load_replay(
-        &mut self,
-        file: FileHandle,
-    ) -> Result<CommandOutcome, crate::command::CommandError> {
-        self.dispatch_load_replay(file).map_err(Into::into)
-    }
-
-    fn replay_play(&mut self) -> Result<(), crate::command::CommandError> {
-        let _ = self.replay.play();
-        Ok(())
-    }
-
-    fn replay_pause(&mut self) -> Result<(), crate::command::CommandError> {
-        self.replay.pause();
-        Ok(())
-    }
-
-    fn replay_stop(&mut self) -> Result<(), crate::command::CommandError> {
-        self.replay.stop();
-        Ok(())
-    }
-
-    fn replay_seek(&mut self, position_ms: u64) -> Result<(), crate::command::CommandError> {
-        self.replay.seek_ms(position_ms);
-        Ok(())
-    }
-
-    fn replay_seek_by(&mut self, delta_ms: i64) -> Result<(), crate::command::CommandError> {
-        Workbench::replay_seek_by(self, delta_ms);
-        Ok(())
-    }
-
-    fn replay_step(&mut self, delta: i32) -> Result<(), crate::command::CommandError> {
-        Workbench::replay_step(self, delta);
-        Ok(())
-    }
-
-    fn replay_set_speed(&mut self, speed: f64) {
-        self.replay.set_speed(speed);
-    }
-
-    fn replay_set_policy(
-        &mut self,
-        policy: crate::replay::ReplayPolicyView,
-    ) -> Result<(), crate::command::CommandError> {
-        self.replay.set_policy(policy.into());
-        Ok(())
-    }
-
-    fn replay_add_bookmark(&mut self, name: Option<String>) {
-        self.replay.add_bookmark(name);
-    }
-
-    fn replay_remove_bookmark(&mut self, position_ms: u64) {
-        self.replay.remove_bookmark(position_ms);
     }
 
     fn enable_plugin(&mut self, plugin_id: String) -> Result<(), crate::command::CommandError> {

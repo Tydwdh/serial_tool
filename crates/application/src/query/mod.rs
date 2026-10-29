@@ -5,67 +5,11 @@ pub use crate::plugin::{
     PluginPanelContributionView, PluginSettingView, PluginStateView, PluginSummaryView,
     PluginUiContributionView, PluginView,
 };
-pub use crate::recording::{RecordModeView, RecorderStatsView, RecordingStatusView};
-pub use crate::replay::{
-    ReplayBlockReasonView, ReplayBookmarkView, ReplayLoadReportView, ReplayPolicyView,
-    ReplayStateView, ReplayStatusView,
-};
 pub use crate::transport::{
     PortStatusView, PortTypeView, PortView, SerialConfigView, TransportView,
 };
 
 pub type NetworkPortConfig = tool_platform::NetworkSerialConfig;
-
-impl From<tool_recorder::ReplayState> for ReplayStateView {
-    fn from(state: tool_recorder::ReplayState) -> Self {
-        match state {
-            tool_recorder::ReplayState::Empty => Self::Empty,
-            tool_recorder::ReplayState::Loaded => Self::Loaded,
-            tool_recorder::ReplayState::Playing => Self::Playing,
-            tool_recorder::ReplayState::Paused => Self::Paused,
-            tool_recorder::ReplayState::Finished => Self::Finished,
-        }
-    }
-}
-
-impl From<tool_recorder::ReplayBlockReason> for ReplayBlockReasonView {
-    fn from(reason: tool_recorder::ReplayBlockReason) -> Self {
-        match reason {
-            tool_recorder::ReplayBlockReason::NeedAnalyzer => Self::NeedAnalyzer,
-            tool_recorder::ReplayBlockReason::AnalyzerFailed(error) => Self::AnalyzerFailed(error),
-        }
-    }
-}
-
-impl From<tool_recorder::ReplayPolicy> for ReplayPolicyView {
-    fn from(policy: tool_recorder::ReplayPolicy) -> Self {
-        match policy {
-            tool_recorder::ReplayPolicy::AutoPreferRecorded => Self::AutoPreferRecorded,
-            tool_recorder::ReplayPolicy::ExactRecorded => Self::ExactRecorded,
-            tool_recorder::ReplayPolicy::ReparseRaw => Self::ReparseRaw,
-        }
-    }
-}
-
-impl From<ReplayPolicyView> for tool_recorder::ReplayPolicy {
-    fn from(policy: ReplayPolicyView) -> Self {
-        match policy {
-            ReplayPolicyView::AutoPreferRecorded => Self::AutoPreferRecorded,
-            ReplayPolicyView::ExactRecorded => Self::ExactRecorded,
-            ReplayPolicyView::ReparseRaw => Self::ReparseRaw,
-        }
-    }
-}
-
-impl From<tool_recorder::ReplayLoadReport> for ReplayLoadReportView {
-    fn from(report: tool_recorder::ReplayLoadReport) -> Self {
-        Self {
-            loaded: report.loaded,
-            skipped: report.skipped,
-            first_errors: report.first_errors,
-        }
-    }
-}
 
 // 插件清单的应用层只读视图。
 //
@@ -192,9 +136,6 @@ impl From<tool_extension::PluginSummary> for PluginSummaryView {
             license: summary.license,
             category: summary.category,
             icon: summary.icon,
-            has_replay_analyzer: summary.has_replay_analyzer,
-            replay_subscriptions: summary.replay_subscriptions,
-            replay_outputs: summary.replay_outputs,
             registered_commands: summary.registered_commands,
             missing_commands: summary.missing_commands,
             undeclared_commands: summary.undeclared_commands,

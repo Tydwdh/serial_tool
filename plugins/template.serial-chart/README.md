@@ -3,11 +3,7 @@
 这个模板展示完整链路：
 
 ```text
-实时:
-  串口 RX -> main.lua -> protocol.template.sample -> 图表
-
-回放:
-  RawSerial 录制 -> replay.lua -> protocol.template.sample -> 图表
+串口 RX -> main.lua -> protocol.template.sample -> 图表
 ```
 
 ## 输入数据格式
@@ -39,11 +35,11 @@ plugins/template.serial-chart -> plugins/yourname.serial-chart
 "name": "你的串口图表插件"
 ```
 
-保留 `$schema` 字段，它会让支持 JSON Schema 的编辑器提示可用字段、权限和回放配置。
+保留 `$schema` 字段，它会让支持 JSON Schema 的编辑器提示可用字段、权限和面板配置。
 
-项目根目录的 `.luarc.json` 会加载 `plugins\.lua\` 下的 Lua API stub，用于消除 `ctx`、`on_replay_*` 和 `require("hw.*")` 的假报错。
+项目根目录的 `.luarc.json` 会加载 `plugins\.lua\` 下的 Lua API stub，用于消除 `ctx` 和 `require("hw.*")` 的假报错。
 
-3. 修改 `main.lua` 和 `replay.lua` 中的：
+3. 修改 `main.lua` 中的：
 
 ```lua
 CHART_ID
@@ -53,20 +49,9 @@ TOPIC_OUT
 
 4. 根据你的协议修改 `parse_packet()`。
 
-## 录制与回放测试
+## 运行验证
 
-### StandardReplay
-
-1. 录制模式选择“标准回放”。
-2. 产生串口数据。
-3. 停止录制。
-4. 选择“自动”或“精确回放”。
-5. 图表应直接恢复。
-
-### RawSerial + ReparseRaw
-
-1. 录制模式选择“原始串口”。
-2. 产生串口数据。
-3. 停止录制。
-4. 回放策略选择“重新解析”。
-5. replay.lua 应生成 `protocol.template.sample`，图表应显示数据。
+1. 在插件页启用本插件。
+2. 打开一个串口，让该串口收到一行 `{"seq":1,"value":12.3,"target":50.0}\n` 数据（或把 `rx_port` 设为该端口）。
+3. 图表应出现一条采样点；插件日志显示解析成功。
+4. 修改参数面板中的 `rx_port`，只保留目标端口的数据。

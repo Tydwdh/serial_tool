@@ -3,17 +3,12 @@
 
 mod app;
 mod bootstrap;
-mod command_registry;
 mod commands;
 mod config;
-mod keymap;
 mod panel_registry;
-mod panels_ops;
 mod perf;
 mod reconnect;
-pub(crate) mod replay_task;
 mod runtime;
-mod shared_keymap;
 mod shared_settings;
 mod shared_shell;
 mod state;

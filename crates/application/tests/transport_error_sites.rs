@@ -9,8 +9,7 @@
 //!
 //! 运行时覆盖不到的地方只能钉形状：任何一处退回 `.to_string()`，对应函数的映射器计数
 //! 就少 1，这里立刻变红。按函数体切而不是全文搜，是因为 `send`（`SendPlanError`，正文
-//! 本来就是中文）、`dispatch_load_replay`（io 错误，中文框架由 `tool-recorder` 在生产处
-//! 补）、插件扫描与导出落盘（第 25 轮起走 `tool_platform::storage::translate_error`）
+//! 本来就是中文）、插件扫描与导出落盘（第 25 轮起走 `tool_platform::storage::translate_error`）
 //! 用的都**不是传输映射器** —— 那是另外的靶子，混进来只会让本用例在无关改动时假报警。
 
 const SOURCE: &str = include_str!("../src/workbench.rs");

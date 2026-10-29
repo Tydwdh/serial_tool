@@ -237,8 +237,7 @@ static UNOPENABLE_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomi
 
 /// 一个「`metadata` 拿得到、当文件**打开必失败**」的临时路径，`Drop` 时自动清理。
 ///
-/// 为什么需要它：第 43 轮那三条用例（`crates/recorder/src/replay.rs` 两条、
-/// `crates/application/tests/headless.rs` 一条）拿**目录**当"打不开"的夹具，注释里写的
+/// 为什么需要它：早期那几条用例（`crates/application/tests/headless.rs` 等）拿**目录**当"打不开"的夹具，注释里写的
 /// 「Linux 是目录 ⇒ `EISDIR`」是错的 —— POSIX 只在**写**打开时给 `EISDIR`，
 /// `open(目录, O_RDONLY)` 是成功的，于是那句
 /// `File::open(&dir).expect_err("目录不能当文件打开")` 在 Linux 上当场 panic：

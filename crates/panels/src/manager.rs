@@ -19,24 +19,20 @@ pub struct PanelId(String);
 /// 内置面板 ID。与旧版 `PanelKind` 的 snake_case 序列化格式完全一致，
 /// 保证旧配置可直接加载。
 pub const PANEL_DEVICES: &str = "devices";
-pub const PANEL_REPLAY: &str = "replay";
 pub const PANEL_PLUGINS: &str = "plugins";
 pub const PANEL_SETTINGS: &str = "settings";
 pub const PANEL_TERMINAL: &str = "terminal";
 pub const PANEL_SENDER: &str = "sender";
 pub const PANEL_LOGS: &str = "logs";
-pub const PANEL_CHART: &str = "chart";
 
 /// 内置面板 ID 全集（顺序即默认布局顺序）。
-pub const PANEL_BUILTIN: [&str; 8] = [
+pub const PANEL_BUILTIN: [&str; 6] = [
     PANEL_DEVICES,
-    PANEL_REPLAY,
     PANEL_PLUGINS,
     PANEL_SETTINGS,
     PANEL_TERMINAL,
     PANEL_SENDER,
     PANEL_LOGS,
-    PANEL_CHART,
 ];
 
 /// 动态面板 ID 前缀，与内置面板 id 空间隔离。
@@ -272,7 +268,7 @@ impl RegionSlot {
 }
 
 /// egui_tiles 的持久化布局。额外保存三个默认 tab 容器的 id，
-/// 使顶部工具栏和快捷键仍能快速显示/隐藏底部、右侧区域。
+/// 使顶部工具栏仍能快速显示/隐藏底部、右侧区域。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TilesLayout {
     pub tree: Tree<PanelId>,
@@ -382,47 +378,35 @@ impl TilesLayout {
         let center_panes = TilesLayout::pane_ids(
             &mut tiles,
             &[
-                PanelId::builtin(PANEL_SETTINGS),
-                PanelId::builtin(PANEL_DEVICES),
-                PanelId::builtin(PANEL_REPLAY),
-                PanelId::builtin(PANEL_PLUGINS),
+                PanelId::builtin(PANEL_TERMINAL),
+                PanelId::builtin(PANEL_LOGS),
             ],
         );
         let sender_pane = Self::pane_ids(&mut tiles, &[PanelId::builtin(PANEL_SENDER)]);
-        let side_panes = Self::pane_ids(
-            &mut tiles,
-            &[
-                PanelId::builtin(PANEL_LOGS),
-                PanelId::builtin(PANEL_TERMINAL),
-            ],
-        );
+        let side_panes = Self::pane_ids(&mut tiles, &[PanelId::builtin(PANEL_DEVICES)]);
 
         let main_tabs = tiles.insert_tab_tile(center_panes);
         let bottom_tabs = tiles.insert_tab_tile(sender_pane);
         let right_tabs = tiles.insert_tab_tile(side_panes);
-        let settings_pane = tiles
-            .find_pane(&PanelId::builtin(PANEL_SETTINGS))
-            .expect("default settings pane");
         let terminal_pane = tiles
             .find_pane(&PanelId::builtin(PANEL_TERMINAL))
             .expect("default terminal pane");
 
         if let Some(Tile::Container(Container::Tabs(tabs))) = tiles.get_mut(main_tabs) {
-            tabs.set_active(settings_pane);
-        }
-        if let Some(Tile::Container(Container::Tabs(tabs))) = tiles.get_mut(right_tabs) {
             tabs.set_active(terminal_pane);
         }
 
         let main_column = tiles.insert_vertical_tile(vec![main_tabs, bottom_tabs]);
+        if let Some(Tile::Container(Container::Linear(linear))) = tiles.get_mut(main_column) {
+            linear.shares.set_share(main_tabs, 0.72);
+            linear.shares.set_share(bottom_tabs, 0.28);
+        }
         let mut root_linear = Linear::new(LinearDir::Horizontal, vec![main_column, right_tabs]);
-        // Keep the release layout's persisted proportions for both Native and
-        // Web. Existing user layouts remain untouched; this only controls the
-        // default used by reset/default-workspace creation.
-        root_linear.shares.set_share(main_column, 0.45367718);
-        root_linear.shares.set_share(right_tabs, 0.66292167);
+        root_linear.shares.set_share(main_column, 0.76);
+        root_linear.shares.set_share(right_tabs, 0.24);
         let root = tiles.insert_container(root_linear);
-        let tree = Tree::new("hardware-workbench-layout", root, tiles);
+        let mut tree = Tree::new("hardware-workbench-layout", root, tiles);
+        tree.set_visible(right_tabs, false);
 
         Self {
             tree,
@@ -432,10 +416,7 @@ impl TilesLayout {
             plugin_panel_owners: BTreeMap::new(),
             plugin_groups: BTreeMap::new(),
             bottom_panes: vec![PanelId::builtin(PANEL_SENDER)],
-            right_panes: vec![
-                PanelId::builtin(PANEL_LOGS),
-                PanelId::builtin(PANEL_TERMINAL),
-            ],
+            right_panes: vec![PanelId::builtin(PANEL_DEVICES)],
         }
     }
 
@@ -871,18 +852,14 @@ impl TilesLayout {
 impl Default for DockLayout {
     fn default() -> Self {
         let mut center = DockStack::default();
-        center.open(PanelId::builtin(PANEL_DEVICES));
-        center.open(PanelId::builtin(PANEL_REPLAY));
-        center.open(PanelId::builtin(PANEL_PLUGINS));
-        center.open(PanelId::builtin(PANEL_SETTINGS));
+        center.open(PanelId::builtin(PANEL_TERMINAL));
+        center.open(PanelId::builtin(PANEL_LOGS));
 
         let mut bottom = DockStack::default();
-        bottom.open(PanelId::builtin(PANEL_TERMINAL));
-        bottom.open(PanelId::builtin(PANEL_LOGS));
         bottom.open(PanelId::builtin(PANEL_SENDER));
-        // open() 会把激活项停在最后加入的 sender；这里显式指回终端，
-        // 让底部区域默认标签与 PanelManager::default_workspace 的 active_tab 一致。
-        bottom.active = Some(PanelId::builtin(PANEL_TERMINAL));
+
+        let mut right = DockStack::default();
+        right.open(PanelId::builtin(PANEL_DEVICES));
 
         Self {
             bottom_visible: true,
@@ -891,7 +868,7 @@ impl Default for DockLayout {
             right_size: default_right_size(),
             center,
             bottom,
-            right: DockStack::default(),
+            right,
         }
     }
 }
@@ -930,40 +907,12 @@ impl DockLayout {
     }
 
     pub fn normalize_tool_layout(&mut self) {
-        // 工具面板不允许留在 Center：如果被放在 Center，移到底部
-        for kind in [
-            PanelId::builtin(PANEL_TERMINAL),
-            PanelId::builtin(PANEL_LOGS),
-        ] {
-            if self.center.remove(&kind) {
-                if !self.bottom.contains(&kind) && !self.right.contains(&kind) {
-                    self.bottom.open(kind);
-                }
-                self.bottom_visible = true;
-            }
-        }
-
         // Sender 不允许在 Center stack 中存在；
         // 如果没有在任何区域，默认放到底部。
         let sender = PanelId::builtin(PANEL_SENDER);
         self.center.remove(&sender);
         if !self.bottom.contains(&sender) && !self.right.contains(&sender) {
             self.bottom.open(sender);
-        }
-
-        // 确保功能面板（回放、插件、设置）至少在一个停靠区中存在。
-        // 避免旧版配置文件或异常重置后用户看不到这些核心功能入口。
-        for kind in [
-            PanelId::builtin(PANEL_REPLAY),
-            PanelId::builtin(PANEL_PLUGINS),
-            PanelId::builtin(PANEL_SETTINGS),
-        ] {
-            if !self.center.contains(&kind)
-                && !self.bottom.contains(&kind)
-                && !self.right.contains(&kind)
-            {
-                self.center.open(kind);
-            }
         }
 
         // 激活标签必须真实存在于该 stack 中，否则回落到第一个标签；
@@ -983,8 +932,9 @@ impl DockLayout {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PanelManager {
     pub active_tab: PanelId,
+    /// 布局代际：旧版本的工作区在首次加载时重置为单端口监视布局。
     #[serde(default)]
-    pub inspector_visible: bool, // legacy: ignored, kept for old workspace compatibility
+    pub layout_version: u32,
     #[serde(default)]
     pub dock: DockLayout,
     /// 新版工作区布局。None 表示从旧版 `dock` 字段自动迁移。
@@ -992,11 +942,13 @@ pub struct PanelManager {
     pub tiles: Option<TilesLayout>,
 }
 
+const CURRENT_LAYOUT_VERSION: u32 = 1;
+
 impl Default for PanelManager {
     fn default() -> Self {
         Self {
-            active_tab: PanelId::builtin(PANEL_DEVICES),
-            inspector_visible: false,
+            active_tab: PanelId::builtin(PANEL_TERMINAL),
+            layout_version: CURRENT_LAYOUT_VERSION,
             dock: DockLayout::default(),
             tiles: None,
         }
@@ -1006,6 +958,12 @@ impl Default for PanelManager {
 impl PanelManager {
     /// 确保当前管理器拥有 tiles 布局；旧版配置会在首次转换，损坏的布局回退到默认。
     pub fn ensure_tiles_layout(&mut self) -> &mut TilesLayout {
+        if self.layout_version < CURRENT_LAYOUT_VERSION {
+            self.layout_version = CURRENT_LAYOUT_VERSION;
+            self.active_tab = PanelId::builtin(PANEL_TERMINAL);
+            self.tiles = None;
+            self.dock = DockLayout::default();
+        }
         if self
             .tiles
             .as_ref()
@@ -1017,8 +975,7 @@ impl PanelManager {
             self.tiles = Some(TilesLayout::current_default());
         }
         if self.tiles.is_none() {
-            self.dock.normalize_tool_layout();
-            self.tiles = Some(TilesLayout::from_legacy(&self.dock));
+            self.tiles = Some(TilesLayout::current_default());
         }
         self.tiles.as_mut().expect("tiles layout was initialized")
     }
@@ -1294,26 +1251,22 @@ mod tests {
         layout.remember_region_panes();
         let before = pane_set(&layout);
         let main_tabs = layout.main_tabs;
-        for pane in [PANEL_LOGS, PANEL_TERMINAL] {
-            drag_pane_into(&mut layout, &PanelId::builtin(pane), main_tabs);
-        }
+        drag_pane_into(&mut layout, &PanelId::builtin(PANEL_DEVICES), main_tabs);
         assert!(layout.tree.tiles.get(layout.right_tabs).is_none());
 
         layout.set_right_visible(true);
 
         assert!(layout.right_visible(), "显式要求显示右侧区域后应当可见");
-        for pane in [PANEL_LOGS, PANEL_TERMINAL] {
-            let id = layout
-                .tree
-                .tiles
-                .find_pane(&PanelId::builtin(pane))
-                .expect("面板仍然存在");
-            assert_eq!(
-                layout.tree.tiles.parent_of(id),
-                Some(layout.right_tabs),
-                "{pane} 应当回到重建后的右侧区域"
-            );
-        }
+        let id = layout
+            .tree
+            .tiles
+            .find_pane(&PanelId::builtin(PANEL_DEVICES))
+            .expect("设备面板仍然存在");
+        assert_eq!(
+            layout.tree.tiles.parent_of(id),
+            Some(layout.right_tabs),
+            "设备面板应当回到重建后的右侧区域"
+        );
         assert_same_panes(&before, &layout);
     }
 
@@ -1473,30 +1426,29 @@ mod tests {
     }
 
     #[test]
-    fn legacy_dock_migrates_to_tiles_and_preserves_visibility() {
-        let mut manager = PanelManager::default();
+    fn legacy_dock_is_reset_to_monitor_layout() {
+        let mut manager = PanelManager {
+            layout_version: 0,
+            ..Default::default()
+        };
         manager.dock.bottom_visible = false;
         manager.dock.right_visible = true;
         manager.dock.right.open(PanelId::builtin(PANEL_LOGS));
 
         let layout = manager.ensure_tiles_layout();
 
-        assert!(!layout.bottom_visible());
-        assert!(layout.right_visible());
-        assert!(
-            layout
-                .tree
-                .tiles
-                .find_pane(&PanelId::builtin(PANEL_DEVICES))
-                .is_some()
-        );
-        assert!(
-            layout
-                .tree
-                .tiles
-                .find_pane(&PanelId::builtin(PANEL_LOGS))
-                .is_some()
-        );
+        assert!(layout.bottom_visible(), "发送器区域默认可见");
+        assert!(!layout.right_visible(), "设备抽屉默认隐藏");
+        for pane in [PANEL_DEVICES, PANEL_TERMINAL, PANEL_LOGS] {
+            assert!(
+                layout
+                    .tree
+                    .tiles
+                    .find_pane(&PanelId::builtin(pane))
+                    .is_some(),
+                "{pane} 必须存在于监视布局"
+            );
+        }
     }
 
     #[test]

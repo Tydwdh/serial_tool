@@ -5,7 +5,6 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 use tool_application::plugin::PluginStateView;
-use tool_application::query::{ReplayBlockReasonView, ReplayPolicyView, ReplayStateView};
 use tool_application::{AppCommand, AppError, CommandOutcome, TaskId, TaskState, Workbench};
 use tool_core::{Direction, Event, LogLevel, Payload, topics};
 use tool_databus::{DataBus, TopicFilter};
@@ -27,8 +26,6 @@ fn headless_workbench_can_dispatch_and_query() {
 
     // Query APIs must be accessible.
     let _ = wb.query_transport();
-    let _ = wb.query_recording();
-    let _ = wb.query_replay();
     let _ = wb.query_plugins();
 
     // Invalid connect should return transport error, not panic.
@@ -67,11 +64,11 @@ fn headless_workbench_can_dispatch_and_query() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Headless 契约测试
 //
-// 四类行为：send routing / replay lifecycle / plugin enable-disable / event emission
+// 三类行为：send routing / plugin enable-disable / event emission
 //
 // 全部用例只经由 Workbench + AppCommand + query_* 的真实 API 驱动：不启动 egui，
 // 不打开真实串口，不访问仓库 plugins/ 目录，不发网络请求。断言目标是真实状态
-// 变化（任务 kind / 回放状态机 / 插件状态机 / DataBus 事件），不是"调用不报错"。
+// 变化（任务 kind / 插件状态机 / DataBus 事件），不是"调用不报错"。
 // 终端的保留条数与按 seq 淘汰最旧条目不在这里测：那份读取模型（`query_terminal_since`）
 // 第 46 轮证实零生产使用者后已删除，活路径的上限行为由 `tool-panels` 的
 // `max_entries_is_global_across_ports_and_keeps_newest_events` /
@@ -141,29 +138,6 @@ fn tick_until(
         }
         std::thread::sleep(Duration::from_millis(2));
     }
-}
-
-/// 生成一份真实 JSONL 录制片段：工作台 recorder 的落盘格式就是每行一个 Event。
-fn write_replay_fixture(name: &str, event_count: usize) -> PathBuf {
-    let dir = std::env::temp_dir().join("serial-tool-headless-replay");
-    std::fs::create_dir_all(&dir).expect("创建回放临时目录");
-    let path = dir.join(format!("{name}-{}.jsonl", std::process::id()));
-    let base_ms = 1_700_000_000_000_u64;
-    let mut text = String::new();
-    for index in 0..event_count {
-        let mut event = Event::with_timestamp(
-            base_ms + index as u64 * 10,
-            tool_transport::serial_topics::SERIAL_RX,
-            "serial:COM_REPLAY",
-            Direction::Rx,
-            Payload::Bytes(format!("replay-{index}\n").into_bytes()),
-        );
-        event.id = index as u64 + 1;
-        text.push_str(&serde_json::to_string(&event).expect("序列化回放事件"));
-        text.push('\n');
-    }
-    std::fs::write(&path, text).expect("写入回放临时文件");
-    path
 }
 
 /// 生成一个最小 Lua 插件（写在临时目录，不触碰仓库 plugins/）。
@@ -405,192 +379,6 @@ fn network_port_ids_are_recognized_in_both_naming_forms() {
         "端口未打开时发送任务必须以 Failed 收尾，实际: {:?}",
         sends.map(|task_id| task_state(&wb, task_id))
     );
-}
-
-#[test]
-fn replay_lifecycle_loads_plays_finishes_stops_and_survives_bad_file() {
-    let bus = DataBus::new();
-    let mut wb = Workbench::new(bus.clone());
-
-    // 未加载：状态 Empty、不可播放/不可 seek。
-    let empty = wb.query_replay();
-    assert_eq!(empty.state, ReplayStateView::Empty);
-    assert!(!empty.can_play);
-    assert!(!empty.can_seek);
-    assert_eq!(empty.total_events, 0);
-
-    // 控制类命令在未加载时也必须安全返回 Ok，且不得把状态推进到 Playing。
-    for command in [
-        AppCommand::ReplayPlay,
-        AppCommand::ReplayPause,
-        AppCommand::ReplayStop,
-        AppCommand::ReplaySeek { position_ms: 50 },
-        AppCommand::ReplaySeekBy { delta_ms: -25 },
-        AppCommand::ReplayStep { delta: 3 },
-        AppCommand::SetReplaySpeed { speed: 4.0 },
-        AppCommand::SetReplayPolicy {
-            policy: ReplayPolicyView::ExactRecorded,
-        },
-    ] {
-        expect_done(&mut wb, command);
-    }
-    let after_commands = wb.query_replay();
-    assert_eq!(
-        after_commands.state,
-        ReplayStateView::Empty,
-        "未加载时 ReplayPlay 不得假装进入 Playing"
-    );
-    assert_eq!(after_commands.position_ms, 0, "空回放不得产生非零位置");
-    wb.dispatch(AppCommand::SetReplayPolicy {
-        policy: ReplayPolicyView::AutoPreferRecorded,
-    })
-    .expect("恢复默认策略");
-
-    // 未加载时的书签增删：位置停在 0，增删必须真实反映到 query_replay()。
-    wb.dispatch(AppCommand::AddReplayBookmark { name: None })
-        .expect("添加书签");
-    let bookmarked_empty = wb.query_replay();
-    assert_eq!(bookmarked_empty.bookmarks.len(), 1);
-    assert_eq!(bookmarked_empty.bookmarks[0].position_ms, 0);
-    wb.dispatch(AppCommand::RemoveReplayBookmark { position_ms: 0 })
-        .expect("删除书签");
-    assert!(wb.query_replay().bookmarks.is_empty());
-
-    // 加载真实 JSONL（20 条 10ms 间隔的串口 RX）。
-    let fixture = write_replay_fixture("lifecycle", 20);
-    let load_task = expect_pending(
-        &mut wb,
-        AppCommand::LoadReplay {
-            file: FileHandle::from_native_path(&fixture),
-        },
-    );
-    assert_eq!(task_kind(&wb, load_task).as_deref(), Some("load_replay"));
-    assert!(
-        tick_until(&mut wb, Duration::from_secs(10), |wb| matches!(
-            task_state(wb, load_task),
-            Some(TaskState::Completed | TaskState::Failed)
-        )),
-        "load_replay 任务必须在超时前结束"
-    );
-    assert_eq!(
-        task_state(&wb, load_task),
-        Some(TaskState::Completed),
-        "合法录制文件必须加载成功"
-    );
-
-    let loaded = wb.query_replay();
-    assert_eq!(loaded.state, ReplayStateView::Loaded);
-    assert_eq!(loaded.total_events, 20);
-    assert_eq!(
-        loaded.load_report.as_ref().map(|report| report.loaded),
-        Some(20)
-    );
-    assert_eq!(loaded.duration_ms, 190);
-    assert!(
-        !loaded.has_recorded_protocol,
-        "只有 transport.serial.* 的录制不应含 protocol.* 事件"
-    );
-    // 无 protocol.* → 自动策略落到 ReparseRaw，必须有 analyzer 输出才能播放。
-    assert_eq!(loaded.effective_policy, ReplayPolicyView::ReparseRaw);
-    assert_eq!(
-        loaded.block_reason,
-        Some(ReplayBlockReasonView::NeedAnalyzer)
-    );
-    assert!(!loaded.can_play, "缺少 analyzer 输出时必须阻断播放");
-    assert_eq!(wb.replay_raw_serial_events().len(), 20);
-
-    // 被门控的 ReplayPlay：返回 Done 但状态/cursor 都不推进（不假装播放成功）。
-    expect_done(&mut wb, AppCommand::ReplayPlay);
-    let blocked = wb.query_replay();
-    assert_eq!(
-        blocked.state,
-        ReplayStateView::Loaded,
-        "被 analyzer 门控时不得进入 Playing"
-    );
-    assert_eq!(blocked.cursor, 0, "被 analyzer 门控时不得推进 cursor");
-
-    // 提供 analyzer 输出（空输出也是有效输出）后放行。
-    wb.replay_set_analyzer_cache(Vec::new());
-    let ready = wb.query_replay();
-    assert!(ready.analyzer_cache_valid);
-    assert!(ready.can_play, "analyzer 缓存有效后必须允许播放");
-    assert!(ready.can_seek);
-
-    // 32x 播放到自然结束，并验证事件真的发布到了 DataBus。
-    expect_done(&mut wb, AppCommand::SetReplaySpeed { speed: 32.0 });
-    assert_eq!(wb.query_replay().speed, 32.0);
-    let replay_events = bus.subscribe(TopicFilter::prefix("transport.serial."));
-    expect_done(&mut wb, AppCommand::ReplayPlay);
-    assert_eq!(wb.query_replay().state, ReplayStateView::Playing);
-
-    let mut published = 0_usize;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while wb.query_replay().state != ReplayStateView::Finished && Instant::now() < deadline {
-        published += wb.tick_replay();
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    let finished = wb.query_replay();
-    assert_eq!(
-        finished.state,
-        ReplayStateView::Finished,
-        "播放必须自然结束"
-    );
-    assert_eq!(published, 20, "所有录制事件都应在播放过程中发布");
-    assert_eq!(finished.cursor, 20);
-    assert_eq!(finished.position_ms, finished.duration_ms);
-
-    let emitted: Vec<Event> = replay_events
-        .drain()
-        .into_iter()
-        .filter(|event| event.is_replay())
-        .collect();
-    assert_eq!(emitted.len(), 20, "回放事件必须真实发布到 DataBus");
-    assert!(
-        emitted
-            .iter()
-            .all(|event| event.topic == tool_transport::serial_topics::SERIAL_RX),
-        "回放事件必须保留原始 topic"
-    );
-    assert!(
-        emitted
-            .iter()
-            .all(|event| event.source == "replay:serial:COM_REPLAY"),
-        "回放事件必须带 replay: 前缀与原始 source"
-    );
-
-    // Stop 回到 Loaded 并把位置归零。
-    expect_done(&mut wb, AppCommand::ReplayStop);
-    let stopped = wb.query_replay();
-    assert_eq!(stopped.state, ReplayStateView::Loaded);
-    assert_eq!(stopped.cursor, 0);
-    assert_eq!(stopped.position_ms, 0);
-
-    // 加载失败：任务落 Failed，且不得破坏已加载的回放状态。
-    let missing = fixture.with_file_name(format!("missing-{}.jsonl", std::process::id()));
-    let _ = std::fs::remove_file(&missing);
-    let bad_task = expect_pending(
-        &mut wb,
-        AppCommand::LoadReplay {
-            file: FileHandle::from_native_path(&missing),
-        },
-    );
-    assert!(
-        tick_until(&mut wb, Duration::from_secs(5), |wb| matches!(
-            task_state(wb, bad_task),
-            Some(TaskState::Completed | TaskState::Failed)
-        )),
-        "坏路径的 load_replay 任务必须结束"
-    );
-    assert_eq!(task_state(&wb, bad_task), Some(TaskState::Failed));
-    let after_failure = wb.query_replay();
-    assert_eq!(
-        after_failure.state,
-        ReplayStateView::Loaded,
-        "加载失败不得清空已有回放数据"
-    );
-    assert_eq!(after_failure.total_events, 20);
-
-    let _ = std::fs::remove_file(&fixture);
 }
 
 #[test]
@@ -997,63 +785,6 @@ fn file_export_failures_reach_the_user_in_chinese() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// 回放文件**打不开**（区别于「不存在」）时，用户读到的那半句必须是中文框架。
-///
-/// 为什么用一个"能 stat、打不开"的路径而不是不存在的路径：`prepare_load` 第一步就
-/// `metadata`，路径不存在时那里先红（那句中文是第 24 轮之前就有的
-/// `获取文件大小 <路径> 失败：<OS 细节>`），永远走不到 `File::open`。
-/// 这种路径由 `tool_testing::UnopenablePath` 造（Windows 用目录；Unix 用 Unix 域套接字，
-/// 因为**目录在 Linux 上是可以读打开的**，第 43 轮那版"目录就是打不开"的夹具在 Linux 上
-/// 直接死在测试前提上）。
-///
-/// 第 43 轮起框架里点名**是哪个路径**（用户在回放面板手输的就是它），所以本用例钉
-/// 「框架在最前 + 整句正好等于框架与 OS 细节的拼接」—— 后者同时钉住了路径、原样带出的
-/// 细节、以及**没有叠第二层框架**。kind 不在这条链上（派发侧只做 `to_string()`），
-/// 它由 `crates/recorder/src/replay.rs` 的
-/// `native_load_exits_keep_the_kind_of_the_underlying_os_error` 钉。
-#[test]
-fn replay_file_that_cannot_be_opened_reaches_the_user_in_chinese() {
-    let bus = DataBus::new();
-    let mut wb = Workbench::new(bus);
-
-    let unopenable = tool_testing::UnopenablePath::new();
-    let target = unopenable.path();
-    let raw = std::fs::File::open(target)
-        .expect_err("测试前提：这个路径必须打不开，否则本用例没有在测「打开失败」");
-
-    let task = expect_pending(
-        &mut wb,
-        AppCommand::LoadReplay {
-            file: FileHandle::from_native_path(target),
-        },
-    );
-    assert_eq!(task_kind(&wb, task).as_deref(), Some("load_replay"));
-    assert!(
-        tick_until(&mut wb, Duration::from_secs(10), |wb| matches!(
-            task_state(wb, task),
-            Some(TaskState::Completed | TaskState::Failed)
-        )),
-        "load_replay 任务必须在超时前结束"
-    );
-    assert_eq!(
-        task_state(&wb, task),
-        Some(TaskState::Failed),
-        "实际句串: {:?}",
-        task_message(&wb, task)
-    );
-
-    let words = task_message(&wb, task).expect("失败任务必须留下一句给用户的话");
-    assert!(
-        words.starts_with("打开回放文件 "),
-        "打开回放文件失败的正文必须是中文框架，实际 {words:?}"
-    );
-    assert_eq!(
-        words,
-        format!("打开回放文件 {} 失败：{raw}", target.display()),
-        "框架之外还多了别的话（双重框架），或者路径/OS 细节被改写了"
-    );
 }
 
 /// 重启交接的判定必须来自权威状态（PluginManager 的 stopping 表），不是错误文案。
@@ -2388,34 +2119,17 @@ fn connecting_a_serial_port_reports_chinese_words_for_both_failure_shapes() {
 /// 可泄漏的文案 —— 也正因为如此，本用例才必须自己造出一个真的失败。
 #[test]
 fn disconnecting_a_port_that_will_not_finish_closing_reports_chinese() {
-    let (addr_serial_side, parked_serial_side) = parked_websocket_server();
-    let (addr_network_side, parked_network_side) = parked_websocket_server();
-    let bus = DataBus::new();
-    let mut wb = Workbench::new(bus);
-
     let never_opened = "COM_HEADLESS_DISCONNECT_NOT_OPEN";
+
+    // 网络分支：一个窗口只允许一个连接，所以两条分支各用独立的 Workbench。
+    let (addr_network_side, parked_network_side) = parked_websocket_server();
+    let mut wb = Workbench::new(DataBus::new());
     let network_side = register_network_port(&mut wb, "127.0.0.1", addr_network_side.port());
     park_a_network_worker(&mut wb, &network_side, &parked_network_side);
-    let serial_side = register_network_port(&mut wb, "127.0.0.1", addr_serial_side.port());
-    park_a_network_worker(&mut wb, &serial_side, &parked_serial_side);
-    // 注销之后同名端口落到平台后端那条出口。
-    expect_done(
-        &mut wb,
-        AppCommand::RemoveNetworkPort {
-            port: PortId::new(serial_side.clone()),
-        },
-    );
-
     let network_task = expect_pending(
         &mut wb,
         AppCommand::Disconnect {
             port: PortId::new(network_side.clone()),
-        },
-    );
-    let serial_task = expect_pending(
-        &mut wb,
-        AppCommand::Disconnect {
-            port: PortId::new(serial_side.clone()),
         },
     );
     let not_opened_task = expect_pending(
@@ -2424,23 +2138,18 @@ fn disconnecting_a_port_that_will_not_finish_closing_reports_chinese() {
             port: PortId::new(never_opened),
         },
     );
-
-    // 两个超时任务各占一条 per-port 有序队列（`serial:{端口}`），所以两次 3 秒预算是
-    // 并发烧掉的；第三格（从未打开）跟着一起收尾，不额外花时间。
     let all_ended = tick_until(&mut wb, Duration::from_secs(30), |wb| {
-        [network_task, serial_task, not_opened_task]
-            .iter()
-            .all(|task| {
-                matches!(
-                    task_state(wb, *task),
-                    Some(TaskState::Completed | TaskState::Failed)
-                )
-            })
+        [network_task, not_opened_task].iter().all(|task| {
+            matches!(
+                task_state(wb, *task),
+                Some(TaskState::Completed | TaskState::Failed)
+            )
+        })
     });
     assert!(
         all_ended,
-        "三条关闭任务都必须在 30s 内结束，实际: {:?}",
-        [network_task, serial_task, not_opened_task].map(|task| task_state(&wb, task))
+        "网络分支与从未打开端口的关闭任务必须在 30s 内结束，实际: {:?}",
+        [network_task, not_opened_task].map(|task| task_state(&wb, task))
     );
     assert_eq!(
         task_message(&wb, network_task).as_deref(),
@@ -2448,14 +2157,43 @@ fn disconnecting_a_port_that_will_not_finish_closing_reports_chinese() {
         "网络分支（`close_port_blocking`）给用户的那句变了"
     );
     assert_eq!(
+        task_state(&wb, not_opened_task),
+        Some(TaskState::Completed),
+        "关闭一个从未打开的端口不是错误：这里没有可泄漏的文案"
+    );
+
+    // 串口分支：注销网络端口后，同名端口落到平台后端的 `disconnect`。
+    let (addr_serial_side, parked_serial_side) = parked_websocket_server();
+    let mut wb = Workbench::new(DataBus::new());
+    let serial_side = register_network_port(&mut wb, "127.0.0.1", addr_serial_side.port());
+    park_a_network_worker(&mut wb, &serial_side, &parked_serial_side);
+    expect_done(
+        &mut wb,
+        AppCommand::RemoveNetworkPort {
+            port: PortId::new(serial_side.clone()),
+        },
+    );
+    let serial_task = expect_pending(
+        &mut wb,
+        AppCommand::Disconnect {
+            port: PortId::new(serial_side.clone()),
+        },
+    );
+    let serial_ended = tick_until(&mut wb, Duration::from_secs(30), |wb| {
+        matches!(
+            task_state(wb, serial_task),
+            Some(TaskState::Completed | TaskState::Failed)
+        )
+    });
+    assert!(
+        serial_ended,
+        "串口分支的关闭任务必须在 30s 内结束，实际: {:?}",
+        task_state(&wb, serial_task)
+    );
+    assert_eq!(
         task_message(&wb, serial_task).as_deref(),
         Some(format!("操作超时：{serial_side} 正在关闭中").as_str()),
         "串口分支（平台后端 `disconnect`）给用户的那句变了"
-    );
-    assert_eq!(
-        task_state(&wb, not_opened_task),
-        Some(TaskState::Completed),
-        "关闭一个从未打开的端口不是错误：这里没有可泄漏的文案，本用例的另外两格才有"
     );
 }
 

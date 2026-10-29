@@ -85,7 +85,7 @@
                         "name":  "串口图表插件模板",
                         "version":  "0.1.0",
                         "api_version":  "0.1",
-                        "description":  "串口数据图表模板：订阅 RX 事件绘制曲线，含回放分析器（演示 replay 配置）",
+                        "description":  "串口数据图表模板：订阅 RX 事件绘制曲线",
                         "author":  "Tydwdh",
                         "homepage":  "https://github.com/Tydwdh/serial_tool",
                         "repository":  "https://github.com/Tydwdh/serial_tool",
@@ -100,8 +100,8 @@
                                             "storage"
                                         ],
                         "download_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugin-marketplace/plugins/template.serial-chart/0.1.0/template.serial-chart-0.1.0.zip",
-                        "sha256":  "9fe8a4eed92372e1b474fa785b0e5255e18cb53b2015213f36e49ab71d696ba4",
-                        "size":  4587,
+                        "sha256":  "fb2e2865322540fe4c1d10f631aba5918af541887f1dcd920192573c42114b00",
+                        "size":  3218,
                         "manifest_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugins/template.serial-chart/plugin.json",
                         "main_url":  "https://raw.githubusercontent.com/Tydwdh/serial_tool/main/plugins/template.serial-chart/main.lua",
                         "published":  "2026-08-01T17:23:00.6634523Z"

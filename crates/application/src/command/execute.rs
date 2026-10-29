@@ -7,10 +7,7 @@
 use std::path::PathBuf;
 
 use crate::TaskId;
-use crate::recording::RecordModeView;
-use crate::replay::ReplayPolicyView;
 use crate::send_plan::{PlannedSend, plan_send};
-use tool_platform::storage::FileHandle;
 use tool_platform::{NetworkSerialConfig, PortId, SerialSettings};
 
 use super::{AppCommand, CommandError, CommandOutcome};
@@ -48,36 +45,6 @@ pub trait CommandEffects {
         value: bool,
         dtr: bool,
     ) -> Result<CommandOutcome, CommandError>;
-
-    // ── recording ────────────────────────────────────────────────────────
-    fn start_recording(
-        &mut self,
-        file: FileHandle,
-        mode: RecordModeView,
-    ) -> Result<CommandOutcome, CommandError>;
-    fn set_recording_mode(&mut self, mode: RecordModeView);
-    fn stop_recording(&mut self) -> Result<CommandOutcome, CommandError>;
-    fn pause_recording(&mut self) -> Result<CommandOutcome, CommandError>;
-    fn resume_recording(&mut self) -> Result<CommandOutcome, CommandError>;
-    fn add_recording_bookmark(&mut self, name: Option<String>);
-
-    // ── replay ───────────────────────────────────────────────────────────
-    fn load_replay(&mut self, file: FileHandle) -> Result<CommandOutcome, CommandError> {
-        let _ = file;
-        Err(CommandError::InvalidCommand(
-            "当前平台不支持按路径加载回放".to_owned(),
-        ))
-    }
-    fn replay_play(&mut self) -> Result<(), CommandError>;
-    fn replay_pause(&mut self) -> Result<(), CommandError>;
-    fn replay_stop(&mut self) -> Result<(), CommandError>;
-    fn replay_seek(&mut self, position_ms: u64) -> Result<(), CommandError>;
-    fn replay_seek_by(&mut self, delta_ms: i64) -> Result<(), CommandError>;
-    fn replay_step(&mut self, delta: i32) -> Result<(), CommandError>;
-    fn replay_set_speed(&mut self, speed: f64);
-    fn replay_set_policy(&mut self, policy: ReplayPolicyView) -> Result<(), CommandError>;
-    fn replay_add_bookmark(&mut self, name: Option<String>);
-    fn replay_remove_bookmark(&mut self, position_ms: u64);
 
     // ── plugins / marketplace / update ───────────────────────────────────
     fn enable_plugin(&mut self, plugin_id: String) -> Result<(), CommandError>;
@@ -154,59 +121,6 @@ pub fn execute<E: CommandEffects + ?Sized>(
         | AppCommand::SendRaw { .. }) => execute_send(effects, command),
         AppCommand::SetDtr { port, value } => effects.set_signal(port, value, true),
         AppCommand::SetRts { port, value } => effects.set_signal(port, value, false),
-        AppCommand::StartRecording { file, mode } => effects.start_recording(file, mode),
-        AppCommand::SetRecordingMode { mode } => {
-            effects.set_recording_mode(mode);
-            Ok(CommandOutcome::Done)
-        }
-        AppCommand::StopRecording => effects.stop_recording(),
-        AppCommand::PauseRecording => effects.pause_recording(),
-        AppCommand::ResumeRecording => effects.resume_recording(),
-        AppCommand::AddBookmark { name } => {
-            effects.add_recording_bookmark(name);
-            Ok(CommandOutcome::Done)
-        }
-        AppCommand::AddReplayBookmark { name } => {
-            effects.replay_add_bookmark(name);
-            Ok(CommandOutcome::Done)
-        }
-        AppCommand::LoadReplay { file } => effects.load_replay(file),
-        AppCommand::ReplayPlay => {
-            effects.replay_play()?;
-            Ok(CommandOutcome::Done)
-        }
-        AppCommand::ReplayPause => {
-            effects.replay_pause()?;
-            Ok(CommandOutcome::Done)
-        }
-        AppCommand::ReplayStop => {
-            effects.replay_stop()?;
-            Ok(CommandOutcome::Done)
-        }
-        AppCommand::ReplaySeek { position_ms } => {
-            effects.replay_seek(position_ms)?;
-            Ok(CommandOutcome::Done)
-        }
-        AppCommand::ReplaySeekBy { delta_ms } => {
-            effects.replay_seek_by(delta_ms)?;
-            Ok(CommandOutcome::Done)
-        }
-        AppCommand::ReplayStep { delta } => {
-            effects.replay_step(delta)?;
-            Ok(CommandOutcome::Done)
-        }
-        AppCommand::SetReplaySpeed { speed } => {
-            effects.replay_set_speed(speed);
-            Ok(CommandOutcome::Done)
-        }
-        AppCommand::SetReplayPolicy { policy } => {
-            effects.replay_set_policy(policy)?;
-            Ok(CommandOutcome::Done)
-        }
-        AppCommand::RemoveReplayBookmark { position_ms } => {
-            effects.replay_remove_bookmark(position_ms);
-            Ok(CommandOutcome::Done)
-        }
         AppCommand::EnablePlugin { plugin_id } => {
             effects.enable_plugin(plugin_id)?;
             Ok(CommandOutcome::Done)

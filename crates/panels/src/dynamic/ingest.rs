@@ -17,18 +17,9 @@ use tool_databus::{DataBus, Subscription};
 
 /// 取出用于鉴权的事件来源。
 ///
-/// 回放事件本身带的是 `replay:` 前缀来源，真正的发起方记录在 metadata 的
-/// `original_source` 里，鉴权必须按原始来源判定。返回 `String` 而不是 `&str`
-/// 是因为调用点随后会把 `event.payload` move 走。
+/// 返回 `String` 而不是 `&str` 是因为调用点随后会把 `event.payload` move 走。
 fn event_source_for_owner(event: &Event) -> String {
-    if event.source.starts_with("replay:") {
-        event
-            .meta_str("original_source")
-            .unwrap_or(&event.source)
-            .to_owned()
-    } else {
-        event.source.clone()
-    }
+    event.source.clone()
 }
 
 /// 字段更新失败的上报：写 `last_error`（面板显示用）并发一条 `ui.dynamic` 系统日志。

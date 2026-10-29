@@ -5,7 +5,7 @@ use egui_material_icons::icons::{
     ICON_CHECK_CIRCLE, ICON_CLOUD_DOWNLOAD, ICON_ERROR, ICON_NOTIFICATIONS, ICON_REFRESH,
     ICON_SYSTEM_UPDATE, ICON_WARNING,
 };
-use tool_application::query::{PortStatusView, RecorderStatsView};
+use tool_application::query::PortStatusView;
 use tool_panels::{
     StatusBarAction, StatusBarView, StatusSignalView, design, status_bar_contents_ui, theme,
 };
@@ -23,14 +23,10 @@ impl WorkbenchApp {
             .map(|p| self.workbench.transport_status(p))
             .unwrap_or_else(PortStatusView::closed);
         let selected_port = self.serial.selected_port.clone();
-        let recording = self.workbench.query_recording();
         let (serial_color, serial_label) = self.serial_segment(&st, selected_port.as_deref());
-        let (recording_color, recording_label) = recording_segment(&recording.stats);
         let status_view = StatusBarView {
             serial_color,
             serial_label,
-            recording_color,
-            recording_label,
             signals: st.open.then_some(StatusSignalView {
                 dtr: self.send.dtr_high,
                 rts: self.send.rts_high,
@@ -41,11 +37,6 @@ impl WorkbenchApp {
         let mut status_actions = Vec::new();
         ui.horizontal(|ui| {
             status_actions = status_bar_contents_ui(ui, &status_view);
-            if recording.stats.running
-                && let Some(ref err) = recording.stats.last_error
-            {
-                ui.colored_label(theme::red(), format!("错误: {err}"));
-            }
 
             // ── 插件贡献：status_bar.left ──
             self.ui_contribution_slot(ui, "status_bar.left");
@@ -292,23 +283,6 @@ impl WorkbenchApp {
             self.force_check_update();
         }
     }
-}
-
-/// 录制段的颜色与文案：MB 按 1024 进制换算，与录制面板的统计口径一致。
-fn recording_segment(stats: &RecorderStatsView) -> (egui::Color32, String) {
-    if !stats.running {
-        return (theme::text_dimmed(), "未录制".to_owned());
-    }
-    let state = if stats.paused {
-        "已暂停"
-    } else {
-        "录制中"
-    };
-    let size_mb = stats.bytes_written as f64 / 1024.0 / 1024.0;
-    (
-        theme::red(),
-        format!("{state} {} 条 {size_mb:.1}MB", stats.events_written),
-    )
 }
 
 /// 状态栏内联的通知摘要（超长截断，完整文案放 hover）。

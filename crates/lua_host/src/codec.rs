@@ -1,6 +1,6 @@
 use mlua::{Lua, Table, Value};
 
-/// 注册 hw.codec 到 package.preload，live 和 replay 均可 require("hw.codec")。
+/// 注册 hw.codec 到 package.preload，插件脚本可 require("hw.codec")。
 pub fn register_codec(lua: &Lua) -> mlua::Result<()> {
     let package: Table = lua.globals().get("package")?;
     let preload: Table = package.get("preload")?;

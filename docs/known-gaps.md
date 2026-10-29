@@ -8,7 +8,7 @@
 
 ### 错误文案
 
-- `AppError` 逐层加中文分类前缀（`传输错误：` `录制错误：` 等，`crates/application/src/error.rs`）。
+- `AppError` 逐层加中文分类前缀（`传输错误：` `存储错误：` `插件错误：` 等，`crates/application/src/error.rs`）。
   非法 HEX 的完整渲染串被
   `crates/application/tests/headless.rs::send_routing_dispatches_by_port_kind_and_rejects_invalid_hex`
   逐字钉住：

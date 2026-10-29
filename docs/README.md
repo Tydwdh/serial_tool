@@ -7,7 +7,7 @@
 **插件作者**
 
 1. [插件开发总览](plugins/README.md)：目录结构、运行时角色、开发流程与设计建议。
-2. [plugin.json 参考](plugins/manifest.md)：字段、权限、`contributes`、`live`/`replay` 配置。
+2. [plugin.json 参考](plugins/manifest.md)：字段、权限、`contributes`、`live` 配置。
 3. [Lua API 参考](plugins/lua-api.md)：`ctx.*`、串口 patterns、任务/协程、UI 事件协议。
 4. [场景测试 DSL](plugins/scenarios.md)：不接硬件的自动化验收。
 5. [插件协议枚举（自动生成）](plugins/spec.generated.md)。

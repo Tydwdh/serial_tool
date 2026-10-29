@@ -12,7 +12,7 @@
 //! `manifest_deps.rs` 的元测试逐条钉住它们。
 //!
 //! 本文件还有第二类判定：**源码文本形状守卫**。它只用于钉住 native 侧
-//! 无法在运行期驱动的形状（命令面板使用键、端口条目投影）：这些模块能编译，
+//! 无法在运行期驱动的形状（端口条目投影）：这些模块能编译，
 //! 但渲染需要 egui 上下文，运行期用例覆盖不到，于是把"只能有一份/只能用一个键"
 //! 钉在源码文本上。读文件失败一律 panic（路径写错时不能退化成零断言），
 //! 判定前还会去掉整行注释，免得注释里的代码样本把守卫喂成假绿。
@@ -88,7 +88,7 @@ fn app_manifest_keeps_the_application_boundary() {
             "composition root 必须依赖 {required}（实际依赖：{names:?}）"
         );
     }
-    let hits = violations(&names, &["tool-recorder", "tool-extension", "tool-testing"]);
+    let hits = violations(&names, &["tool-extension", "tool-testing"]);
     assert!(
         hits.is_empty(),
         "crates/app 不应直连 {hits:?}（该能力属于 tool-application）；实际依赖：{names:?}"
@@ -106,16 +106,6 @@ fn app_manifest_does_not_redeclare_pruned_dependencies() {
     );
 }
 
-/// 读一份本 crate 的源码文本（形状守卫的判定对象）。
-///
-/// 读不到必须 panic：`unwrap_or_default()` 会让"路径写错"退化成"文件里没有那条
-/// 写法"，正/负判定同时静默通过。
-fn read_source(relative: &str) -> String {
-    let path = crate_dir().join(relative);
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("读取 {} 失败：{error}", path.display()))
-}
-
 /// 去掉整行注释后把所有空白压掉：判定就不再依赖换行与缩进（rustfmt 重排链条会让
 /// 逐行匹配假红），而注释里的代码样本也不会把守卫喂成假绿。
 fn squeezed_code(text: &str) -> String {
@@ -123,51 +113,6 @@ fn squeezed_code(text: &str) -> String {
         .filter(|line| !line.trim_start().starts_with("//"))
         .flat_map(|line| line.chars().filter(|ch| !ch.is_whitespace()))
         .collect()
-}
-
-/// 命令面板的「使用顺序」必须以命令 id 为键，而不是标题。
-///
-/// 标题会随插件与改名变，id 不会；设置项 `command_usage_order` 的读写都必须用 id。
-#[test]
-fn palette_usage_order_is_keyed_by_command_id() {
-    // 判定带分号：只比"前缀"会让 insert(0, command_id.clone().to_uppercase()) 蒙过去。
-    const RECORD_TO_FRONT: &str = "usage_order.insert(0,command_id.clone());";
-
-    let native = squeezed_code(&read_source("src/ui/command_palette.rs"));
-    let config = squeezed_code(&read_source("src/config.rs"));
-
-    // 载入侧必须整份赋回：`usage_order` 里认不出的值只是排不到前面，不是脏数据，
-    // 在读入侧按 id 裁剪等于把用户的历史删掉。分号同样不能省 ——
-    // `= cfg.command_usage_order.into_iter().filter(..).collect()` 也得被抓到。
-    assert!(
-        config.contains("usage_order=cfg.command_usage_order;"),
-        "载入配置必须把 command_usage_order **整份**赋回面板状态（找 `usage_order = cfg.command_usage_order;`）"
-    );
-
-    assert!(
-        native.contains("position(|used|used==&entry.id)"),
-        "排序读取必须拿使用顺序里的字符串比命令 id（找 `used == &entry.id`）"
-    );
-    assert!(
-        native.contains(RECORD_TO_FRONT),
-        "记录使用必须把命令 id 插到最前（找 {RECORD_TO_FRONT}）；写成标题就是键空间分叉"
-    );
-    // 派发出口只有一个值，且就是命令 id：标题再被带出来当键，这条就会红。
-    assert!(
-        native.contains("pending_command=Some(command_id);"),
-        "面板派发出去的命令 id 必须就是记录使用的那个值（找 `pending_command = Some(command_id);`）"
-    );
-    for forbidden in [
-        "used==&entry.label",
-        "used==&entry.title",
-        "Option<(String,String)>",
-    ] {
-        assert!(
-            !native.contains(forbidden),
-            "命令面板的候选派发/排序不许再把标题（label/title）当使用键，\
-             也不许把 (id, 标题) 成对带出渲染层：发现 {forbidden}"
-        );
-    }
 }
 
 /// native 端口条目投影只准有一份，且就住在 `ui/mod.rs`（顶栏与设备面板都从那儿取）。

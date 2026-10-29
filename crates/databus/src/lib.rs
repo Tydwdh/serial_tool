@@ -466,7 +466,7 @@ impl DataBus {
     }
 
     /// 无界（lossless）订阅：永不因队列满而丢弃事件。
-    /// 适用于录制、测试断言等完整性敏感的场景。
+    /// 适用于测试断言等完整性敏感的场景。
     /// 极端情况下生产者快于消费者会导致内存增长，需配合背压或限速使用。
     pub fn subscribe_lossless(&self, filter: TopicFilter) -> Subscription {
         let (sender, receiver) = unbounded();
@@ -598,8 +598,8 @@ mod tests {
         assert!(TopicFilter::metadata_eq("port", "COM1").matches_event(&event));
 
         let mut bool_event = ev("t");
-        bool_event.meta_set("replay", serde_json::Value::Bool(true));
-        assert!(!TopicFilter::metadata_eq("replay", "true").matches_event(&bool_event));
+        bool_event.meta_set("flag", serde_json::Value::Bool(true));
+        assert!(!TopicFilter::metadata_eq("flag", "true").matches_event(&bool_event));
 
         assert!(!TopicFilter::metadata_eq("missing", "x").matches_event(&ev("t")));
     }

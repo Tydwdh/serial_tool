@@ -10,7 +10,6 @@ members = [
     "crates/panels",
     "crates/plugin_api",
     "crates/platform",
-    "crates/recorder",
     "crates/testing",
     "crates/transport",
     "crates/updater",

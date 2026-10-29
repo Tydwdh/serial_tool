@@ -23,7 +23,7 @@ pub(crate) struct MarketplaceState {
 
 /// 市场插件安装后台任务句柄。
 ///
-/// 参考 `ReplayAnalyzerJob`：generation 用于区分并发任务，cancel 当前未使用
+/// generation 用于区分并发任务，cancel 当前未使用
 /// （下载/解压本身不可中断，但可在 Drop 时 detach 线程）。progress 共享给 UI 轮询。
 pub(crate) struct MarketplaceInstallJob {
     pub(crate) plugin_id: String,

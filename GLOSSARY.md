@@ -19,7 +19,7 @@ _Avoid_: 入口、main
 ## 应用层
 
 **Workbench**:
-native 的应用核心与组合根，拥有 transport/recorder/replay/plugins，并实现命令执行所需的副作用。
+native 的应用核心与组合根，拥有 transport/plugins，并实现命令执行所需的副作用。
 _Avoid_: 应用、后端
 
 **面板 (Panel)**:

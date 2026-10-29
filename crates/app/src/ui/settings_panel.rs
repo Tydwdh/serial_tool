@@ -1,20 +1,19 @@
 use crate::app::WorkbenchApp;
 use crate::bootstrap::apply_theme;
-use crate::config::{config_path, default_recorder_path};
+use crate::config::config_path;
 use crate::shared_settings::{SETTINGS_NAV_ITEMS, settings_nav_button};
 use crate::state::StatusLevel;
 use eframe::egui;
 use egui_material_icons::icons::{
-    ICON_APPS, ICON_CONTENT_COPY, ICON_FOLDER, ICON_FOLDER_OPEN, ICON_INFO, ICON_KEYBOARD,
-    ICON_NETWORK_CHECK, ICON_PALETTE, ICON_RESTART_ALT, ICON_TUNE,
+    ICON_APPS, ICON_CONTENT_COPY, ICON_FOLDER, ICON_FOLDER_OPEN, ICON_INFO, ICON_NETWORK_CHECK,
+    ICON_PALETTE, ICON_RESTART_ALT, ICON_TUNE,
 };
 use std::path::{Path, PathBuf};
 use tool_databus::EventPublisher;
 use tool_panels::{
-    DataSettingsView, KeymapAction, KeymapEntry, PluginSettingsView, copy_text_with_feedback,
-    data_settings_ui,
+    DataSettingsView, PluginSettingsView, copy_text_with_feedback, data_settings_ui,
     design::{self, ButtonKind},
-    keymap_ui, plugin_settings_ui, theme,
+    plugin_settings_ui, theme,
 };
 
 /// 两步确认按钮在 egui 临时记忆里的 salt。wasm 侧（`web.rs`）用同名字符串，
@@ -30,7 +29,7 @@ impl WorkbenchApp {
             .ctx()
             .data_mut(|data| data.get_persisted::<usize>(nav_id))
             .unwrap_or(0)
-            .min(4);
+            .min(3);
         design::elevated_card().show(ui, |ui| {
             design::toolbar(ui, |ui| {
                 for (index, icon, label) in SETTINGS_NAV_ITEMS {
@@ -62,25 +61,13 @@ impl WorkbenchApp {
         ui.add_space(8.0);
 
         if category == 2 {
-            // ── 快捷键 ──
-            design::card().show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                design::section_header(ui, ICON_KEYBOARD, "快捷键");
-                ui.separator();
-                self.render_keymap_editor(ui);
-            });
-        }
-
-        ui.add_space(8.0);
-
-        if category == 3 {
             // ── 插件设置 ──
             self.render_plugin_settings(ui);
         }
 
         ui.add_space(8.0);
 
-        if category == 4 {
+        if category == 3 {
             // ── 恢复默认 ──
             self.render_restore_defaults_row(ui);
 
@@ -107,7 +94,7 @@ impl WorkbenchApp {
         }
     }
 
-    /// 工作区分类：配置位置、布局恢复、最近工作区。
+    /// 工作区分类：配置位置与布局恢复。
     fn render_workspace_settings_card(&mut self, ui: &mut egui::Ui) {
         design::card().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
@@ -117,8 +104,6 @@ impl WorkbenchApp {
 
             ui.add_space(8.0);
             self.render_layout_reset_row(ui);
-
-            self.render_recent_workspaces(ui);
         });
     }
 
@@ -145,7 +130,7 @@ impl WorkbenchApp {
             if armed {
                 response.on_hover_text("再次点击恢复默认布局，3 秒内有效（Esc 或点击别处取消）");
             } else {
-                response.on_hover_text("仅重置面板位置，不修改主题、串口、快捷键和插件状态");
+                response.on_hover_text("仅重置面板位置，不修改主题、串口和插件状态");
             }
             if design::confirm_click(ui, LAYOUT_RESET_CONFIRM_ID, clicked) {
                 self.panels.reset_tiles_layout();
@@ -160,49 +145,6 @@ impl WorkbenchApp {
         });
     }
 
-    /// 最近工作区列表；为空时不占用任何纵向空间。
-    fn render_recent_workspaces(&mut self, ui: &mut egui::Ui) {
-        if self.recent_workspaces.is_empty() {
-            return;
-        }
-        ui.add_space(8.0);
-        ui.label(egui::RichText::new("最近工作区").color(theme::text_secondary()));
-        // 快照一份带序号的路径：加载/移除都会改动 recent_workspaces，不能边遍历边借用。
-        let paths: Vec<(usize, PathBuf)> = self
-            .recent_workspaces
-            .iter()
-            .enumerate()
-            .map(|(index, path)| (index, PathBuf::from(path)))
-            .collect();
-        let mut to_remove: Option<usize> = None;
-        for (index, path) in &paths {
-            let path_str = path.display().to_string();
-            design::toolbar(ui, |ui| {
-                if ui.small_button("打开").clicked() {
-                    match self.load_config_from_path(path) {
-                        Ok(()) => {
-                            self.apply_loaded_workspace_postprocess();
-                            apply_theme(ui.ctx(), self.ui_theme);
-                            self.set_status_force(StatusLevel::Info, format!("已加载: {path_str}"));
-                        }
-                        Err(error) => self.set_status_force(StatusLevel::Error, error),
-                    }
-                }
-                let display = tool_panels::compact_middle(&path_str, 60);
-                ui.label(&display).on_hover_text(&path_str);
-                if ui.small_button("× 移除").clicked() {
-                    to_remove = Some(*index);
-                }
-            });
-        }
-        if let Some(index) = to_remove {
-            self.recent_workspaces.remove(index);
-            if let Err(error) = self.save_config() {
-                log::warn!("save_config failed: {error}");
-            }
-        }
-    }
-
     /// 外观分类：主题、底部面板可见性、等宽字体大小。
     fn render_appearance_settings_card(&mut self, ui: &mut egui::Ui) {
         design::card().show(ui, |ui| {
@@ -210,14 +152,6 @@ impl WorkbenchApp {
             design::section_header(ui, ICON_PALETTE, "外观");
             ui.separator();
             self.render_theme_rows(ui);
-            ui.add_space(4.0);
-            let mut bottom_visible = self.panels.bottom_visible();
-            if ui.checkbox(&mut bottom_visible, "显示底部面板").changed() {
-                self.set_bottom_visible(bottom_visible);
-                if let Err(error) = self.save_config() {
-                    log::warn!("save_config failed: {error}");
-                }
-            }
             ui.add_space(4.0);
             design::toolbar(ui, |ui| {
                 ui.label("等宽字体大小");
@@ -336,7 +270,7 @@ impl WorkbenchApp {
         });
     }
 
-    /// 恢复所有默认设置：串口、录制路径、端口别名/分组、布局、数据上限、字体与主题。
+    /// 恢复所有默认设置：串口、端口别名/分组、布局、数据上限、字体与主题。
     ///
     /// 一次点击就清空全部用户配置且无法撤销，所以走两步确认（`design::confirm_*`）。
     fn render_restore_defaults_row(&mut self, ui: &mut egui::Ui) {
@@ -358,7 +292,6 @@ impl WorkbenchApp {
                 self.serial.data_bits = "8".to_owned();
                 self.serial.stop_bits = "1".to_owned();
                 self.serial.parity = "none".to_owned();
-                self.recorder_path = default_recorder_path();
                 self.serial.port_aliases.clear();
                 self.serial.port_groups.clear();
                 self.panels.reset_tiles_layout();
@@ -409,50 +342,6 @@ impl WorkbenchApp {
                 Ok(target) => self
                     .set_status_force(StatusLevel::Info, format!("已打开: {}", target.display())),
                 Err(error) => self.set_status_force(StatusLevel::Error, error),
-            }
-        }
-    }
-
-    /// 快捷键编辑器：表格展示所有命令及其绑定，支持录制新快捷键。
-    fn render_keymap_editor(&mut self, ui: &mut egui::Ui) {
-        use crate::keymap::Keymap;
-
-        // 所有可配置的命令：内置 + 插件命令（统一 CommandRegistry）。
-        // 命令元数据由 tick_plugin_lifecycle 随插件启停同步，此处直接读取。
-        let all_commands: Vec<crate::command_registry::Command> = self.commands.all().to_vec();
-        let entries = all_commands
-            .iter()
-            .map(|command| KeymapEntry {
-                id: command.id.clone(),
-                title: command.title.clone(),
-                bindings: self
-                    .keymap
-                    .get_bindings(&command.id)
-                    .iter()
-                    .map(|binding| binding.display())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                recording: self.key_recording.as_ref() == Some(&command.id),
-            })
-            .collect::<Vec<_>>();
-
-        for action in keymap_ui(ui, &entries) {
-            match action {
-                KeymapAction::Record(command_id) => self.key_recording = Some(command_id),
-                KeymapAction::Clear(command_id) => {
-                    self.keymap.set_bindings(&command_id, vec![]);
-                    if let Err(error) = self.save_config() {
-                        log::warn!("save_config failed: {error}");
-                    }
-                }
-                KeymapAction::RestoreDefaults => {
-                    self.keymap = Keymap::default();
-                    self.key_recording = None;
-                    if let Err(error) = self.save_config() {
-                        log::warn!("save_config failed: {error}");
-                    }
-                    self.set_status_force(StatusLevel::Warn, "快捷键已恢复默认");
-                }
             }
         }
     }

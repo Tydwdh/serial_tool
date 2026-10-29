@@ -29,9 +29,9 @@ use manifest_deps::{
 /// 四道防空转下限：任何一道掉下来都说明扫描面在缩水，而不是边界变干净了。
 /// 数值按当前工作区（14 个 crate 目录 / 2 个 presentation / 15 个成员 / 17 条 workspace deps）
 /// 取「不大于实际」的口径，只在覆盖变少时变红。
-const WORKSPACE_MEMBER_FLOOR: usize = 15;
-const CRATE_MANIFEST_FLOOR: usize = 14;
-const CHECKED_MANIFEST_FLOOR: usize = 12;
+const WORKSPACE_MEMBER_FLOOR: usize = 14;
+const CRATE_MANIFEST_FLOOR: usize = 13;
+const CHECKED_MANIFEST_FLOOR: usize = 11;
 const WORKSPACE_DEPENDENCY_FLOOR: usize = 15;
 
 fn workspace_root() -> PathBuf {

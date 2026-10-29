@@ -5,16 +5,11 @@ mod data_table;
 pub mod design;
 mod dynamic;
 mod gauge;
-mod keymap;
 mod log;
 mod manager;
 mod network;
 mod plugin_settings;
 mod plugins;
-mod recording;
-mod replay;
-mod replay_policy;
-mod replay_view;
 mod scrollback;
 mod search;
 pub mod sender;
@@ -43,22 +38,16 @@ pub use dynamic::{
     dynamic_form_ui, parse_fields,
 };
 pub use gauge::GaugePanel;
-pub use keymap::{KeymapAction, KeymapEntry, keymap_ui};
 pub use log::{LogExportCursor, LogPanel};
 pub use manager::{
-    DockArea, DockLayout, DockStack, PANEL_BUILTIN, PANEL_CHART, PANEL_DEVICES, PANEL_LOGS,
-    PANEL_PLUGINS, PANEL_REPLAY, PANEL_SENDER, PANEL_SETTINGS, PANEL_TERMINAL, PanelId,
-    PanelManager, TilesLayout,
+    DockArea, DockLayout, DockStack, PANEL_BUILTIN, PANEL_DEVICES, PANEL_LOGS, PANEL_PLUGINS,
+    PANEL_SENDER, PANEL_SETTINGS, PANEL_TERMINAL, PanelId, PanelManager, TilesLayout,
 };
 pub use network::{NetworkSerialAction, NetworkSerialFormView, network_serial_form_ui};
 pub use plugin_settings::{PluginSettingsView, plugin_settings_ui};
 pub use plugins::{
     MarketplaceState, PluginPanelEvent, PluginPanelOptions, PluginTab, PluginsPanel,
 };
-pub use recording::{RecordingAction, RecordingMode, RecordingView, recording_ui};
-pub use replay::ReplayPanel;
-pub use replay_policy::{ReplayPolicyOption, replay_policy_ui};
-pub use replay_view::ReplayUiCommand;
 pub use search::SearchQuery;
 pub use sender::{
     SEND_LAYOUT_BREAKPOINT, SendAction, SendLayout, SendLineEnding, SendPortItem,

@@ -12,7 +12,6 @@
 | `tool-databus` | 唯一事件总线：订阅模式、历史、性能计数 | `crates/databus/src/lib.rs` |
 | `tool-platform` | 平台抽象：存储、native 端点 | `crates/platform/src/lib.rs` |
 | `tool-transport` | 端口 worker：本地串口 / 网络串口 / 虚拟串口 | `crates/transport/src/lib.rs` |
-| `tool-recorder` | JSONL 录制与回放（零耦合的两个 manager） | `crates/recorder/src/{recorder,replay}.rs` |
 | `tool-application` | UI 无关的应用核心：`Workbench`、命令、DTO、任务 | `crates/application/src/workbench.rs` |
 | `tool-panels` | egui 面板（View 返回 Action）+ dock 布局模型 | `crates/panels/src/lib.rs` |
 | `tool-extension` | 插件发现/清单校验/权限/生命周期 | `crates/extension/src/manager.rs` |
@@ -21,7 +20,7 @@
 | `tool-marketplace` | 市场索引、SHA256 校验安装 | `crates/marketplace/src/lib.rs` |
 | `tool-updater` | 自动更新（检查/下载/校验/提权 helper/回滚） | `crates/updater/src/lib.rs` |
 | `tool-testing` | 测试报告模型 + 场景 DSL | `crates/testing/src/lib.rs` |
-| `hardware-workbench-app` | eframe 壳：组合根、dock、快捷键、主题、配置 | `crates/app/src/app/mod.rs` |
+| `hardware-workbench-app` | eframe 壳：组合根、dock、主题、配置 | `crates/app/src/app/mod.rs` |
 | `vendor/egui_tiles` | 打补丁的 dock 布局库（§12） | `vendor/egui_tiles/src/lib.rs` |
 
 依赖方向（粗）：
@@ -31,7 +30,6 @@ crates/app ──────────> crates/panels ───────�
      │                                              │
      └──────────────────────────────────────────────┤
                                                     ├─> transport（本地/网络/虚拟串口）
-                                                    ├─> recorder（录制/回放）
                                                     ├─> extension + lua_host（插件）
                                                     ├─> marketplace（市场安装）
                                                     └─> updater（自动更新）
@@ -44,11 +42,11 @@ crates/app ──────────> crates/panels ───────�
   presentation 层；presentation = `tool-panels` + `hardware-workbench-app`
   （`crates/application/tests/architecture.rs`）。判定基于**解析后的真实依赖名**，覆盖
   `{ package = ... }` 重命名、`[target.*]` 段与根清单 `alias.workspace = true` 继承的写法。
-- `tool-panels` 不得直连领域 crate（transport/recorder/extension/lua_host/marketplace/updater 等），
-  必须经 `tool-application` 的 DTO；`hardware-workbench-app` 不得直连 `tool-recorder`/`tool-extension`/`tool-testing`
+- `tool-panels` 不得直连领域 crate（transport/extension/lua_host/marketplace/updater 等），
+  必须经 `tool-application` 的 DTO；`hardware-workbench-app` 不得直连 `tool-extension`/`tool-testing`
   （`crates/app/tests/architecture.rs`）。两份守卫 `#[path]` 引同一份判定实现（`crates/app/tests/manifest_deps.rs`），
   修一处漏洞另一处不会仍可绕过。
-- 还有一类**源码形状守卫**钉住 native 侧无法在运行期驱动的形状（命令面板使用键、端口条目投影），
+- 还有一类**源码形状守卫**钉住 native 侧无法在运行期驱动的形状（端口条目投影），
   以及一条禁止 wasm 目标回流的守卫——见同一测试文件。
 
 ## 2. 控制面：AppCommand / 后台任务 / 查询
@@ -60,8 +58,8 @@ crates/app ──────────> crates/panels ───────�
   `spawn_ordered` 按端口键 FIFO——保证同端口的 `Write → SetDtr` 顺序与多段发送顺序。
 - 完成经 `AppEvent`（`TaskStateChanged`/`TaskCompleted`/`TaskFailed`/`TaskCancelled`）→
   `Workbench::poll_tasks`（每帧）→ 结果落到各 manager；UI 在下一帧通过查询读取。
-- 读侧统一走 `Workbench::query_transport / query_recording / query_replay / query_plugins /
-  task_snapshots`；`TransportView` 只有一份（`crates/application/src/transport.rs`）。
+- 读侧统一走 `Workbench::query_transport / query_plugins / task_snapshots`；
+  `TransportView` 只有一份（`crates/application/src/transport.rs`）。
 - UI 直接持有 `Workbench`（`dispatch` / `tick` / `query_*`）；`CommandEffects` 保持命令决策与
   副作用的分离。
 
@@ -73,7 +71,6 @@ crates/app ──────────> crates/panels ───────�
 
 | 模式 | 语义 | 使用方 |
 | --- | --- | --- |
-| lossless（无界） | 不丢；背压由订阅方自己消化 | recorder（可靠性路径） |
 | lossy_bounded（丢新） | 满则丢新并计数 | UI 面板（chart/gauge/attitude 等）、插件、`UiEventSubscriptions` |
 | ring_bounded（丢旧） | 环形覆盖最旧 | Terminal / Log |
 
@@ -89,7 +86,6 @@ crates/app ──────────> crates/panels ───────�
   回收僵尸。`TransportManager` 刻意无 `Drop`——唯一安全关闭点是 `WorkbenchApp::drop → close_serial`。
 - 后台任务跑在 `TaskManager` 的 worker 线程；重活按端口键在 `spawn_ordered` 队列里串行。
 - 插件：每个插件一个线程 + mlua（§7）。
-- 录制 writer 线程（BufWriter 周期 flush）；回放由帧驱动（`tick_replay`），不开独立时钟线程。
 - 主线程是 egui：UI 状态只在帧内读写，后台只能通过总线/任务回执交接。
 
 ## 5. 传输层
@@ -117,15 +113,12 @@ crates/app ──────────> crates/panels ───────�
   `Workbench::start_reconnect` 只是一次尝试、失败即返回中文原因——原先那个「3 秒预算 +
   10ms 轮询」的循环判据（`Io(WouldBlock)`）没有生产者，已删除。
 
-## 6. 录制与回放
+## 6. 单端口与设备模型
 
-- 录制：JSONL 行格式；`RecordMode::RawSerial | StandardReplay` 过滤（`crates/recorder/src/format.rs`；
-  回放来源事件不录）；`JsonlRecorder` 以**无损订阅**接全总线，worker 线程写 BufWriter；
-  支持暂停/书签/会话摘要；背压阈值（软 100k 事件 / 256MB / 10s，硬 1M / 512MB / 60s）由 `Workbench::tick` 驱动检查。
-- 回放：两步加载（`prepare_load` + `load_prepared`）；
-  稀疏时间索引（步长 200）支持 seek；策略 `AutoPreferRecorded | ExactRecorded | ReparseRaw`；
-  重放事件在**同一个总线**上发布并打标（`replay=true`、`origin=replay`、source 前缀 `replay:`）。
-- recorder 与 replay 刻意零耦合（`crates/recorder/src/lib.rs` 文档）。
+- 同一 `Workbench` 同一时刻只允许一个活动连接。`Connect` 一个端口时，`Workbench::connect` 先关闭其它已打开端口，再打开目标端口；UI 不再提供多端口并行连接。
+- 活动端口切换时终端清空接收区，避免把上一个端口的数据误认为当前端口的数据；设备列表同时显示各端口的连接/断开状态。
+- 发送器只有一个目标端口；设备数量 ≤1 时目标静态显示，不渲染端口选择器。
+- 需要同时监控多个端口时启动多个应用实例，每个实例独立维护自己的连接、终端与发送器；配置文件由各实例共享，写入采用原子替换（最后写入者生效）。
 
 ## 7. 插件体系
 
@@ -148,7 +141,7 @@ crates/app ──────────> crates/panels ───────�
 - `send_plan`（`crates/application/src/send_plan.rs`）是发送路由与编码的唯一决策点。
 - 平台抽象：`crates/platform`（native 端点包 `TransportManager`；存储走 `storage::native`）。
 - 壳：`crates/app/src/shared_shell.rs` + `vendor/egui_tiles`；面板注册表
-  `crates/app/src/panel_registry.rs`（8 个内置面板）。
+  `crates/app/src/panel_registry.rs`（终端、日志、发送器、设备等内置面板）。
 
 ## 9. 状态与持久化
 
@@ -156,7 +149,7 @@ crates/app ──────────> crates/panels ───────�
   （临时文件 + rename）、旧文件 `.backup`、损坏隔离 `.corrupt-*.backup`（`crates/app/src/config.rs`）。
 - eframe persistence 的 app_id 是 `hardware-workbench`，与 `HardwareWorkbench` 是**两个不同目录**；
   安装器卸载范围两者都覆盖（`crates/app/tests/installer_uninstall_scope.rs` 钉住）。
-- 归属：`Workbench` 拥有 transport/recorder/replay/plugins；`WorkbenchApp` 持 UI 状态与配置；
+- 归属：`Workbench` 拥有 transport/plugins；`WorkbenchApp` 持 UI 状态与配置；
   `PanelManager`/`TilesLayout` 持久化 dock 布局与区域记忆（`crates/panels/src/manager.rs`）；
   panels 持各自的订阅与渲染游标。
 - 运行时资源从 exe 旁 `assets/` 读；用户插件在 `<数据目录>/plugins`
@@ -178,8 +171,8 @@ crates/app ──────────> crates/panels ───────�
   `cargo test --workspace --all-targets`；压力门禁见 [performance.md](performance.md)。
 - 用例类型：
   - **架构**：依赖边界 + 源码形状（§1）。
-  - **契约**：`crates/application/tests/headless.rs`（send routing / replay / 插件启停 / 事件发布）、
-    安装器卸载范围、命令面板键空间等。
+  - **契约**：`crates/application/tests/headless.rs`（send routing / 插件启停 / 事件发布）、
+    安装器卸载范围等。
   - **场景**：虚拟串口 + 真实插件运行时（`crates/extension` 的 scenario runner；模板
     `plugins/template.serial-chart`）。
   - **豁免清单**：`crates/app/tests/lint_exemptions.rs`（见 [known-gaps.md](known-gaps.md)）。

@@ -4537,7 +4537,6 @@ dependencies = [
  "tool-lua-host",
  "tool-marketplace",
  "tool-platform",
- "tool-recorder",
  "tool-testing",
  "tool-transport",
  "tungstenite",
@@ -4653,20 +4652,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tool-core",
-]
-
-[[package]]
-name = "tool-recorder"
-version = "2.0.0"
-dependencies = [
- "crossbeam-channel",
- "log",
- "parking_lot",
- "serde",
- "serde_json",
- "tool-core",
- "tool-databus",
- "tool-testing",
 ]
 
 [[package]]

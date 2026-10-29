@@ -4,79 +4,6 @@ use tool_application::query::PluginStateView;
 use tool_core::{Direction, Event, LogLevel, Payload, topics};
 
 impl WorkbenchApp {
-    /// 发布插件命令动作（模拟 UI 按钮点击）。
-    pub(crate) fn publish_plugin_command_action(&mut self, plugin_id: &str, command_id: &str) {
-        let summaries = self.workbench.query_plugins().summaries;
-        let plugin = summaries.iter().find(|summary| summary.id == plugin_id);
-
-        // 该插件的 UI contribution 若声明 record_send_input，则把当前发送框内容并入历史
-        let record_send_input = plugin
-            .and_then(|summary| {
-                summary
-                    .contributes
-                    .ui
-                    .iter()
-                    .find(|contribution| contribution.command.as_deref() == Some(command_id))
-            })
-            .is_some_and(|contribution| contribution.record_send_input);
-
-        if record_send_input {
-            self.record_send_history(self.send.input.clone());
-        }
-
-        // Authorize file access if plugin has fs.read.user_selected permission
-        let has_fs_permission = plugin.is_some_and(|summary| {
-            summary
-                .permissions
-                .iter()
-                .any(|permission| permission == "fs.read.user_selected")
-        });
-
-        if has_fs_permission {
-            let input = self.send.input.trim();
-            if !input.is_empty() && input.lines().count() == 1 {
-                let path = std::path::PathBuf::from(input.trim_matches('"'));
-                if path.is_file() {
-                    self.workbench.authorize_plugin_file(
-                        plugin_id,
-                        tool_platform::storage::FileHandle::from_native_path(path),
-                    );
-                }
-            }
-        }
-
-        let context = serde_json::json!({
-            "slot": "send.toolbar",
-            "send": {
-                "input": self.send.input.clone(),
-                "target_port": self.send.target_port.clone(),
-                "target_port_open": self.send_target_port_open(),
-                "hex_mode": self.send.hex_mode,
-                "line_ending": {
-                    "label": self.send.line_ending.label(),
-                    "suffix": self.send.line_ending.suffix(),
-                },
-                "periodic_enabled": self.send.periodic_enabled,
-                "periodic_interval_ms": self.send.periodic_interval_ms,
-            },
-            "serial": {
-                "selected_port": self.serial.selected_port.clone(),
-                "open_ports": self.workbench.open_port_names(),
-            }
-        });
-
-        let payload = serde_json::json!({
-            "plugin_id": plugin_id,
-            "contribution_id": command_id,
-            "slot": "send.toolbar",
-            "kind": "button",
-            "command": command_id,
-            "context": context,
-        });
-
-        self.publish_plugin_command_execute(plugin_id, command_id, &payload);
-    }
-
     pub(crate) fn publish_plugin_command_execute(
         &mut self,
         plugin_id: &str,
@@ -121,11 +48,6 @@ impl WorkbenchApp {
         }
 
         self.workbench.process_plugin_lifecycle();
-        // 插件命令并入统一 CommandRegistry（内置命令同表）。
-        // 先 clone summaries 再重建，避免 plugin_summaries 的 &self 借用与
-        // &mut self.commands 冲突。
-        let summaries = self.plugin_summaries().to_vec();
-        self.commands.rebuild_plugin_commands(&summaries);
         self.dynamic_panels.ingest(&mut self.panels);
         // 插件动态面板并入统一 PanelRegistry（内置面板同表），须在 ingest 之后。
         self.panel_registry

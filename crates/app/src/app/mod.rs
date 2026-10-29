@@ -1,6 +1,4 @@
-use crate::config::{
-    ConfigLoadResult, PersistedConfig, default_recorder_path, load_config, resolve_theme_path,
-};
+use crate::config::{ConfigLoadResult, PersistedConfig, load_config, resolve_theme_path};
 use crate::state::{MAX_SEND_HISTORY, NotificationQueue, SendUiState, SerialUiState, UpdateState};
 use eframe::egui;
 use std::collections::VecDeque;
@@ -8,52 +6,12 @@ use tool_application::{ApplicationConfig, Workbench};
 use tool_core::{Event, LogLevel};
 use tool_databus::DataBus;
 use tool_marketplace::retire_old_plugin_dirs;
-use tool_panels::{
-    ChartPanel, DynamicPanels, LogPanel, PanelManager, PluginsPanel, ReplayPanel, TerminalPanel,
-    theme,
-};
+use tool_panels::{DynamicPanels, LogPanel, PanelManager, PluginsPanel, TerminalPanel, theme};
 use tool_transport::RepaintWaker;
 
 use crate::bootstrap::{apply_theme, setup_fonts, user_plugins_dir, user_themes_dir};
 use crate::ui::toast::ToastOverlay;
 pub(crate) use crate::workbench_app::WorkbenchApp;
-
-pub(crate) struct ReplayAnalyzerJob {
-    pub(crate) generation: u64,
-    pub(crate) source_path: String,
-    pub(crate) cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    pub(crate) handle: Option<std::thread::JoinHandle<ReplayAnalyzerResult>>,
-}
-
-impl Drop for ReplayAnalyzerJob {
-    fn drop(&mut self) {
-        // 退出时取消 analyzer 线程并尝试 join（带超时，避免卡住 drop）。
-        // analyzer 线程有 budget hook（30_000 指令）+ cancel 检查，最终会终止；
-        // 此处 join 只为回收资源、避免 detach。
-        self.cancel
-            .store(true, std::sync::atomic::Ordering::Release);
-        if let Some(handle) = self.handle.take() {
-            // 短轮询等待最多 ~2s，超时则放弃 join（线程最终会自行退出）。
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            while !handle.is_finished() && std::time::Instant::now() < deadline {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            if handle.is_finished() {
-                let _ = handle.join();
-            }
-            // 否则 detach：analyzer 线程会在 cancel 信号下自然退出，不泄漏。
-        }
-    }
-}
-
-pub(crate) struct ReplayAnalyzerResult {
-    pub(crate) total: usize,
-    pub(crate) succeeded: usize,
-    pub(crate) failed: usize,
-    pub(crate) derived_events: Vec<Event>,
-    pub(crate) errors: Vec<String>,
-    pub(crate) logs: Vec<String>,
-}
 
 // ══════════════════════════════════════════
 //  WorkbenchApp impl
@@ -86,41 +44,27 @@ impl WorkbenchApp {
         let panels = startup_panel_manager(config.as_ref());
         let (send, serial) = startup_ui_state(config.as_ref());
         let (workbench, ui_events) = startup_workbench(&bus, waker, config.as_ref());
+        let plugins_panel = {
+            let mut panel = PluginsPanel::new();
+            panel.set_root(user_plugins_dir().display().to_string());
+            panel
+        };
         let mut app = Self {
             workbench,
             terminal_panel: TerminalPanel::new(&bus),
-            chart_panel: ChartPanel::new(&bus),
             dynamic_panels: DynamicPanels::new(&bus),
-            plugins_panel: PluginsPanel::new(),
-            replay_panel: ReplayPanel::new(),
+            plugins_panel,
             bottom_log_panel: LogPanel::new(&bus),
             serial,
-            recorder_path: config
-                .as_ref()
-                .map(|cfg| cfg.recorder_path.clone())
-                .unwrap_or_else(default_recorder_path),
             panels,
             notifications: NotificationQueue::new(),
             toast_overlay: ToastOverlay::default(),
-            recent_workspaces: config
-                .as_ref()
-                .map(|cfg| cfg.recent_workspaces.clone())
-                .unwrap_or_default(),
             send,
             layout_dirty: false,
             last_auto_save_time: 0.0,
             ui_events,
-            replay_analyzer: Default::default(),
             periodic_send: Default::default(),
-            keymap: config
-                .as_ref()
-                .map(|cfg| cfg.keymap.clone())
-                .unwrap_or_default(),
-            commands: crate::command_registry::CommandRegistry::builtin(),
             panel_registry: crate::panel_registry::PanelRegistry::builtin(),
-            pending_command: None,
-            key_recording: None,
-            command_palette: Default::default(),
             update_state: UpdateState::default(),
             contribution_states: std::collections::HashMap::new(),
             plugin_summaries_cache: std::cell::OnceCell::new(),
@@ -159,8 +103,8 @@ impl WorkbenchApp {
     /// 帧级缓存的插件 summaries。
     ///
     /// `summaries()` 会全量 clone 所有 manifest + 做命令对账；同帧内会被
-    /// `ui_contribution_slot`（每 slot 一次）、命令面板、插件面板、设置面板、
-    /// 快捷键标签等多处调用。这里用一个 `OnceCell` 做帧内缓存：每帧首次调用
+    /// `ui_contribution_slot`（每 slot 一次）、插件面板、设置面板、
+    /// 状态栏等多处调用。这里用一个 `OnceCell` 做帧内缓存：每帧首次调用
     /// 计算一次，同帧后续调用复用同一份 `Vec`。`tick_pre_ui` 开头会重置缓存。
     ///
     /// 注意：返回的是 `&[PluginSummary]` 借用，调用方不能在此引用存活期间
@@ -363,7 +307,6 @@ fn application_config_from(cfg: &PersistedConfig) -> ApplicationConfig {
         terminal_merge_window_ms: cfg.terminal_merge_window_ms,
         terminal_max_entries: cfg.terminal_max_entries,
         log_max_entries: cfg.log_max_entries,
-        recorder_path: cfg.recorder_path.clone(),
         network_ports: cfg.network_ports.clone(),
         port_aliases: cfg.port_aliases.clone(),
         port_groups: cfg.port_groups.clone(),
@@ -413,9 +356,6 @@ impl Drop for WorkbenchApp {
         if let Err(error) = self.save_config() {
             log::warn!("save_config failed: {error}")
         }
-        let _ = self
-            .workbench
-            .dispatch(tool_application::AppCommand::StopRecording);
         self.workbench.shutdown_serial();
     }
 }

@@ -28,7 +28,7 @@ pub fn app_dir() -> PathBuf {
 /// 用户可写的应用数据目录。
 ///
 /// Ubuntu 的 `.deb` 会把程序安装到 `/usr/lib/hardware-workbench`，该目录
-/// 只应存放只读资源。插件、主题和录制文件必须放在当前用户的数据目录，
+/// 只应存放只读资源。插件、主题和用户数据必须放在当前用户的数据目录，
 /// 这样从应用菜单启动时不需要 root 权限。
 pub fn user_data_dir() -> PathBuf {
     #[cfg(target_os = "linux")]
@@ -50,10 +50,6 @@ pub fn user_plugins_dir() -> PathBuf {
 
 pub fn user_themes_dir() -> PathBuf {
     user_data_dir().join("themes")
-}
-
-pub fn user_logs_dir() -> PathBuf {
-    user_data_dir().join("logs")
 }
 
 pub fn setup_fonts(cc: &eframe::CreationContext<'_>) {

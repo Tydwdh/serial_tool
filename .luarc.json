@@ -20,9 +20,6 @@
   ],
   "diagnostics.globals": [
     "ctx",
-    "on_disable",
-    "on_replay_begin",
-    "on_replay_event",
-    "on_replay_end"
+    "on_disable"
   ]
 }

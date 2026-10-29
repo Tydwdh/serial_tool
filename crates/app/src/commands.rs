@@ -1,5 +1,4 @@
 use crate::app::WorkbenchApp;
-use crate::config::resolve_recorder_path;
 use crate::reconnect::{RECONNECT_MAX_ATTEMPTS, ReconnectOutcome};
 use crate::state::PendingPortOpenNotice;
 use crate::state::StatusLevel;
@@ -192,33 +191,13 @@ impl WorkbenchApp {
         self.notifications.push("general", level, text);
     }
 
-    // ── 内置命令 handler（由 CommandRegistry 注册）──
-
-    /// `$Send`：目标端口打开且输入非空时发送。
-    pub(crate) fn cmd_send_if_ready(&mut self) {
-        if self.send_target_port_open() && !self.send.input.trim().is_empty() {
-            self.do_send();
-        }
-    }
-
-    /// `$ToggleRightDock`：切换右侧边栏并持久化。
-    pub(crate) fn cmd_toggle_right_dock(&mut self) {
-        let visible = self.panels.right_visible();
-        self.panels.set_right_visible(!visible);
-        if let Err(e) = self.save_config() {
-            log::warn!("save_config failed: {e}")
-        };
-    }
-
-    /// `$CommandPalette`：切换命令面板开关。
-    pub(crate) fn cmd_toggle_command_palette(&mut self) {
-        self.command_palette.open = !self.command_palette.open;
-        self.command_palette.query.clear();
-        self.command_palette.selected = None;
-    }
+    // ── 内置命令 handler ──
 
     /// 切换串口时：保存旧端口设置到 profile，从 profile 恢复新端口设置。
     pub(crate) fn switch_port_selection(&mut self, old_port: Option<&str>, new_port: &str) {
+        if old_port != Some(new_port) {
+            self.terminal_panel.clear();
+        }
         if let Some(old) = old_port {
             self.serial.port_profiles.insert(
                 old.to_owned(),
@@ -363,71 +342,6 @@ impl WorkbenchApp {
             );
         } else if self.serial.selected_port != old_selected {
             self.set_status_force(StatusLevel::Info, "请选择串口");
-        }
-    }
-
-    /// 切换选中串口的打开/关闭状态（快捷键用）。
-    pub(crate) fn toggle_selected_port(&mut self) {
-        let Some(port) = self.serial.selected_port.clone() else {
-            self.set_status_force(StatusLevel::Warn, "请选择串口");
-            return;
-        };
-        self.toggle_port_by_name(&port);
-    }
-
-    /// 点击端口列表圆点切换开/关（支持任意端口，不限当前选中）。
-    ///
-    /// 三种状态：
-    /// - 已打开（●）：关闭该端口
-    /// - 自动重连中（⟳）：取消重连
-    /// - 未打开（○）：切换 selected_port 到该端口（恢复其配置档案）并打开
-    pub(crate) fn toggle_port_by_name(&mut self, name: &str) {
-        // 自动重连中：取消重连（与顶栏 chip 的 × 走同一条路径）
-        if self.serial.reconnects.entry(name).is_some() {
-            self.cancel_auto_reconnect(name, "已取消 ");
-            return;
-        }
-
-        if self.workbench.transport_status(name).open {
-            // 已打开：关闭（用户自己的动作 —— 记住它，别再自动重连回来）
-            self.serial.manual_disconnects.insert(name.to_owned());
-            self.serial.reconnects.cancel(name);
-            self.cancel_pending_port_open_notice(name);
-            match self
-                .workbench
-                .dispatch(tool_application::AppCommand::Disconnect {
-                    port: tool_platform::PortId::new(name),
-                }) {
-                Ok(tool_application::CommandOutcome::Pending { .. }) => {
-                    self.set_status_force(StatusLevel::Info, format!("正在断开 {name}..."));
-                }
-                Ok(tool_application::CommandOutcome::Done) => {}
-                Err(error) => self.set_status_force(StatusLevel::Error, error.to_string()),
-            }
-            return;
-        }
-
-        // 网络端口连接中：取消连接（worker 正在异步 connect）
-        if self.workbench.transport_status(name).connecting {
-            self.cancel_pending_port_open_notice(name);
-            let _ = self
-                .workbench
-                .dispatch(tool_application::AppCommand::Disconnect {
-                    port: tool_platform::PortId::new(name),
-                });
-            self.set_status_force(StatusLevel::Info, format!("已取消 {name} 的连接"));
-            return;
-        }
-
-        // 未打开：切换 selected_port（恢复该端口的配置档案）后打开
-        self.serial.manual_disconnects.remove(name);
-        let old = self.serial.selected_port.clone();
-        if old.as_deref() != Some(name) {
-            self.switch_port_selection(old.as_deref(), name);
-        }
-        match self.open_selected_port_result() {
-            Ok(()) => self.defer_port_open_notice(name, format!("{name} 已连接")),
-            Err(e) => self.set_status_force(StatusLevel::Error, e),
         }
     }
 
@@ -762,33 +676,6 @@ impl WorkbenchApp {
             .is_some_and(|pending| pending.port_name == port_name)
         {
             self.serial.pending_open_notice = None;
-        }
-    }
-
-    pub(crate) fn start_or_stop_recording(&mut self) {
-        let recording = self.workbench.query_recording();
-        let is_recording = recording.stats.running || recording.stats.stopping;
-        let command = if is_recording {
-            tool_application::AppCommand::StopRecording
-        } else {
-            let recorder_path = resolve_recorder_path(std::path::Path::new(&self.recorder_path));
-            tool_application::AppCommand::StartRecording {
-                file: FileHandle::from_native_path(recorder_path),
-                mode: recording.mode,
-            }
-        };
-        match self.workbench.dispatch(command) {
-            Ok(tool_application::CommandOutcome::Pending { message, .. }) => {
-                self.set_status_force(StatusLevel::Info, message);
-            }
-            Ok(tool_application::CommandOutcome::Done) => {
-                if is_recording {
-                    self.set_status_force(StatusLevel::Info, "正在停止录制...");
-                } else {
-                    self.set_status_force(StatusLevel::Info, "录制中");
-                }
-            }
-            Err(error) => self.set_status_force(StatusLevel::Error, error.to_string()),
         }
     }
 }

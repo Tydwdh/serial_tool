@@ -335,10 +335,8 @@ impl SerialPanel {
 
     /// Render the shared refresh/status/port-list section.
     ///
-    /// Native places this section after its recording card while Web places
-    /// it after the same card. Keeping it independently callable prevents a
-    /// platform composition root from changing the visual order of the
-    /// shared device panel.
+    /// Kept independently callable so the device panel can place it after the
+    /// connection controls without duplicating the list logic.
     pub fn port_list_ui(ui: &mut Ui, view: &mut SerialView<'_>) -> Vec<SerialAction> {
         let mut actions = Vec::new();
 
@@ -355,13 +353,13 @@ impl SerialPanel {
             for port in view.ports {
                 let connecting = port.connecting;
                 ui.horizontal_wrapped(|ui| {
-                    let label = if port.kind.is_empty() {
-                        port.label.clone()
-                    } else {
-                        format!("{} · {}", port.label, port.kind)
-                    };
-                    ui.label(label);
-                    ui.monospace(&port.id);
+                    ui.label(&port.label);
+                    if !port.kind.is_empty() {
+                        ui.weak(port.kind.as_str());
+                    }
+                    if port.label != port.id {
+                        ui.monospace(&port.id);
+                    }
                     if port.open {
                         if ui
                             .add_enabled(view.capabilities.disconnect, egui::Button::new("断开"))

@@ -1,9 +1,8 @@
 # Lua 插件 ctx.* API 参考
 
-本文是实时插件（`main.lua`）与回放分析器（`replay.lua`）可用的 Lua API 参考。运行时在脚本执行前安装全局对象 `ctx`；每个域的安装条件见下表，未获授权的域在 `ctx` 上不存在（`ctx.serial` 为 `nil` 等）。以 `ctx` = `nil` 访问会报 Lua 错误。
+本文是实时插件（`main.lua`）可用的 Lua API 参考。运行时在脚本执行前安装全局对象 `ctx`；每个域的安装条件见下表，未获授权的域在 `ctx` 上不存在（`ctx.serial` 为 `nil` 等）。以 `ctx` = `nil` 访问会报 Lua 错误。
 
-- 实时插件入口：`plugin.json` 的 `main`（或 `live.main`），默认 `main.lua`。
-- 回放分析器入口：`plugin.json` 的 `replay.main`，默认 `replay.lua`。
+- 插件入口：`plugin.json` 的 `main`（或 `live.main`），默认 `main.lua`。
 - 编辑器补全用的类型存根：`plugins/.lua/hardware-workbench.lua`、`plugins/.lua/hw/*.lua`（`---@meta`）。
 - 清单字段与权限声明见 [manifest.md](manifest.md)；插件协议枚举见 [spec.generated.md](spec.generated.md)。
 
@@ -517,62 +516,9 @@ local port = ctx.session.get("port") or "COM3"
 ctx.session.set("port", "COM3")
 ```
 
-## 回放分析器
-
-当 `plugin.json` 声明了 `replay` 段（见 [manifest.md](manifest.md)）时，`replay.lua` 在回放期间运行。运行器见 `crates/lua_host/src/replay.rs`。回放分析器只接收清单 `replay.subscriptions` 命中的输入事件（`crates/lua_host/src/replay.rs:88`）。
-
-与实时插件不同，回放分析器安装的 `ctx` 域非常有限（`install_replay_ctx`，`replay.rs:115`）：
-
-| ctx 域 | 说明 |
-|---|---|
-| `ctx.plugin` | `{id, name, version}`（`crates/app/src/runtime/replay_task.rs:96`） |
-| `ctx.now_ms()` | 当前时间戳 |
-| `ctx.storage.get(key)` | 只读的会话级存储（注意是 `ctx.storage`，不是 `ctx.session`） |
-| `ctx.replay` | 回放专用 API |
-
-回放中**没有** `ctx.log`、`ctx.bus`、`ctx.serial`、`ctx.timer`、`ctx.task`、`ctx.ui` 等；请用 `ctx.replay.log` 记录日志。
-
-### ctx.replay
-
-| 函数 | 返回 | 说明 |
-|---|---|---|
-| `emit(topic, payload?)` | — | 向回放流注入一条派生事件；topic 必须命中 `replay.outputs`，否则报错 |
-| `log(message)` | — | 写入回放日志 |
-| `current_event()` | event? | 当前输入事件（与 `on_replay_event` 收到的同一张表） |
-
-`emit` 的事件时间戳取自当前输入事件，并标记为派生事件（`replay.rs:169`）。
-
-### 回调
-
-| 回调 | 参数 | 说明 |
-|---|---|---|
-| `on_replay_begin(session)` | `{start_ms, end_ms, event_count}` | 回放开始 |
-| `on_replay_event(event)` | event 对象 | 逐条处理订阅命中的输入事件 |
-| `on_replay_end()` | — | 回放结束（此时 `current_event` 标记被清除） |
-
-回调抛错只追加一条 `on_replay_* error: ...` 到回放日志，不中断运行（`replay.rs`）。
-
-```lua
-function on_replay_begin(session)
-  ctx.replay.log("回放开始，共 " .. tostring(session.event_count) .. " 条")
-end
-
-function on_replay_event(event)
-  if event.topic == "transport.serial.default.rx" then
-    ctx.replay.emit("protocol.demo.sample", { value = #tostring(event.payload) })
-  end
-end
-
-function on_replay_end()
-  ctx.replay.log("回放结束")
-end
-```
-
-**预算**：分析器安装 30 秒执行预算 hook（`install_budget_hook(&lua, 30_000, ...)`，`crates/lua_host/src/replay.rs:44`），超时或取消即中止。回放允许声明的权限为 `REPLAY_PERMISSIONS = ["log", "storage"]`（`crates/extension/src/spec.rs:20`）。
-
 ## 内置 Lua 模块 hw.codec / hw.utils
 
-宿主在沙箱收紧前预注册两个模块（`crates/lua_host/src/lib.rs` `codec::register_codec` / `register_utils`），实时与回放均可 `require`（`package.preload` 已冻结为只读，插件不能注入新模块）。
+宿主在沙箱收紧前预注册两个模块（`crates/lua_host/src/lib.rs` `codec::register_codec` / `register_utils`），实时插件可 `require`（`package.preload` 已冻结为只读，插件不能注入新模块）。
 
 `hw.codec`（`plugins/.lua/hw/codec.lua`）：
 

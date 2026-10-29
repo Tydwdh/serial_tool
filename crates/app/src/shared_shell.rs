@@ -6,9 +6,7 @@ use egui_tiles::{
     Behavior, Container, ContainerKind, DragPreview, EditAction, ResizeState,
     SimplificationOptions, TabState, Tile, TileId, Tiles, UiResponse,
 };
-use tool_panels::{
-    ChartPanel, DynamicPanels, LogPanel, PanelId, PanelManager, TerminalPanel, theme,
-};
+use tool_panels::{DynamicPanels, LogPanel, PanelId, PanelManager, TerminalPanel, theme};
 
 pub(crate) trait DockHost {
     /// Native measures with `Instant`; web measures with a JS timestamp.
@@ -31,7 +29,6 @@ pub(crate) trait DockHost {
 /// The shared panel bodies, handed to the shell through one accessor.
 pub(crate) struct SharedPanels<'a> {
     pub terminal: &'a mut TerminalPanel,
-    pub chart: &'a mut ChartPanel,
     pub log: &'a mut LogPanel,
     pub dynamic: &'a mut DynamicPanels,
 }
@@ -69,11 +66,6 @@ pub(crate) fn render_panel<H: DockHost>(host: &mut H, ui: &mut egui::Ui, id: &Pa
                 host.prepare_terminal_panel();
                 let started = host.panel_render_start();
                 host.shared_panels().terminal.ui(ui);
-                host.note_panel_render(kind, started);
-            }
-            BuiltinPanel::Chart => {
-                let started = host.panel_render_start();
-                host.shared_panels().chart.ui(ui);
                 host.note_panel_render(kind, started);
             }
             BuiltinPanel::Logs => {

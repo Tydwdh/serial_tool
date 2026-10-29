@@ -278,9 +278,8 @@ fn collect_dependencies(
 }
 
 /// presentation 禁止直连的领域 crate（唯一真相，两份守卫共用）。
-pub const DOMAIN_CRATES: [&str; 6] = [
+pub const DOMAIN_CRATES: [&str; 5] = [
     "tool-transport",
-    "tool-recorder",
     "tool-extension",
     "tool-marketplace",
     "tool-lua-host",

@@ -1,7 +1,7 @@
 //! Lua ↔ Rust 类型转换工具函数。
 //!
 //! 纯函数集合，负责在 VM value / `PluginValue` / `serde_json::Value` / `Payload` 之间互转。
-//! 被 `install_ctx`、各 `create_*_api`、`install_replay_ctx` 等广泛依赖。
+//! 被 `install_ctx`、各 `create_*_api` 等广泛依赖。
 
 use mlua::{Lua, Table, Value};
 use tool_core::{Direction, Event, Payload};

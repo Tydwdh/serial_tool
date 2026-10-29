@@ -3,7 +3,6 @@
 
 - runtime: lua
 - live permissions: bus, log, serial, ui, storage, timer, testing, dialog, fs.read.user_selected, task, config
-- replay permissions: log, storage
 - panel kinds: chart, form, attitude, gauge, table
 - UI slots: send.toolbar, top_bar.left, top_bar.right, status_bar.left, status_bar.right
 - UI kinds: button, small_button, separator, label, status, toggle, progress

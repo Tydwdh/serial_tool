@@ -35,6 +35,8 @@ pub enum PluginPanelEvent {
     Enable(String),
     /// 用户请求禁用插件。
     Disable(String),
+    /// 用户请求重新扫描已安装插件根目录。
+    RefreshPlugins { root: String },
     /// 用户请求刷新市场索引。
     RefreshMarket,
     /// 用户请求从平台导入插件文件。
@@ -109,6 +111,11 @@ impl PluginsPanel {
             market_search: String::new(),
             market_category: None,
         }
+    }
+
+    /// 设置插件根目录（启动时由 app 指向用户数据目录）。
+    pub fn set_root(&mut self, root: String) {
+        self.root = root;
     }
 
     // ── 市场 UI 状态 setter（供 app 回填） ──
@@ -278,8 +285,9 @@ impl PluginsPanel {
                         ui.add(TextEdit::singleline(&mut self.root).desired_width(240.0));
                     }
                     if design::button(ui, ICON_REFRESH, "刷新", ButtonKind::Primary).clicked() {
-                        // 实际刷新由 Workbench 处理，Panel 只发状态提示
-                        return Some(PluginPanelEvent::Status("刷新已请求".to_owned(), false));
+                        return Some(PluginPanelEvent::RefreshPlugins {
+                            root: self.root.clone(),
+                        });
                     }
                     if options.show_root
                         && design::button(ui, ICON_FOLDER_OPEN, "打开目录", ButtonKind::Secondary)
@@ -705,7 +713,6 @@ impl PluginsPanel {
                 Self::plugin_panels_row(ui, summary);
 
                 // ── 命令状态（仅 Running 时展示对账结果） ──
-                Self::plugin_commands_row(ui, summary);
 
                 if let Some(error) = &summary.last_error {
                     ui.colored_label(theme::red(), error);
@@ -812,47 +819,7 @@ impl PluginsPanel {
         }
     }
 
-    /// Running 时逐条对账声明/注册结果，其余状态只列出 manifest 里声明的命令。
-    fn plugin_commands_row(ui: &mut egui::Ui, summary: &PluginSummaryView) {
-        let declared = &summary.contributes.commands;
-        let registered = &summary.registered_commands;
-        let missing = &summary.missing_commands;
-        let undeclared = &summary.undeclared_commands;
-        let is_running = matches!(summary.state, PluginStateView::Running);
-
-        if !declared.is_empty() || !registered.is_empty() {
-            ui.horizontal_wrapped(|ui| {
-                ui.label("命令");
-                if is_running {
-                    for cmd in declared {
-                        if registered.iter().any(|r| r == &cmd.id) {
-                            ui.colored_label(theme::green(), format!("✓ {}", cmd.id));
-                        } else if missing.iter().any(|m| m == &cmd.id) {
-                            design::badge(ui, &cmd.id, theme::yellow())
-                                .on_hover_text("此命令已在 manifest 声明但尚未注册 handler");
-                        } else {
-                            ui.label(cmd.id.as_str());
-                        }
-                    }
-                    for cmd in undeclared {
-                        design::badge(ui, cmd, theme::text_secondary())
-                            .on_hover_text("此命令在运行时动态注册，未在 manifest 声明");
-                    }
-                } else {
-                    for cmd in declared {
-                        ui.label(
-                            egui::RichText::new(&cmd.id)
-                                .monospace()
-                                .color(theme::text_primary()),
-                        );
-                    }
-                }
-            });
-        }
-    }
-
-    /// 启用/禁用合并为单个按钮：当前正在运行/已启用则显示「禁用」并执行禁用，
-    /// 否则显示「启用」并执行启用。
+    /// 插件启用/禁用按钮。
     fn plugin_toggle_button(
         ui: &mut egui::Ui,
         summary: &PluginSummaryView,

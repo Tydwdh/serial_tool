@@ -8,12 +8,6 @@
 --     -> main.lua 解析
 --     -> protocol.template.sample
 --     -> 图表显示
---
--- 回放链路：
---   RawSerial 录制
---     -> replay.lua 解析
---     -> protocol.template.sample
---     -> 图表显示
 
 local CHART_ID = "template.serial-chart.chart"
 local FORM_ID = "template.serial-chart.form"

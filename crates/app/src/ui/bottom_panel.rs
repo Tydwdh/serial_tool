@@ -114,7 +114,7 @@ impl WorkbenchApp {
             cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         for action in actions {
-            // SendText / SendHex 只差命令载荷，历史录制与错误处理共用同一段。
+            // SendText / SendHex 只差命令载荷，发送历史与错误处理共用同一段。
             let command = match action {
                 SendAction::SendText { port, text } => tool_application::AppCommand::SendText {
                     port: tool_platform::PortId::new(port),
@@ -170,37 +170,6 @@ impl WorkbenchApp {
     }
 
     // ── 发送逻辑 ──
-
-    pub(crate) fn do_send(&mut self) {
-        let Some(port) = self.send.target_port.clone() else {
-            self.send.error = Some("请选择发送目标串口".into());
-            return;
-        };
-        let input = self.send.input.clone();
-        if input.trim().is_empty() {
-            self.send.error = Some("发送内容不能为空".to_owned());
-        } else {
-            // 载荷规则不在这里：与周期发送、共享 sender、web 侧同一个 `send_plan::send_command`。
-            let command = tool_application::send_plan::send_command(
-                &port,
-                &input,
-                self.send.hex_mode,
-                self.send.line_ending.suffix(),
-                self.send.hex_strict,
-            );
-            self.send.error = self
-                .workbench
-                .dispatch(command)
-                .err()
-                .map(|e| e.to_string());
-        }
-
-        if self.send.error.is_none() && !self.send.input.trim().is_empty() {
-            self.record_send_history(input);
-        }
-        self.send.history_index = None;
-        self.send.saved_input.clear();
-    }
 
     pub(crate) fn record_send_history(&mut self, text: impl Into<String>) {
         let text = text.into();

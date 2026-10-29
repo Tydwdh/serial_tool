@@ -20,15 +20,13 @@ plugins/
     README.md
   <plugin-id>/                  # 你自己的插件
     plugin.json                 # 必需：插件声明
-    main.lua                    # 实时插件入口
-    replay.lua                  # 可选：回放解析器入口
+    main.lua                    # 插件入口
 ```
 
 - `plugin.json`：插件声明，字段见 [manifest.md](manifest.md)。
-- `main.lua`：实时插件入口，脚本文件名由清单 `main` / `live.main` 指定。
-- `replay.lua`：可选的回放解析器入口，由清单 `replay.main` 指定（`crates/extension/src/manifest.rs:201-204`）。
+- `main.lua`：插件入口，脚本文件名由清单 `main` / `live.main` 指定。
 
-## 两种运行角色
+## 运行角色
 
 ### 实时插件：main.lua
 
@@ -39,21 +37,6 @@ plugins/
 ```
 
 可用能力由清单声明的权限决定：只有声明了对应权限，宿主才会挂载 `ctx.serial`、`ctx.ui`、`ctx.timer` 等 API（`crates/lua_host/src/lib.rs:848-945`）。
-
-### 回放解析器：replay.lua
-
-只在回放阶段运行，把历史 `transport.serial.*` 事件重新解析成 `protocol.*` 事件：
-
-```text
-录制文件里的 transport.serial.default.rx
-  -> replay.lua 解析
-  -> ctx.replay.emit("protocol.xxx", {...})
-  -> 图表
-```
-
-回放解析器运行在受限沙箱里，只挂载 `ctx.plugin`、`ctx.now_ms`、`ctx.storage.get` 与 `ctx.replay`（`emit` / `log` / `current_event`），不具备串口、UI、定时器能力（`crates/lua_host/src/replay.rs:139-218`）。它声明 `replay` 即可被回放解析器列表发现，**不需要插件处于启用状态**（`crates/extension/src/manifest.rs:253-258`）。
-
-回放侧只接受 `log` / `storage` 权限，未列入的权限直接拒绝（`crates/extension/src/permission.rs:33-42`）。
 
 ## 最小实时插件
 
@@ -120,16 +103,15 @@ end)
 - **插件 ID 稳定**：`id` 发布后尽量不要改，建议用命名空间风格，如 `yourname.pid-tuner`、`vendor.imu-viewer`。
 - **面板 ID 稳定**：面板 ID 带上插件 ID 前缀，避免跨插件冲突，如 `yourname.my-analyzer.chart`。
 - **UI 入口优先用命令**：`contributes.ui[].command` 触发 `ctx.commands.register` 注册的 handler，插件只声明控件与命令，不直接绘制宿主 UI（`crates/extension/src/manifest.rs:321-352`）。
-- **实时与回放职责分离**：不要在 `replay.lua` 里做串口操作，它是无副作用的纯分析器。
 - **退出时清理**：在 `on_disable` 中取消定时器、移除运行时创建的动态面板。
 
 ## 编辑器支持（LuaLS stub）
 
-仓库根目录的 `.luarc.json` 让 LuaLS 读取 `plugins/.lua/` 下的宿主 API stub，并把 `ctx`、`on_disable`、`on_replay_begin`、`on_replay_event`、`on_replay_end` 声明为全局：
+仓库根目录的 `.luarc.json` 让 LuaLS 读取 `plugins/.lua/` 下的宿主 API stub，并把 `ctx`、`on_disable` 声明为全局：
 
 ```json
 "workspace.library": ["plugins/.lua"],
-"diagnostics.globals": ["ctx", "on_disable", "on_replay_begin", "on_replay_event", "on_replay_end"]
+"diagnostics.globals": ["ctx", "on_disable"]
 ```
 
 `plugins/.lua/hardware-workbench.lua` 提供 `ctx` 的类型定义；`plugins/.lua/hw/codec.lua` 与 `plugins/.lua/hw/utils.lua` 提供 `require("hw.codec")` / `require("hw.utils")` 的类型定义，避免编辑时误报未定义。

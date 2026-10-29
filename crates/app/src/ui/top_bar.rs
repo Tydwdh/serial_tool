@@ -1,7 +1,7 @@
 use eframe::egui;
-use egui_material_icons::icons::{ICON_CANCEL, ICON_FIBER_MANUAL_RECORD, ICON_REFRESH, ICON_STOP};
+use egui_material_icons::icons::{ICON_CANCEL, ICON_REFRESH};
 use std::collections::BTreeMap;
-use tool_panels::design::{self, ButtonKind};
+use tool_panels::design;
 use tool_panels::{SerialPanel, SerialTopBarAction, SerialTopBarView, theme};
 
 use crate::app::WorkbenchApp;
@@ -76,17 +76,27 @@ impl WorkbenchApp {
             ui.separator();
             // ── 插件贡献：top_bar.left ──
             self.ui_contribution_slot(ui, "top_bar.left");
-            let recording_running = self.workbench.query_recording().stats.running;
-            let record_response = if recording_running {
-                design::button(ui, ICON_STOP, "停止录制", ButtonKind::Danger)
-            } else {
-                design::button(ui, ICON_FIBER_MANUAL_RECORD, "开始录制", ButtonKind::Ghost)
-            };
-            if record_response.clicked() {
-                self.start_or_stop_recording();
-            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button("更多", |ui| {
+                    if ui.button("设置").clicked() {
+                        self.panels
+                            .open_tab(tool_panels::PanelId::builtin(tool_panels::PANEL_SETTINGS));
+                        ui.close();
+                    }
+                    if ui.button("插件").clicked() {
+                        self.panels
+                            .open_tab(tool_panels::PanelId::builtin(tool_panels::PANEL_PLUGINS));
+                        ui.close();
+                    }
+                });
+                if ui.button("设备").clicked() {
+                    let visible = self.panels.right_visible();
+                    self.panels.set_right_visible(!visible);
+                    if let Err(error) = self.save_config() {
+                        log::warn!("save_config failed: {error}");
+                    }
+                }
                 // ── 插件贡献：top_bar.right ──
                 self.ui_contribution_slot(ui, "top_bar.right");
             });

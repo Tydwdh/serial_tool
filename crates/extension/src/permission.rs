@@ -27,16 +27,6 @@ impl PermissionManager {
             }
         }
 
-        // replay 侧固定走协议白名单（log / storage），不受宿主 allowed 集合放宽影响。
-        for permission in manifest.replay_permissions() {
-            if !crate::spec::REPLAY_PERMISSIONS.contains(&permission.as_str()) {
-                return Err(ExtensionError::PermissionDenied {
-                    plugin_id: manifest.id.clone(),
-                    permission: permission.clone(),
-                });
-            }
-        }
-
         Ok(())
     }
 }

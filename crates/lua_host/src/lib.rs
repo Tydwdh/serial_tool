@@ -20,7 +20,6 @@ pub mod config;
 pub mod convert;
 pub mod globals;
 pub mod host_services;
-pub mod replay;
 pub(crate) use crate::api::bus::create_bus_api;
 pub(crate) use crate::api::commands::create_commands_api;
 pub(crate) use crate::api::config::create_config_api;
@@ -43,7 +42,6 @@ use crate::globals::{
 };
 use crate::host_services::line_buffer_key;
 pub use config::ConfigStore;
-pub use replay::{run_replay_analyzer, run_replay_analyzer_with_cancel};
 use tool_transport::{TransportManager, serial_topics};
 
 // ── Host Services ──
@@ -129,12 +127,6 @@ impl LuaPluginRuntime {
         }
 
         self.event_sender.try_send(event.clone()).is_ok()
-    }
-
-    /// 回放事件与实时事件走同一条投递策略（含 `alive` 判定），判据见 [`Self::on_event`]：
-    /// 用 `try_send` 而非 `send` —— 回放期间若插件处理慢，丢弃事件比阻塞 UI 线程安全。
-    pub fn on_replay_event(&self, event: &Event) -> bool {
-        self.on_event(event)
     }
 
     pub fn stop(&self) {
@@ -270,12 +262,10 @@ pub(crate) fn harden_globals(lua: &Lua) -> mlua::Result<()> {
 }
 
 /// 生产代码里**唯一**合法的 Lua VM 构造点：把 `Lua::new_with(子集)` 和 `harden_globals`
-/// 焊在同一个函数里，"建了 VM 却忘了加固" 就没法再顺手写出来。计划里数了两处构造点，实际
-/// 有三处插件可达的 VM（插件事件循环、阻塞式运行、replay analyzer），各自
-/// 抄一遍 stdlib 子集；其中 `replay.rs` 那一处连加固都没抄，`dofile` 至今活着。新增任何
-/// 能跑插件源码的 VM，一律调用本函数，不要自己 `new_with`；`mod tests` 里的静态守卫按
-/// 本函数的名字与全 crate 的出现次数把关，并把 `Lua::new()`、`Lua::default()`、
-/// `unsafe_new*`、`new_with_options` 这些"绕过本函数"的拼法一并列为违规。
+/// 焊在同一个函数里，"建了 VM 却忘了加固" 就没法再顺手写出来。插件事件循环与阻塞式运行
+/// 都经这一处构造；新增任何能跑插件源码的 VM，一律调用本函数，不要自己 `new_with`；
+/// `mod tests` 里的静态守卫按本函数的名字与全 crate 的出现次数把关，并把 `Lua::new()`、
+/// `Lua::default()`、`unsafe_new*`、`new_with_options` 这些"绕过本函数"的拼法一并列为违规。
 ///
 /// 返回 `mlua::Result` 而非 `LuaHostResult`：构造与加固的失败都意味着这个 VM 不可信，
 /// 调用方必须一并当作启动失败处理（`plugin_event_loop` 就是这么做到的）。
@@ -1011,27 +1001,6 @@ fn install_ctx(
 
 const TEST_BOOTSTRAP: &str = include_str!("test_bootstrap.lua");
 
-// ── Replay Analyzer ──
-
-/// Replay analyzer 运行配置。
-#[derive(Debug, Clone)]
-pub struct LuaReplayConfig {
-    pub script_name: String,
-    pub plugin_id: String,
-    pub plugin_version: String,
-    pub subscriptions: Vec<String>,
-    pub outputs: Vec<String>,
-    pub context: serde_json::Value,
-    pub plugin_root: Option<std::path::PathBuf>,
-}
-
-/// Replay analyzer 输出。
-#[derive(Debug, Clone)]
-pub struct LuaReplayOutput {
-    pub events: Vec<Event>,
-    pub logs: Vec<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1078,22 +1047,6 @@ mod tests {
             }
         }
         matched
-    }
-
-    /// 一条喂给回放分析器的串口 RX 事件：主题用生产常量，避免和用例里订阅的
-    /// `subscriptions` 各写一份字面量而悄悄对不上。
-    fn replay_rx_event(text: &str) -> Event {
-        Event::new(
-            serial_topics::SERIAL_RX,
-            "serial:COM2",
-            tool_core::Direction::Rx,
-            Payload::Text(text.to_owned()),
-        )
-    }
-
-    /// 跑一遍回放分析器，失败直接 panic —— 这些用例断言的是成功路径的产物。
-    fn run_replay(source: &str, config: LuaReplayConfig, inputs: &[Event]) -> LuaReplayOutput {
-        crate::replay::run_replay_analyzer(source.to_owned(), config, inputs).unwrap()
     }
 
     /// 在一对一次性的总线/传输上跑完脚本并交回结果：沙箱用例的断言全在脚本里，
@@ -1810,190 +1763,6 @@ ctx.log.info("waiter-ready")
         );
     }
 
-    // ── replay analyzer 测试 ──
-
-    #[test]
-    fn replay_analyzer_no_serial_access() {
-        let source = r#"
-function on_replay_begin(session)
-end
-function on_replay_event(event)
-    -- 尝试访问 ctx.serial 应该失败
-    local ok, _ = pcall(function()
-        ctx.serial.list()
-    end)
-    assert(not ok, "ctx.serial should not be available")
-end
-function on_replay_end()
-end
-"#;
-
-        let config = LuaReplayConfig {
-            script_name: "test.lua".to_owned(),
-            plugin_id: "test".to_owned(),
-            plugin_version: "1.0.0".to_owned(),
-            subscriptions: vec![serial_topics::SERIAL_RX.to_owned()],
-            outputs: vec![],
-            context: json!({"id": "test", "name": "Test"}),
-            plugin_root: None,
-        };
-
-        let output = run_replay(source, config, &[replay_rx_event("hello")]);
-        // assert 失败会报 error，这里验证没有致命错误
-        assert!(output.events.is_empty());
-    }
-
-    #[test]
-    fn replay_analyzer_no_timer_access() {
-        let source = r#"
-function on_replay_begin(session)
-end
-function on_replay_event(event)
-    local ok, _ = pcall(function()
-        ctx.timer.after(10, function() end)
-    end)
-    assert(not ok, "ctx.timer should not be available")
-end
-function on_replay_end()
-end
-"#;
-
-        let config = LuaReplayConfig {
-            script_name: "test.lua".to_owned(),
-            plugin_id: "test".to_owned(),
-            plugin_version: "1.0.0".to_owned(),
-            subscriptions: vec![serial_topics::SERIAL_RX.to_owned()],
-            outputs: vec![],
-            context: json!({"id": "test", "name": "Test"}),
-            plugin_root: None,
-        };
-
-        let output = run_replay(source, config, &[replay_rx_event("hello")]);
-        assert!(output.events.is_empty());
-    }
-
-    #[test]
-    fn replay_analyzer_emit_has_correct_metadata() {
-        let source = r#"
-function on_replay_begin(session)
-end
-function on_replay_event(event)
-    ctx.replay.emit("protocol.demo.sample", { t = 1, value = 100 })
-end
-function on_replay_end()
-end
-"#;
-
-        let config = LuaReplayConfig {
-            script_name: "test.lua".to_owned(),
-            plugin_id: "demo.plugin".to_owned(),
-            plugin_version: "2.0.0".to_owned(),
-            subscriptions: vec![serial_topics::SERIAL_RX.to_owned()],
-            outputs: vec![],
-            context: json!({"id": "demo.plugin", "name": "Demo", "version": "2.0.0"}),
-            plugin_root: None,
-        };
-
-        // 输入事件留在手里：下面还要用它的 timestamp_ms 作比对
-        let input = replay_rx_event("test");
-
-        let output = run_replay(source, config, std::slice::from_ref(&input));
-        assert_eq!(output.events.len(), 1);
-
-        let derived = &output.events[0];
-        assert_eq!(derived.topic, "protocol.demo.sample");
-        assert!(derived.is_replay());
-        assert_eq!(derived.origin(), Some("replay_derived"));
-        assert_eq!(derived.category(), Some("derived"));
-        assert!(derived.meta_bool("derived"));
-        assert_eq!(derived.meta_str("plugin_id"), Some("demo.plugin"));
-        assert_eq!(derived.meta_str("plugin_version"), Some("2.0.0"));
-        assert!(!derived.meta_bool("recordable"));
-        // source 应包含 replay-analyzer 前缀
-        assert!(derived.source.starts_with("replay-analyzer:"));
-        // timestamp_ms 应该等于输入事件的时间戳
-        assert_eq!(derived.timestamp_ms, input.timestamp_ms);
-    }
-
-    #[test]
-    fn replay_analyzer_lifecycle() {
-        let source = r#"
-local phases = {}
-function on_replay_begin(session)
-    table.insert(phases, "begin")
-    ctx.replay.log("started with " .. session.event_count .. " events")
-end
-function on_replay_event(event)
-    table.insert(phases, "event")
-    ctx.replay.emit("test.out", { phase = "event" })
-end
-function on_replay_end()
-    table.insert(phases, "end")
-    ctx.replay.emit("test.out", { phase = "end" })
-end
-"#;
-
-        let config = LuaReplayConfig {
-            script_name: "lifecycle.lua".to_owned(),
-            plugin_id: "test.lifecycle".to_owned(),
-            plugin_version: "1.0.0".to_owned(),
-            subscriptions: vec![serial_topics::SERIAL_RX.to_owned()],
-            outputs: vec![],
-            context: json!({"id": "test.lifecycle", "name": "Lifecycle"}),
-            plugin_root: None,
-        };
-
-        let inputs = [replay_rx_event("a"), replay_rx_event("b")];
-
-        let output = run_replay(source, config, &inputs);
-
-        // 应该有 2 个 event 阶段 + 1 个 end 阶段 = 3 个 emit
-        assert_eq!(output.events.len(), 3);
-        // 日志应该有 begin 消息
-        assert!(
-            output
-                .logs
-                .iter()
-                .any(|l| l.contains("started with 2 events"))
-        );
-    }
-
-    #[test]
-    fn replay_analyzer_skips_unmatched_events() {
-        let source = r#"
-function on_replay_begin(session) end
-function on_replay_event(event)
-    ctx.replay.emit("test.out", {})
-end
-function on_replay_end() end
-"#;
-
-        let config = LuaReplayConfig {
-            script_name: "skip.lua".to_owned(),
-            plugin_id: "test.skip".to_owned(),
-            plugin_version: "1.0.0".to_owned(),
-            subscriptions: vec![serial_topics::SERIAL_RX.to_owned()],
-            outputs: vec![],
-            context: json!({"id": "test.skip", "name": "Skip"}),
-            plugin_root: None,
-        };
-
-        // 只有 1 个匹配的 RX 事件，另 1 个是 TX
-        let tx = Event::new(
-            serial_topics::SERIAL_TX,
-            "serial:COM2",
-            tool_core::Direction::Tx,
-            Payload::Text("tx".to_owned()),
-        );
-
-        let output = run_replay(source, config, &[replay_rx_event("rx"), tx]);
-        assert_eq!(
-            output.events.len(),
-            1,
-            "should only emit for matched RX event"
-        );
-    }
-
     #[test]
     fn sandbox_package_preload_is_read_only() {
         // 尝试写入 package.preload 应该被 metatable 拦截
@@ -2082,60 +1851,6 @@ assert(package.loadlib == nil or pcall(package.loadlib, "x.so", "y") == false)
 "#,
         );
         assert!(result.is_ok(), "字符串→chunk 逃逸未被挡住：{result:?}");
-    }
-
-    /// 第三处插件可达 VM（`replay.rs` 的 replay analyzer，跑第三方 `replay.lua`）必须与
-    /// 主沙箱同加固。它此前是裸 `Lua::new_with`：`dofile`/`loadfile`/`load` 全都活着，
-    /// 而且 `plugin_root` 为 `None` 时 `package.path` 停在 Lua 的默认值上 —— 那个默认值是
-    /// `setpath` 从进程环境里的 `LUA_PATH_5_4`/`LUA_PATH` 播种出来的（loadlib.c:288-311），
-    /// 等于"这台机器恰好设过 LUA_PATH"会改变沙箱边界。收紧 searcher 把环境相关性一并抹平，
-    /// 所以下面的判据只看 require 的报错里有没有文件探测的痕迹（`no file`），不引用任何
-    /// 具体路径，也不碰磁盘。
-    #[test]
-    fn replay_sandbox_has_no_file_loaders() {
-        let source = r#"
-assert(dofile == nil, "replay: dofile must be nil, got " .. type(dofile))
-assert(loadfile == nil, "replay: loadfile must be nil, got " .. type(loadfile))
-assert(load == nil, "replay: load must be nil, got " .. type(load))
-assert(package.searchpath == nil,
-    "replay: package.searchpath must be nil, got " .. type(package.searchpath))
--- base 不能整个没掉：pcall/assert 还在，说明是逐抹而非断粮
-assert(type(pcall) == "function", "replay: pcall must survive")
-package.path = "/hwbench-t2-replay-probe/?.lua"
-local probe_ok, probe_err = pcall(require, "hwbench_t2_replay_probe")
-assert(probe_ok == false, "replay: require must not resolve modules from the filesystem")
-assert(not tostring(probe_err):find("no file", 1, true),
-    "replay: require still probes host paths: " .. tostring(probe_err))
-assert(pcall(require, "hw.codec") == true,
-    "replay: require('hw.codec') must still resolve from the preload searcher")
-function on_replay_begin(session) end
-function on_replay_event(event) end
-function on_replay_end() end
-"#;
-        let config = LuaReplayConfig {
-            script_name: "harden_probe.lua".to_owned(),
-            plugin_id: "test.harden".to_owned(),
-            plugin_version: "1.0.0".to_owned(),
-            subscriptions: vec![serial_topics::SERIAL_RX.to_owned()],
-            outputs: vec![],
-            context: json!({"id": "test.harden", "name": "Harden"}),
-            plugin_root: None,
-        };
-        let output = crate::replay::run_replay_analyzer(source.to_owned(), config, &[]);
-        let output = match output {
-            Ok(output) => output,
-            Err(error) => panic!("replay 沙箱断言失败：{error}"),
-        };
-        assert!(
-            output.events.is_empty(),
-            "replay 沙箱用例不该产出事件：{:?}",
-            output.events
-        );
-        assert!(
-            output.logs.is_empty(),
-            "replay 沙箱用例不应产生回调错误：{:?}",
-            output.logs
-        );
     }
 
     /// 四处插件可达 VM 里的最后一处 —— `plugin_event_loop`（`run_plugin` 起的常驻线程，真实
@@ -2424,7 +2139,7 @@ assert(type(pcall) == "function", "event loop: pcall must survive")
         /// 文本守卫的极限要说清楚：`let lua: Lua = Default::default();` 这种靠类型推断的写法
         /// 没有任何拼法可匹配。所以每一处插件可达的 VM 都另外配了一条行为背垫
         /// （`sandbox_*` 走 `run_script_blocking`、`plugin_event_loop_runs_lua_*`、
-        /// `load_plugin_runs_lua_*`、`replay_sandbox_*`），拼法清单只是第一道网。
+        /// `load_plugin_runs_lua_*`），拼法清单只是第一道网。
         const FORBIDDEN_CONSTRUCTORS: [&str; 4] = [
             "Lua::new()",
             "Lua::default(",
@@ -2548,9 +2263,9 @@ fn other() {
         //    `unsafe_new*` / `new_with_options` —— 全都等价于"开了一台没人加固的 VM"；
         // 2. 全 crate 只许一处 `Lua::new_with(`，且必须在 `sandbox_lua` 体内；
         // 3. `sandbox_lua` 自己必须调 `harden_globals`。
-        // 规则 2 就是当初漏掉 replay.rs 的那道缝：那是一处 new_with(含 PACKAGE) 却没跟着
-        // harden_globals 的 VM —— 拼法再怎么补也都看不见它，因为它没用裸构造器。把构造收敛到
-        // 一处、把加固焊进那一处，"再开一个没加固的 VM" 才从"记得不记得"变成"过不过守卫"。
+        // 规则 2 把构造收敛到一处：拼法清单只看得见裸构造器，看不见 `new_with(含 PACKAGE)`
+        // 却没跟着 harden_globals 的 VM；把加固焊进唯一构造点，"再开一个没加固的 VM" 才从
+        // "记得不记得" 变成 "过不过守卫"。
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut production: Vec<(String, usize, String)> = Vec::new();
         let mut checked = 0usize;
@@ -2574,7 +2289,7 @@ fn other() {
             }
         }
         assert!(
-            checked >= 20,
+            checked >= 19,
             "扫描到的 .rs 文件过少（{checked}），守卫可能失效"
         );
 

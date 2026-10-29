@@ -80,7 +80,6 @@ impl WorkbenchApp {
         let line_ending = self.send.line_ending;
         let hex_strict = self.send.hex_strict;
         let transport = self.workbench.transport_endpoint();
-        let max_count = self.send.periodic_max_count;
         let event_sink = self.workbench.event_sink();
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let outcome = self.periodic_send.outcome.clone();
@@ -121,21 +120,6 @@ impl WorkbenchApp {
                 }
 
                 count += 1;
-                if let Some(max) = max_count
-                    && count >= max
-                {
-                    cancel.store(true, std::sync::atomic::Ordering::Release);
-                    let msg = format!("周期发送已完成（{max} 次）");
-                    event_sink.publish(tool_core::Event::system_log(
-                        tool_core::LogLevel::Info,
-                        "periodic",
-                        msg.clone(),
-                    ));
-                    if let Ok(mut slot) = outcome.lock() {
-                        *slot = Some((StatusLevel::Info, msg));
-                    }
-                    return;
-                }
             }
         });
     }

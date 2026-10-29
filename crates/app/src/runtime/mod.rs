@@ -5,12 +5,10 @@
 //! 的 inherent impl 形式分散实现，Rust 允许 inherent impl 跨文件。
 
 mod autosave;
-mod keys;
 pub(crate) mod marketplace;
 pub(crate) mod periodic_send;
 mod plugin;
 mod port_refresh;
-mod replay;
 mod timing;
 mod update;
 
@@ -19,7 +17,7 @@ use eframe::egui;
 
 impl WorkbenchApp {
     pub(crate) fn tick_pre_ui(&mut self, ctx: &egui::Context) {
-        // 先收取统一后台任务事件：串口、Replay、插件扫描和导出都在这里
+        // 先收取统一后台任务事件：串口、插件扫描和导出都在这里
         // 将结果安全地应用回 Workbench/UI 线程。
         self.workbench.tick(ctx.input(|input| input.time));
         self.sync_ports_from_workbench(false);
@@ -29,15 +27,10 @@ impl WorkbenchApp {
         self.plugin_summaries_cache = std::cell::OnceCell::new();
 
         // 通知队列在 status_bar 渲染时自动清理过期消息。
-        self.tick_recorder_status();
-        self.tick_replay(ctx);
         let plugin_started = self.perf.begin_frame();
         self.tick_plugin_lifecycle();
         self.perf.record_plugin_callback(plugin_started);
         self.sync_marketplace_installed_ids();
-        self.handle_keys(ctx);
-        self.flush_pending_command();
-        self.tick_key_recording(ctx);
         self.tick_port_refresh(ctx);
         self.tick_pending_port_open_notice(ctx);
         self.tick_reconnects(ctx);
@@ -48,12 +41,11 @@ impl WorkbenchApp {
         self.tick_native_export(ctx);
     }
 
-    pub(crate) fn tick_post_ui(&mut self, ctx: &egui::Context) {
+    pub(crate) fn tick_post_ui(&mut self, _ctx: &egui::Context) {
         let log_started = self.perf.begin_frame();
         let log_ingested = self.bottom_log_panel.ingest_pending();
         self.perf.record_log_ingest(log_started, log_ingested);
         self.process_ui_set_status();
-        self.command_palette(ctx);
     }
 
     /// 处理 Lua 插件通过 ctx.ui.set_status() 推送的状态栏通知。

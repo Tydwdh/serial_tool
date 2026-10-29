@@ -155,20 +155,25 @@ fn actions_height_id(layout: SendLayout) -> Id {
 fn render_options(ui: &mut Ui, view: &mut SendView<'_>) {
     let row = |ui: &mut Ui, view: &mut SendView<'_>| {
         ui.label("发送到");
-        let selected = view
-            .target_port
-            .as_deref()
-            .and_then(|id| view.ports.iter().find(|port| port.id == id))
-            .map(|port| port.label.clone())
-            .unwrap_or_else(|| "请选择串口".to_owned());
-        combo_slot(ui, 130.0, |ui| {
-            egui::ComboBox::from_id_salt("shared-send-target-port")
-                .width(130.0)
-                .selected_text(selected)
-                .show_ui(ui, |ui| {
-                    if view.ports.is_empty() {
-                        ui.add_enabled(false, egui::Label::new("无已打开串口"));
-                    } else {
+        if view.ports.len() <= 1 {
+            ui.label(
+                view.ports
+                    .first()
+                    .map(|port| port.label.as_str())
+                    .unwrap_or("未打开端口"),
+            );
+        } else {
+            let selected = view
+                .target_port
+                .as_deref()
+                .and_then(|id| view.ports.iter().find(|port| port.id == id))
+                .map(|port| port.label.clone())
+                .unwrap_or_else(|| "请选择串口".to_owned());
+            combo_slot(ui, 130.0, |ui| {
+                egui::ComboBox::from_id_salt("shared-send-target-port")
+                    .width(130.0)
+                    .selected_text(selected)
+                    .show_ui(ui, |ui| {
                         for port in view.ports {
                             ui.selectable_value(
                                 view.target_port,
@@ -176,9 +181,9 @@ fn render_options(ui: &mut Ui, view: &mut SendView<'_>) {
                                 &port.label,
                             );
                         }
-                    }
-                });
-        });
+                    });
+            });
+        }
         ui.separator();
         if design::choice_toggle(ui, !*view.hex_mode, "文本").clicked() {
             *view.hex_mode = false;
@@ -227,7 +232,7 @@ fn render_input(ui: &mut Ui, view: &mut SendView<'_>, input_height: f32) -> egui
     // 布局 TextEdit 之前取到的光标属于上一帧：本帧的上下键要按"按键前"的行位置判断。
     let before = cursor_index(ui, id).unwrap_or(0);
     let hint = if view.target_open {
-        "输入要发送的文本或 HEX，Ctrl+Enter 发送"
+        "输入要发送的文本或 HEX"
     } else {
         "请选择已打开的串口"
     };

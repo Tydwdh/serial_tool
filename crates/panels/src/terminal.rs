@@ -39,7 +39,7 @@ const CLEAR_CONFIRM_ID: &str = "terminal-clear-confirm";
 /// 终端端口列的短显示名：IPv4 地址 + 端口（如 `192.168.1.100:7125`）
 /// 只显示 IP 后两段（`1.100`），避免长端口名占据接收区视野；
 /// 其余端口名（COM3、虚拟端口等）原样返回。
-/// 仅用于界面显示，CSV/JSONL 导出与回放仍使用完整端口名。
+/// 仅用于界面显示，CSV/JSONL 导出仍使用完整端口名。
 fn short_port_display(port: &str) -> Cow<'_, str> {
     let host = port.rsplit_once(':').map(|(h, _)| h).unwrap_or(port);
     let segments: Vec<&str> = host.split('.').collect();
@@ -59,7 +59,7 @@ fn short_port_display(port: &str) -> Cow<'_, str> {
 }
 
 /// 端口列的显示名：配置了别名则显示别名，否则回退到短显示（IPv4 后两段）。
-/// 仅用于界面显示，CSV/JSONL 导出与回放仍使用完整端口名。
+/// 仅用于界面显示，CSV/JSONL 导出仍使用完整端口名。
 fn port_display_name<'b>(port: &'b str, port_aliases: &'b HashMap<String, String>) -> Cow<'b, str> {
     if let Some(alias) = port_aliases.get(port)
         && !alias.trim().is_empty()
@@ -107,9 +107,6 @@ pub struct TerminalPanel {
     pending_navigate_to_id: Option<u64>,
     /// 跳转目标行高亮：(目标行 id, 起始时间秒)。渲染时若命中且未超时画强调色并淡出。
     navigate_highlight: Option<(u64, f64)>,
-
-    selected_entry_id: Option<u64>,
-    detail_entry_id: Option<u64>,
 
     /// 用户可调的字体大小（10-24px），默认 13.0
     pub font_size: f32,
@@ -417,8 +414,6 @@ impl TerminalPanel {
             pending_navigate_to_id: None,
             navigate_highlight: None,
 
-            selected_entry_id: None,
-            detail_entry_id: None,
             font_size: 13.0,
             merge_window_ms: 5,
             selection: RowSelection::new(0),
@@ -467,8 +462,6 @@ impl TerminalPanel {
         self.store.clear();
         self.view_index.clear();
         self.auto_scroll.reset();
-        self.selected_entry_id = None;
-        self.detail_entry_id = None;
         self.search.clear();
         self.port_filter = None;
         self.virtual_rows.clear();
@@ -528,24 +521,8 @@ impl TerminalPanel {
     fn enforce_max_entries(&mut self) {
         let removed = self.store.set_max_entries(self.scrollback.max_entries());
         self.view_index.mark_removed(removed.iter().copied());
-        self.forget_removed_entries(&removed);
         self.scrollback
             .note_trimmed(removed.len(), self.store.len());
-    }
-
-    /// 条目已从 Store 移除后，清掉仍指向它们的面板状态并标记发生过截断。
-    fn forget_removed_entries(&mut self, removed: &[u64]) {
-        if removed.is_empty() {
-            return;
-        }
-        for &id in removed {
-            if self.selected_entry_id == Some(id) {
-                self.selected_entry_id = None;
-            }
-            if self.detail_entry_id == Some(id) {
-                self.detail_entry_id = None;
-            }
-        }
     }
 
     fn current_view_filter(&self) -> TerminalViewFilter {
@@ -728,21 +705,6 @@ impl TerminalPanel {
                 "区分大小写（HEX 为大写，默认不区分）",
             );
 
-            ui.label("端口");
-            // 该行会换行：ComboBox 必须按已知宽度占位，否则窄面板下它直接溢出，
-            // 并把这行所属 Ui 的换行边界撑大（见 design::combo_slot）。
-            design::combo_slot(ui, 100.0, |ui| {
-                egui::ComboBox::from_id_salt("terminal-port-filter")
-                    .width(100.0)
-                    .selected_text(self.port_filter.as_deref().unwrap_or("全部"))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.port_filter, None, "全部");
-                        for port in self.store.port_names() {
-                            ui.selectable_value(&mut self.port_filter, Some(port.clone()), port);
-                        }
-                    });
-            });
-
             if design::button(ui, ICON_FILTER_ALT_OFF, "清除筛选", ButtonKind::Ghost).clicked()
             {
                 self.search.clear();
@@ -819,7 +781,6 @@ impl TerminalPanel {
         };
 
         self.apply_render_outcome(&scroll_key, render_outcome, scroll_delta_y, ui);
-        self.detail_popup(ui.ctx());
 
         // 高亮超时清理
         if let Some((_, start)) = self.navigate_highlight {
@@ -872,112 +833,10 @@ impl TerminalPanel {
         self.view_index.mark_changed(update.changed_ids);
         self.view_index
             .mark_removed(update.removed_ids.iter().copied());
-        self.forget_removed_entries(&update.removed_ids);
         self.scrollback
             .note_trimmed(update.removed_ids.len(), self.store.len());
         // 全局上限裁掉的条目走与 set_max_entries 相同的清理路径。
         self.enforce_max_entries();
-    }
-
-    fn detail_popup(&mut self, ctx: &egui::Context) {
-        let Some(entry_id) = self.detail_entry_id else {
-            return;
-        };
-
-        // 详情行与接收区行共用同一套文本构造，避免两套格式化逻辑漂移。
-        let Some(detail) = self.store.get(entry_id).map(VisibleRow::from_item) else {
-            self.detail_entry_id = None;
-            return;
-        };
-
-        let mut open = true;
-
-        egui::Window::new("接收详情")
-            .open(&mut open)
-            .resizable(true)
-            .default_size([760.0, 520.0])
-            .min_size([520.0, 320.0])
-            .show(ctx, |ui| {
-                let (dir_label, dir_color) = direction_label(detail.direction);
-
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(detail.timestamp_label.as_ref()).monospace());
-                    ui.label(
-                        RichText::new(detail.port.as_deref().unwrap_or(""))
-                            .monospace()
-                            .color(theme::yellow()),
-                    );
-                    ui.label(RichText::new(dir_label).strong().color(dir_color));
-                    ui.label(
-                        RichText::new(format!("#{} · {}B", detail.id, detail.raw_text.len()))
-                            .color(theme::text_dimmed())
-                            .small(),
-                    );
-
-                    if ui.button("复制内容").clicked() {
-                        copy_text_with_feedback(ui, detail.raw_text.to_string(), "已复制原始内容");
-                    }
-
-                    if ui.button("复制显示文本").clicked() {
-                        copy_text_with_feedback(
-                            ui,
-                            detail.display_text.to_string(),
-                            "已复制显示文本",
-                        );
-                    }
-
-                    if ui.button("复制 HEX").clicked() {
-                        copy_text_with_feedback(ui, detail.hex_text.to_string(), "已复制 HEX");
-                    }
-                });
-
-                ui.separator();
-
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .max_height(ui.available_height())
-                    .show(ui, |ui| {
-                        // 原始段显示的是转义后的文本，行数仍按未转义内容估算。
-                        detail_text_block(
-                            ui,
-                            "原始内容",
-                            format_raw_visible(&detail.raw_text),
-                            &detail.raw_text,
-                            6,
-                            14,
-                        );
-
-                        ui.separator();
-
-                        detail_text_block(
-                            ui,
-                            "显示文本",
-                            detail.display_text.to_string(),
-                            &detail.display_text,
-                            4,
-                            10,
-                        );
-
-                        ui.separator();
-
-                        detail_text_block(
-                            ui,
-                            "HEX",
-                            detail.hex_text.to_string(),
-                            &detail.hex_text,
-                            4,
-                            12,
-                        );
-                    });
-            });
-
-        // Escape 关闭详情窗口（在 show() 闭包外处理，避免 open 的借用冲突）
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            open = false;
-        }
-        if !open {
-            self.detail_entry_id = None;
-        }
     }
 }
 
@@ -2471,6 +2330,8 @@ fn format_terminal_text(text: &str) -> String {
     output
 }
 
+// fmt_ts 已提取到 crate::fmt_ts
+
 fn format_raw_visible(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -2486,8 +2347,6 @@ fn format_raw_visible(text: &str) -> String {
     }
     output
 }
-
-// fmt_ts 已提取到 crate::fmt_ts
 
 fn direction_label(direction: Direction) -> (&'static str, Color32) {
     match direction {
@@ -2506,31 +2365,6 @@ fn direction_export_label(direction: Direction) -> &'static str {
         Direction::Tx => "TX",
         Direction::Internal => "INTERNAL",
     }
-}
-
-/// 详情窗口的一段只读文本：加粗标题 + 等宽多行 TextEdit。
-/// `text` 是显示内容，`measured` 用于估算行数（原始模式显示的是转义后的文本，
-/// 但行数仍按未转义内容计算）。
-fn detail_text_block(
-    ui: &mut egui::Ui,
-    title: &str,
-    mut text: String,
-    measured: &str,
-    min_rows: usize,
-    max_rows: usize,
-) {
-    ui.label(RichText::new(title).strong());
-    ui.add(
-        egui::TextEdit::multiline(&mut text)
-            .desired_width(f32::INFINITY)
-            .desired_rows(detail_text_rows(measured, min_rows, max_rows))
-            .font(egui::TextStyle::Monospace),
-    );
-}
-
-fn detail_text_rows(text: &str, min_rows: usize, max_rows: usize) -> usize {
-    let line_count = text.lines().count().max(1);
-    line_count.clamp(min_rows, max_rows)
 }
 
 #[cfg(test)]

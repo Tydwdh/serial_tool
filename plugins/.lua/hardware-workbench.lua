@@ -226,11 +226,6 @@
 ---@field resume fun(id: string)
 ---@field list fun(): HwTask[]
 
----@class HwReplayApi
----@field emit fun(topic: string, payload?: HwJsonValue)
----@field log fun(message: string)
----@field current_event fun(): HwEvent?
-
 ---@class HwTestApi
 ---@field [string] any
 
@@ -248,7 +243,6 @@
 ---@field fs HwFsApi
 ---@field config HwConfigApi
 ---@field task HwTaskApi
----@field replay HwReplayApi
 ---@field test HwTestApi
 
 ---@type HwContext
@@ -256,16 +250,3 @@ ctx = ctx
 
 ---@param callback fun()
 function on_disable(callback) end
-
----@class HwReplaySession
----@field start_ms integer
----@field end_ms integer
----@field event_count integer
-
----@param session HwReplaySession
-function on_replay_begin(session) end
-
----@param event HwEvent
-function on_replay_event(event) end
-
-function on_replay_end() end

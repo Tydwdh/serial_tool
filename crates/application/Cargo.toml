@@ -20,7 +20,6 @@ thiserror.workspace = true
 tool-core = { path = "../core" }
 tool-databus = { path = "../databus" }
 tool-platform = { path = "../platform" }
-tool-recorder = { path = "../recorder" }
 tool-extension = { path = "../extension" }
 tool-marketplace = { path = "../marketplace" }
 tool-lua-host = { path = "../lua_host" }

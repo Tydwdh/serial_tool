@@ -313,53 +313,11 @@ impl Event {
             self.metadata = json!({});
         }
         // 上一步已保证 metadata 是 object；这里仍按 Option 处理而不是 expect，
-        // 是刻意防御：宁可静默跳过这一次写入，也不让打日志/回放的路径 panic。
+        // 是刻意防御：宁可静默跳过这一次写入，也不让打日志/导出的路径 panic。
         if let Some(obj) = self.metadata.as_object_mut() {
             obj.insert(key.to_owned(), value);
         }
     }
-
-    /// 检查是否为回放事件。
-    pub fn is_replay(&self) -> bool {
-        self.meta_bool("replay")
-    }
-
-    /// 检查事件类别（raw / derived / ephemeral）。
-    pub fn category(&self) -> Option<&str> {
-        self.meta_str("category")
-    }
-
-    /// 检查事件来源（live / replay / replay_derived）。
-    pub fn origin(&self) -> Option<&str> {
-        self.meta_str("origin")
-    }
-}
-
-/// 给 analyzer 输出事件打 replay_derived 标记。
-/// `derived_from` 可以是一个或多个输入事件 id。
-pub fn mark_derived_event(
-    event: &mut Event,
-    plugin_id: &str,
-    plugin_version: &str,
-    derived_from: &[u64],
-) {
-    event.source = format!("replay-analyzer:{plugin_id}");
-    event.meta_set("replay", Value::Bool(true));
-    event.meta_set("origin", Value::String("replay_derived".to_owned()));
-    event.meta_set("category", Value::String("derived".to_owned()));
-    event.meta_set("derived", Value::Bool(true));
-    event.meta_set("plugin_id", Value::String(plugin_id.to_owned()));
-    event.meta_set("plugin_version", Value::String(plugin_version.to_owned()));
-    event.meta_set(
-        "derived_from",
-        Value::Array(
-            derived_from
-                .iter()
-                .map(|id| Value::Number((*id).into()))
-                .collect(),
-        ),
-    );
-    event.meta_set("recordable", Value::Bool(false));
 }
 
 /// 跨平台挂钟时间，单位为毫秒。
@@ -388,7 +346,7 @@ pub fn monotonic_now_nanos() -> u64 {
 }
 
 /// Topic 匹配：`*` 后缀按前缀匹配，不带 `*` 精确匹配。
-/// 供实时事件路由、replay analyzer、Lua callback 统一使用。
+/// 供实时事件路由、Lua callback 统一使用。
 /// Configuration for the WebSocket-backed network serial endpoint.
 ///
 /// One definition lives here because both the shared platform layer and the
@@ -711,23 +669,6 @@ mod tests {
         assert!(event.meta_bool("flag"));
         event.meta_set("name", json!("hello"));
         assert_eq!(event.meta_str("name"), Some("hello"));
-    }
-
-    #[test]
-    fn mark_derived_event_sets_full_metadata() {
-        let mut event = Event::new("protocol.x", "src", Direction::Internal, Payload::Empty);
-        mark_derived_event(&mut event, "myplugin", "1.2.3", &[10, 20]);
-        assert!(event.is_replay());
-        assert_eq!(event.origin(), Some("replay_derived"));
-        assert_eq!(event.category(), Some("derived"));
-        assert!(event.meta_bool("derived"));
-        assert_eq!(event.meta_str("plugin_id"), Some("myplugin"));
-        assert_eq!(event.meta_str("plugin_version"), Some("1.2.3"));
-        assert!(!event.meta_bool("recordable"));
-        // derived_from 为数组 [10, 20]
-        let derived_from = event.meta_get("derived_from").unwrap();
-        assert_eq!(derived_from, &json!([10, 20]));
-        assert_eq!(event.source, "replay-analyzer:myplugin");
     }
 
     #[test]

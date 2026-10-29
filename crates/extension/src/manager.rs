@@ -14,7 +14,7 @@ use tool_transport::TransportManager;
 use crate::host_services::{DialogRequest, FileAccessBroker};
 use crate::manifest::{
     PluginDiagnostic, PluginDiagnosticSeverity, PluginManifest, PluginState, PluginSummary,
-    ReplayAnalyzerEntry, SUPPORTED_PLUGIN_API_VERSIONS,
+    SUPPORTED_PLUGIN_API_VERSIONS,
 };
 use crate::permission::PermissionManager;
 use crate::{ExtensionError, ExtensionResult, translate_error};
@@ -460,8 +460,7 @@ impl PluginManager {
         self.records
             .values()
             .map(|record| {
-                // 只在 Running 状态时做命令对账；未启用时 registered 一定为空，
-                // 不应把所有声明命令都标为 missing。
+                // 只在 Running 状态时做命令对账；未启用时 registered 一定为空。
                 let (registered_commands, missing_commands, undeclared_commands) =
                     if matches!(record.state, PluginState::Running) {
                         let registered: Vec<String> = self
@@ -469,7 +468,6 @@ impl PluginManager {
                             .get(&record.manifest.id)
                             .cloned()
                             .unwrap_or_default();
-
                         let declared: Vec<String> = record
                             .manifest
                             .contributes
@@ -477,24 +475,20 @@ impl PluginManager {
                             .iter()
                             .map(|c| c.id.clone())
                             .collect();
-
                         let declared_ids: HashSet<&str> =
                             declared.iter().map(String::as_str).collect();
                         let registered_ids: HashSet<&str> =
                             registered.iter().map(String::as_str).collect();
-
                         let missing: Vec<String> = declared
                             .iter()
                             .filter(|id| !registered_ids.contains(id.as_str()))
                             .cloned()
                             .collect();
-
                         let undeclared: Vec<String> = registered
                             .iter()
                             .filter(|id| !declared_ids.contains(id.as_str()))
                             .cloned()
                             .collect();
-
                         (registered, missing, undeclared)
                     } else {
                         (Vec::new(), Vec::new(), Vec::new())
@@ -518,9 +512,6 @@ impl PluginManager {
                     license: record.manifest.license.clone(),
                     category: record.manifest.category.clone(),
                     icon: record.manifest.icon.clone(),
-                    has_replay_analyzer: record.manifest.has_replay_analyzer(),
-                    replay_subscriptions: record.manifest.replay_subscriptions().to_vec(),
-                    replay_outputs: record.manifest.replay_outputs().to_vec(),
                     registered_commands,
                     missing_commands,
                     undeclared_commands,
@@ -535,20 +526,6 @@ impl PluginManager {
 
     pub fn roots(&self) -> Vec<PathBuf> {
         self.roots.clone()
-    }
-
-    /// 列出所有已发现插件中有 replay analyzer 的配置。
-    /// 不需要插件处于 enabled 状态。
-    pub fn replay_analyzer_entries(&self) -> Vec<ReplayAnalyzerEntry> {
-        self.records
-            .iter()
-            .filter(|(_, r)| r.manifest.has_replay_analyzer())
-            .map(|(id, r)| ReplayAnalyzerEntry {
-                plugin_id: id.clone(),
-                manifest: r.manifest.clone(),
-                root: r.root.clone(),
-            })
-            .collect()
     }
 
     pub fn count(&self) -> usize {
@@ -596,13 +573,6 @@ impl PluginManager {
     }
 
     pub fn process_event(&mut self, event: &Event) -> usize {
-        // 关键：回放事件不再送进实时插件。
-        // 否则 replay RX 会被 Lua 插件再次解析，重新发布 protocol.demo.sample，
-        // 和录制文件里原有的 protocol.demo.sample 混在一起。
-        if event.is_replay() {
-            return 0;
-        }
-
         // ── 管理面事件：命令注册/注销 ──
         if event.topic == topics::PLUGIN_COMMAND_REGISTERED {
             self.handle_command_registered(event);
@@ -838,7 +808,7 @@ impl PluginManager {
             "command_not_found",
             Some(plugin_id.to_owned()),
             path,
-            format!("命令 '{command}' 未注册，点击或快捷键触发无效"),
+            format!("命令 '{command}' 未注册，无法执行"),
         );
     }
 
@@ -982,7 +952,6 @@ ctx.bus.publish('protocol.pid.sample', { t = 1, target = 50, actual = 43, output
             permissions: vec!["filesystem".to_owned()],
             contributes: crate::manifest::PluginContributes::default(),
             live: None,
-            replay: None,
             description: None,
             author: None,
             homepage: None,

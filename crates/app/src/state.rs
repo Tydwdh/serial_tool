@@ -262,7 +262,6 @@ pub(crate) struct SendUiState {
     pub(crate) periodic_enabled: bool,
     pub(crate) periodic_interval_ms: String,
     pub(crate) periodic_send_count: u64,
-    pub(crate) periodic_max_count: Option<u64>,
 }
 
 impl Default for SendUiState {
@@ -283,7 +282,6 @@ impl Default for SendUiState {
             periodic_enabled: false,
             periodic_interval_ms: "1000".to_owned(),
             periodic_send_count: 0,
-            periodic_max_count: None,
         }
     }
 }
