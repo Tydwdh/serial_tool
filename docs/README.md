@@ -22,8 +22,7 @@
 
 1. [发布流程](RELEASE.md)：版本、tag、CI 与 update.json。
 2. [发布包与安装器](INSTALLER.md)：便携包、Windows 安装器、Ubuntu `.deb`。
-3. [在线模式](web.md)：能力矩阵、非等价项、构建与部署。
-4. [发布说明模板](releases/TEMPLATE.md)。
+3. [发布说明模板](releases/TEMPLATE.md)。
 
 ## 仓库策略
 

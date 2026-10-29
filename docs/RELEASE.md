@@ -7,7 +7,6 @@
 
 - Windows x64：主开发与发布平台。
 - Linux x86_64（Ubuntu 22.04+）：`.deb` 打包并经 CI 冒烟测试。
-- 浏览器在线模式：见 [web.md](web.md)。
 - macOS **不受支持**：仓库没有 `target_os = "macos"` 的代码分支（全仓 grep 无命中），CI 不构建
   macOS，也没有对应发布包；`transport` 在该平台只会落到未经验证的非 Windows `serialport` 路径。
 
@@ -58,14 +57,13 @@ git push origin v1.3.0
 ## CI 自动流程
 
 工作流定义在 `.github/workflows/ci.yml`，触发条件为 `workflow_dispatch`、推送到 `main`、
-推送 `v*` 标签或针对 `main` 的 PR（`.github/workflows/ci.yml:3`）。共 4 个作业：
+推送 `v*` 标签或针对 `main` 的 PR（`.github/workflows/ci.yml:3`）。共 3 个作业：
 
 | 作业 | Runner | 作用 |
 |------|--------|------|
 | `test`（Test & Lint） | `windows-latest` | 格式、clippy、测试、压力门禁；标签上再打包并构建安装器 |
 | `linux-deb`（Ubuntu .deb） | `ubuntu-22.04` | Linux 检查/测试，构建 `.deb` 并安装冒烟 |
-| `wasm`（WASM check） | `ubuntu-latest` | `wasm32-unknown-unknown` 编译与 lint |
-| `release`（GitHub Release） | `windows-latest` | 仅在标签上运行，依赖前三个作业 |
+| `release`（GitHub Release） | `windows-latest` | 仅在标签上运行，依赖前两个作业 |
 
 ### `test`
 
@@ -93,12 +91,6 @@ git push origin v1.3.0
 随后构建 `.deb`（`bash ./installer/linux/build-deb.sh`，`:144`），校验包元数据（`:147`），并在
 `/usr/lib/hardware-workbench/`、桌面项、图标与字体上做安装冒烟（`:153`）。标签上再生成
 `dist/SHA256SUMS-linux.txt`（`:172`）并上传 `hardware-workbench-linux` artifact（`:178`）。
-
-### `wasm`
-
-安装 `wasm32-unknown-unknown` 目标（`:198`），对可在 wasm32 上编译的成员执行
-`cargo check`（`:211`）与 clippy（`:214`），排除 native-only 的 `tool-extension`、`tool-lua-host`、
-`tool-marketplace`、`tool-transport`、`tool-updater`。
 
 ### `release`
 
@@ -140,7 +132,6 @@ git push origin v1.3.0
 格式合法的 SHA256。
 
 该更新流程用于 **Windows 便携版**；Ubuntu `.deb` 用户下载新版本 `.deb` 后用系统包管理器升级。
-浏览器版不读 `update.json`。
 
 ## 发布插件
 
