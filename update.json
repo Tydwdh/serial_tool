@@ -1,14 +1,17 @@
 {
-  "version": "1.3.2",
-  "sha256": "e9e88d516a32cf33834afa8036808aaae76263906b63995b130dae5cd13ea735",
-  "date": "2026-10-15",
   "changelog": [
-    "**gcode-sender v0.9.0：G文件 在\"发送区不是文件\"时自动打开文件选择框。**",
-    "**右上角通知卡片的读条时间减半**：卡片按该级别 TTL 的一半展示（提示 1.5s → 0.75s、",
-    "**删掉重连里那段\"3 秒预算 + 10ms 轮询\"的死循环（判据 `Io(WouldBlock)` 没有任何生产者）。**",
-    "**重连系统：native 的\"单槽 + 死字段\"换成真状态机（多端口 / 真退避 / 真上限 / 能取消），退避与上限与浏览器共用一份。**",
-    "**接收区不再把未封存的数据压成一行（\"…\"）：超过一行的数据现在按原样折行显示。**",
-    "**串口断连不再\"只有手动重连才发现\"：Windows worker 每秒探一次设备存活，失效自己退出并发布带原因的断开事件。**"
+    "**移除 Web 版（wasm32 / 在线模式）**：删除 wasm 目标、浏览器组合根、web 平台适配、omniLua 引擎与差分测试、Web CI 与 GitHub Pages 发布、Trunk 工程与 web 文档。`v1.3.2` 是最后一个包含在线版的版本；桌面端功能与原生网络串口保持不变。",
+    "**收口为单一 native 组合根**：`AppRuntime` trait、`AppCapabilities`/`Capability` 门控与面板能力过滤删除；UI 直接持有 `Workbench`。`tool-plugin-api` 只保留 native 插件契约。",
+    "**发布形态变更**：版本号升至 2.0.0；在线版不再更新，GitHub Pages 停用。",
+    "**架构评审的六项深化全部落地**（读侧 / 命令执行 / 滚动缓冲 / 插件 ctx / 面板分发 / 传输 seam）：",
+    "**配置路径行不再被右侧裁切：图标按钮按真实 32px 计宽，标签/路径列显式占位。**",
+    "**截断提醒不再逐帧重发，清空数据后也真正结束这一轮（接收区 / 日志面板）**：满载期间每条新事件",
+    "**文档集重启（第 62 轮）：docs/ 从零重写为 13 个文件——架构正文 + 已知差异登记册 +",
+    "**行级布局收口为无状态布局组件：`design::FieldRow` / `fitted_label` / `toolbar`。**",
+    "**界面视觉统一：控件高度、圆角、字号与层级色收口到同一套设计标记。**"
   ],
-  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v1.3.2/hardware-workbench-app.zip"
+  "date": "2026-10-30",
+  "sha256": "734b2e6dbf5738d980b1a9cef46c783ec6481eecda114f759356e75e6c3b852f",
+  "version": "2.0.0",
+  "download_url": "https://github.com/Tydwdh/serial_tool/releases/download/v2.0.0/hardware-workbench-app.zip"
 }
