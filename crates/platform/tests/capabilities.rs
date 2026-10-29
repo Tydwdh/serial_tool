@@ -2,8 +2,7 @@
 //!
 //! `tool-platform` is the boundary Application and the UI both depend on, so
 //! its identifiers, capability flags and native storage behaviour are pinned
-//! here. The `wasm32` implementations are exercised by the browser build; these
-//! tests cover the platform-neutral values plus the native storage capability.
+//! here.
 
 use futures_executor::block_on;
 use tempfile::tempdir;

@@ -212,3 +212,70 @@ fn native_port_item_projection_exists_exactly_once() {
          多出来的名字就是又分家了（顶栏/设备面板请调用 WorkbenchApp::native_port_items）"
     );
 }
+
+fn collect_production_rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_production_rust_sources(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// 删除 Web 版后，生产源码与清单里不许再出现 wasm 目标。
+#[test]
+fn no_wasm_target_in_production_sources() {
+    let root = crate_dir()
+        .parent()
+        .and_then(Path::parent)
+        .expect("crates/app 之上应恰好两级到工作区根")
+        .to_path_buf();
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(root.join("crates")).expect("读取 crates/") {
+        let crate_path = entry.expect("读取 crate 目录项").path();
+        if !crate_path.is_dir() {
+            continue;
+        }
+        let manifest = crate_path.join("Cargo.toml");
+        if manifest.is_file() {
+            files.push(manifest);
+        }
+        let build = crate_path.join("build.rs");
+        if build.is_file() {
+            files.push(build);
+        }
+        collect_production_rust_sources(&crate_path.join("src"), &mut files);
+    }
+    assert!(
+        files.len() > 50,
+        "只扫到 {} 个生产文件，扫描路径大概错了 —— 这条守卫会退化成零断言",
+        files.len()
+    );
+    let mut offenders = Vec::new();
+    for path in files {
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("读取 {} 失败：{error}", path.display()));
+        let haystack = if path.extension().is_some_and(|ext| ext == "rs") {
+            squeezed_code(&text)
+        } else {
+            text
+        };
+        if haystack.contains(concat!("wasm", "32")) {
+            offenders.push(
+                path.strip_prefix(&root)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string(),
+            );
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "生产源码/清单里仍有 wasm 目标：{offenders:?}"
+    );
+}

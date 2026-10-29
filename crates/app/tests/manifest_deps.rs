@@ -317,7 +317,7 @@ tool-application = { path = "../application" }
 my-recorder = { package = "tool-recorder", path = "../recorder" }
 serde.workspace = true
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+[target.'cfg(unix)'.dependencies]
 open = "5"
 renamed-market = { package = "tool-marketplace", path = "../marketplace" }
 

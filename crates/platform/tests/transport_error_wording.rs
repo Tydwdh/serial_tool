@@ -177,7 +177,6 @@ fn every_variant_has_its_own_chinese_message_and_none_falls_through() {
 /// （`serialport` 不是本 crate 的依赖，`tool_transport::sp` 也是私有的），
 /// 它的中文由 `crates/transport` 自己的 `translate_error_covers_all_variants` 钉住。
 #[test]
-#[cfg(not(target_arch = "wasm32"))]
 fn the_two_mappers_agree_on_every_overlapping_failure() {
     // ① 「端口没开」在两个枚举里各有一个变体。
     assert_eq!(

@@ -285,10 +285,7 @@ impl PluginsPanel {
                         && design::button(ui, ICON_FOLDER_OPEN, "打开目录", ButtonKind::Secondary)
                             .clicked()
                     {
-                        #[cfg(not(target_arch = "wasm32"))]
                         let _ = open::that(&self.root);
-                        #[cfg(target_arch = "wasm32")]
-                        ui.label("浏览器没有本地插件目录");
                     }
                     if options.show_import && ui.button("导入 Lua 插件").clicked() {
                         return Some(PluginPanelEvent::ImportPlugin);
@@ -1003,18 +1000,13 @@ fn diagnostic_row(ui: &mut egui::Ui, diagnostic: &PluginDiagnosticView) {
             copy_text_with_feedback(ui, diagnostic.path.clone(), "已复制插件诊断路径");
         }
         if design::button(ui, ICON_OPEN_IN_NEW, "打开位置", ButtonKind::Ghost).clicked() {
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                let path = std::path::Path::new(&diagnostic.path);
-                let target = if path.is_file() {
-                    path.parent().unwrap_or(path)
-                } else {
-                    path
-                };
-                let _ = open::that(target);
-            }
-            #[cfg(target_arch = "wasm32")]
-            ui.label("浏览器无法打开本地路径");
+            let path = std::path::Path::new(&diagnostic.path);
+            let target = if path.is_file() {
+                path.parent().unwrap_or(path)
+            } else {
+                path
+            };
+            let _ = open::that(target);
         }
     });
 }

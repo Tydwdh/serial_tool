@@ -251,9 +251,7 @@ pub fn run_plugin(
 /// searcher 后它依然可被插件直接调用，用任意模板探测宿主文件是否存在。它是这一类漏洞的
 /// 兄弟，所以一并置 nil —— 探测元数据也是信息泄露，而这里没有任何插件需要它。
 ///
-/// Web 端 `omnilua` 走 `SandboxConfig::remove_globals`
-/// （`plugin_runtime/src/web_lua.rs:87-97`），本函数让 native 与它对等，并多抹掉
-/// `load` 与 `package.searchpath`。
+/// 沙箱在脚本执行前移除 `dofile`、`loadfile`、`load` 与 `package.searchpath`。
 pub(crate) fn harden_globals(lua: &Lua) -> mlua::Result<()> {
     for name in ["dofile", "loadfile", "load"] {
         lua.globals().set(name, mlua::Value::Nil)?;

@@ -2022,12 +2022,11 @@ fn network_reconnect_takes_the_network_branch() {
 }
 
 /// 同一个端口登记第二次重连时，**前一个循环必须先被取消**（规则见
-/// `task_model::cancel_deregistered_task`，四份 web 收尾与 native 共用这一份）。
+/// `task_model::cancel_deregistered_task`，native 的连接收尾共用这一份）。
 ///
-/// 为什么这条用例必须在 native：wasm 那半没有测试运行器（全仓零 `wasm_bindgen_test`），
-/// 而缺这道保护的恰恰是 web 的四份连接收尾 —— `insert` 就地覆盖前一个 task 的 id 之后，
-/// 终态快照上的清理按 id 比对认不出它，只有 `Connected` / `Disconnected` 会按端口摘除，
-/// 于是那个循环再也停不下来。规则收成一份之后，只有这里能驱动它，所以这份保护的红利
+/// 这条用例必须在这里：`insert` 就地覆盖前一个 task 的 id 之后，终态快照上的清理
+/// 按 id 比对认不出它，只有 `Connected` / `Disconnected` 会按端口摘除，于是那个循环
+/// 再也停不下来。规则收成一份之后，只有这里能驱动它，所以这份保护的红利
 /// （漏改任一调用点立刻红）全靠本用例。
 ///
 /// 驱动手段沿用本文件的「关不掉的 worker」：对端收下并读掉 WebSocket 握手后永不回话，

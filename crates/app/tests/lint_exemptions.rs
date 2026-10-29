@@ -17,34 +17,9 @@ use std::path::{Path, PathBuf};
 /// 用单字符串而不是元组，是为了让清单留在 rustfmt 的列宽内（元组会被拆成
 /// 四行一组，反而看不出"这是一张清单"）。
 ///
-/// 这份清单是**扫出来的**，不是记出来的。`dead_code` 那 3 条分两种形状：
-/// `crates/app/src/shared_keymap.rs` 的 2 条写在
-/// `#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]` 里 —— 那些项只有 wasm 侧的
-/// `web` 模块会读（`mod web` 是 `cfg(target_arch = "wasm32")`），所以 native 构建里它们必然报死；
-/// 剩下 1 条是 `crates/app/src/state.rs` 里普通的 `#[allow(dead_code)]`，护着一个刻意暂停、
-/// 尚无调用者的方法（该模块本身是 `cfg(not(target_arch = "wasm32"))`）。前者对应
-/// `docs/known-gaps.md` 的「Linux / wasm 死代码与豁免」条目。
+/// 这份清单是**扫出来的**，不是记出来的。`dead_code` 那 1 条在
+/// `crates/app/src/state.rs`，护着一个刻意暂停、尚无调用者的方法。
 /// `cfg_attr` 形式也算豁免 —— 它同样只是让告警静默，所以一起钉住。
-///
-/// **判"某条豁免是不是空转"的正确做法**（第 9 轮与第 17 轮都用它，第 17 轮据此删掉 6 条；
-/// 第 28 轮再跑一次，当时那 10 条全部复发、一条没删；第 29 轮把
-/// `transport/network.rs` 的 2 条 `too_many_arguments` 换成单参数的 `NetworkWorkerContext`，
-/// 清单收到 8 条；第 30 轮把 `panels/lib.rs::next_auto_scroll_state` 的 8 个位置参数换成
-/// 单参数的 `AutoScrollInputs`，清单收到 7 条；第 32 轮把 `panels/gauge.rs::draw_arc`
-/// 的 5 个相邻同型 `f32` 收进命名字段的 `ArcSpec`，清单收到 6 条；第 33 轮把
-/// `panels/serial.rs::render_port_editor` 的 7 个位置参数（`alias` 与 `selected_group`
-/// 是相邻同型的 `&mut String`）收进命名字段的 `PortEditorInputs`，清单收到 5 条
-/// —— 摘下来的那些不需要重测，代码里已经没有它们的落点）：
-/// 把 `crates/` 下的豁免一次摘光，然后**分别**跑两条 clippy ——
-/// `--workspace --all-targets`（native）与 `--target wasm32-unknown-unknown -p hardware-workbench-app`
-/// （wasm）—— 谁点名谁就还需要，两边都不点名的才是死的。只看并集不够：
-/// `cfg_attr(target_arch = "wasm32", …)` 护着的东西在 native 构建里本来就活着，
-/// native 永远不会抱怨它，只在 wasm 那半边才测得出来。
-///
-/// 还有个坑：`-D warnings` 下某个 crate 一失败，依赖它的 crate 就**根本不会被编译**，
-/// 于是这一条只报了最前面那几个站点就收工（第 28 轮 native 只跑到 `tool-transport` 停下，
-/// `crates/app` 那 4 条完全没被检查到）。要把每条豁免都点到位，得把这两条命令
-/// **去掉 `-D warnings` 再各跑一遍**收集全部告警 —— 否则"没复发"可能只是"没检查"。
 const EXPECTED: &[&str] = &[
     // clippy 豁免（2 条，重新数过；第 29 轮把 `transport/network.rs` 的 2 条
     // `too_many_arguments` 换成单参数的 `NetworkWorkerContext`、第 30 轮把 `panels/lib.rs`
@@ -53,9 +28,7 @@ const EXPECTED: &[&str] = &[
     // `PortEditorInputs` 之后各删掉）
     "crates/app/src/config.rs clippy::large_enum_variant",
     "crates/lua_host/src/lib.rs clippy::too_many_arguments",
-    // dead_code 豁免（3 条；第 17 轮摘光重测后，6 条 wasm 侧的判为空转已删）
-    "crates/app/src/shared_keymap.rs dead_code",
-    "crates/app/src/shared_keymap.rs dead_code",
+    // dead_code 豁免（1 条）
     "crates/app/src/state.rs dead_code",
 ];
 
@@ -149,8 +122,8 @@ fn allows_in_line(line: &str) -> Vec<String> {
         .collect()
 }
 
-/// （文件, lint）→ 出现次数。同一文件同一 lint 可以有多条（`app/src/shared_keymap.rs`
-/// 就有两条 `dead_code`），所以必须数次数，去重会让"在已登记文件里再加一条"溜过去。
+/// （文件, lint）→ 出现次数。同一文件同一 lint 可以有多条，所以必须数次数，
+/// 去重会让"在已登记文件里再加一条"溜过去。
 fn collected() -> BTreeMap<(String, String), usize> {
     let root = workspace_root();
     let mut files = Vec::new();
@@ -366,7 +339,7 @@ fn rustflags_do_not_silence_lints() {
     );
     assert!(
         silencing_rustflags(
-            "[target.wasm32-unknown-unknown]\nrustflags = [\"--cfg=web_sys_unstable_apis\"]\n"
+            "[target.x86_64-unknown-linux-gnu]\nrustflags = [\"--cfg=feature_flag\"]\n"
         )
         .is_empty(),
         "合法的 `--cfg` 不该被报成静默"

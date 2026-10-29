@@ -576,11 +576,8 @@ fn parse_byte(token: &str) -> Result<u8, String> {
 /// 从 JSON-RPC 文本中提取 gcode 响应内容。
 /// 只处理 `notify_gcode_response` 推送，其余 notify（状态/进程统计等）一律忽略。
 ///
-/// 收在 `tool-core` 的原因：`crates/platform/Cargo.toml` 把 `tool-transport` 放在
-/// `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]` 下，wasm 侧的
-/// `web_network.rs` 链接不到它，而两端都无条件依赖 `tool-core`——这正是本函数此前
-/// 在 transport 与 platform 各存一份的原因。不要把 wasm 侧改指回 `tool_transport`，
-/// 那会直接让 wasm 构建失败。
+/// 收在 `tool-core`：`tool-platform` 与 `tool-transport` 都无条件依赖它，
+/// 解析规则放在这里，两侧共用同一份实现。
 pub fn parse_gcode_response(text: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     if value.get("method").and_then(serde_json::Value::as_str) != Some("notify_gcode_response") {
@@ -884,20 +881,13 @@ mod tests {
         assert_eq!(LineEnding::default().suffix(), "");
     }
 
-    // ── gcode 响应解析：用例自 `tool-transport::network` 与
-    //    `tool-platform::web_network` 的两个测试模块合并迁入，原有断言逐字未改 ──
-    //
-    // 计数等式：tool-core +4 条 = tool-transport -3 条（另 1 条 `..._no_text_params` 是
-    // 净新增，用来钉住守卫之后的 `.first()?` / `.as_str()`）；wasm 侧那份
-    // `parses_only_gcode_notifications` 从来不计进原生测试数（`web_network` 整个模块被
-    // `#[cfg(target_arch = "wasm32")]` 挡住），它的两条断言按形状并入下面对应的用例，
-    // 两个旧模块的每条断言在这里都还有落点。
+    // ── gcode 响应解析：用例自 `tool-transport::network` 迁入，原有断言逐字未改 ──
 
     #[test]
     fn extracts_gcode_response() {
         let msg = r#"{"jsonrpc":"2.0","method":"notify_gcode_response","params":["ok BED_SIZE"]}"#;
         assert_eq!(parse_gcode_response(msg).as_deref(), Some("ok BED_SIZE"));
-        // 自 wasm 副本并入的第二条正例（原来只断言 `"ok"`）。
+        // 第二条正例（原来只断言 `"ok"`）。
         let another = r#"{"jsonrpc":"2.0","method":"notify_gcode_response","params":["ok"]}"#;
         assert_eq!(parse_gcode_response(another).as_deref(), Some("ok"));
     }
@@ -906,12 +896,12 @@ mod tests {
     fn ignores_status_update() {
         let msg = r#"{"jsonrpc":"2.0","method":"notify_status_update","params":[{"print_stats":{"state":"printing"}}]}"#;
         assert_eq!(parse_gcode_response(msg), None);
-        // 自 wasm 副本并入：`notify_status_update` + 空 `params`。它和上面那条一样在
+        // `notify_status_update` + 空 `params`。它和上面那条一样在
         // method 守卫处就返回 None，并没有走到 `.first()?`——真正钉住那一行的是
         // `ignores_gcode_notification_with_no_text_params`。
         let empty_params = r#"{"jsonrpc":"2.0","method":"notify_status_update","params":[]}"#;
         assert_eq!(parse_gcode_response(empty_params), None);
-        // 净新增（两份旧副本都没有这种形状）：非 gcode 推送、但首元素是字符串。
+        // 非 gcode 推送、但首元素是字符串。
         // 上面两条反例即使删掉 method 守卫也仍然返回 None（对象走 `.as_str()`、
         // 空数组走 `.first()?`），只有这条能钉住守卫本身。
         let text_payload =
