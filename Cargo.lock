@@ -1787,7 +1787,6 @@ dependencies = [
  "egui",
  "egui_material_icons",
  "egui_tiles",
- "js-sys",
  "log",
  "open",
  "rfd",
@@ -1803,13 +1802,8 @@ dependencies = [
  "tool-marketplace",
  "tool-panels",
  "tool-platform",
- "tool-plugin-api",
- "tool-plugin-runtime",
  "tool-transport",
  "tool-updater",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
  "winresource",
 ]
 

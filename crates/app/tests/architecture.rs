@@ -11,11 +11,11 @@
 //! 两种情况下本守卫都会静默保持绿色 —— 这些都是实证过的绕过向量，
 //! `manifest_deps.rs` 的元测试逐条钉住它们。
 //!
-//! 本文件还有第二类判定：**源码文本形状守卫**。它只用于钉住
-//! `#[cfg(target_arch = "wasm32")]` 门控的那半边（`src/main.rs` 的 `mod web`）：
-//! native 测试目标根本不编译它，本仓也没有 `wasm_bindgen_test`，运行期无从驱动，
-//! 于是把"两端必须同形"这件事钉在源码文本上。读文件失败一律 panic（路径写错时
-//! 不能退化成零断言），判定前还会去掉整行注释，免得注释里的代码样本把守卫喂成假绿。
+//! 本文件还有第二类判定：**源码文本形状守卫**。它只用于钉住 native 侧
+//! 无法在运行期驱动的形状（命令面板使用键、端口条目投影）：这些模块能编译，
+//! 但渲染需要 egui 上下文，运行期用例覆盖不到，于是把"只能有一份/只能用一个键"
+//! 钉在源码文本上。读文件失败一律 panic（路径写错时不能退化成零断言），
+//! 判定前还会去掉整行注释，免得注释里的代码样本把守卫喂成假绿。
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -125,19 +125,15 @@ fn squeezed_code(text: &str) -> String {
         .collect()
 }
 
-/// 命令面板的「使用顺序」两端必须同一键空间：命令 id。
+/// 命令面板的「使用顺序」必须以命令 id 为键，而不是标题。
 ///
-/// 为什么是 id 而不是标题：标题会随插件与改名变，id 不会；而且这个设置项两端都叫
-/// `command_usage_order`（各自存各自的存储），同名却不同键空间就永远对不齐。
-/// web 半边在 native 测试目标里不编译（见文件头），所以这里钉的是源码形状。
+/// 标题会随插件与改名变，id 不会；设置项 `command_usage_order` 的读写都必须用 id。
 #[test]
-fn palette_usage_order_is_keyed_by_command_id_on_both_ends() {
-    // 写入端两端的形状必须一模一样：命令 id 那个绑定被挪到列表最前。
+fn palette_usage_order_is_keyed_by_command_id() {
     // 判定带分号：只比"前缀"会让 insert(0, command_id.clone().to_uppercase()) 蒙过去。
     const RECORD_TO_FRONT: &str = "usage_order.insert(0,command_id.clone());";
 
     let native = squeezed_code(&read_source("src/ui/command_palette.rs"));
-    let web = squeezed_code(&read_source("src/web/mod.rs"));
     let config = squeezed_code(&read_source("src/config.rs"));
 
     // 载入侧必须整份赋回：`usage_order` 里认不出的值只是排不到前面，不是脏数据，
@@ -149,31 +145,25 @@ fn palette_usage_order_is_keyed_by_command_id_on_both_ends() {
     );
 
     assert!(
-        native.contains("position(|used|used==&entry.id)")
-            && web.contains("position(|id|id==&command.id)"),
-        "排序读取必须拿使用顺序里的字符串比命令 id：\
-         native 要找 `used == &entry.id`，web 要找 `id == &command.id`"
+        native.contains("position(|used|used==&entry.id)"),
+        "排序读取必须拿使用顺序里的字符串比命令 id（找 `used == &entry.id`）"
     );
-    for (end, code) in [("native", &native), ("web", &web)] {
-        assert!(
-            code.contains(RECORD_TO_FRONT),
-            "{end} 端记录使用必须把命令 id 插到最前（找 {RECORD_TO_FRONT}）；\
-             写成标题就是两端键空间又分叉了"
-        );
-    }
+    assert!(
+        native.contains(RECORD_TO_FRONT),
+        "记录使用必须把命令 id 插到最前（找 {RECORD_TO_FRONT}）；写成标题就是键空间分叉"
+    );
     // 派发出口只有一个值，且就是命令 id：标题再被带出来当键，这条就会红。
     assert!(
         native.contains("pending_command=Some(command_id);"),
-        "native 面板派发出去的命令 id 必须就是记录使用的那个值（找 `pending_command = Some(command_id);`）"
+        "面板派发出去的命令 id 必须就是记录使用的那个值（找 `pending_command = Some(command_id);`）"
     );
     for forbidden in [
         "used==&entry.label",
         "used==&entry.title",
-        "id==&command.title",
         "Option<(String,String)>",
     ] {
         assert!(
-            !native.contains(forbidden) && !web.contains(forbidden),
+            !native.contains(forbidden),
             "命令面板的候选派发/排序不许再把标题（label/title）当使用键，\
              也不许把 (id, 标题) 成对带出渲染层：发现 {forbidden}"
         );

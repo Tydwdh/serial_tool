@@ -82,9 +82,9 @@ fn the_dead_pending_reconnect_state_is_gone() {
     );
 }
 
-/// 退避公式与上限只有一份实现，native 与浏览器共用。
+/// 退避公式与上限只有一份实现。
 #[test]
-fn the_backoff_formula_and_attempt_cap_are_shared_by_both_hosts() {
+fn the_backoff_formula_and_attempt_cap_have_one_definition() {
     let shared = read("src/reconnect.rs");
     assert!(
         shared.contains("pub(crate) fn reconnect_delay(attempts: u32) -> f64"),
@@ -93,20 +93,6 @@ fn the_backoff_formula_and_attempt_cap_are_shared_by_both_hosts() {
     assert!(
         shared.contains("pub(crate) const RECONNECT_MAX_ATTEMPTS: u32 = 10;"),
         "尝试上限必须只有一个定义"
-    );
-
-    let web = read("src/web/serial.rs");
-    assert!(
-        !web.contains("fn web_reconnect_delay"),
-        "浏览器侧不许再抄一份退避公式"
-    );
-    assert!(
-        web.contains("crate::reconnect::reconnect_delay("),
-        "浏览器侧必须用共享公式"
-    );
-    assert!(
-        !web.contains(">= 10 {"),
-        "浏览器侧的重试上限必须用共享常量，不许再写死 10"
     );
 
     let native = read("src/commands.rs");

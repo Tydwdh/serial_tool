@@ -5,16 +5,13 @@
 //! `0.0s (1/10)`；派发也不是循环（端口回到枚举列表当帧派一次，失败就再也不试），
 //! 而且只认 `selected_port` 一个端口。
 //!
-//! 现在：按端口记账、真退避、有次数上限、能取消，并且 **native 与浏览器共用同一套退避
-//! 公式与上限**（从前 `0.5·2ⁿ / 8s / 10 次` 只长在浏览器侧，native 侧连公式都没有）。
+//! 现在：按端口记账、真退避、有次数上限、能取消。
 //!
 //! 纯状态机：不读时钟（`now` 由调用方给）、不派发命令、不碰 UI —— 那三件由组合根做，
 //! 判定逻辑因此可以在没有 egui、没有串口的测试里逐格驱动。
 
-#[cfg(not(target_arch = "wasm32"))]
 use std::collections::BTreeMap;
 
-#[cfg(not(target_arch = "wasm32"))]
 use tool_application::TaskId;
 
 /// 自动重连的最大尝试次数：到这个数就放弃，并明确告诉用户。
@@ -25,34 +22,30 @@ pub(crate) fn reconnect_delay(attempts: u32) -> f64 {
     (0.5 * 2_f64.powi(attempts.min(4) as i32)).min(8.0)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 /// 一个端口的待重连状态。
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ReconnectEntry {
     pub(crate) port: String,
     /// 已经失败的尝试次数（不含正在飞的那一次）。
     pub(crate) attempts: u32,
-    /// 下一次尝试的时间（秒，来自 `ctx.input().time` / `web_now_seconds()`）。
+    /// 下一次尝试的时间（秒，来自 `ctx.input().time`）。
     pub(crate) next_try_at: f64,
     /// 已派发、还没定终态的那次尝试。
     pub(crate) task_id: Option<TaskId>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum ReconnectOutcome {
     Retry { attempts: u32, delay: f64 },
     GaveUp { attempts: u32 },
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 /// 待重连端口表。
 #[derive(Default)]
 pub(crate) struct ReconnectTracker {
     entries: BTreeMap<String, ReconnectEntry>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl ReconnectTracker {
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -150,7 +143,7 @@ impl ReconnectTracker {
     }
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

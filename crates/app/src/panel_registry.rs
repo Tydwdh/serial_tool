@@ -63,17 +63,8 @@ impl Default for PanelRegistry {
 }
 
 impl PanelRegistry {
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn builtin() -> Self {
         Self::for_capabilities(AppCapabilities::native())
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn web() -> Self {
-        // Web keeps the native Dock positions. Panels whose capability has no
-        // browser equivalent yet remain explicitly unavailable; implemented
-        // panels use the same registry/layout rather than a second shell.
-        Self::for_capabilities(AppCapabilities::web())
     }
 
     pub(crate) fn for_capabilities(capabilities: AppCapabilities) -> Self {
