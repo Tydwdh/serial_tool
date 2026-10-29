@@ -18,7 +18,7 @@ use crate::globals::{
 };
 use crate::host_services::{LineBufferMap, LuaHostServices, line_buffer_key};
 
-/// Shared ctx pattern matcher (native and web use the same rules).
+/// Shared ctx pattern matcher.
 pub(crate) use tool_plugin_api::ctx::match_pattern as match_pat;
 
 /// 端口名大小写不敏感比较（Windows 串口号 `com3` / `COM3` 视为同一端口）。
