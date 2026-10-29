@@ -9,8 +9,7 @@ use crate::{AppCapabilities, AppCommand, CommandOutcome, TaskSnapshot};
 /// The runtime contract the shared UI reads through.
 ///
 /// Writes go through [`dispatch`](Self::dispatch); reads go through the
-/// `query_*` methods. Both composition roots implement this one interface so
-/// the shared shell never binds a concrete runtime type.
+/// `query_*` methods. The native composition root implements this interface.
 pub trait AppRuntime {
     fn capabilities(&self) -> AppCapabilities;
 

@@ -1,9 +1,8 @@
 //! One command plan, two platform adapters.
 //!
 //! Every `AppCommand` is resolved here exactly once — validation, routing,
-//! outcome text and the task kind. The composition roots implement
-//! [`CommandEffects`] with the operations that genuinely differ (threads vs
-//! promises, filesystem vs download, native vs browser plugin runtime).
+//! outcome text and the task kind. The native composition root implements
+//! [`CommandEffects`] with the operations that genuinely differ.
 
 use std::path::PathBuf;
 
@@ -69,16 +68,6 @@ pub trait CommandEffects {
             "当前平台不支持按路径加载回放".to_owned(),
         ))
     }
-    fn load_replay_text(
-        &mut self,
-        name: String,
-        text: String,
-    ) -> Result<CommandOutcome, CommandError> {
-        let _ = (name, text);
-        Err(CommandError::InvalidCommand(
-            "当前平台不支持按文本加载回放".to_owned(),
-        ))
-    }
     fn replay_play(&mut self) -> Result<(), CommandError>;
     fn replay_pause(&mut self) -> Result<(), CommandError>;
     fn replay_stop(&mut self) -> Result<(), CommandError>;
@@ -112,18 +101,6 @@ pub trait CommandEffects {
             "市场和更新由桌面组合根负责".to_owned(),
         ))
     }
-    #[cfg(target_arch = "wasm32")]
-    fn install_marketplace_plugin(
-        &mut self,
-        plugin_id: String,
-        manifest_url: String,
-        main_url: String,
-    ) -> Result<CommandOutcome, CommandError> {
-        let _ = (plugin_id, manifest_url, main_url);
-        Err(CommandError::InvalidCommand(
-            "当前平台不支持插件市场安装".to_owned(),
-        ))
-    }
     fn check_for_update(&mut self) -> Result<CommandOutcome, CommandError> {
         Err(CommandError::InvalidCommand(
             "市场和更新由桌面组合根负责".to_owned(),
@@ -139,7 +116,7 @@ pub trait CommandEffects {
 }
 
 /// Resolve and execute one command. This is the only `match` over
-/// `AppCommand`; both composition roots call it through their adapter.
+/// `AppCommand`; the native composition root calls it through its adapter.
 pub fn execute<E: CommandEffects + ?Sized>(
     effects: &mut E,
     command: AppCommand,
@@ -193,10 +170,7 @@ pub fn execute<E: CommandEffects + ?Sized>(
             effects.replay_add_bookmark(name);
             Ok(CommandOutcome::Done)
         }
-        #[cfg(not(target_arch = "wasm32"))]
         AppCommand::LoadReplay { file } => effects.load_replay(file),
-        #[cfg(target_arch = "wasm32")]
-        AppCommand::LoadReplayText { name, text } => effects.load_replay_text(name, text),
         AppCommand::ReplayPlay => {
             effects.replay_play()?;
             Ok(CommandOutcome::Done)
@@ -243,12 +217,6 @@ pub fn execute<E: CommandEffects + ?Sized>(
         }
         AppCommand::ReloadPlugins => effects.reload_plugins(),
         AppCommand::RefreshMarketplace { url } => effects.refresh_marketplace(url),
-        #[cfg(target_arch = "wasm32")]
-        AppCommand::InstallMarketplacePlugin {
-            plugin_id,
-            manifest_url,
-            main_url,
-        } => effects.install_marketplace_plugin(plugin_id, manifest_url, main_url),
         AppCommand::CheckForUpdate => effects.check_for_update(),
         AppCommand::DiscoverPlugins { roots } => effects.discover_plugins(roots),
         AppCommand::ExecutePluginCommand {

@@ -12,8 +12,7 @@ use tool_platform::{NetworkSerialConfig, PortId, SerialSettings};
 /// Platform-neutral command failure.
 ///
 /// `Display` is the bare Chinese body; the native composition root wraps it in
-/// `AppError` to add its classification prefix, while web maps it straight to
-/// the string its existing callers expect.
+/// `AppError` to add its classification prefix.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum CommandError {
     #[error("{0}")]
@@ -134,14 +133,8 @@ pub enum AppCommand {
         name: Option<String>,
     },
 
-    #[cfg(not(target_arch = "wasm32"))]
     LoadReplay {
         file: FileHandle,
-    },
-    #[cfg(target_arch = "wasm32")]
-    LoadReplayText {
-        name: String,
-        text: String,
     },
 
     ReplayPlay,
@@ -183,15 +176,6 @@ pub enum AppCommand {
 
     RefreshMarketplace {
         url: String,
-    },
-
-    /// Install the same plugin.json + main.lua sources published by a
-    /// marketplace registry. Application owns the asynchronous fetch task.
-    #[cfg(target_arch = "wasm32")]
-    InstallMarketplacePlugin {
-        plugin_id: String,
-        manifest_url: String,
-        main_url: String,
     },
 
     CheckForUpdate,

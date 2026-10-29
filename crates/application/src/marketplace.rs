@@ -39,7 +39,6 @@ pub struct MarketplaceStatusView {
     pub installing: Vec<String>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl From<tool_marketplace::RegistryPlugin> for MarketplacePluginView {
     fn from(plugin: tool_marketplace::RegistryPlugin) -> Self {
         Self {
@@ -63,7 +62,6 @@ impl From<tool_marketplace::RegistryPlugin> for MarketplacePluginView {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl From<tool_marketplace::Registry> for MarketplaceView {
     fn from(registry: tool_marketplace::Registry) -> Self {
         Self {

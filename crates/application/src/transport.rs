@@ -38,7 +38,6 @@ impl std::fmt::Display for PortTypeView {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl From<tool_transport::PortType> for PortTypeView {
     fn from(port_type: tool_transport::PortType) -> Self {
         match port_type {
@@ -100,7 +99,6 @@ impl From<PortDescriptor> for PortView {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl From<tool_transport::SerialPortDescriptor> for PortView {
     fn from(port: tool_transport::SerialPortDescriptor) -> Self {
         let detail = PortTypeView::from(port.port_type);
@@ -167,7 +165,6 @@ impl PortStatusView {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl From<tool_transport::TransportStatus> for PortStatusView {
     fn from(status: tool_transport::TransportStatus) -> Self {
         Self {
@@ -256,7 +253,6 @@ impl TransportView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(not(target_arch = "wasm32"))]
     use tool_transport::SerialPortDescriptor;
 
     #[test]
