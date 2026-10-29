@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>硬件调试工作台 · 串口监视模式</title>
+<style>
+  html, body {
+    margin: 0;
+    min-height: 100%;
+    background: #0f1115;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    box-sizing: border-box;
+  }
+  svg {
+    width: min(1200px, 100%);
+    height: auto;
+    display: block;
+  }
+</style>
+</head>
+<body>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-label="串口监视模式界面效果图" class="sans">
+  <title>硬件调试工作台 · 串口监视模式</title>
+  <style>
+    svg {
+      --fg: #e6e8ee;
+      --muted: #9aa3b2;
+      --border: #303744;
+      --surface: #1b1f27;
+      --accent: #6ea8fe;
+      --success: #4cc38a;
+      --warning: #e5b567;
+      --error: #e06c75;
+      --c1: #7dcfff;
+      --c2: #9ece6a;
+      --c3: #e0af68;
+      --c4: #bb9af7;
+      --c5: #f7768e;
+      --c6: #7aa2f7;
+    }
+    .sans { font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans SC", sans-serif; }
+    .mono { font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace; }
+    text { dominant-baseline: middle; }
+  </style>
+
+  <rect x="8" y="8" width="1184" height="744" rx="16" fill="var(--surface)" stroke="var(--border)"/>
+
+  <!-- 顶栏：只留连接、断开、重连、录制、更多 -->
+  <rect x="24" y="18" width="28" height="28" rx="8" fill="var(--accent)" fill-opacity="0.14" stroke="var(--accent)" stroke-opacity="0.35"/>
+  <text x="38" y="32" text-anchor="middle" font-size="10.5" font-weight="700" fill="var(--accent)" class="mono">HW</text>
+  <text x="62" y="30" font-size="15" font-weight="600" fill="var(--fg)">硬件调试工作台</text>
+  <text x="62" y="45" font-size="9" fill="var(--muted)" letter-spacing="0.9">SERIAL MONITOR</text>
+
+  <rect x="220" y="14" width="310" height="38" rx="9" fill="var(--fg)" fill-opacity="0.03" stroke="var(--border)"/>
+  <circle cx="238" cy="33" r="3.5" fill="var(--success)"/>
+  <text x="250" y="33" font-size="13.5" font-weight="600" fill="var(--fg)">COM3</text>
+  <line x1="300" y1="23" x2="300" y2="43" stroke="var(--border)"/>
+  <text x="312" y="33" font-size="10.5" fill="var(--success)">已连接</text>
+  <text x="358" y="33" font-size="10.5" fill="var(--muted)">115200 · 8-N-1</text>
+  <path d="M500 29l5 5 5-5" fill="none" stroke="var(--muted)" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <rect x="544" y="14" width="58" height="38" rx="9" fill="none" stroke="var(--border)"/>
+  <text x="573" y="33" text-anchor="middle" font-size="11" fill="var(--fg)">断开</text>
+  <rect x="610" y="14" width="38" height="38" rx="9" fill="none" stroke="var(--border)"/>
+  <path d="M623 33a7 7 0 1 1 2 5" fill="none" stroke="var(--muted)" stroke-width="1.4" stroke-linecap="round"/>
+  <path d="M623 27v6h-6" fill="none" stroke="var(--muted)" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <rect x="974" y="14" width="78" height="38" rx="9" fill="none" stroke="var(--border)"/>
+  <circle cx="990" cy="33" r="3.5" fill="var(--error)"/>
+  <text x="1002" y="33" font-size="11" fill="var(--fg)">录制</text>
+  <rect x="1060" y="14" width="76" height="38" rx="9" fill="none" stroke="var(--border)"/>
+  <text x="1098" y="33" text-anchor="middle" font-size="11" fill="var(--fg)">更多 ⋯</text>
+
+  <line x1="8" y1="62" x2="1192" y2="62" stroke="var(--border)"/>
+
+  <!-- 终端：默认占满主区 -->
+  <rect x="16" y="76" width="1168" height="564" rx="10" fill="var(--fg)" fill-opacity="0.02" stroke="var(--border)"/>
+  <text x="32" y="98" font-size="12.5" font-weight="600" fill="var(--accent)">终端</text>
+  <rect x="32" y="107" width="24" height="2" rx="1" fill="var(--accent)"/>
+  <text x="80" y="98" font-size="12.5" fill="var(--muted)">日志</text>
+
+  <rect x="560" y="85" width="132" height="26" rx="7" fill="var(--fg)" fill-opacity="0.04" stroke="var(--border)"/>
+  <rect x="562" y="87" width="42" height="22" rx="5" fill="var(--accent)" fill-opacity="0.14"/>
+  <text x="583" y="98" text-anchor="middle" font-size="9.5" fill="var(--accent)">全部</text>
+  <text x="625" y="98" text-anchor="middle" font-size="9.5" fill="var(--muted)">RX</text>
+  <text x="667" y="98" text-anchor="middle" font-size="9.5" fill="var(--muted)">TX</text>
+
+  <rect x="704" y="85" width="48" height="26" rx="7" fill="var(--fg)" fill-opacity="0.04" stroke="var(--border)"/>
+  <text x="728" y="98" text-anchor="middle" font-size="9.5" fill="var(--muted)">HEX</text>
+  <rect x="760" y="85" width="48" height="26" rx="7" fill="var(--fg)" fill-opacity="0.04" stroke="var(--border)"/>
+  <text x="784" y="98" text-anchor="middle" font-size="9.5" fill="var(--muted)">原始</text>
+
+  <rect x="824" y="85" width="150" height="26" rx="7" fill="var(--fg)" fill-opacity="0.04" stroke="var(--border)"/>
+  <circle cx="836" cy="98" r="4.5" fill="none" stroke="var(--muted)" stroke-width="1.2"/>
+  <line x1="839" y1="101" x2="843" y2="105" stroke="var(--muted)" stroke-width="1.2" stroke-linecap="round"/>
+  <text x="850" y="98" font-size="9" fill="var(--muted)">过滤当前端口…</text>
+
+  <text x="1020" y="98" font-size="9.5" fill="var(--muted)">暂停跟随</text>
+  <text x="1084" y="98" font-size="9.5" fill="var(--muted)">导出</text>
+  <text x="1136" y="98" font-size="9.5" fill="var(--muted)">清空</text>
+  <line x1="16" y1="120" x2="1184" y2="120" stroke="var(--border)"/>
+
+  <rect x="16" y="128" width="1168" height="30" fill="var(--fg)" fill-opacity="0.014"/>
+  <text x="32" y="143" font-size="9.5" fill="var(--muted)" class="mono">14:32:08.412</text>
+  <rect x="122" y="136" width="26" height="14" rx="4" fill="var(--c1)" fill-opacity="0.14"/>
+  <text x="135" y="143" text-anchor="middle" font-size="8.5" fill="var(--c1)">RX</text>
+  <text x="158" y="143" font-size="10.5" fill="var(--c1)" class="mono">$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47</text>
+
+  <text x="32" y="173" font-size="9.5" fill="var(--muted)" class="mono">14:32:08.415</text>
+  <rect x="122" y="166" width="26" height="14" rx="4" fill="var(--c2)" fill-opacity="0.14"/>
+  <text x="135" y="173" text-anchor="middle" font-size="8.5" fill="var(--c2)">RX</text>
+  <text x="158" y="173" font-size="10.5" fill="var(--c2)" class="mono">[Klipper] MCU 'mcu' config loaded</text>
+
+  <rect x="16" y="188" width="1168" height="30" fill="var(--fg)" fill-opacity="0.014"/>
+  <text x="32" y="203" font-size="9.5" fill="var(--muted)" class="mono">14:32:08.420</text>
+  <rect x="122" y="196" width="26" height="14" rx="4" fill="var(--c3)" fill-opacity="0.14"/>
+  <text x="135" y="203" text-anchor="middle" font-size="8.5" fill="var(--c3)">TX</text>
+  <text x="158" y="203" font-size="10.5" fill="var(--c3)" class="mono">M105</text>
+
+  <text x="32" y="233" font-size="9.5" fill="var(--muted)" class="mono">14:32:08.512</text>
+  <rect x="122" y="226" width="26" height="14" rx="4" fill="var(--c1)" fill-opacity="0.14"/>
+  <text x="135" y="233" text-anchor="middle" font-size="8.5" fill="var(--c1)">RX</text>
+  <text x="158" y="233" font-size="10.5" fill="var(--c1)" class="mono">T:210.4 /210.0 B:60.1 /60.0</text>
+
+  <rect x="16" y="248" width="1168" height="30" fill="var(--fg)" fill-opacity="0.014"/>
+  <text x="32" y="263" font-size="9.5" fill="var(--muted)" class="mono">14:32:08.530</text>
+  <rect x="122" y="256" width="26" height="14" rx="4" fill="var(--error)" fill-opacity="0.14"/>
+  <text x="135" y="263" text-anchor="middle" font-size="8.5" fill="var(--error)">RX</text>
+  <text x="158" y="263" font-size="10.5" fill="var(--error)" class="mono">!! ADC out of range</text>
+
+  <text x="32" y="293" font-size="9.5" fill="var(--muted)" class="mono">14:32:08.534</text>
+  <rect x="122" y="286" width="26" height="14" rx="4" fill="var(--c2)" fill-opacity="0.14"/>
+  <text x="135" y="293" text-anchor="middle" font-size="8.5" fill="var(--c2)">RX</text>
+  <text x="158" y="293" font-size="10.5" fill="var(--c2)" class="mono">ok</text>
+
+  <rect x="16" y="308" width="1168" height="30" fill="var(--fg)" fill-opacity="0.014"/>
+  <text x="32" y="323" font-size="9.5" fill="var(--muted)" class="mono">14:32:08.701</text>
+  <rect x="122" y="316" width="26" height="14" rx="4" fill="var(--c1)" fill-opacity="0.14"/>
+  <text x="135" y="323" text-anchor="middle" font-size="8.5" fill="var(--c1)">RX</text>
+  <text x="158" y="323" font-size="10.5" fill="var(--c1)" class="mono">// probe: triggered @ 1.234</text>
+
+  <text x="32" y="353" font-size="9.5" fill="var(--muted)" class="mono">14:32:08.720</text>
+  <rect x="122" y="346" width="26" height="14" rx="4" fill="var(--warning)" fill-opacity="0.14"/>
+  <text x="135" y="353" text-anchor="middle" font-size="8.5" fill="var(--warning)">RX</text>
+  <text x="158" y="353" font-size="10.5" fill="var(--warning)" class="mono">echo: cold extrusion prevented</text>
+
+  <rect x="16" y="368" width="1168" height="30" fill="var(--fg)" fill-opacity="0.014"/>
+  <text x="32" y="383" font-size="9.5" fill="var(--muted)" class="mono">14:32:08.905</text>
+  <rect x="122" y="376" width="26" height="14" rx="4" fill="var(--c3)" fill-opacity="0.14"/>
+  <text x="135" y="383" text-anchor="middle" font-size="8.5" fill="var(--c3)">TX</text>
+  <text x="158" y="383" font-size="10.5" fill="var(--c3)" class="mono">M104 S215</text>
+
+  <text x="32" y="413" font-size="9.5" fill="var(--muted)" class="mono">14:32:09.010</text>
+  <rect x="122" y="406" width="26" height="14" rx="4" fill="var(--c1)" fill-opacity="0.14"/>
+  <text x="135" y="413" text-anchor="middle" font-size="8.5" fill="var(--c1)">RX</text>
+  <text x="158" y="413" font-size="10.5" fill="var(--c1)" class="mono">ok T:210.4 /210.0 B:60.1 /60.0</text>
+
+  <rect x="16" y="428" width="1168" height="30" fill="var(--fg)" fill-opacity="0.014"/>
+  <text x="32" y="443" font-size="9.5" fill="var(--muted)" class="mono">14:32:09.112</text>
+  <rect x="122" y="436" width="26" height="14" rx="4" fill="var(--c2)" fill-opacity="0.14"/>
+  <text x="135" y="443" text-anchor="middle" font-size="8.5" fill="var(--c2)">RX</text>
+  <text x="158" y="443" font-size="10.5" fill="var(--c2)" class="mono">echo: busy processing command</text>
+
+  <text x="32" y="473" font-size="9.5" fill="var(--muted)" class="mono">14:32:09.208</text>
+  <rect x="122" y="466" width="26" height="14" rx="4" fill="var(--c1)" fill-opacity="0.14"/>
+  <text x="135" y="473" text-anchor="middle" font-size="8.5" fill="var(--c1)">RX</text>
+  <text x="158" y="473" font-size="10.5" fill="var(--c1)" class="mono">{"temp":210.4,"target":210.0,"bed":60.1}</text>
+
+  <rect x="16" y="488" width="1168" height="30" fill="var(--fg)" fill-opacity="0.014"/>
+  <text x="32" y="503" font-size="9.5" fill="var(--muted)" class="mono">14:32:09.310</text>
+  <rect x="122" y="496" width="26" height="14" rx="4" fill="var(--c3)" fill-opacity="0.14"/>
+  <text x="135" y="503" text-anchor="middle" font-size="8.5" fill="var(--c3)">TX</text>
+  <text x="158" y="503" font-size="10.5" fill="var(--c3)" class="mono">M114</text>
+
+  <text x="32" y="533" font-size="9.5" fill="var(--muted)" class="mono">14:32:09.402</text>
+  <rect x="122" y="526" width="26" height="14" rx="4" fill="var(--c1)" fill-opacity="0.14"/>
+  <text x="135" y="533" text-anchor="middle" font-size="8.5" fill="var(--c1)">RX</text>
+  <text x="158" y="533" font-size="10.5" fill="var(--c1)" class="mono">X:120.00 Y:80.00 Z:10.00 E:0.00</text>
+
+  <rect x="16" y="548" width="1168" height="30" fill="var(--fg)" fill-opacity="0.014"/>
+  <text x="32" y="563" font-size="9.5" fill="var(--muted)" class="mono">14:32:09.511</text>
+  <rect x="122" y="556" width="26" height="14" rx="4" fill="var(--c2)" fill-opacity="0.14"/>
+  <text x="135" y="563" text-anchor="middle" font-size="8.5" fill="var(--c2)">RX</text>
+  <text x="158" y="563" font-size="10.5" fill="var(--c2)" class="mono">// Klipper state: Ready</text>
+
+  <text x="32" y="593" font-size="9.5" fill="var(--muted)" class="mono">14:32:09.620</text>
+  <rect x="122" y="586" width="26" height="14" rx="4" fill="var(--c2)" fill-opacity="0.14"/>
+  <text x="135" y="593" text-anchor="middle" font-size="8.5" fill="var(--c2)">RX</text>
+  <text x="158" y="593" font-size="10.5" fill="var(--c2)" class="mono">ok</text>
+
+  <text x="32" y="626" font-size="9" fill="var(--muted)">自动跟随 · 12,480 行 · 0 丢弃</text>
+  <text x="1168" y="626" text-anchor="end" font-size="9" fill="var(--muted)">UTF-8 · CRLF</text>
+  <rect x="1172" y="128" width="4" height="484" rx="2" fill="var(--fg)" fill-opacity="0.08"/>
+  <rect x="1172" y="128" width="4" height="96" rx="2" fill="var(--fg)" fill-opacity="0.28"/>
+
+  <!-- 发送：默认只有一条，展开后才出现历史/周期/DTR/RTS -->
+  <rect x="16" y="656" width="1168" height="56" rx="10" fill="var(--fg)" fill-opacity="0.03" stroke="var(--border)"/>
+  <text x="32" y="684" font-size="10" fill="var(--muted)">发送到</text>
+  <rect x="84" y="670" width="126" height="28" rx="7" fill="var(--fg)" fill-opacity="0.04" stroke="var(--border)"/>
+  <circle cx="98" cy="684" r="3" fill="var(--success)"/>
+  <text x="108" y="684" font-size="10" fill="var(--fg)">COM3 · 主控板</text>
+  <path d="M196 681l4 4 4-4" fill="none" stroke="var(--muted)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <rect x="222" y="670" width="88" height="28" rx="7" fill="var(--fg)" fill-opacity="0.04" stroke="var(--border)"/>
+  <rect x="224" y="672" width="42" height="24" rx="5" fill="var(--accent)" fill-opacity="0.14"/>
+  <text x="245" y="684" text-anchor="middle" font-size="9.5" fill="var(--accent)">文本</text>
+  <text x="288" y="684" text-anchor="middle" font-size="9.5" fill="var(--muted)">HEX</text>
+
+  <rect x="322" y="668" width="698" height="32" rx="8" fill="var(--fg)" fill-opacity="0.04" stroke="var(--border)"/>
+  <text x="336" y="684" font-size="11" fill="var(--fg)" class="mono">M104 S215</text>
+  <rect x="406" y="674" width="1.5" height="20" fill="var(--accent)"/>
+  <text x="1008" y="684" text-anchor="end" font-size="8.5" fill="var(--muted)">Enter 发送</text>
+
+  <rect x="1032" y="666" width="128" height="36" rx="9" fill="var(--accent)" fill-opacity="0.16" stroke="var(--accent)" stroke-opacity="0.45"/>
+  <text x="1096" y="684" text-anchor="middle" font-size="12" font-weight="600" fill="var(--accent)">发送</text>
+  <path d="M1166 680l0-8M1162 676l4-4 4 4" fill="none" stroke="var(--muted)" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- 状态栏：录制关闭时不占位 -->
+  <line x1="8" y1="728" x2="1192" y2="728" stroke="var(--border)"/>
+  <circle cx="24" cy="740" r="3" fill="var(--success)"/>
+  <text x="34" y="740" font-size="9.5" fill="var(--fg)">已连接 COM3 · 115200 8-N-1</text>
+  <text x="300" y="740" font-size="9.5" fill="var(--muted)" class="mono">RX 12.4 KB/s</text>
+  <text x="390" y="740" font-size="9.5" fill="var(--muted)" class="mono">TX 0.8 KB/s</text>
+  <text x="520" y="740" font-size="9.5" fill="var(--muted)">缓冲区 12,480 行</text>
+  <text x="1160" y="740" text-anchor="end" font-size="9.5" fill="var(--muted)">v2.0.0</text>
+</svg>
+
+</body>
+</html>

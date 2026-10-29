@@ -1,0 +1,299 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-label="改进后的硬件调试工作台界面效果图" class="sans">
+  <title>硬件调试工作台 UI 效果图</title>
+  <style>
+    svg {
+      --fg: #e6e8ee;
+      --muted: #9aa3b2;
+      --border: #303744;
+      --surface: #1b1f27;
+      --accent: #6ea8fe;
+      --success: #4cc38a;
+      --warning: #e5b567;
+      --error: #e06c75;
+      --c1: #7dcfff;
+      --c2: #9ece6a;
+      --c3: #e0af68;
+      --c4: #bb9af7;
+      --c5: #f7768e;
+      --c6: #7aa2f7;
+    }
+    .sans { font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans SC", sans-serif; }
+    .mono { font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace; }
+    text { dominant-baseline: middle; }
+  </style>
+
+  <!-- 窗口 -->
+  <rect x="8" y="8" width="1184" height="744" rx="16" fill="var(--surface)" stroke="var(--border)"/>
+
+  <!-- 顶栏 -->
+  <rect x="24" y="20" width="28" height="28" rx="8" fill="var(--accent)" fill-opacity="0.14" stroke="var(--accent)" stroke-opacity="0.35"/>
+  <text x="38" y="34" text-anchor="middle" font-size="10.5" font-weight="700" fill="var(--accent)" class="mono">HW</text>
+  <text x="62" y="34" font-size="15" font-weight="600" fill="var(--fg)">硬件调试工作台</text>
+  <text x="62" y="49" font-size="9" fill="var(--muted)" letter-spacing="0.9">SERIAL WORKBENCH</text>
+
+  <rect x="210" y="16" width="262" height="36" rx="9" fill="var(--fg)" fill-opacity="0.03" stroke="var(--border)"/>
+  <circle cx="228" cy="34" r="3.5" fill="var(--success)"/>
+  <text x="240" y="34" font-size="13.5" font-weight="600" fill="var(--fg)">COM3</text>
+  <line x1="290" y1="24" x2="290" y2="44" stroke="var(--border)"/>
+  <text x="302" y="34" font-size="10.5" fill="var(--success)">已连接</text>
+  <text x="348" y="34" font-size="10.5" fill="var(--muted)">115200 · 8N1</text>
+  <path d="M450 31l5 5 5-5" fill="none" stroke="var(--muted)" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <rect x="486" y="16" width="58" height="36" rx="9" fill="none" stroke="var(--border)"/>
+  <text x="515" y="34" text-anchor="middle" font-size="11" fill="var(--fg)">断开</text>
+  <rect x="554" y="16" width="82" height="36" rx="9" fill="none" stroke="var(--border)"/>
+  <circle cx="570" cy="34" r="4" fill="var(--error)"/>
+  <text x="584" y="34" font-size="11" fill="var(--fg)">录制</text>
+
+  <rect x="680" y="20" width="220" height="32" rx="8" fill="var(--fg)" fill-opacity="0.025" stroke="var(--border)"/>
+  <circle cx="696" cy="36" r="4.5" fill="none" stroke="var(--muted)" stroke-width="1.3"/>
+  <line x1="700" y1="40" x2="704" y2="44" stroke="var(--muted)" stroke-width="1.3" stroke-linecap="round"/>
+  <text x="714" y="36" font-size="9.5" fill="var(--muted)">搜索命令、端口或设置…</text>
+  <text x="884" y="36" text-anchor="end" font-size="8.5" fill="var(--muted)">Ctrl K</text>
+
+  <line x1="1016" y1="24" x2="1016" y2="44" stroke="var(--border)"/>
+  <path d="M1055 28a7 7 0 1 0 0 12 8 8 0 0 1 0-12z" fill="none" stroke="var(--muted)" stroke-width="1.4" stroke-linecap="round"/>
+  <path d="M1079 30h18M1079 38h18" stroke="var(--muted)" stroke-width="1.4" stroke-linecap="round"/>
+  <circle cx="1085" cy="30" r="2.4" fill="var(--surface)" stroke="var(--muted)" stroke-width="1.2"/>
+  <circle cx="1091" cy="38" r="2.4" fill="var(--surface)" stroke="var(--muted)" stroke-width="1.2"/>
+  <circle cx="1126" cy="34" r="8" fill="none" stroke="var(--muted)" stroke-width="1.3"/>
+  <text x="1126" y="34" text-anchor="middle" font-size="9" fill="var(--muted)">?</text>
+
+  <line x1="8" y1="64" x2="1192" y2="64" stroke="var(--border)"/>
+
+  <!-- 左侧导航 -->
+  <rect x="8" y="64" width="64" height="688" fill="var(--fg)" fill-opacity="0.012"/>
+  <line x1="72" y1="64" x2="72" y2="752" stroke="var(--border)"/>
+
+  <rect x="16" y="82" width="48" height="64" rx="10" fill="var(--accent)" fill-opacity="0.12" stroke="var(--accent)" stroke-opacity="0.28"/>
+  <g fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round">
+    <rect x="31" y="94" width="18" height="12" rx="3"/>
+    <path d="M35 106v5M40 106v6M45 106v5"/>
+  </g>
+  <text x="40" y="132" text-anchor="middle" font-size="9.5" fill="var(--accent)">设备</text>
+
+  <g fill="none" stroke="var(--muted)" stroke-width="1.4" stroke-linecap="round">
+    <path d="M31 174h18M31 182h18M31 190h18"/>
+  </g>
+  <circle cx="36" cy="174" r="2.5" fill="var(--surface)" stroke="var(--muted)" stroke-width="1.2"/>
+  <circle cx="44" cy="182" r="2.5" fill="var(--surface)" stroke="var(--muted)" stroke-width="1.2"/>
+  <circle cx="35" cy="190" r="2.5" fill="var(--surface)" stroke="var(--muted)" stroke-width="1.2"/>
+  <text x="40" y="210" text-anchor="middle" font-size="9.5" fill="var(--muted)">设置</text>
+
+  <g fill="none" stroke="var(--muted)" stroke-width="1.3">
+    <rect x="31" y="230" width="8" height="8" rx="2"/>
+    <rect x="41" y="230" width="8" height="8" rx="2"/>
+    <rect x="31" y="240" width="8" height="8" rx="2"/>
+    <rect x="41" y="240" width="8" height="8" rx="2"/>
+  </g>
+  <text x="40" y="270" text-anchor="middle" font-size="9.5" fill="var(--muted)">插件</text>
+
+  <path d="M33 292l14 7-14 7z" fill="none" stroke="var(--muted)" stroke-width="1.4" stroke-linejoin="round"/>
+  <text x="40" y="326" text-anchor="middle" font-size="9.5" fill="var(--muted)">回放</text>
+
+  <circle cx="40" cy="706" r="9" fill="none" stroke="var(--muted)" stroke-width="1.2"/>
+  <text x="40" y="706" text-anchor="middle" font-size="10" fill="var(--muted)">?</text>
+
+  <!-- 左栏 -->
+  <text x="88" y="96" font-size="16" font-weight="600" fill="var(--fg)">连接</text>
+  <text x="88" y="114" font-size="9.5" fill="var(--muted)">4 个设备 · 1 个已连接</text>
+  <rect x="276" y="84" width="56" height="26" rx="7" fill="var(--accent)" fill-opacity="0.12" stroke="var(--accent)" stroke-opacity="0.35"/>
+  <text x="304" y="97" text-anchor="middle" font-size="10.5" fill="var(--accent)">+ 添加</text>
+
+  <rect x="88" y="128" width="248" height="30" rx="8" fill="var(--fg)" fill-opacity="0.035" stroke="var(--border)"/>
+  <rect x="90" y="130" width="80" height="26" rx="6" fill="var(--accent)" fill-opacity="0.14"/>
+  <text x="130" y="143" text-anchor="middle" font-size="10.5" fill="var(--accent)">端口</text>
+  <text x="214" y="143" text-anchor="middle" font-size="10.5" fill="var(--muted)">录制</text>
+  <text x="298" y="143" text-anchor="middle" font-size="10.5" fill="var(--muted)">网络</text>
+
+  <rect x="88" y="172" width="248" height="88" rx="10" fill="var(--fg)" fill-opacity="0.035" stroke="var(--border)"/>
+  <circle cx="104" cy="192" r="3.5" fill="var(--success)"/>
+  <text x="116" y="192" font-size="13.5" font-weight="600" fill="var(--fg)">COM3</text>
+  <text x="158" y="192" font-size="10" fill="var(--muted)">主控板</text>
+  <rect x="266" y="182" width="56" height="20" rx="6" fill="var(--success)" fill-opacity="0.12"/>
+  <text x="294" y="192" text-anchor="middle" font-size="9.5" fill="var(--success)">已连接</text>
+  <text x="104" y="212" font-size="9.5" fill="var(--muted)">CH340 · 115200 8N1</text>
+  <text x="104" y="230" font-size="9.5" fill="var(--muted)" class="mono">RX 12.4 KB/s</text>
+  <text x="184" y="230" font-size="9.5" fill="var(--muted)" class="mono">TX 0.8 KB/s</text>
+  <rect x="264" y="224" width="58" height="24" rx="7" fill="none" stroke="var(--border)"/>
+  <text x="293" y="236" text-anchor="middle" font-size="10" fill="var(--fg)">断开</text>
+
+  <rect x="88" y="266" width="248" height="62" rx="10" fill="var(--fg)" fill-opacity="0.02" stroke="var(--border)"/>
+  <circle cx="104" cy="286" r="3.5" fill="var(--muted)"/>
+  <text x="116" y="286" font-size="12.5" font-weight="600" fill="var(--fg)">COM1</text>
+  <text x="158" y="286" font-size="10" fill="var(--muted)">温度传感器</text>
+  <text x="104" y="304" font-size="9.5" fill="var(--muted)">115200 8N1 · 2 分钟前</text>
+  <rect x="274" y="278" width="48" height="24" rx="7" fill="var(--accent)" fill-opacity="0.12" stroke="var(--accent)" stroke-opacity="0.35"/>
+  <text x="298" y="290" text-anchor="middle" font-size="10" fill="var(--accent)">打开</text>
+
+  <rect x="88" y="334" width="248" height="62" rx="10" fill="var(--fg)" fill-opacity="0.02" stroke="var(--border)"/>
+  <circle cx="104" cy="354" r="3.5" fill="var(--muted)"/>
+  <text x="116" y="354" font-size="12.5" font-weight="600" fill="var(--fg)">COM2</text>
+  <text x="158" y="354" font-size="10" fill="var(--muted)">备用</text>
+  <text x="104" y="372" font-size="9.5" fill="var(--muted)">未连接 · 上次 115200 8N1</text>
+  <rect x="274" y="346" width="48" height="24" rx="7" fill="var(--accent)" fill-opacity="0.12" stroke="var(--accent)" stroke-opacity="0.35"/>
+  <text x="298" y="358" text-anchor="middle" font-size="10" fill="var(--accent)">打开</text>
+
+  <rect x="88" y="402" width="248" height="62" rx="10" fill="var(--fg)" fill-opacity="0.02" stroke="var(--border)"/>
+  <circle cx="104" cy="422" r="3.5" fill="var(--success)"/>
+  <text x="116" y="422" font-size="12.5" font-weight="600" fill="var(--fg)">Klipper</text>
+  <text x="162" y="422" font-size="10" fill="var(--muted)">3D 打印机</text>
+  <text x="104" y="440" font-size="9.5" fill="var(--muted)" class="mono">192.168.1.20:7125</text>
+  <rect x="258" y="414" width="64" height="20" rx="6" fill="var(--success)" fill-opacity="0.12"/>
+  <text x="290" y="424" text-anchor="middle" font-size="9.5" fill="var(--success)">已连接</text>
+
+  <rect x="88" y="478" width="248" height="42" rx="10" fill="var(--fg)" fill-opacity="0.02" stroke="var(--border)"/>
+  <text x="104" y="499" font-size="11" fill="var(--fg)">高级串口参数</text>
+  <text x="196" y="499" font-size="9.5" fill="var(--muted)">115200 · 8-N-1</text>
+  <path d="M312 496l4 4 4-4" fill="none" stroke="var(--muted)" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <rect x="88" y="532" width="248" height="104" rx="10" fill="var(--fg)" fill-opacity="0.02" stroke="var(--border)"/>
+  <text x="104" y="554" font-size="12" font-weight="600" fill="var(--fg)">录制</text>
+  <text x="320" y="554" text-anchor="end" font-size="9.5" fill="var(--muted)">未开始</text>
+  <text x="104" y="574" font-size="9.5" fill="var(--muted)">标准回放 · logs/session-2026…</text>
+  <rect x="104" y="590" width="216" height="28" rx="7" fill="none" stroke="var(--border)"/>
+  <circle cx="118" cy="604" r="3" fill="var(--error)"/>
+  <text x="218" y="604" text-anchor="middle" font-size="10" fill="var(--fg)">开始录制</text>
+
+  <line x1="88" y1="656" x2="336" y2="656" stroke="var(--border)"/>
+  <text x="104" y="678" font-size="9.5" fill="var(--muted)">主题</text>
+  <text x="320" y="678" text-anchor="end" font-size="9.5" fill="var(--fg)">One Dark Pro</text>
+  <text x="104" y="700" font-size="8.5" fill="var(--muted)">拖拽面板边缘调整宽度</text>
+
+  <line x1="352" y1="64" x2="352" y2="752" stroke="var(--border)"/>
+
+  <!-- 主区标签 -->
+  <text x="368" y="88" font-size="12.5" font-weight="600" fill="var(--accent)">终端</text>
+  <rect x="368" y="97" width="26" height="2" rx="1" fill="var(--accent)"/>
+  <text x="414" y="88" font-size="12.5" fill="var(--muted)">日志</text>
+  <text x="460" y="88" font-size="12.5" fill="var(--muted)">脚本</text>
+  <text x="1160" y="88" text-anchor="end" font-size="9.5" fill="var(--muted)">COM3 · 115200 · 8-N-1</text>
+
+  <!-- 终端 -->
+  <rect x="368" y="112" width="808" height="444" rx="10" fill="var(--fg)" fill-opacity="0.02" stroke="var(--border)"/>
+  <text x="384" y="136" font-size="13" font-weight="600" fill="var(--fg)">接收</text>
+  <circle cx="430" cy="136" r="3" fill="var(--success)"/>
+  <text x="438" y="136" font-size="9.5" fill="var(--success)">实时</text>
+  <text x="492" y="136" font-size="9" fill="var(--muted)">UTF-8</text>
+
+  <rect x="900" y="124" width="122" height="22" rx="6" fill="var(--fg)" fill-opacity="0.04" stroke="var(--border)"/>
+  <circle cx="910" cy="135" r="4.5" fill="none" stroke="var(--muted)" stroke-width="1.2"/>
+  <line x1="913" y1="138" x2="917" y2="142" stroke="var(--muted)" stroke-width="1.2" stroke-linecap="round"/>
+  <text x="924" y="135" font-size="9" fill="var(--muted)">过滤…</text>
+  <text x="1040" y="135" font-size="9.5" fill="var(--muted)">暂停</text>
+  <text x="1080" y="135" font-size="9.5" fill="var(--muted)">导出</text>
+  <text x="1120" y="135" font-size="9.5" fill="var(--muted)">清空</text>
+  <line x1="368" y1="152" x2="1176" y2="152" stroke="var(--border)"/>
+
+  <rect x="368" y="158" width="808" height="28" fill="var(--fg)" fill-opacity="0.015"/>
+  <text x="384" y="172" font-size="9.5" fill="var(--muted)" class="mono">14:32:08.412</text>
+  <rect x="462" y="165" width="22" height="14" rx="4" fill="var(--c1)" fill-opacity="0.14"/>
+  <text x="473" y="172" text-anchor="middle" font-size="8.5" fill="var(--c1)">RX</text>
+  <text x="492" y="172" font-size="10.5" fill="var(--c1)" class="mono">$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47</text>
+
+  <text x="384" y="200" font-size="9.5" fill="var(--muted)" class="mono">14:32:08.415</text>
+  <rect x="462" y="193" width="22" height="14" rx="4" fill="var(--c2)" fill-opacity="0.14"/>
+  <text x="473" y="200" text-anchor="middle" font-size="8.5" fill="var(--c2)">RX</text>
+  <text x="492" y="200" font-size="10.5" fill="var(--c2)" class="mono">[Klipper] MCU 'mcu' config loaded</text>
+
+  <rect x="368" y="214" width="808" height="28" fill="var(--fg)" fill-opacity="0.015"/>
+  <text x="384" y="228" font-size="9.5" fill="var(--muted)" class="mono">14:32:08.420</text>
+  <rect x="462" y="221" width="22" height="14" rx="4" fill="var(--c3)" fill-opacity="0.14"/>
+  <text x="473" y="228" text-anchor="middle" font-size="8.5" fill="var(--c3)">TX</text>
+  <text x="492" y="228" font-size="10.5" fill="var(--c3)" class="mono">M105</text>
+
+  <text x="384" y="256" font-size="9.5" fill="var(--muted)" class="mono">14:32:08.512</text>
+  <rect x="462" y="249" width="22" height="14" rx="4" fill="var(--c1)" fill-opacity="0.14"/>
+  <text x="473" y="256" text-anchor="middle" font-size="8.5" fill="var(--c1)">RX</text>
+  <text x="492" y="256" font-size="10.5" fill="var(--c1)" class="mono">T:210.4 /210.0 B:60.1 /60.0</text>
+
+  <rect x="368" y="270" width="808" height="28" fill="var(--fg)" fill-opacity="0.015"/>
+  <text x="384" y="284" font-size="9.5" fill="var(--muted)" class="mono">14:32:08.530</text>
+  <rect x="462" y="277" width="22" height="14" rx="4" fill="var(--error)" fill-opacity="0.14"/>
+  <text x="473" y="284" text-anchor="middle" font-size="8.5" fill="var(--error)">RX</text>
+  <text x="492" y="284" font-size="10.5" fill="var(--error)" class="mono">!! ADC out of range</text>
+
+  <text x="384" y="312" font-size="9.5" fill="var(--muted)" class="mono">14:32:08.534</text>
+  <rect x="462" y="305" width="22" height="14" rx="4" fill="var(--c2)" fill-opacity="0.14"/>
+  <text x="473" y="312" text-anchor="middle" font-size="8.5" fill="var(--c2)">RX</text>
+  <text x="492" y="312" font-size="10.5" fill="var(--c2)" class="mono">ok</text>
+
+  <rect x="368" y="326" width="808" height="28" fill="var(--fg)" fill-opacity="0.015"/>
+  <text x="384" y="340" font-size="9.5" fill="var(--muted)" class="mono">14:32:08.701</text>
+  <rect x="462" y="333" width="22" height="14" rx="4" fill="var(--c1)" fill-opacity="0.14"/>
+  <text x="473" y="340" text-anchor="middle" font-size="8.5" fill="var(--c1)">RX</text>
+  <text x="492" y="340" font-size="10.5" fill="var(--c1)" class="mono">// probe: triggered @ 1.234</text>
+
+  <text x="384" y="368" font-size="9.5" fill="var(--muted)" class="mono">14:32:08.720</text>
+  <rect x="462" y="361" width="22" height="14" rx="4" fill="var(--warning)" fill-opacity="0.14"/>
+  <text x="473" y="368" text-anchor="middle" font-size="8.5" fill="var(--warning)">RX</text>
+  <text x="492" y="368" font-size="10.5" fill="var(--warning)" class="mono">echo: cold extrusion prevented</text>
+
+  <rect x="368" y="382" width="808" height="28" fill="var(--fg)" fill-opacity="0.015"/>
+  <text x="384" y="396" font-size="9.5" fill="var(--muted)" class="mono">14:32:08.905</text>
+  <rect x="462" y="389" width="22" height="14" rx="4" fill="var(--c3)" fill-opacity="0.14"/>
+  <text x="473" y="396" text-anchor="middle" font-size="8.5" fill="var(--c3)">TX</text>
+  <text x="492" y="396" font-size="10.5" fill="var(--c3)" class="mono">M104 S215</text>
+
+  <text x="384" y="424" font-size="9.5" fill="var(--muted)" class="mono">14:32:09.010</text>
+  <rect x="462" y="417" width="22" height="14" rx="4" fill="var(--c1)" fill-opacity="0.14"/>
+  <text x="473" y="424" text-anchor="middle" font-size="8.5" fill="var(--c1)">RX</text>
+  <text x="492" y="424" font-size="10.5" fill="var(--c1)" class="mono">ok T:210.4 /210.0 B:60.1 /60.0</text>
+
+  <rect x="368" y="438" width="808" height="28" fill="var(--fg)" fill-opacity="0.015"/>
+  <text x="384" y="452" font-size="9.5" fill="var(--muted)" class="mono">14:32:09.112</text>
+  <rect x="462" y="445" width="22" height="14" rx="4" fill="var(--c2)" fill-opacity="0.14"/>
+  <text x="473" y="452" text-anchor="middle" font-size="8.5" fill="var(--c2)">RX</text>
+  <text x="492" y="452" font-size="10.5" fill="var(--c2)" class="mono">echo: busy processing command</text>
+
+  <text x="384" y="540" font-size="9" fill="var(--muted)">自动跟随 · 12,480 行</text>
+  <text x="1160" y="540" text-anchor="end" font-size="9" fill="var(--muted)">UTF-8 · CRLF</text>
+  <rect x="1158" y="158" width="4" height="308" rx="2" fill="var(--fg)" fill-opacity="0.08"/>
+  <rect x="1158" y="158" width="4" height="92" rx="2" fill="var(--fg)" fill-opacity="0.28"/>
+
+  <!-- 发送区 -->
+  <rect x="368" y="576" width="808" height="152" rx="10" fill="var(--fg)" fill-opacity="0.025" stroke="var(--border)"/>
+  <text x="384" y="600" font-size="10" fill="var(--muted)">发送到</text>
+  <rect x="426" y="584" width="116" height="26" rx="7" fill="var(--fg)" fill-opacity="0.04" stroke="var(--border)"/>
+  <circle cx="440" cy="597" r="3" fill="var(--success)"/>
+  <text x="450" y="597" font-size="10" fill="var(--fg)">COM3 · 主控板</text>
+  <path d="M524 594l4 4 4-4" fill="none" stroke="var(--muted)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <rect x="960" y="584" width="88" height="26" rx="7" fill="var(--fg)" fill-opacity="0.04" stroke="var(--border)"/>
+  <rect x="962" y="586" width="42" height="22" rx="5" fill="var(--accent)" fill-opacity="0.14"/>
+  <text x="983" y="599" text-anchor="middle" font-size="9.5" fill="var(--accent)">文本</text>
+  <text x="1026" y="599" text-anchor="middle" font-size="9.5" fill="var(--muted)">HEX</text>
+  <text x="1064" y="599" font-size="9.5" fill="var(--muted)">历史</text>
+  <text x="1104" y="599" font-size="9.5" fill="var(--muted)">G 代码</text>
+
+  <rect x="384" y="620" width="664" height="48" rx="8" fill="var(--fg)" fill-opacity="0.04" stroke="var(--border)"/>
+  <text x="396" y="640" font-size="11" fill="var(--fg)" class="mono">M104 S215</text>
+  <rect x="462" y="630" width="1.5" height="16" fill="var(--accent)"/>
+  <text x="396" y="656" font-size="8.5" fill="var(--muted)">Enter 发送 · Shift+Enter 换行</text>
+  <rect x="1058" y="620" width="102" height="48" rx="9" fill="var(--accent)" fill-opacity="0.16" stroke="var(--accent)" stroke-opacity="0.45"/>
+  <text x="1109" y="638" text-anchor="middle" font-size="12" font-weight="600" fill="var(--accent)">发送</text>
+  <text x="1109" y="654" text-anchor="middle" font-size="8.5" fill="var(--accent)" fill-opacity="0.7">Enter</text>
+
+  <text x="384" y="690" font-size="9.5" fill="var(--muted)">DTR</text>
+  <rect x="412" y="682" width="26" height="14" rx="7" fill="var(--success)" fill-opacity="0.18"/>
+  <circle cx="432" cy="689" r="4" fill="var(--success)"/>
+  <text x="454" y="690" font-size="9.5" fill="var(--muted)">RTS</text>
+  <rect x="482" y="682" width="26" height="14" rx="7" fill="var(--fg)" fill-opacity="0.08"/>
+  <circle cx="492" cy="689" r="4" fill="var(--muted)"/>
+  <text x="532" y="690" font-size="9.5" fill="var(--muted)">周期发送</text>
+  <rect x="584" y="682" width="26" height="14" rx="7" fill="var(--fg)" fill-opacity="0.08"/>
+  <circle cx="594" cy="689" r="4" fill="var(--muted)"/>
+  <rect x="622" y="680" width="52" height="20" rx="5" fill="var(--fg)" fill-opacity="0.04" stroke="var(--border)"/>
+  <text x="648" y="690" text-anchor="middle" font-size="9" fill="var(--muted)" class="mono">1000</text>
+  <text x="682" y="690" font-size="9" fill="var(--muted)">ms</text>
+  <text x="1160" y="690" text-anchor="end" font-size="9.5" fill="var(--muted)">清空输入</text>
+
+  <!-- 状态栏 -->
+  <line x1="8" y1="728" x2="1192" y2="728" stroke="var(--border)"/>
+  <circle cx="24" cy="740" r="3" fill="var(--success)"/>
+  <text x="34" y="740" font-size="9.5" fill="var(--fg)">已连接 COM3 · 115200 8-N-1</text>
+  <text x="330" y="740" font-size="9.5" fill="var(--muted)" class="mono">RX 12.4 KB/s</text>
+  <text x="410" y="740" font-size="9.5" fill="var(--muted)" class="mono">TX 0.8 KB/s</text>
+  <text x="1080" y="740" font-size="9.5" fill="var(--muted)">录制关闭</text>
+  <text x="1160" y="740" text-anchor="end" font-size="9.5" fill="var(--muted)">v2.0.0</text>
+</svg>

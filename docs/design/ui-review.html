@@ -1,0 +1,636 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>硬件调试工作台 · 监视模式（审核稿）</title>
+<style>
+  :root {
+    --bg: #0a0c10;
+    --surface: #171a21;
+    --panel: #1b1f27;
+    --panel2: #202630;
+    --panel3: #252b36;
+    --border: #2e3542;
+    --text: #e6e8ee;
+    --muted: #98a2b3;
+    --accent: #6ea8fe;
+    --green: #4cc38a;
+    --yellow: #e5b567;
+    --red: #e06c75;
+    --cyan: #7dcfff;
+    --purple: #bb9af7;
+    --sans: "Segoe UI", "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
+    --mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: radial-gradient(1200px 620px at 50% -10%, #141a26 0%, var(--bg) 62%);
+    color: var(--text);
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  button, input, textarea, select { font-family: inherit; }
+  button { cursor: pointer; }
+  .app {
+    width: min(1200px, calc(100vw - 48px));
+    height: min(760px, calc(100vh - 48px));
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: 0 28px 90px rgba(0, 0, 0, .48);
+  }
+
+  /* ── 顶栏：连接 + 设备抽屉 + 更多；没有录制、没有命令面板 ── */
+  .topbar {
+    flex: 0 0 56px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .brand { width: 198px; display: flex; align-items: center; gap: 10px; }
+  .logo {
+    width: 28px; height: 28px; flex: 0 0 28px;
+    display: grid; place-items: center;
+    border-radius: 8px;
+    border: 1px solid rgba(110, 168, 254, .35);
+    background: rgba(110, 168, 254, .14);
+    color: var(--accent);
+    font: 700 10px/1 var(--mono);
+  }
+  .brand-title { font-size: 14px; font-weight: 600; line-height: 1.05; }
+  .brand-sub { margin-top: 3px; font-size: 8px; letter-spacing: .14em; color: var(--muted); }
+  .connection {
+    height: 36px;
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 12px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: rgba(255, 255, 255, .025);
+    font-size: 11px;
+  }
+  .connection strong { font-size: 13px; }
+  .sep { width: 1px; height: 18px; background: var(--border); }
+  .dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--muted); }
+  .dot.ok { background: var(--green); box-shadow: 0 0 8px rgba(76, 195, 138, .4); }
+  .ok { color: var(--green); }
+  .muted { color: var(--muted); }
+  .chev { color: var(--muted); font-size: 10px; }
+  .ghost, .icon {
+    height: 36px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: transparent;
+    color: var(--text);
+    font-size: 11px;
+    padding: 0 14px;
+  }
+  .icon { width: 38px; padding: 0; font-size: 14px; }
+  .ghost:hover, .icon:hover { background: rgba(255, 255, 255, .045); }
+  .spacer { flex: 1 1 auto; }
+  .menu-wrap { position: relative; }
+  .menu {
+    position: absolute;
+    top: 44px;
+    right: 0;
+    width: 156px;
+    padding: 4px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: var(--panel);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, .45);
+    display: none;
+    z-index: 40;
+  }
+  .menu.open { display: block; }
+  .menu button {
+    display: block;
+    width: 100%;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text);
+    text-align: left;
+    font-size: 11px;
+  }
+  .menu button:hover { background: rgba(255, 255, 255, .05); }
+
+  /* ── 主区：接收区占满，发送器在底部 ── */
+  .main {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 16px 0;
+  }
+  .tabs {
+    flex: 0 0 28px;
+    display: flex;
+    align-items: flex-end;
+    gap: 18px;
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+  .tab { padding-bottom: 7px; border-bottom: 2px solid transparent; }
+  .tab.active { color: var(--accent); border-color: var(--accent); font-weight: 600; }
+  .tabs .meta { margin-left: auto; padding-bottom: 7px; font-size: 9.5px; color: var(--muted); }
+
+  .terminal {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, .018);
+  }
+  .toolbar {
+    flex: 0 0 40px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .segmented {
+    height: 26px;
+    display: flex;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+  }
+  .segmented button {
+    height: 100%;
+    padding: 0 10px;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    font-size: 9.5px;
+  }
+  .segmented button.active { background: rgba(110, 168, 254, .14); color: var(--accent); }
+  .chip {
+    height: 26px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 9.5px;
+  }
+  .chip:hover { background: rgba(255, 255, 255, .04); }
+  .search {
+    width: 180px;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: rgba(255, 255, 255, .025);
+    color: var(--muted);
+  }
+  .search input {
+    width: 100%;
+    border: 0;
+    outline: none;
+    background: transparent;
+    color: var(--text);
+    font-size: 9.5px;
+  }
+  .search input::placeholder { color: var(--muted); }
+  .link {
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    padding: 0 2px;
+    font-size: 9.5px;
+  }
+  .link:hover { color: var(--text); }
+
+  .rows {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+    padding: 4px 0;
+    font-family: var(--mono);
+    font-size: 10.5px;
+  }
+  .row {
+    height: 27px;
+    display: grid;
+    grid-template-columns: 84px 32px minmax(0, 1fr);
+    gap: 8px;
+    align-items: center;
+    padding: 0 12px;
+    white-space: nowrap;
+  }
+  .row:nth-child(even) { background: rgba(255, 255, 255, .014); }
+  .time { color: var(--muted); font-size: 9.5px; }
+  .badge {
+    width: 28px;
+    height: 15px;
+    display: grid;
+    place-items: center;
+    border-radius: 4px;
+    font-family: var(--sans);
+    font-size: 8px;
+  }
+  .badge.rx { background: rgba(125, 207, 255, .14); color: var(--cyan); }
+  .badge.tx { background: rgba(224, 175, 104, .14); color: var(--yellow); }
+  .badge.err { background: rgba(224, 108, 117, .14); color: var(--red); }
+  .badge.warn { background: rgba(229, 181, 103, .14); color: var(--yellow); }
+  .msg { overflow: hidden; text-overflow: ellipsis; }
+  .msg.rx { color: var(--cyan); }
+  .msg.tx { color: var(--yellow); }
+  .msg.err { color: var(--red); }
+  .msg.warn { color: var(--yellow); }
+  .term-footer {
+    flex: 0 0 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 12px;
+    color: var(--muted);
+    font-size: 9px;
+  }
+
+  /* ── 发送器：多行编辑，历史/选项不占主区 ── */
+  .composer {
+    flex: 0 0 200px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, .022);
+  }
+  .composer-head { flex: 0 0 28px; display: flex; align-items: center; gap: 8px; }
+  .label { font-size: 9.5px; color: var(--muted); }
+  .port-chip {
+    height: 26px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: rgba(255, 255, 255, .03);
+    color: var(--text);
+    font-size: 9.5px;
+  }
+  .composer-body { flex: 1 1 auto; min-height: 0; display: flex; gap: 10px; }
+  textarea {
+    flex: 1 1 auto;
+    min-width: 0;
+    resize: none;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    outline: none;
+    background: rgba(255, 255, 255, .03);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 10.5px;
+    line-height: 1.65;
+  }
+  textarea:focus { border-color: rgba(110, 168, 254, .5); }
+  .send {
+    flex: 0 0 112px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    border: 1px solid rgba(110, 168, 254, .45);
+    border-radius: 9px;
+    background: rgba(110, 168, 254, .16);
+    color: var(--accent);
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .send small { font-size: 8px; font-weight: 400; opacity: .75; }
+  .composer-foot { flex: 0 0 22px; display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 9px; }
+  .toggle { display: flex; align-items: center; gap: 4px; }
+  .toggle input { width: 12px; height: 12px; accent-color: var(--accent); }
+  .interval {
+    width: 46px;
+    height: 20px;
+    padding: 0 5px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    outline: none;
+    background: rgba(255, 255, 255, .03);
+    color: var(--muted);
+    font-size: 9px;
+  }
+
+  /* ── 状态栏：没有录制段 ── */
+  .statusbar {
+    flex: 0 0 28px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 0 12px;
+    border-top: 1px solid var(--border);
+    color: var(--text);
+    font-size: 9.5px;
+  }
+
+  /* ── 设备抽屉：默认隐藏，点顶栏“设备”打开 ── */
+  .drawer {
+    position: absolute;
+    top: 56px;
+    right: 0;
+    bottom: 28px;
+    width: 340px;
+    padding: 14px;
+    overflow: auto;
+    border-left: 1px solid var(--border);
+    background: var(--panel);
+    box-shadow: -24px 0 60px rgba(0, 0, 0, .38);
+    transform: translateX(100%);
+    transition: transform .18s ease;
+    z-index: 30;
+  }
+  .drawer.open { transform: translateX(0); }
+  .drawer-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .drawer-title { font-size: 13px; font-weight: 600; }
+  .drawer section {
+    margin-bottom: 10px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, .02);
+  }
+  .drawer h4 { margin: 0 0 8px; color: var(--muted); font-size: 9.5px; font-weight: 500; }
+  .params { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .field { display: flex; flex-direction: column; gap: 3px; color: var(--muted); font-size: 9px; }
+  .field select, .field input {
+    height: 26px;
+    padding: 0 6px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, .03);
+    color: var(--text);
+    font-size: 10px;
+    outline: none;
+  }
+  .port-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 0;
+    border-top: 1px solid rgba(255, 255, 255, .04);
+    font-size: 10px;
+  }
+  .port-row:first-of-type { border-top: 0; }
+  .port-row .name { font-weight: 600; }
+  .port-row .sub { color: var(--muted); font-size: 9px; }
+  .port-row .grow { flex: 1 1 auto; }
+  .mini {
+    height: 24px;
+    padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 9px;
+  }
+  .mini:hover { color: var(--text); background: rgba(255, 255, 255, .04); }
+  .note { margin-top: 8px; color: var(--muted); font-size: 8.5px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- 顶栏 -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">HW</div>
+      <div>
+        <div class="brand-title">硬件调试工作台</div>
+        <div class="brand-sub">SERIAL MONITOR</div>
+      </div>
+    </div>
+
+    <div class="connection">
+      <span class="dot ok"></span>
+      <strong>COM3</strong>
+      <span class="sep"></span>
+      <span class="ok">已连接</span>
+      <span class="muted">115200 · 8-N-1</span>
+      <span class="chev">⌄</span>
+    </div>
+
+    <button class="ghost">断开</button>
+    <button class="icon" title="重连">⟳</button>
+
+    <div class="spacer"></div>
+
+    <button class="ghost" data-devices>设备</button>
+    <div class="menu-wrap">
+      <button class="ghost" data-more>更多 ⋯</button>
+      <div class="menu" data-menu>
+        <button>设置</button>
+        <button>插件</button>
+        <button>工作台模式</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- 主区 -->
+  <main class="main">
+    <div class="tabs">
+      <div class="tab active">接收</div>
+      <div class="tab">日志</div>
+      <div class="meta">COM3 · 115200 · 8-N-1</div>
+    </div>
+
+    <section class="terminal">
+      <div class="toolbar">
+        <div class="segmented">
+          <button class="active">全部</button>
+          <button>RX</button>
+          <button>TX</button>
+        </div>
+        <button class="chip">HEX</button>
+        <button class="chip">原始</button>
+        <div class="search">
+          <span>⌕</span>
+          <input placeholder="过滤当前端口…">
+        </div>
+        <div class="spacer"></div>
+        <button class="link">暂停跟随</button>
+        <button class="link">导出</button>
+        <button class="link">清空</button>
+      </div>
+
+      <div class="rows">
+        <div class="row"><span class="time">14:32:08.412</span><span class="badge rx">RX</span><span class="msg rx">$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47</span></div>
+        <div class="row"><span class="time">14:32:08.415</span><span class="badge rx">RX</span><span class="msg rx">[Klipper] MCU 'mcu' config loaded</span></div>
+        <div class="row"><span class="time">14:32:08.420</span><span class="badge tx">TX</span><span class="msg tx">M105</span></div>
+        <div class="row"><span class="time">14:32:08.512</span><span class="badge rx">RX</span><span class="msg rx">T:210.4 /210.0 B:60.1 /60.0</span></div>
+        <div class="row"><span class="time">14:32:08.530</span><span class="badge err">RX</span><span class="msg err">!! ADC out of range</span></div>
+        <div class="row"><span class="time">14:32:08.534</span><span class="badge rx">RX</span><span class="msg rx">ok</span></div>
+        <div class="row"><span class="time">14:32:08.701</span><span class="badge rx">RX</span><span class="msg rx">// probe: triggered @ 1.234</span></div>
+        <div class="row"><span class="time">14:32:08.720</span><span class="badge warn">RX</span><span class="msg warn">echo: cold extrusion prevented</span></div>
+        <div class="row"><span class="time">14:32:08.905</span><span class="badge tx">TX</span><span class="msg tx">M104 S215</span></div>
+        <div class="row"><span class="time">14:32:09.010</span><span class="badge rx">RX</span><span class="msg rx">ok T:210.4 /210.0 B:60.1 /60.0</span></div>
+        <div class="row"><span class="time">14:32:09.112</span><span class="badge rx">RX</span><span class="msg rx">echo: busy processing command</span></div>
+        <div class="row"><span class="time">14:32:09.208</span><span class="badge rx">RX</span><span class="msg rx">{"temp":210.4,"target":210.0,"bed":60.1}</span></div>
+        <div class="row"><span class="time">14:32:09.310</span><span class="badge tx">TX</span><span class="msg tx">M114</span></div>
+      </div>
+
+      <div class="term-footer">
+        <span>自动跟随 · 12,480 行 · 0 丢弃</span>
+        <span>UTF-8 · CRLF</span>
+      </div>
+    </section>
+
+    <!-- 多行发送器 -->
+    <section class="composer">
+      <div class="composer-head">
+        <span class="label">发送到</span>
+        <button class="port-chip"><span class="dot ok"></span>COM3 · 主控板 <span class="chev">⌄</span></button>
+        <div class="segmented">
+          <button class="active">文本</button>
+          <button>HEX</button>
+        </div>
+        <button class="chip">历史 12</button>
+        <button class="chip">行尾 CRLF</button>
+        <div class="spacer"></div>
+        <button class="link">清空</button>
+      </div>
+
+      <div class="composer-body">
+        <textarea spellcheck="false">M104 S215
+M105
+M114
+M155 S30
+M109 S215
+M84
+</textarea>
+        <button class="send">发送</button>
+      </div>
+
+      <div class="composer-foot">
+        <span>多行编辑 · 历史可搜索、单条删除</span>
+        <label class="toggle"><input type="checkbox"> 周期发送</label>
+        <input class="interval" value="1000">
+        <span>ms</span>
+        <label class="toggle"><input type="checkbox" checked> DTR</label>
+        <label class="toggle"><input type="checkbox"> RTS</label>
+        <div class="spacer"></div>
+        <span class="muted">UTF-8</span>
+      </div>
+    </section>
+  </main>
+
+  <!-- 状态栏 -->
+  <footer class="statusbar">
+    <span class="dot ok"></span>
+    <span>已连接 COM3 · 115200 8-N-1</span>
+    <span class="muted">RX 12.4 KB/s</span>
+    <span class="muted">TX 0.8 KB/s</span>
+    <span class="muted">缓冲区 12,480 行</span>
+    <div class="spacer"></div>
+    <span class="muted">v2.0.0</span>
+  </footer>
+
+  <!-- 设备抽屉：默认关闭 -->
+  <aside class="drawer" data-drawer>
+    <div class="drawer-head">
+      <div class="drawer-title">设备与连接</div>
+      <button class="icon" data-close-drawer title="关闭">×</button>
+    </div>
+
+    <section>
+      <h4>串口参数</h4>
+      <div class="params">
+        <label class="field">波特率<select><option>115200</option><option>9600</option><option>1000000</option></select></label>
+        <label class="field">数据位<select><option>8</option><option>7</option></select></label>
+        <label class="field">停止位<select><option>1</option><option>2</option></select></label>
+        <label class="field">校验<select><option>无</option><option>奇</option><option>偶</option></select></label>
+      </div>
+      <label class="toggle" style="margin-top:8px"><input type="checkbox" checked> 串口拔出后自动重连</label>
+    </section>
+
+    <section>
+      <h4>可用端口</h4>
+      <div class="port-row">
+        <span class="dot ok"></span>
+        <div class="grow"><div class="name">COM3</div><div class="sub">主控板 · 115200 8N1</div></div>
+        <button class="mini">断开</button>
+      </div>
+      <div class="port-row">
+        <span class="dot"></span>
+        <div class="grow"><div class="name">COM1</div><div class="sub">温度传感器 · 未连接</div></div>
+        <button class="mini">打开</button>
+      </div>
+      <div class="port-row">
+        <span class="dot"></span>
+        <div class="grow"><div class="name">COM2</div><div class="sub">备用 · 未连接</div></div>
+        <button class="mini">打开</button>
+      </div>
+      <div class="port-row">
+        <span class="dot ok"></span>
+        <div class="grow"><div class="name">Klipper</div><div class="sub">192.168.1.20:7125</div></div>
+        <button class="mini">断开</button>
+      </div>
+      <div class="port-row">
+        <span class="dot" style="background:var(--yellow)"></span>
+        <div class="grow"><div class="name">COM4</div><div class="sub">已拔出，连接仍打开</div></div>
+        <button class="mini" style="color:var(--yellow);border-color:rgba(229,181,103,.4)">强制关闭</button>
+      </div>
+      <div class="note">别名、分组、网络端口和强制关闭都在这里，不再占默认主区。</div>
+    </section>
+
+    <section>
+      <h4>别名与分组</h4>
+      <div class="params">
+        <label class="field">COM3 别名<input value="主控板"></label>
+        <label class="field">分组<select><option>未分组</option><option>打印机</option><option>传感器</option></select></label>
+      </div>
+      <div class="note">别名同步到顶栏、端口列表、发送器和接收区端口列。</div>
+    </section>
+
+    <section>
+      <h4>网络端口</h4>
+      <div class="params">
+        <label class="field" style="grid-column:1 / -1">主机或 IP<input value="192.168.1.20"></label>
+        <label class="field">端口<input value="7125"></label>
+        <label class="field">API Key<input value="可选"></label>
+      </div>
+      <button class="mini" style="margin-top:8px">添加并连接</button>
+    </section>
+  </aside>
+</div>
+
+<script>
+  const drawer = document.querySelector("[data-drawer]");
+  const menu = document.querySelector("[data-menu]");
+  document.querySelector("[data-devices]").addEventListener("click", () => drawer.classList.toggle("open"));
+  document.querySelector("[data-close-drawer]").addEventListener("click", () => drawer.classList.remove("open"));
+  document.querySelector("[data-more]").addEventListener("click", (event) => {
+    event.stopPropagation();
+    menu.classList.toggle("open");
+  });
+  document.addEventListener("click", () => menu.classList.remove("open"));
+</script>
+</body>
+</html>
