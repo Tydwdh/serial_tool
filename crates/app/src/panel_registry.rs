@@ -44,18 +44,10 @@ pub(crate) struct PanelDef {
     pub(crate) kind: PanelKind,
 }
 
+#[derive(Default)]
 pub(crate) struct PanelRegistry {
     defs: HashMap<PanelId, PanelDef>,
     disabled: HashSet<PanelId>,
-}
-
-impl Default for PanelRegistry {
-    fn default() -> Self {
-        Self {
-            defs: HashMap::new(),
-            disabled: HashSet::new(),
-        }
-    }
 }
 
 impl PanelRegistry {
