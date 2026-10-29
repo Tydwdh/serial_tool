@@ -1,4 +1,4 @@
-//! Query — 只读视图，UI 通过 `AppRuntime::query_*()` 读取状态。
+//! Query — 只读视图，UI 通过 `Workbench::query_*()` 读取状态。
 
 pub use crate::plugin::{
     PluginCommandView, PluginContributesView, PluginDiagnosticSeverityView, PluginDiagnosticView,

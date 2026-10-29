@@ -1364,40 +1364,6 @@ impl crate::command::CommandEffects for Workbench {
     }
 }
 
-impl crate::AppRuntime for Workbench {
-    fn capabilities(&self) -> crate::AppCapabilities {
-        crate::AppCapabilities::native()
-    }
-
-    fn query_transport(&self) -> TransportView {
-        Workbench::query_transport(self)
-    }
-
-    fn query_recording(&self) -> RecordingStatusView {
-        Workbench::query_recording(self)
-    }
-
-    fn query_replay(&self) -> ReplayStatusView {
-        Workbench::query_replay(self)
-    }
-
-    fn query_plugins(&self) -> PluginView {
-        Workbench::query_plugins(self)
-    }
-
-    fn task_snapshots(&self) -> Vec<TaskSnapshot> {
-        Workbench::task_snapshots(self)
-    }
-
-    fn tick(&mut self) {
-        self.tick(0.0);
-    }
-
-    fn dispatch(&mut self, command: crate::AppCommand) -> Result<crate::CommandOutcome, String> {
-        Workbench::dispatch(self, command).map_err(|error| error.to_string())
-    }
-}
-
 /// 导出内容落盘的唯一一处：CSV 前置 UTF-8 BOM（Excel 兼容），其余格式原样写出。
 ///
 /// 调用方只剩 `spawn_file_export`：presentation 自己准备好内容交进来，BOM 与文件

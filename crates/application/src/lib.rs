@@ -1,12 +1,10 @@
 pub mod service;
 mod task_model;
 
-pub mod capability;
 pub mod marketplace;
 pub mod plugin;
 pub mod recording;
 pub mod replay;
-pub mod runtime;
 pub mod transport;
 pub mod updater;
 
@@ -22,10 +20,8 @@ pub mod send_plan;
 pub mod task;
 pub mod workbench;
 
-pub use capability::{AppCapabilities, Capability};
 pub use command::{AppCommand, CommandOutcome};
 pub use error::AppError;
-pub use runtime::AppRuntime;
 pub use task::{AppEvent, TaskManager, TaskResult};
 pub use transport::{PortTypeView, PortView, SerialConfigView, TransportView};
 pub use workbench::{

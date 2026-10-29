@@ -1,8 +1,8 @@
 //! Platform-neutral panel metadata registry.
 //!
-//! The registry describes which panels exist, their presentation metadata and
-//! the capabilities they require. Rendering is dispatched by the UI host, so
-//! this module does not depend on `WorkbenchApp` or a platform runtime.
+//! The registry describes which panels exist and their presentation metadata.
+//! Rendering is dispatched by the UI host, so this module does not depend on
+//! `WorkbenchApp` or a platform runtime.
 
 use egui_material_icons::{
     MaterialIcon,
@@ -12,7 +12,6 @@ use egui_material_icons::{
     },
 };
 use std::collections::{HashMap, HashSet};
-use tool_application::{AppCapabilities, Capability};
 use tool_panels::DynamicPanels;
 use tool_panels::{
     PANEL_CHART, PANEL_DEVICES, PANEL_LOGS, PANEL_PLUGINS, PANEL_REPLAY, PANEL_SENDER,
@@ -43,12 +42,10 @@ pub(crate) struct PanelDef {
     pub(crate) title: String,
     pub(crate) icon: MaterialIcon,
     pub(crate) kind: PanelKind,
-    required_capability: Option<Capability>,
 }
 
 pub(crate) struct PanelRegistry {
     defs: HashMap<PanelId, PanelDef>,
-    capabilities: AppCapabilities,
     disabled: HashSet<PanelId>,
 }
 
@@ -56,7 +53,6 @@ impl Default for PanelRegistry {
     fn default() -> Self {
         Self {
             defs: HashMap::new(),
-            capabilities: AppCapabilities::native(),
             disabled: HashSet::new(),
         }
     }
@@ -64,69 +60,54 @@ impl Default for PanelRegistry {
 
 impl PanelRegistry {
     pub(crate) fn builtin() -> Self {
-        Self::for_capabilities(AppCapabilities::native())
-    }
-
-    pub(crate) fn for_capabilities(capabilities: AppCapabilities) -> Self {
-        let mut registry = Self {
-            capabilities,
-            ..Self::default()
-        };
+        let mut registry = Self::default();
         registry.register(PanelDef {
             id: PanelId::builtin(PANEL_DEVICES),
             title: "设备".to_owned(),
             icon: ICON_USB,
             kind: PanelKind::Builtin(BuiltinPanel::Devices),
-            required_capability: Some(Capability::Serial),
         });
         registry.register(PanelDef {
             id: PanelId::builtin(PANEL_SETTINGS),
             title: "设置".to_owned(),
             icon: ICON_SETTINGS,
             kind: PanelKind::Builtin(BuiltinPanel::Settings),
-            required_capability: None,
         });
         registry.register(PanelDef {
             id: PanelId::builtin(PANEL_TERMINAL),
             title: "接收".to_owned(),
             icon: ICON_TERMINAL,
             kind: PanelKind::Builtin(BuiltinPanel::Terminal),
-            required_capability: None,
         });
         registry.register(PanelDef {
             id: PanelId::builtin(PANEL_REPLAY),
             title: "回放".to_owned(),
             icon: ICON_HISTORY,
             kind: PanelKind::Builtin(BuiltinPanel::Replay),
-            required_capability: Some(Capability::Replay),
         });
         registry.register(PanelDef {
             id: PanelId::builtin(PANEL_PLUGINS),
             title: "插件".to_owned(),
             icon: ICON_EXTENSION,
             kind: PanelKind::Builtin(BuiltinPanel::Plugins),
-            required_capability: Some(Capability::Plugins),
         });
         registry.register(PanelDef {
             id: PanelId::builtin(PANEL_SENDER),
             title: "发送器".to_owned(),
             icon: ICON_SEND,
             kind: PanelKind::Builtin(BuiltinPanel::Sender),
-            required_capability: Some(Capability::Serial),
         });
         registry.register(PanelDef {
             id: PanelId::builtin(PANEL_LOGS),
             title: "日志".to_owned(),
             icon: ICON_VIEW_IN_AR,
             kind: PanelKind::Builtin(BuiltinPanel::Logs),
-            required_capability: None,
         });
         registry.register(PanelDef {
             id: PanelId::builtin(PANEL_CHART),
             title: "图表".to_owned(),
             icon: ICON_VIEW_IN_AR,
             kind: PanelKind::Builtin(BuiltinPanel::Chart),
-            required_capability: None,
         });
         registry
     }
@@ -141,11 +122,6 @@ impl PanelRegistry {
 
     pub(crate) fn is_available(&self, id: &PanelId) -> bool {
         !self.disabled.contains(id)
-            && self
-                .defs
-                .get(id)
-                .and_then(|def| def.required_capability)
-                .is_none_or(|capability| self.capabilities.supports(capability))
     }
 
     pub(crate) fn title(&self, id: &PanelId) -> String {
@@ -177,7 +153,6 @@ impl PanelRegistry {
                     kind: PanelKind::Dynamic {
                         suffix: id.to_owned(),
                     },
-                    required_capability: None,
                 },
             );
         }
