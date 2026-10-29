@@ -1,8 +1,8 @@
-//! Platform capabilities shared by the Native and Web composition roots.
+//! Platform capabilities used by the native composition root.
 //!
-//! The application layer should depend on these stable identifiers and
-//! asynchronous operations instead of assuming that every platform has a
-//! string such as `COM3` or a synchronous filesystem.
+//! The application layer depends on these stable identifiers and asynchronous
+//! operations instead of assuming that every platform has a string such as
+//! `COM3` or a synchronous filesystem.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -12,24 +12,12 @@ use thiserror::Error;
 
 pub mod storage;
 
-#[cfg(target_arch = "wasm32")]
-pub mod web_serial;
-
-#[cfg(target_arch = "wasm32")]
-pub mod web_network;
-
-#[cfg(target_arch = "wasm32")]
-pub mod web_fetch;
-
-#[cfg(not(target_arch = "wasm32"))]
 pub mod native;
 
 /// An opaque, platform-owned port identity.
 ///
-/// Native values currently contain a canonical OS port name for compatibility
-/// with the existing serial worker. Web values are generated from the
-/// browser's authorized `SerialPort` object and must not be interpreted as a
-/// filesystem or device path by application code.
+/// Values contain a canonical OS port name for compatibility with the serial
+/// worker; application code must not interpret them as a filesystem path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct PortId(String);
 
@@ -71,7 +59,7 @@ pub enum PortKind {
 
 pub use tool_core::NetworkSerialConfig;
 
-/// Stable browser identity for a network endpoint.
+/// Stable identity for a network endpoint.
 pub fn network_port_id(config: &NetworkSerialConfig) -> PortId {
     PortId::new(format!("network://{}:{}", config.host, config.port))
 }
@@ -88,7 +76,7 @@ pub fn network_descriptor(config: &NetworkSerialConfig) -> PortDescriptor {
     }
 }
 
-/// Serial line parameters accepted by both Native serialport and Web Serial.
+/// Serial line parameters accepted by the native serialport backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SerialSettings {
     pub baud_rate: u32,
@@ -182,10 +170,10 @@ pub type TransportFuture<T> = Pin<Box<dyn Future<Output = TransportResult<T>> + 
 
 /// 把平台传输错误翻译成用户可见的中文提示。
 ///
-/// **与 `tool_transport::translate_error` 是同一个用户概念的两个枚举**：`tool-transport`
-/// 只在 native 编译（wasm 依赖不到它），所以本函数与它必须各留一份；同一件事在两端说
-/// 同一句话这件事由 `tests/transport_error_wording.rs` 机器钉住，改任何一侧的文案都会
-/// 让那条断言变红 —— 请两边一起改，别只动一处。逐字抄来的那几条（`PortNotConnected`
+/// **与 `tool_transport::translate_error` 是同一个用户概念的两个枚举**：`tool-platform`
+/// 不能依赖 `tool-transport`，所以本函数与它必须各留一份；同一件事在两侧说同一句话
+/// 这件事由 `tests/transport_error_wording.rs` 机器钉住，改任何一侧的文案都会让那条
+/// 断言变红 —— 请两边一起改，别只动一处。逐字抄来的那几条（`PortNotConnected`
 /// 对应 `TransportError::PortNotOpen`）刻意不做改写。
 ///
 /// `Operation(detail)` 原样返回：native 侧的 `operation_error` 放进来的已经是
@@ -252,8 +240,8 @@ pub fn serial_tx_event(port: &PortId, bytes: Vec<u8>) -> tool_core::Event {
 
 /// Common asynchronous transport capability.
 ///
-/// No method blocks the caller. Native implementations move blocking serial
-/// calls to a worker thread; Web implementations await JavaScript Promises.
+/// No method blocks the caller: the native implementation moves blocking
+/// serial calls to a worker thread.
 pub trait TransportBackend: Clone + 'static {
     fn capabilities(&self) -> TransportCapabilities;
     fn list_known_ports(&self) -> TransportFuture<Vec<PortDescriptor>>;

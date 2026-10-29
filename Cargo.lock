@@ -4628,7 +4628,6 @@ dependencies = [
 name = "tool-core"
 version = "1.3.2"
 dependencies = [
- "js-sys",
  "log",
  "serde",
  "serde_json",
@@ -4718,17 +4717,12 @@ version = "1.3.2"
 dependencies = [
  "futures-channel",
  "futures-executor",
- "futures-util",
- "js-sys",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tool-core",
  "tool-transport",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]

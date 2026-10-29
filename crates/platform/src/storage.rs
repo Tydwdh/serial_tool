@@ -1,14 +1,13 @@
 //! Platform-neutral settings and file capabilities.
 //!
-//! `Application` talks in terms of keys, file IDs and byte blobs. Native
-//! implementations may use filesystem paths internally; Web implementations
-//! do not expose a `PathBuf` to callers.
+//! `Application` talks in terms of keys, file IDs and byte blobs. The native
+//! implementation uses filesystem paths internally but does not expose a
+//! `PathBuf` to callers.
 
 use std::future::Future;
 use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
-#[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -32,7 +31,6 @@ impl FileId {
 pub struct FileHandle {
     id: FileId,
     name: String,
-    #[cfg(not(target_arch = "wasm32"))]
     native_path: Option<PathBuf>,
 }
 
@@ -42,12 +40,10 @@ impl FileHandle {
         Self {
             id: FileId::new(name.clone()),
             name,
-            #[cfg(not(target_arch = "wasm32"))]
             native_path: None,
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn from_native_path(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
         let name = path.display().to_string();
@@ -66,7 +62,6 @@ impl FileHandle {
         &self.name
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn native_path(&self) -> Option<&Path> {
         self.native_path.as_deref()
     }
@@ -126,7 +121,6 @@ pub trait FileService: Clone + 'static {
     fn write(&self, id: FileId, blob: FileBlob) -> StorageFuture<()>;
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 pub mod native {
     use std::path::{Component, Path, PathBuf};
     use std::thread;
@@ -294,111 +288,6 @@ pub mod native {
                 }
                 std::fs::write(path, blob.bytes).map_err(io_error)
             })
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-pub mod web {
-    use wasm_bindgen::JsValue;
-
-    use super::{FileBlob, FileId, FileService, SettingsStore, StorageError, StorageFuture};
-
-    #[derive(Clone)]
-    pub struct WebSettingsStore {
-        storage: web_sys::Storage,
-        namespace: String,
-    }
-
-    impl WebSettingsStore {
-        pub fn from_window(namespace: impl Into<String>) -> Result<Self, StorageError> {
-            let window = web_sys::window()
-                .ok_or_else(|| StorageError::Operation("window unavailable".into()))?;
-            let storage = window
-                .local_storage()
-                .map_err(js_error)?
-                .ok_or(StorageError::Unsupported)?;
-            Ok(Self {
-                storage,
-                namespace: namespace.into(),
-            })
-        }
-
-        fn key(&self, key: &str) -> String {
-            format!("{}:{key}", self.namespace)
-        }
-    }
-
-    fn js_error(error: JsValue) -> StorageError {
-        StorageError::Operation(error.as_string().unwrap_or_else(|| format!("{error:?}")))
-    }
-
-    /// `save` persists settings as the JSON encoding of the byte vector, so
-    /// every read has to undo exactly that encoding.
-    fn decode_settings(text: String) -> Result<Vec<u8>, StorageError> {
-        serde_json::from_str(&text)
-            .map_err(|error| StorageError::Operation(format!("decode settings: {error}")))
-    }
-
-    impl SettingsStore for WebSettingsStore {
-        fn load(&self, key: String) -> StorageFuture<Option<Vec<u8>>> {
-            let result = self
-                .storage
-                .get_item(&self.key(&key))
-                .map_err(js_error)
-                .and_then(|value| value.map(decode_settings).transpose());
-            Box::pin(async move { result })
-        }
-
-        fn save(&self, key: String, bytes: Vec<u8>) -> StorageFuture<()> {
-            let result = serde_json::to_string(&bytes)
-                .map_err(|error| StorageError::Operation(error.to_string()))
-                .and_then(|value| {
-                    self.storage
-                        .set_item(&self.key(&key), &value)
-                        .map_err(js_error)
-                });
-            Box::pin(async move { result })
-        }
-
-        fn remove(&self, key: String) -> StorageFuture<()> {
-            let result = self.storage.remove_item(&self.key(&key)).map_err(js_error);
-            Box::pin(async move { result })
-        }
-    }
-
-    /// Browser fallback for small user-selected files. The key/value store is
-    /// deliberately behind FileService so it can be replaced with OPFS or the
-    /// File System Access API without changing Application semantics.
-    #[derive(Clone)]
-    pub struct WebFileService {
-        storage: WebSettingsStore,
-    }
-
-    impl WebFileService {
-        pub fn new(storage: WebSettingsStore) -> Self {
-            Self { storage }
-        }
-    }
-
-    impl FileService for WebFileService {
-        fn read(&self, id: FileId) -> StorageFuture<FileBlob> {
-            let future = self.storage.load(id.as_str().to_owned());
-            let name = id.as_str().to_owned();
-            Box::pin(async move {
-                let bytes = future
-                    .await?
-                    .ok_or_else(|| StorageError::NotFound(name.clone()))?;
-                Ok(FileBlob {
-                    name,
-                    mime: "application/octet-stream".to_owned(),
-                    bytes,
-                })
-            })
-        }
-
-        fn write(&self, id: FileId, blob: FileBlob) -> StorageFuture<()> {
-            self.storage.save(id.as_str().to_owned(), blob.bytes)
         }
     }
 }

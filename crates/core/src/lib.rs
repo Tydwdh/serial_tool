@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-#[cfg(not(target_arch = "wasm32"))]
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// JSON 配置文件的通用读写与恢复工具。
@@ -365,53 +364,27 @@ pub fn mark_derived_event(
 
 /// 跨平台挂钟时间，单位为毫秒。
 ///
-/// Native 读系统时钟并把毫秒数钳制到 `u64`；`wasm32-unknown-unknown` 没有
-/// OS 支撑的 `std::time::SystemTime`，改用浏览器挂钟。系统时钟落在 `UNIX_EPOCH`
-/// 之前时记一条 warning 并返回 `1`——刻意不返回 `0`，调用方可以假定时间戳非零。
+/// 读系统时钟并把毫秒数钳制到 `u64`。系统时钟落在 `UNIX_EPOCH` 之前时
+/// 记一条 warning 并返回 `1`——刻意不返回 `0`，调用方可以假定时间戳非零。
 ///
 /// 这里曾有 `Clock`/`SystemClock`/`FrozenClock`，但没有任何函数接收过时钟，它不是
 /// 可注入的接缝，故整组删除；真要冻结时间，给那几个必须确定性的函数加一个时钟入参。
 pub fn now_timestamp_ms() -> u64 {
-    #[cfg(target_arch = "wasm32")]
-    {
-        // `wasm32-unknown-unknown` has no OS-backed implementation of
-        // `std::time::SystemTime`.  Use the browser wall clock instead.
-        js_sys::Date::now().max(0.0) as u64
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-            .unwrap_or_else(|e| {
-                log::warn!("system clock before UNIX_EPOCH: {e}");
-                1
-            })
-    }
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or_else(|e| {
+            log::warn!("system clock before UNIX_EPOCH: {e}");
+            1
+        })
 }
 
 /// 返回用于计算耗时的跨平台时钟，单位为纳秒。
 ///
-/// `wasm32-unknown-unknown` 没有 `std::time::Instant` 的实现，因此 Web
-/// 构建必须使用浏览器提供的时间源。Native 使用进程内单调时钟；Web 使用
-/// `Date.now()`，它足以支持短耗时统计，并且不会触发标准库的 unsupported
-/// time panic。
+/// 使用进程内单调时钟，单位为纳秒。
 pub fn monotonic_now_nanos() -> u64 {
-    #[cfg(target_arch = "wasm32")]
-    {
-        (js_sys::Date::now().max(0.0) * 1_000_000.0) as u64
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-        START
-            .get_or_init(Instant::now)
-            .elapsed()
-            .as_nanos()
-            .min(u128::from(u64::MAX)) as u64
-    }
+    static START: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+    START.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
 /// Topic 匹配：`*` 后缀按前缀匹配，不带 `*` 精确匹配。
