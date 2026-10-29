@@ -12,12 +12,12 @@
 
 ## 版本号与提交约定
 
-版本号唯一权威来源是根 `Cargo.toml` 的 `[workspace.package].version`（当前 `1.3.0`）
-（`Cargo.toml:19`）。发布时四者必须一致：
+版本号唯一权威来源是根 `Cargo.toml` 的 `[workspace.package].version`（当前 `2.0.0`）。
+发布时四者必须一致：
 
 | 载体 | 约定 |
 |------|------|
-| Git tag | `v<version>`，例如 `v1.3.0` |
+| Git tag | `v<version>`，例如 `v2.0.0` |
 | `Cargo.toml` `[workspace.package].version` | 去掉 tag 的 `v` 前缀后的版本号 |
 | `CHANGELOG.md` 版本标题 | `## [<version>] - YYYY-MM-DD` |
 | `docs/releases/<tag>.md` | 与 tag 同名的发布说明，作为 GitHub Release 正文 |
@@ -48,10 +48,10 @@ cargo test -p tool-panels -p tool-databus -- --ignored
 
 ```bash
 git add -A
-git commit -m "release: v1.3.0"
-git tag -a v1.3.0 -m "v1.3.0"
+git commit -m "release: v2.0.0"
+git tag -a v2.0.0 -m "v2.0.0"
 git push origin main
-git push origin v1.3.0
+git push origin v2.0.0
 ```
 
 ## CI 自动流程

@@ -2,7 +2,13 @@
 
 本项目的重要变更记录于此。版本号遵循语义化版本。
 
-## [Unreleased]
+## [2.0.0] - 2026-10-30
+
+### 破坏性变更
+
+- **移除 Web 版（wasm32 / 在线模式）**：删除 wasm 目标、浏览器组合根、web 平台适配、omniLua 引擎与差分测试、Web CI 与 GitHub Pages 发布、Trunk 工程与 web 文档。`v1.3.2` 是最后一个包含在线版的版本；桌面端功能与原生网络串口保持不变。
+- **收口为单一 native 组合根**：`AppRuntime` trait、`AppCapabilities`/`Capability` 门控与面板能力过滤删除；UI 直接持有 `Workbench`。`tool-plugin-api` 只保留 native 插件契约。
+- **发布形态变更**：版本号升至 2.0.0；在线版不再更新，GitHub Pages 停用。
 
 ### 重构
 

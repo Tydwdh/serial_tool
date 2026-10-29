@@ -1,6 +1,6 @@
 # 已知差异与残余工作（登记册）
 
-本文登记**已知且刻意保留**的两端差异、构建/测试缺口与未闭合工作。源码注释与 CI 注释会按条目名引用本文——**改条目名要同步改引用处**。每条都给出代码位置；行号会漂移，按符号与文件名核对。
+本文登记**已知且刻意保留**的差异、构建/测试缺口与未闭合工作。源码注释与 CI 注释会按条目名引用本文——**改条目名要同步改引用处**。每条都给出代码位置；行号会漂移，按符号与文件名核对。
 
 ## 发送路径的残留差异
 
@@ -8,32 +8,27 @@
 
 ### 错误文案
 
-- native 经 `AppError` 逐层加中文分类前缀（`传输错误：` `录制错误：` 等，`crates/application/src/error.rs`）。
+- `AppError` 逐层加中文分类前缀（`传输错误：` `录制错误：` 等，`crates/application/src/error.rs`）。
   非法 HEX 的完整渲染串被
   `crates/application/tests/headless.rs::send_routing_dispatches_by_port_kind_and_rejects_invalid_hex`
   逐字钉住：
   `传输错误：HEX 解析失败：严格模式: "C" 规范化后为 1 个字符，必须恰为 2（偶数 hex 长度），请补0或关闭严格模式`。
-- web 侧 `AppError` 被 `cfg(not(target_arch = "wasm32"))` 排除，`to_string()` 出来的是**不带任何分类前缀**的正文——
-  「native 有一层分类框架、web 没有」按设计仍在，别把中文化记成"两端一致"。
-- 用户可见站点：native 发送红字标签（`crates/app/src/ui/bottom_panel.rs` 写 `SendView.error`，
+- 用户可见站点：发送红字标签（`crates/app/src/ui/bottom_panel.rs` 写 `SendView.error`，
   由 `crates/panels/src/sender.rs` 的 `colored_label` 渲染）；状态栏的活错误站点只来自 DTR/RTS。
 
 ### 预检的规则来源
 
 - 按钮门禁是**共享面板** `crates/panels/src/sender.rs`：它传 `*view.hex_strict`（默认 `true`，
-  `crates/app/src/state.rs`），native 与 web 走同一个组件。
+  `crates/app/src/state.rs`），面板与命令走同一个组件。
 - 门禁与 `send_plan::decode_hex` 在 `"0x0xAB"` 这类输入上不一致：门禁判非法、`dispatch` 实际接受
   （按钮灰着而命令能发）。两侧各自的实际行为被测试钉住（`crates/panels/src/sender.rs::gate_and_decoder_disagree_on_repeated_0x_prefix`
   与 `crates/application/tests/headless.rs` 的渲染串断言）。统一判定会移动用户可见的按钮状态，登记为后续项而非顺手改。
 
-### `is_network` 的计算规则（native 与 web 各自计算）
+### `is_network` 的计算规则
 
-- 唯一路由输入 `is_network: bool`（`plan_send(command, is_network)`）仍由各平台自己算：
-  native 比对 `app_config.network_ports` 字符串（同时认 `display_name()` 与 `port_id()` 两种形态），
-  web 查 `network_ports` 的键（只在 `port_id()` 形态下写入）。
-- 两种形态**都被持久化**（`workspace.json` / 浏览器设置），统一命名会打断已存工作区，故不统一。
-- 跨平台误分类是响亮的：native 形态的 id 进 web 会走 `WebSerialTransport::enqueue_command` →
-  `TransportError::PortNotConnected`。
+- 唯一路由输入 `is_network: bool`（`plan_send(command, is_network)`）由 native 组合根计算：
+  比对 `app_config.network_ports` 字符串（同时认 `display_name()` 与 `port_id()` 两种形态）。
+- 两种形态**都被持久化**（`workspace.json`），统一命名会打断已存工作区，故不统一。
 - **候选（下一轮）**：`plan_send` 改收类型化目标 `SendTarget::{Serial, Network}`（来源
   `tool_platform::PortDescriptor::kind`），让"端口根本不存在"不再被折叠成"串口"。
 
@@ -49,22 +44,20 @@
   - `ui/status_bar.rs`：`clippy::needless_return`（Linux 早返回块）、`draw_update_icon` never used；
   - `workbench_app.rs`：`update_state` never read。
 - 复现配方（Windows 宿主即可，无需交叉编译）：把源码里 `#[cfg(windows)]` / `#[cfg(target_os = "windows")]`
-  换成 `#[cfg(target_arch = "wasm32")]`（本机为假），`#[cfg(not(windows))]` / `#[cfg(target_os = "linux")]`
-  换成 `#[cfg(not(target_arch = "wasm32"))]`（本机为真），然后跑
+  换成 `#[cfg(target_os = "none")]`（本机为假），`#[cfg(not(windows))]` / `#[cfg(target_os = "linux")]`
+  换成 `#[cfg(not(target_os = "none"))]`（本机为真），然后跑
   `cargo clippy --workspace --all-targets -- -D warnings`——报错只会落在 `hardware-workbench-app`。
   复刻完用 `git checkout -- crates/` 还原。
 - 收口条件：给更新链路补 cfg 或让 Linux 真正启用更新器后，删掉 CI 里的 `--exclude`，本条目随之关闭。
 
-### Linux / wasm 死代码与豁免
+### Linux 死代码与豁免
 
 - `#[allow]` 清单的**唯一真相**是 `crates/app/tests/lint_exemptions.rs` 里钉住的 `EXPECTED`
-  （当前 5 条：2 条 clippy —— `crates/app/src/config.rs::large_enum_variant`、
-  `crates/lua_host/src/lib.rs::too_many_arguments`；3 条 `dead_code` —— `shared_keymap.rs` 2 条
-  （只有 wasm 侧 `web` 模块会读，native 构建里必然报死）、`state.rs` 1 条（刻意暂停、尚无调用者的方法））。
-  本文不重复维护逐条清单；加一条豁免必须显式改那份清单，测试会红。
-- 「豁免是不是空转」的正确判法：把 `crates/` 下的豁免一次摘光，**分别**跑 native 与 wasm 两条 clippy
-  （去掉 `-D warnings` 收集全量），两边都不点名的才是死的。只跑 native 会得出相反结论——
-  `cfg_attr(target_arch = "wasm32", …)` 护着的东西在 native 构建里本来就活着。详见该测试的文档注释。
+  （当前 3 条：2 条 clippy —— `crates/app/src/config.rs::large_enum_variant`、
+  `crates/lua_host/src/lib.rs::too_many_arguments`；1 条 `dead_code` —— `state.rs`，刻意暂停、
+  尚无调用者的方法）。本文不重复维护逐条清单；加一条豁免必须显式改那份清单，测试会红。
+- 「豁免是不是空转」：把 `crates/` 下的豁免一次摘光，跑 native clippy（去掉 `-D warnings`
+  收集全量），仍报的就是需要的。
 
 ### 串口权限错误的逐平台修法（`Serial` 臂）
 

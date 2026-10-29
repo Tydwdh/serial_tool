@@ -5,8 +5,7 @@
 
 ## 运行时诊断行
 
-桌面端与浏览器端各有一条每 5 秒输出一次的诊断行，采样窗口有界，诊断本身不会成为新的
-无界分配路径。
+桌面端有一条每 5 秒输出一次的诊断行，采样窗口有界，诊断本身不会成为新的无界分配路径。
 
 ### 桌面端
 
@@ -19,15 +18,6 @@
 - DataBus 平均发布耗时、subscriber backlog 事件数 / 字节数与 drop 数；
 - Recorder backlog 事件数 / 字节数 / 落后秒数与写入吞吐；
 - plugin 回调与 Chart 渲染采样。
-
-### 浏览器端
-
-由 `crates/app/src/web_perf.rs` 经 `console::info_1` 输出到浏览器控制台
-（`web_perf.rs:181`），间隔 `REPORT_INTERVAL_SECONDS = 5.0`（`web_perf.rs:15`），采样窗口
-`SAMPLE_CAPACITY = 2048`（`web_perf.rs:14`）。除上面的 frame / RX / TX / 事件速率 /
-DataBus / subscriber / Recorder 字段外，浏览器行额外给出 Recorder 的
-`queued` / `behind` / `events` / `bytes` / `write` / `incomplete`，以及
-ingest（term / log）与 render（term / log / chart）与 plugin 采样。
 
 Recorder backlog 字节数是用于背压判定与排查的估算值，不是文件格式记账口径。
 
@@ -53,7 +43,7 @@ cargo test -p tool-databus --release pressure_3mbps_rx_publish_and_drain -- --ig
 
 ## CI gate
 
-`.github/workflows/ci.yml` 的 `test` job 运行两个门禁（`ci.yml:49-50`）：
+`.github/workflows/ci.yml` 的 `test` job 运行压力门禁：
 
 ```text
 cargo test -p tool-panels -p tool-databus -- --ignored
