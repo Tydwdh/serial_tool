@@ -7,8 +7,18 @@ use tool_panels::{SerialPanel, SerialTopBarAction, SerialTopBarView, theme};
 use crate::app::WorkbenchApp;
 use crate::reconnect::RECONNECT_MAX_ATTEMPTS;
 use crate::state::StatusLevel;
+use crate::workbench_app::ConfigPage;
 
 impl WorkbenchApp {
+    /// 「更多」里的配置页是浮动窗口：再次点击同一项即关闭。
+    fn toggle_config_overlay(&mut self, page: ConfigPage) {
+        self.config_overlay = if self.config_overlay == Some(page) {
+            None
+        } else {
+            Some(page)
+        };
+    }
+
     pub(super) fn top_bar(&mut self, ui: &mut egui::Ui) {
         let selected_before = self.serial.selected_port.clone();
         let ports = self.native_port_items();
@@ -80,13 +90,11 @@ impl WorkbenchApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.menu_button("更多", |ui| {
                     if ui.button("设置").clicked() {
-                        self.panels
-                            .open_tab(tool_panels::PanelId::builtin(tool_panels::PANEL_SETTINGS));
+                        self.toggle_config_overlay(ConfigPage::Settings);
                         ui.close();
                     }
                     if ui.button("插件").clicked() {
-                        self.panels
-                            .open_tab(tool_panels::PanelId::builtin(tool_panels::PANEL_PLUGINS));
+                        self.toggle_config_overlay(ConfigPage::Plugins);
                         ui.close();
                     }
                 });

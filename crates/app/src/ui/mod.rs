@@ -51,6 +51,7 @@ impl crate::shared_shell::AppShellHost for WorkbenchApp {
     }
 
     fn after_dock(&mut self, ui: &egui::Ui) {
+        self.render_config_overlay(ui.ctx());
         if self.layout_dirty && !ui.input(|input| input.pointer.primary_down()) {
             self.layout_dirty = false;
             if let Err(error) = self.save_config() {

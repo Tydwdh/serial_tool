@@ -3,16 +3,40 @@
 //! The runtime services and presentation state live in one type; panel modules
 //! receive the pieces they render rather than owning runtime state.
 
-use crate::panel_registry::PanelRegistry;
+use crate::panel_registry::{BuiltinPanel, PanelRegistry};
 use crate::state::{NotificationQueue, SendUiState, SerialUiState, UpdateState};
 use tool_application::Workbench;
 use tool_panels::{DynamicPanels, LogPanel, PanelManager, PluginsPanel, TerminalPanel, theme};
+
+/// 顶栏「更多」里的配置页。它们不进入主 Dock，只以浮动窗口打开。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConfigPage {
+    Settings,
+    Plugins,
+}
+
+impl ConfigPage {
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::Settings => "设置",
+            Self::Plugins => "插件",
+        }
+    }
+
+    pub(crate) fn panel(self) -> BuiltinPanel {
+        match self {
+            Self::Settings => BuiltinPanel::Settings,
+            Self::Plugins => BuiltinPanel::Plugins,
+        }
+    }
+}
 
 pub(crate) struct WorkbenchApp {
     pub(crate) panels: PanelManager,
     pub(crate) terminal_panel: TerminalPanel,
     pub(crate) bottom_log_panel: LogPanel,
     pub(crate) panel_registry: PanelRegistry,
+    pub(crate) config_overlay: Option<ConfigPage>,
     pub(crate) layout_dirty: bool,
     pub(crate) ui_theme: theme::AppTheme,
 

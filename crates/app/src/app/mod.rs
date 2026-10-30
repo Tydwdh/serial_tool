@@ -6,7 +6,10 @@ use tool_application::{ApplicationConfig, Workbench};
 use tool_core::{Event, LogLevel};
 use tool_databus::DataBus;
 use tool_marketplace::retire_old_plugin_dirs;
-use tool_panels::{DynamicPanels, LogPanel, PanelManager, PluginsPanel, TerminalPanel, theme};
+use tool_panels::{
+    DynamicPanels, LogPanel, PANEL_PLUGINS, PANEL_SETTINGS, PANEL_TERMINAL, PanelId, PanelManager,
+    PluginsPanel, TerminalPanel, theme,
+};
 use tool_transport::RepaintWaker;
 
 use crate::bootstrap::{apply_theme, setup_fonts, user_plugins_dir, user_themes_dir};
@@ -57,6 +60,7 @@ impl WorkbenchApp {
             bottom_log_panel: LogPanel::new(&bus),
             serial,
             panels,
+            config_overlay: None,
             notifications: NotificationQueue::new(),
             toast_overlay: ToastOverlay::default(),
             send,
@@ -235,6 +239,17 @@ fn startup_panel_manager(config: Option<&PersistedConfig>) -> PanelManager {
         .map(|cfg| cfg.panels.clone())
         .unwrap_or_else(PanelManager::default_workspace);
     panel_manager.discard_dynamic_tabs();
+
+    // 设置/插件已改为「更多」里的浮动窗口，不再占用主 Dock。旧工作区里可能还留着
+    // 这两个标签；启动时清掉，避免升级后它们继续出现在接收/日志旁边。
+    let active_config_page = panel_manager.active_tab == PanelId::builtin(PANEL_SETTINGS)
+        || panel_manager.active_tab == PanelId::builtin(PANEL_PLUGINS);
+    panel_manager.close_tab(PanelId::builtin(PANEL_SETTINGS));
+    panel_manager.close_tab(PanelId::builtin(PANEL_PLUGINS));
+    if active_config_page {
+        panel_manager.active_tab = PanelId::builtin(PANEL_TERMINAL);
+    }
+
     panel_manager.dock.normalize_tool_layout();
     panel_manager.ensure_tiles_layout();
     panel_manager

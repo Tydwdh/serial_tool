@@ -52,6 +52,33 @@ impl WorkbenchApp {
         }
     }
 
+    pub(super) fn render_config_overlay(&mut self, ctx: &egui::Context) {
+        let Some(page) = self.config_overlay else {
+            return;
+        };
+        let viewport = ctx.content_rect();
+        let default_size = egui::vec2(
+            (viewport.width() * 0.82).clamp(680.0, 1160.0),
+            (viewport.height() * 0.84).clamp(520.0, 900.0),
+        );
+        let default_pos = viewport.center() - default_size * 0.5;
+        let mut open = true;
+        egui::Window::new(page.title())
+            .id(egui::Id::new("config-overlay"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_pos(default_pos)
+            .default_size(default_size)
+            .min_size(egui::vec2(560.0, 360.0))
+            .show(ctx, |ui| {
+                self.render_platform_panel_body(ui, page.panel());
+            });
+        if !open {
+            self.config_overlay = None;
+        }
+    }
+
     pub(crate) fn handle_plugin_panel_events(&mut self, events: Vec<PluginPanelEvent>) {
         for event in events {
             match event {

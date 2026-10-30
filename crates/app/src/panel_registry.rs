@@ -6,16 +6,11 @@
 
 use egui_material_icons::{
     MaterialIcon,
-    icons::{
-        ICON_CABLE, ICON_EXTENSION, ICON_SEND, ICON_SETTINGS, ICON_TERMINAL, ICON_USB,
-        ICON_VIEW_IN_AR,
-    },
+    icons::{ICON_CABLE, ICON_SEND, ICON_TERMINAL, ICON_USB, ICON_VIEW_IN_AR},
 };
 use std::collections::{HashMap, HashSet};
 use tool_panels::DynamicPanels;
-use tool_panels::{
-    PANEL_DEVICES, PANEL_LOGS, PANEL_PLUGINS, PANEL_SENDER, PANEL_SETTINGS, PANEL_TERMINAL, PanelId,
-};
+use tool_panels::{PANEL_DEVICES, PANEL_LOGS, PANEL_SENDER, PANEL_TERMINAL, PanelId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuiltinPanel {
@@ -57,22 +52,10 @@ impl PanelRegistry {
             kind: PanelKind::Builtin(BuiltinPanel::Devices),
         });
         registry.register(PanelDef {
-            id: PanelId::builtin(PANEL_SETTINGS),
-            title: "设置".to_owned(),
-            icon: ICON_SETTINGS,
-            kind: PanelKind::Builtin(BuiltinPanel::Settings),
-        });
-        registry.register(PanelDef {
             id: PanelId::builtin(PANEL_TERMINAL),
             title: "接收".to_owned(),
             icon: ICON_TERMINAL,
             kind: PanelKind::Builtin(BuiltinPanel::Terminal),
-        });
-        registry.register(PanelDef {
-            id: PanelId::builtin(PANEL_PLUGINS),
-            title: "插件".to_owned(),
-            icon: ICON_EXTENSION,
-            kind: PanelKind::Builtin(BuiltinPanel::Plugins),
         });
         registry.register(PanelDef {
             id: PanelId::builtin(PANEL_SENDER),

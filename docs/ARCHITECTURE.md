@@ -142,6 +142,7 @@ crates/app ──────────> crates/panels ───────�
 - 平台抽象：`crates/platform`（native 端点包 `TransportManager`；存储走 `storage::native`）。
 - 壳：`crates/app/src/shared_shell.rs` + `vendor/egui_tiles`；面板注册表
   `crates/app/src/panel_registry.rs`（终端、日志、发送器、设备等内置面板）。
+  设置与插件管理不注册进 Dock，从顶栏「更多」以浮动窗口打开。
 
 ## 9. 状态与持久化
 
