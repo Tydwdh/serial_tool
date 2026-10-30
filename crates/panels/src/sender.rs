@@ -319,6 +319,31 @@ fn render_actions(ui: &mut Ui, view: &mut SendView<'_>, actions: &mut Vec<SendAc
     let target = view.target_port.clone();
 
     let render_main_row = |ui: &mut Ui, view: &mut SendView<'_>, actions: &mut Vec<SendAction>| {
+        if ui.button("清空").clicked() {
+            view.input.clear();
+            *view.error = None;
+            *view.periodic_send_count = 0;
+        }
+        render_history(ui, view);
+        for button in view.toolbar_buttons {
+            let response = ui.add_enabled(button.enabled, egui::Button::new(&button.title));
+            let response = if let Some(tooltip) = button.tooltip.as_deref() {
+                response.on_hover_text(tooltip)
+            } else {
+                response
+            };
+            if response.clicked() {
+                actions.push(SendAction::ActivateToolbar {
+                    plugin_id: button.plugin_id.clone(),
+                    contribution_id: button.contribution_id.clone(),
+                });
+            }
+        }
+        // 主按钮靠右；窄面板放不下时由 horizontal_wrapped 自动换到下一行。
+        let send_width = 64.0;
+        let gap = ui.spacing().item_spacing.x;
+        let remaining = (ui.max_rect().right() - ui.cursor().min.x).max(0.0);
+        ui.add_space((remaining - send_width - gap).max(0.0));
         // 发送是主操作：蓝色实心按钮把它和同排的「清空 / 历史 / 插件」分开。
         let (send_fill, send_stroke, send_text) = if can_send {
             (theme::blue(), theme::blue(), egui::Color32::WHITE)
@@ -357,26 +382,6 @@ fn render_actions(ui: &mut Ui, view: &mut SendView<'_>, actions: &mut Vec<SendAc
             *view.periodic_send_count = 0;
             *view.history_index = None;
             view.saved_input.clear();
-        }
-        if ui.button("清空").clicked() {
-            view.input.clear();
-            *view.error = None;
-            *view.periodic_send_count = 0;
-        }
-        render_history(ui, view);
-        for button in view.toolbar_buttons {
-            let response = ui.add_enabled(button.enabled, egui::Button::new(&button.title));
-            let response = if let Some(tooltip) = button.tooltip.as_deref() {
-                response.on_hover_text(tooltip)
-            } else {
-                response
-            };
-            if response.clicked() {
-                actions.push(SendAction::ActivateToolbar {
-                    plugin_id: button.plugin_id.clone(),
-                    contribution_id: button.contribution_id.clone(),
-                });
-            }
         }
     };
 
@@ -441,6 +446,7 @@ fn render_actions(ui: &mut Ui, view: &mut SendView<'_>, actions: &mut Vec<SendAc
     // 主操作行与次操作行一律换行：插件贡献的按钮（G文件/G单条/暂停恢复/取消等）
     // 会把行撑过可用宽度，用横向 ScrollArea 会把它们裁到视野外，只能靠拖动滚动条
     // 才能点到；换行则始终可见。
+    // 主操作靠右：Linear 风格里 footer 的主按钮在右端，左侧留给次要动作。
     design::toolbar(ui, |ui| render_main_row(ui, view, actions));
     design::toolbar(ui, |ui| render_secondary_row(ui, view, actions));
 }
@@ -1106,21 +1112,20 @@ mod tests {
         );
     }
 
-    /// 操作行不再使用横向滚动：同一行在宽面板下也不会出现滚动条容器。
+    /// 发送按钮固定在操作行右端；左侧留给清空、历史与插件按钮。
     #[test]
-    fn action_row_has_no_horizontal_scroll_container() {
+    fn action_row_send_is_right_aligned() {
         let fixture = Rc::new(RefCell::new(SenderFixture::new(SendLayout::Horizontal)));
         let panel_rect = Rc::new(RefCell::new(None));
         let harness = sender_harness(&fixture, &panel_rect, egui::vec2(640.0, 320.0));
 
-        // 发送按钮左边与面板左边对齐：若外层是横向 ScrollArea，会有内容内边距。
         let panel = panel_rect.borrow().expect("panel rect");
         let send = harness.get_by_label("发送").rect();
         assert!(
-            (send.min.x - panel.min.x).abs() < 12.0,
-            "操作行左边缘 {} 与面板左边缘 {} 偏差过大，可能仍在滚动容器内",
-            send.min.x,
-            panel.min.x
+            (send.max.x - panel.max.x).abs() < 12.0,
+            "发送按钮右边缘 {} 与面板右边缘 {} 偏差过大",
+            send.max.x,
+            panel.max.x
         );
     }
 

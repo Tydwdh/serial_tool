@@ -170,10 +170,6 @@ impl<H: DockHost> SharedTiles<'_, H> {
     fn title(&self, id: &PanelId) -> String {
         self.host.panel_registry().title(id)
     }
-
-    fn icon(&self, id: &PanelId) -> egui_material_icons::MaterialIcon {
-        self.host.panel_registry().icon(id)
-    }
 }
 
 impl<H: DockHost> Behavior<PanelId> for SharedTiles<'_, H> {
@@ -187,7 +183,8 @@ impl<H: DockHost> Behavior<PanelId> for SharedTiles<'_, H> {
     }
 
     fn tab_title_for_pane(&mut self, pane: &PanelId) -> egui::WidgetText {
-        format!("{} {}", self.icon(pane).codepoint, self.title(pane)).into()
+        // Linear 的标签栏只有文字，不重复面板图标；图标仍保留在面板内部。
+        self.title(pane).into()
     }
 
     fn tab_title_for_tile(&mut self, tiles: &Tiles<PanelId>, tile_id: TileId) -> egui::WidgetText {
@@ -221,15 +218,15 @@ impl<H: DockHost> Behavior<PanelId> for SharedTiles<'_, H> {
     }
 
     fn tab_bar_height(&self, _style: &egui::Style) -> f32 {
-        40.0
+        32.0
     }
 
     fn tab_title_spacing(&self, _visuals: &egui::Visuals) -> f32 {
-        14.0
+        10.0
     }
 
     fn tab_bar_color(&self, _visuals: &egui::Visuals) -> egui::Color32 {
-        theme::tab_bar_bg()
+        theme::bg_primary()
     }
 
     fn tab_bg_color(
@@ -237,13 +234,9 @@ impl<H: DockHost> Behavior<PanelId> for SharedTiles<'_, H> {
         _visuals: &egui::Visuals,
         _tiles: &Tiles<PanelId>,
         _tile_id: TileId,
-        state: &TabState,
+        _state: &TabState,
     ) -> egui::Color32 {
-        if state.active {
-            theme::tab_active_bg()
-        } else {
-            theme::tab_inactive_bg()
-        }
+        egui::Color32::TRANSPARENT
     }
 
     fn tab_outline_stroke(
@@ -251,17 +244,22 @@ impl<H: DockHost> Behavior<PanelId> for SharedTiles<'_, H> {
         _visuals: &egui::Visuals,
         _tiles: &Tiles<PanelId>,
         _tile_id: TileId,
-        state: &TabState,
+        _state: &TabState,
     ) -> egui::Stroke {
-        if state.active {
-            hairline(theme::tab_active_outline())
-        } else {
-            egui::Stroke::NONE
-        }
+        // 选中态用文字亮度 + 浅表面区分，不再描一圈边框。
+        egui::Stroke::NONE
     }
 
     fn tab_bar_hline_stroke(&self, _visuals: &egui::Visuals) -> egui::Stroke {
-        hairline(theme::tab_bar_outline())
+        hairline(theme::border())
+    }
+
+    fn tab_underline_stroke(&self, state: &TabState) -> egui::Stroke {
+        if state.active {
+            egui::Stroke::new(1.5, theme::blue())
+        } else {
+            egui::Stroke::NONE
+        }
     }
 
     fn tab_text_color(
@@ -272,9 +270,9 @@ impl<H: DockHost> Behavior<PanelId> for SharedTiles<'_, H> {
         state: &TabState,
     ) -> egui::Color32 {
         if state.active {
-            theme::tab_active_text()
+            theme::text_white()
         } else {
-            theme::tab_inactive_text()
+            theme::text_secondary()
         }
     }
 

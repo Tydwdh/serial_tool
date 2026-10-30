@@ -159,39 +159,43 @@ impl SerialPanel {
             .map(|port| port_display_label(port, aliases))
             .unwrap_or_else(|| "未连接".to_owned());
 
-        let color = if connecting {
+        let state_color = if connecting {
             crate::theme::yellow()
         } else if connected.is_some() {
             crate::theme::green()
         } else {
-            crate::theme::red()
+            crate::theme::text_dimmed()
         };
-        // 连接状态做成一个独立的胶囊：图标 + 端口状态 + 折叠箭头。原先的
-        // selectable_label 会在选中时整块变蓝，和「打开」按钮抢注意力。
+        let label_color = if connected.is_some() {
+            crate::theme::text_primary()
+        } else {
+            crate::theme::text_secondary()
+        };
+        // Linear 式连接 chip：中性表面 + 状态点，不再用红/绿整块染色。
         let chip = egui::Frame::new()
-            .fill(color.gamma_multiply(0.10))
-            .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.32)))
-            .corner_radius(14.0)
-            .inner_margin(egui::Margin::symmetric(10, 4))
+            .fill(crate::theme::bg_secondary())
+            .stroke(egui::Stroke::new(1.0, crate::theme::border()))
+            .corner_radius(6.0)
+            .inner_margin(egui::Margin::symmetric(9, 4))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    ui.label(
-                        egui::RichText::new(ICON_CABLE.codepoint)
-                            .size(17.0)
-                            .color(color),
-                    );
-                    ui.label(
-                        egui::RichText::new("串口")
-                            .size(13.5)
-                            .color(crate::theme::text_secondary()),
-                    );
+                    let (dot, _) =
+                        ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
+                    ui.painter().circle_filled(dot.center(), 3.0, state_color);
                     ui.label(
                         egui::RichText::new(&connected_label)
-                            .size(13.5)
+                            .size(11.5)
                             .strong()
-                            .color(color),
+                            .color(label_color),
                     );
+                    if connected.is_some() {
+                        ui.label(
+                            egui::RichText::new(serial_settings_label(settings))
+                                .size(9.5)
+                                .color(crate::theme::text_dimmed()),
+                        );
+                    }
                     let chevron = if *collapsed {
                         ICON_CHEVRON_RIGHT.codepoint
                     } else {
@@ -199,8 +203,8 @@ impl SerialPanel {
                     };
                     ui.label(
                         egui::RichText::new(chevron)
-                            .size(16.0)
-                            .color(crate::theme::text_secondary()),
+                            .size(14.0)
+                            .color(crate::theme::text_dimmed()),
                     );
                 });
             })
@@ -303,11 +307,6 @@ impl SerialPanel {
             {
                 actions.push(SerialTopBarAction::Disconnect { port });
             }
-        } else if connected.is_some() {
-            ui.label(
-                egui::RichText::new(format!("· {}", serial_settings_label(settings)))
-                    .color(crate::theme::text_secondary()),
-            );
         }
 
         if view.show_request_port

@@ -14,10 +14,10 @@ pub use layout::{
     FIELD_LABEL_WIDTH, FIELD_MIN_VALUE_WIDTH, FieldRow, FieldRowResponse, fitted_label, toolbar,
 };
 
-pub const CONTROL_HEIGHT: f32 = 32.0;
-pub const ICON_BUTTON_SIZE: f32 = 32.0;
-pub const CARD_RADIUS: f32 = 10.0;
-pub const SECTION_GAP: f32 = 14.0;
+pub const CONTROL_HEIGHT: f32 = 30.0;
+pub const ICON_BUTTON_SIZE: f32 = 30.0;
+pub const CARD_RADIUS: f32 = 6.0;
+pub const SECTION_GAP: f32 = 12.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonKind {
@@ -133,7 +133,7 @@ pub fn icon_button(
         widgets.active.bg_stroke = Stroke::NONE;
         ui.add_sized(
             egui::vec2(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE),
-            egui::Button::new(icon_only(icon, theme::text_secondary(), 18.0))
+            egui::Button::new(icon_only(icon, theme::text_secondary(), 16.0))
                 .min_size(egui::vec2(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
                 .corner_radius(CARD_RADIUS),
         )
@@ -149,7 +149,7 @@ pub fn card() -> Frame {
         // 卡片会完全融进面板背景。
         .stroke(Stroke::new(1.0, theme::border_light().gamma_multiply(0.55)))
         .corner_radius(CARD_RADIUS)
-        .inner_margin(egui::Margin::symmetric(16, 14))
+        .inner_margin(egui::Margin::symmetric(14, 12))
 }
 
 /// 两步确认的机械状态：首次点击武装，再次点击才算确认。
@@ -402,7 +402,7 @@ pub fn choice_toggle(ui: &mut egui::Ui, selected: bool, label: impl AsRef<str>) 
         let button = egui::Button::selectable(selected, text)
             .frame_when_inactive(true)
             .corner_radius(CARD_RADIUS)
-            .min_size(egui::vec2(56.0, CONTROL_HEIGHT));
+            .min_size(egui::vec2(0.0, CONTROL_HEIGHT));
         let button = if selected {
             button.stroke(Stroke::new(1.0, theme::toggle_selected_border()))
         } else {

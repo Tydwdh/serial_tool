@@ -174,6 +174,16 @@ pub trait Behavior<Pane> {
             // Render the title
             ui.painter().galley(text_position, galley, text_color);
 
+            // Optional accent line under the active tab (Linear-style underline).
+            let underline = self.tab_underline_stroke(state);
+            if underline.width > 0.0 {
+                ui.painter().hline(
+                    tab_rect.x_range(),
+                    tab_rect.bottom() - underline.width * 0.5,
+                    underline,
+                );
+            }
+
             // Conditionally render the close button
             if state.closable {
                 let close_btn_rect = egui::Align2::RIGHT_CENTER
@@ -394,6 +404,11 @@ pub trait Behavior<Pane> {
         } else {
             visuals.widgets.noninteractive.text_color()
         }
+    }
+
+    /// Accent line under the active tab. Return a zero-width stroke to disable it.
+    fn tab_underline_stroke(&self, _state: &TabState) -> Stroke {
+        Stroke::NONE
     }
 
     /// When drag-and-dropping a tile, the candidate area is drawn with this stroke.

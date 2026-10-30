@@ -43,6 +43,7 @@ impl WorkbenchApp {
         let mut serial_actions = Vec::new();
 
         design::toolbar(ui, |ui| {
+            brand(ui);
             let mut view = SerialTopBarView {
                 ports: &ports,
                 aliases: &aliases,
@@ -151,4 +152,40 @@ impl WorkbenchApp {
             }
         }
     }
+}
+
+/// 顶栏品牌块：24px 方块 + 两行文字，对应 Linear 审核稿的左侧品牌区。
+fn brand(ui: &mut egui::Ui) {
+    ui.allocate_ui_with_layout(
+        egui::vec2(170.0, 30.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            let (logo, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::hover());
+            ui.painter()
+                .rect_filled(logo, 6.0, theme::blue().gamma_multiply(0.16));
+            ui.painter().text(
+                logo.center(),
+                egui::Align2::CENTER_CENTER,
+                "HW",
+                egui::FontId::new(9.0, egui::FontFamily::Monospace),
+                theme::text_white(),
+            );
+            ui.add_space(7.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(
+                    egui::RichText::new("硬件调试工作台")
+                        .size(12.5)
+                        .strong()
+                        .color(theme::text_primary()),
+                );
+                ui.label(
+                    egui::RichText::new("SERIAL MONITOR")
+                        .size(7.0)
+                        .color(theme::text_dimmed()),
+                );
+            });
+        },
+    );
+    ui.add_space(4.0);
 }

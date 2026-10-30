@@ -13,11 +13,13 @@ use tool_core::config::{
     quarantine_corrupt_file,
 };
 
-/// 可选界面配色。One Dark Pro 系列取自官方 VS Code 主题；Catppuccin 配色取自官方调色板库。
+/// 可选界面配色。Linear Dark 是默认主题；One Dark Pro 系列取自官方 VS Code 主题，
+/// Catppuccin 配色取自官方调色板库。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AppTheme {
     #[default]
+    LinearDark,
     OneDarkPro,
     OneDarkProFlat,
     OneDarkProDarker,
@@ -33,7 +35,8 @@ pub enum AppTheme {
 impl AppTheme {
     /// 可选中的内置主题。枚举里的 `Custom` 只在加载用户主题文件后才成为当前主题，
     /// 本身不对应任何内置配色，因此不出现在这份列表里。
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
+        Self::LinearDark,
         Self::OneDarkPro,
         Self::OneDarkProFlat,
         Self::OneDarkProDarker,
@@ -47,7 +50,8 @@ impl AppTheme {
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::OneDarkPro => "One Dark Pro（默认）",
+            Self::LinearDark => "Linear Dark（默认）",
+            Self::OneDarkPro => "One Dark Pro",
             Self::OneDarkProFlat => "One Dark Pro Flat",
             Self::OneDarkProDarker => "One Dark Pro Darker",
             Self::OneDarkProMix => "One Dark Pro Mix",
@@ -62,6 +66,7 @@ impl AppTheme {
 
     pub const fn description(self) -> &'static str {
         match self {
+            Self::LinearDark => "近黑画布、紫色强调与紧凑控件，Linear 风格",
             Self::OneDarkPro => "经典编辑器深色配色，高对比且适合长时间工作",
             Self::OneDarkProFlat => "扁平层级、减少区域明暗差异",
             Self::OneDarkProDarker => "更深的 #23272e 编辑区背景",
@@ -81,31 +86,33 @@ impl AppTheme {
 
     const fn from_index(index: u8) -> Self {
         match index {
-            0 => Self::OneDarkPro,
-            1 => Self::OneDarkProFlat,
-            2 => Self::OneDarkProDarker,
-            3 => Self::OneDarkProMix,
-            4 => Self::OneDarkProNightFlat,
-            5 => Self::Latte,
-            6 => Self::Frappe,
-            7 => Self::Macchiato,
-            8 => Self::Mocha,
+            0 => Self::LinearDark,
+            1 => Self::OneDarkPro,
+            2 => Self::OneDarkProFlat,
+            3 => Self::OneDarkProDarker,
+            4 => Self::OneDarkProMix,
+            5 => Self::OneDarkProNightFlat,
+            6 => Self::Latte,
+            7 => Self::Frappe,
+            8 => Self::Macchiato,
+            9 => Self::Mocha,
             _ => Self::Custom,
         }
     }
 
     const fn index(self) -> u8 {
         match self {
-            Self::OneDarkPro => 0,
-            Self::OneDarkProFlat => 1,
-            Self::OneDarkProDarker => 2,
-            Self::OneDarkProMix => 3,
-            Self::OneDarkProNightFlat => 4,
-            Self::Latte => 5,
-            Self::Frappe => 6,
-            Self::Macchiato => 7,
-            Self::Mocha => 8,
-            Self::Custom => 9,
+            Self::LinearDark => 0,
+            Self::OneDarkPro => 1,
+            Self::OneDarkProFlat => 2,
+            Self::OneDarkProDarker => 3,
+            Self::OneDarkProMix => 4,
+            Self::OneDarkProNightFlat => 5,
+            Self::Latte => 6,
+            Self::Frappe => 7,
+            Self::Macchiato => 8,
+            Self::Mocha => 9,
+            Self::Custom => 10,
         }
     }
 }
@@ -177,7 +184,11 @@ struct CustomTheme {
     ui: ThemeUi,
 }
 
-const BUNDLED_THEME_FILES: [(&str, &str); 9] = [
+const BUNDLED_THEME_FILES: [(&str, &str); 10] = [
+    (
+        "linear-dark.json",
+        include_str!("../../../assets/themes/linear-dark.json"),
+    ),
     (
         "one-dark-pro.json",
         include_str!("../../../assets/themes/one-dark-pro.json"),
@@ -382,6 +393,7 @@ pub fn builtin_theme_for_path(path: &Path) -> Option<AppTheme> {
 
 fn builtin_theme_file(theme: AppTheme) -> Option<&'static str> {
     Some(match theme {
+        AppTheme::LinearDark => "linear-dark.json",
         AppTheme::OneDarkPro => "one-dark-pro.json",
         AppTheme::OneDarkProFlat => "one-dark-pro-flat.json",
         AppTheme::OneDarkProDarker => "one-dark-pro-darker.json",
@@ -864,6 +876,13 @@ mod tests {
         assert_eq!(tab_active_outline(), Color32::TRANSPARENT);
         assert_eq!(tab_active_text(), Color32::from_rgb(220, 220, 220));
 
+        load_builtin_theme(AppTheme::LinearDark, &root).expect("bundled Linear Dark loads");
+        set_active_theme(AppTheme::LinearDark);
+        assert_eq!(bg_primary(), Color32::from_rgb(12, 13, 15));
+        assert_eq!(bg_deep(), Color32::from_rgb(8, 9, 10));
+        assert_eq!(blue(), Color32::from_rgb(0x5e, 0x6a, 0xd2));
+        assert_eq!(text_primary(), Color32::from_rgb(0xf7, 0xf8, 0xf8));
+
         load_builtin_theme(AppTheme::Latte, &root).expect("bundled Latte loads");
         set_active_theme(AppTheme::Latte);
         assert_eq!(bg_primary(), Color32::from_rgb(239, 241, 245));
@@ -873,10 +892,11 @@ mod tests {
     }
 
     #[test]
-    fn themes_expose_one_dark_pro_and_all_catppuccin_choices() {
-        assert_eq!(AppTheme::ALL.len(), 9);
-        assert_eq!(AppTheme::default(), AppTheme::OneDarkPro);
+    fn themes_expose_linear_one_dark_and_all_catppuccin_choices() {
+        assert_eq!(AppTheme::ALL.len(), 10);
+        assert_eq!(AppTheme::default(), AppTheme::LinearDark);
         assert!(!AppTheme::Latte.is_dark());
+        assert!(AppTheme::LinearDark.is_dark());
         assert!(AppTheme::OneDarkPro.is_dark());
     }
 

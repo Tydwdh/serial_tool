@@ -154,20 +154,20 @@ pub fn apply_theme(ctx: &egui::Context, selected_theme: theme::AppTheme) {
 
 fn apply_spacing_style(s: &mut egui::Style) {
     // ── 间距 ──
-    // 行距略大于列距：深色界面上文字块之间需要更明显的纵向呼吸感，否则整页会
-    // 挤成一团。基础控件 30px 高，design 的主/次按钮再高 2px 以突出层级。
-    s.spacing.item_spacing = egui::vec2(10.0, 10.0);
-    s.spacing.button_padding = egui::vec2(14.0, 7.0);
-    s.spacing.interact_size = egui::vec2(44.0, 30.0);
-    s.spacing.slider_width = 180.0;
-    s.spacing.combo_width = 140.0;
-    s.spacing.text_edit_width = 220.0;
-    s.spacing.indent = 16.0;
-    s.spacing.window_margin = egui::Margin::same(12);
-    s.spacing.menu_margin = egui::Margin::same(8);
+    // Linear 风格：8px 网格、30px 控件、低留白。行距不再额外放大，靠边框和
+    // 文本层级分隔，而不是靠大块空白。
+    s.spacing.item_spacing = egui::vec2(8.0, 8.0);
+    s.spacing.button_padding = egui::vec2(10.0, 5.0);
+    s.spacing.interact_size = egui::vec2(40.0, 30.0);
+    s.spacing.slider_width = 160.0;
+    s.spacing.combo_width = 120.0;
+    s.spacing.text_edit_width = 200.0;
+    s.spacing.indent = 14.0;
+    s.spacing.window_margin = egui::Margin::same(10);
+    s.spacing.menu_margin = egui::Margin::same(6);
     s.spacing.scroll = egui::style::ScrollStyle {
-        bar_width: 10.0,
-        handle_min_length: 30.0,
+        bar_width: 8.0,
+        handle_min_length: 28.0,
         ..egui::style::ScrollStyle::solid()
     };
 }
@@ -195,27 +195,27 @@ fn disable_debug_overlays(s: &mut egui::Style) {
 
 fn apply_text_styles(s: &mut egui::Style) {
     // ── 字体大小 ──
-    // 中文在 13px 上下会明显发虚；正文抬到 15px，按钮 14px，等宽 14px 让日志
-    // 与终端在 100% 缩放下仍可读。
+    // Linear 风格靠近 11–13px：正文 12.5，按钮 11.5，辅助文字 10。中文仍用
+    // Noto Sans SC，12.5px 在 100% 缩放下可读；终端字号由面板设置单独控制。
     s.text_styles.insert(
         egui::TextStyle::Body,
-        egui::FontId::new(15.0, egui::FontFamily::Proportional),
-    );
-    s.text_styles.insert(
-        egui::TextStyle::Button,
-        egui::FontId::new(14.0, egui::FontFamily::Proportional),
-    );
-    s.text_styles.insert(
-        egui::TextStyle::Monospace,
-        egui::FontId::new(14.0, egui::FontFamily::Monospace),
-    );
-    s.text_styles.insert(
-        egui::TextStyle::Small,
         egui::FontId::new(12.5, egui::FontFamily::Proportional),
     );
     s.text_styles.insert(
+        egui::TextStyle::Button,
+        egui::FontId::new(11.5, egui::FontFamily::Proportional),
+    );
+    s.text_styles.insert(
+        egui::TextStyle::Monospace,
+        egui::FontId::new(12.5, egui::FontFamily::Monospace),
+    );
+    s.text_styles.insert(
+        egui::TextStyle::Small,
+        egui::FontId::new(10.0, egui::FontFamily::Proportional),
+    );
+    s.text_styles.insert(
         egui::TextStyle::Heading,
-        egui::FontId::new(19.0, egui::FontFamily::Proportional),
+        egui::FontId::new(18.0, egui::FontFamily::Proportional),
     );
 }
 
@@ -241,28 +241,28 @@ fn base_visuals(is_dark: bool) -> egui::Visuals {
         egui::Visuals::light()
     };
 
-    // 圆角：面板圆角略大，控件圆角跟随 design::CARD_RADIUS 的 10px 语言，
-    // 避免 6/8/10 三种半径混在同一屏里。
-    v.window_corner_radius = 10.into();
-    v.menu_corner_radius = 8.into();
+    // 圆角：Linear 的控件是 5–7px 的小圆角，窗口 8px；避免 10px 以上的
+    // 大圆角把工具栏做成“胶囊”。
+    v.window_corner_radius = 8.into();
+    v.menu_corner_radius = 6.into();
     v.window_shadow = egui::Shadow {
+        offset: [0, 8],
+        blur: 24,
+        spread: 0,
+        color: egui::Color32::BLACK.gamma_multiply(0.38),
+    };
+    v.popup_shadow = egui::Shadow {
         offset: [0, 6],
         blur: 18,
         spread: 0,
-        color: egui::Color32::BLACK.gamma_multiply(0.28),
-    };
-    v.popup_shadow = egui::Shadow {
-        offset: [0, 4],
-        blur: 14,
-        spread: 0,
-        color: egui::Color32::BLACK.gamma_multiply(0.30),
+        color: egui::Color32::BLACK.gamma_multiply(0.40),
     };
 
     // 背景 — 使用新的层级色
     v.panel_fill = theme::bg_primary();
-    v.window_fill = theme::bg_deep();
+    v.window_fill = theme::bg_secondary();
     v.extreme_bg_color = theme::bg_deep();
-    v.faint_bg_color = theme::bg_card();
+    v.faint_bg_color = theme::bg_secondary();
     v.code_bg_color = theme::bg_input();
     v.text_edit_bg_color = Some(theme::bg_input());
 
@@ -280,7 +280,7 @@ fn base_visuals(is_dark: bool) -> egui::Visuals {
     // 窗口
     v.window_stroke = egui::Stroke::new(1.0, theme::separator());
     v.resize_corner_size = 8.0;
-    v.striped = true;
+    v.striped = false;
     v.collapsing_header_frame = false;
     v.window_highlight_topmost = false;
     v.button_frame = true;
@@ -309,38 +309,36 @@ fn apply_widget_visuals(v: &mut egui::Visuals) {
 
     // noninteractive（标签、分隔线等）
     w.noninteractive.corner_radius = 6.into();
-    w.noninteractive.bg_fill = theme::bg_card();
+    w.noninteractive.bg_fill = theme::bg_primary();
     w.noninteractive.bg_stroke = egui::Stroke::new(1.0, theme::border());
     w.noninteractive.fg_stroke = egui::Stroke::new(1.0, theme::text_primary());
     w.noninteractive.weak_bg_fill = theme::bg_secondary();
 
     // inactive（按钮、输入框等未交互状态）
-    w.inactive.corner_radius = 8.into();
-    // 滚动条 handle（solid 模式，scroll_area.rs:1457-1466 走 &visuals.widgets.inactive.bg_fill）、
-    // 也作为按钮/输入框等未交互状态的默认填充色。#373C47 中灰对两者都合适。
+    w.inactive.corner_radius = 6.into();
+    // 滚动条 handle（solid 模式，scroll_area.rs:1457-1466 走 &visuals.widgets.inactive.bg_fill）。
     w.inactive.bg_fill = theme::scrollbar();
-    // 默认按钮原先用 bg_input（比卡片还暗），在深色面板上只剩一圈几乎看不见的
-    // 描边；用比面板亮一层的 bg_tertiary，普通按钮才有可点击的实体感。
+    // Linear 的普通按钮是浅表面 + 细边框，不用接近面板底色的暗块。
     w.inactive.weak_bg_fill = theme::bg_tertiary();
     w.inactive.bg_stroke = egui::Stroke::new(1.0, theme::border());
     w.inactive.fg_stroke = egui::Stroke::new(1.0, theme::text_primary());
 
     // hovered
-    w.hovered.corner_radius = 8.into();
+    w.hovered.corner_radius = 6.into();
     w.hovered.bg_fill = theme::bg_hover();
     w.hovered.weak_bg_fill = theme::bg_hover();
     w.hovered.bg_stroke = egui::Stroke::new(1.0, theme::border_light());
     w.hovered.fg_stroke = egui::Stroke::new(1.0, theme::text_white());
 
     // active（按下/选中）
-    w.active.corner_radius = 8.into();
+    w.active.corner_radius = 6.into();
     w.active.bg_fill = theme::widget_active_weak();
     w.active.weak_bg_fill = theme::widget_active_weak();
     w.active.bg_stroke = egui::Stroke::new(1.0, theme::blue());
     w.active.fg_stroke = egui::Stroke::new(1.0, theme::text_white());
 
     // open（展开状态）
-    w.open.corner_radius = 8.into();
+    w.open.corner_radius = 6.into();
     w.open.bg_fill = theme::widget_open();
     w.open.weak_bg_fill = theme::bg_tertiary();
     w.open.bg_stroke = egui::Stroke::new(1.0, theme::border_light());
