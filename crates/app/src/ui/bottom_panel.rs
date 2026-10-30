@@ -3,7 +3,7 @@ use crate::state::{MAX_SEND_HISTORY, SendUiState, StatusLevel};
 use eframe::egui;
 use tool_panels::{
     SendAction, SendLayout, SendPortItem, SendToolbarButton, SendView,
-    record_history as record_shared_send_history, sender_ui as shared_sender_ui,
+    sender_ui as shared_sender_ui,
 };
 
 impl WorkbenchApp {
@@ -107,6 +107,10 @@ impl WorkbenchApp {
             shared_sender_ui(ui, &mut view)
         };
         self.send.line_ending = line_ending;
+        // 先把发送区这一帧的编辑结果（清空/删除历史）落回状态，再处理动作。
+        // 插件按钮在自己的 `publish_ui_contribution_action` 里直接写 `send.send_history`；
+        // 若这里再晚一步用旧的本地快照覆盖，插件刚记下的命令会被悄悄抹掉。
+        self.send.send_history = history.into_iter().collect();
         if was_periodic
             && !self.send.periodic_enabled
             && let Some(cancel) = self.periodic_send.cancel.take()
@@ -161,11 +165,10 @@ impl WorkbenchApp {
             };
             let history_text = self.send.input.clone();
             match self.workbench.dispatch(command) {
-                Ok(_) => record_shared_send_history(&mut history, history_text, MAX_SEND_HISTORY),
+                Ok(_) => self.record_send_history(history_text),
                 Err(error) => self.send.error = Some(error.to_string()),
             }
         }
-        self.send.send_history = history.into_iter().collect();
         self.ui_contribution_non_button_slot(ui, "send.toolbar");
     }
 
