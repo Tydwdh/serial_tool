@@ -33,7 +33,7 @@ impl WorkbenchApp {
         self.sync_marketplace_installed_ids();
         self.tick_port_refresh(ctx);
         self.tick_pending_port_open_notice(ctx);
-        self.tick_reconnects(ctx);
+        self.tick_reconnects();
         self.tick_periodic_send(ctx);
         self.tick_auto_save(ctx);
         self.tick_update();

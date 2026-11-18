@@ -333,6 +333,11 @@ impl Subscription {
         self.dropped.load(Ordering::Relaxed)
     }
 
+    /// 读取并清零丢包计数；用户主动清空图表后不应继续展示上一轮的溢出提示。
+    pub fn take_dropped_count(&self) -> u64 {
+        self.dropped.swap(0, Ordering::Relaxed)
+    }
+
     pub fn queued_len(&self) -> u64 {
         self.backlog.queued_events()
     }

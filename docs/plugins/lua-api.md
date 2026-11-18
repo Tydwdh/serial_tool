@@ -116,7 +116,7 @@ end)
 | `on(topic, callback)` | — | 注册持续回调 |
 | `off(topic)` | — | 注销回调 |
 
-`publish` 拒绝 `ui.`、`transport.`、`log.` 保留前缀，要求改用对应的专用 API（`crates/lua_host/src/api/bus.rs:41`）。
+`publish` 拒绝 `ui.`、`transport.`、`log.`、`plugin.` 保留前缀，要求改用对应的专用 API（`crates/lua_host/src/api/bus.rs:41`）。`plugin.` 由宿主管理，插件不能伪造 `plugin.command.execute` 去调用其他插件。事件回调同样属于 `bus` 权限：没有 `bus` 时，`ui.*`/`log.*` 等系统事件不会进入 Lua。
 
 `on` 注册的 topic 支持 `*` 后缀前缀匹配：`get_callback` 先精确查，再按 `topic_matches` 遍历（`crates/lua_host/src/lib.rs:592`、`crates/core/src/lib.rs:419`）：显式 `*` 结尾才前缀匹配，否则必须精确。回调存在即视为插件“有活动”，插件会保持运行。
 

@@ -336,7 +336,9 @@ fn cancel_pending_read(handle: HANDLE, overlapped: &OVERLAPPED) {
     unsafe {
         let _ = CancelIoEx(handle, overlapped);
         let mut transferred = 0_u32;
-        let _ = GetOverlappedResult(handle, overlapped, &mut transferred, 0);
+        // bWait=TRUE：CancelIoEx 只请求取消，必须等 GetOverlappedResult 确认
+        // 内核不再持有这个栈上 OVERLAPPED 后才能返回。
+        let _ = GetOverlappedResult(handle, overlapped, &mut transferred, 1);
     }
 }
 
@@ -579,7 +581,9 @@ impl NativeSerialPort {
         if ok != 0 {
             return Ok(read as usize);
         }
-        wait_overlapped(self.handle, &overlapped, event.raw())
+        // RX drain 的读也必须可超时：设备在 ReadFile 挂起后被拔掉时，
+        // 这里若等 INFINITE 会永远不回到 probe/stop 检查，worker 无法 join。
+        wait_overlapped_timeout(self.handle, &overlapped, event.raw(), 5_000)
     }
 
     fn write_all(&self, mut buf: &[u8]) -> io::Result<()> {
@@ -651,10 +655,6 @@ impl NativeSerialPort {
     fn set_rts(&self, value: bool) -> io::Result<()> {
         cvt(unsafe { EscapeCommFunction(self.handle, if value { SETRTS } else { CLRRTS }) })
     }
-}
-
-fn wait_overlapped(handle: HANDLE, overlapped: &OVERLAPPED, event: HANDLE) -> io::Result<usize> {
-    wait_overlapped_timeout(handle, overlapped, event, INFINITE)
 }
 
 fn wait_overlapped_timeout(

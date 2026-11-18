@@ -22,7 +22,7 @@ fn read(relative: &str) -> String {
 fn the_frame_tick_drives_the_reconnect_loop_exactly_once() {
     let tick = read("src/runtime/mod.rs");
     assert_eq!(
-        tick.matches("self.tick_reconnects(ctx);").count(),
+        tick.matches("self.tick_reconnects();").count(),
         1,
         "每帧必须推进一次自动重连（多了会重复派发、少了整个重连表就冻住）"
     );
@@ -99,5 +99,24 @@ fn the_backoff_formula_and_attempt_cap_have_one_definition() {
     assert!(
         native.contains("RECONNECT_MAX_ATTEMPTS"),
         "native 的重连文案与判定必须用共享上限"
+    );
+}
+
+/// 调度、判定与 UI 倒计时必须使用同一个时钟：epoch 秒。
+/// 混用 `ctx.input().time` 会让端口枚举消失路径调度的条目永远不到期。
+#[test]
+fn the_reconnect_tick_uses_epoch_seconds() {
+    let commands = read("src/commands.rs");
+    let start = commands
+        .find("pub(crate) fn tick_reconnects")
+        .expect("commands.rs 里必须有 tick_reconnects");
+    let block = &commands[start..(start + 600).min(commands.len())];
+    assert!(
+        block.contains("let now = tool_core::now_timestamp_ms() as f64 / 1000.0;"),
+        "tick_reconnects 必须使用与调度/UI 相同的 epoch 秒时钟"
+    );
+    assert!(
+        !block.contains("let now = ctx.input"),
+        "tick_reconnects 不能再用应用启动后的单调秒 ctx.input().time"
     );
 }

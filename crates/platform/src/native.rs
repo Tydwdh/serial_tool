@@ -127,8 +127,10 @@ impl TransportBackend for TransportManager {
     fn send(&self, port: PortId, bytes: Vec<u8>) -> TransportFuture<()> {
         let manager = self.clone();
         spawn_blocking(move || {
+            // `send_to` 只表示命令入队；若后续 disconnect 立刻置 stop，
+            // worker 可能还没写出就退出。异步发送必须等 worker 真正写完。
             manager
-                .send_to(port.as_str(), bytes)
+                .send_to_blocking(port.as_str(), bytes, Duration::from_secs(5))
                 .map_err(operation_error)
         })
     }

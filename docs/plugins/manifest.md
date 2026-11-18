@@ -14,12 +14,12 @@
 
 | 字段 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---:|---|---|
-| `id` | string | 是 | — | 插件唯一 ID，非空（`manifest.rs:76`）。发布后保持稳定。 |
+| `id` | string | 是 | — | 插件唯一 ID，非空（`manifest.rs:76`）。发布后保持稳定；只能含字母数字、`.`、`-`、`_`，不能以 `.` 开头或结尾、不能含 `..`。 |
 | `name` | string | 是 | — | UI 显示名，非空（`manifest.rs:79`）。 |
 | `version` | string | 是 | — | 插件自身版本，非空（`manifest.rs:82`）。 |
 | `api_version` | string | 否 | `"0.1"` | 依赖的宿主 API 契约版本（`manifest.rs:12-13`）。 |
 | `runtime` | string | 是 | — | 目前仅 `"lua"`（`spec.rs:6`；校验 `manifest.rs:83-88`）。 |
-| `main` | string | 是 | — | 实时入口脚本；`live.main` 缺失时作为回退（`manifest.rs:176-181`）。 |
+| `main` | string | 是 | — | 实时入口脚本；`live.main` 缺失时作为回退（`manifest.rs:176-181`）。必须是插件根内的相对路径，不能是绝对路径、`..`、Windows 盘符或反斜杠路径。 |
 | `permissions` | string[] | 否 | `[]` | 实时权限；`live.permissions` 缺失时作为回退（`manifest.rs:183-189`）。 |
 | `description` | string | 否 | — | 一句话描述（市场元数据）。 |
 | `author` | string | 否 | — | 作者。建议 `"名字 <邮箱>"` 或 GitHub 用户名。 |
@@ -166,7 +166,7 @@
 
 加载时逐条校验（`crates/extension/src/manifest.rs:72-170`）；任一条不通过即产生 `manifest_validation_error` 诊断并且不加载插件（`crates/extension/src/manager.rs:208-218`）：
 
-- `id` / `name` / `version` / `runtime` 非空，`runtime` 必须受支持，实时入口非空。
+- `id` / `name` / `version` / `runtime` 非空，`runtime` 必须受支持；`id` 必须是安全路径片段，实时入口必须是非空相对路径。
 - `commands[].id` 非空且在 `commands` 内唯一。
 - `ui[].id` 非空且在 `ui` 内唯一；`slot` 属于 `UI_SLOTS`；`kind` 属于 `UI_KINDS`；填写了 `command` 时必须指向已声明的命令。
 - `panels[].id` 非空且在 `panels` 内唯一；`kind` 属于 `PANEL_KINDS`。

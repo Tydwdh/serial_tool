@@ -437,7 +437,10 @@ fn plugin_event_loop(
                     continue;
                 }
 
-                if let Some(callback) = get_callback(&lua, &event.topic)
+                // 回调注册属于 ctx.bus 的能力：没有 bus 权限时，连
+                // `__plugin_callbacks` 这张内部表也不该把系统事件送进插件。
+                if has_permission(&config, "bus")
+                    && let Some(callback) = get_callback(&lua, &event.topic)
                     && let Ok(event_table) = lua.create_table()
                 {
                     let _ = event_to_lua_table(&lua, &event_table, &event);

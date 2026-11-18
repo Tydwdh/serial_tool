@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use tool_application::query::NetworkPortConfig;
 #[cfg(test)]
 use tool_core::config::atomic_write_json;
-use tool_core::config::{CURRENT_SCHEMA_VERSION, quarantine_corrupt_file};
+use tool_core::config::quarantine_corrupt_file;
 use tool_platform::storage::native::NativeSettingsStore;
 
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,11 @@ pub(crate) struct PortProfile {
     pub(crate) stop_bits: String,
     pub(crate) parity: String,
 }
+
+/// workspace.json 自己的 schema 版本。与主题等其它 JSON 文档分开推进：
+/// 移除 `recorder_path` 后必须让旧版 v2.0.0 看到未来版本并只读，
+/// 而不是把新配置当损坏文件隔离。
+pub(crate) const CONFIG_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PersistedConfig {
@@ -137,13 +142,13 @@ fn parse_persisted_config(text: &str) -> Result<(PersistedConfig, bool), String>
         .ok_or_else(|| "配置根节点必须是 JSON 对象".to_owned())?;
     // 未声明版本按 v0 读取并迁移到当前版本。
     let version = tool_core::config::declared_schema_version(object).unwrap_or(0);
-    if version > CURRENT_SCHEMA_VERSION {
+    if version > CONFIG_SCHEMA_VERSION {
         return Err(format!(
-            "配置版本 {version} 高于当前程序支持的 {CURRENT_SCHEMA_VERSION}"
+            "配置版本 {version} 高于当前程序支持的 {CONFIG_SCHEMA_VERSION}"
         ));
     }
 
-    let migrated = version != CURRENT_SCHEMA_VERSION;
+    let migrated = version != CONFIG_SCHEMA_VERSION;
     if version == 0 {
         if !object.contains_key("theme_path")
             && let Some(legacy_theme_path) = object.get("custom_theme_path").cloned()
@@ -156,7 +161,7 @@ fn parse_persisted_config(text: &str) -> Result<(PersistedConfig, bool), String>
     }
     object.insert(
         "schema_version".to_owned(),
-        serde_json::Value::from(CURRENT_SCHEMA_VERSION),
+        serde_json::Value::from(CONFIG_SCHEMA_VERSION),
     );
     // 历史键名 `version` 与 `schema_version` 在 `PersistedConfig` 上是同一个字段
     // （`#[serde(default, alias = "version")]`），所以归一化之后必须把旧键删掉：
@@ -167,7 +172,7 @@ fn parse_persisted_config(text: &str) -> Result<(PersistedConfig, bool), String>
 
     let mut config = serde_json::from_value::<PersistedConfig>(value)
         .map_err(|error| format!("配置字段无效：{error}"))?;
-    config.schema_version = CURRENT_SCHEMA_VERSION;
+    config.schema_version = CONFIG_SCHEMA_VERSION;
     Ok((config, migrated))
 }
 
@@ -179,7 +184,7 @@ pub(crate) fn load_config() -> ConfigLoadResult {
         && let Ok(text) = String::from_utf8(bytes)
     {
         if let Some(version) = declared_schema_version(&text)
-            && version > CURRENT_SCHEMA_VERSION
+            && version > CONFIG_SCHEMA_VERSION
         {
             return ConfigLoadResult::FutureVersion {
                 path: primary,
@@ -299,7 +304,7 @@ impl WorkbenchApp {
             .collect();
         let network_proxy_url = self.network_proxy_url.trim();
         PersistedConfig {
-            schema_version: CURRENT_SCHEMA_VERSION,
+            schema_version: CONFIG_SCHEMA_VERSION,
             panels,
             selected_port: self.serial.selected_port.clone(),
             baud_rate: self.serial.baud_rate.clone(),
@@ -389,7 +394,7 @@ mod tests {
             .expect("legacy workspace should migrate");
 
         assert!(migrated);
-        assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(config.schema_version, CONFIG_SCHEMA_VERSION);
         assert_eq!(config.theme_path.as_deref(), Some("one-dark-pro.json"));
     }
 
@@ -397,11 +402,11 @@ mod tests {
     fn future_workspace_schema_is_rejected() {
         let mut value: serde_json::Value =
             serde_json::from_str(&legacy_workspace_json()).expect("valid test JSON");
-        value["schema_version"] = serde_json::json!(CURRENT_SCHEMA_VERSION + 1);
+        value["schema_version"] = serde_json::json!(CONFIG_SCHEMA_VERSION + 1);
 
         assert_eq!(
             declared_schema_version(&value.to_string()),
-            Some(CURRENT_SCHEMA_VERSION + 1)
+            Some(CONFIG_SCHEMA_VERSION + 1)
         );
         assert!(parse_persisted_config(&value.to_string()).is_err());
     }
@@ -413,15 +418,15 @@ mod tests {
     fn legacy_version_key_is_a_version_for_both_config_readers() {
         let mut value: serde_json::Value =
             serde_json::from_str(&legacy_workspace_json()).expect("valid test JSON");
-        value["version"] = serde_json::json!(CURRENT_SCHEMA_VERSION + 1);
+        value["version"] = serde_json::json!(CONFIG_SCHEMA_VERSION + 1);
         let text = value.to_string();
 
-        let version = CURRENT_SCHEMA_VERSION + 1;
+        let version = CONFIG_SCHEMA_VERSION + 1;
         assert_eq!(declared_schema_version(&text), Some(version));
         assert_eq!(
             parse_persisted_config(&text).err(),
             Some(format!(
-                "配置版本 {version} 高于当前程序支持的 {CURRENT_SCHEMA_VERSION}"
+                "配置版本 {version} 高于当前程序支持的 {CONFIG_SCHEMA_VERSION}"
             ))
         );
     }
@@ -434,12 +439,12 @@ mod tests {
     fn legacy_version_only_config_still_loads() {
         let mut value: serde_json::Value =
             serde_json::from_str(&legacy_workspace_json()).expect("valid test JSON");
-        value["version"] = serde_json::json!(CURRENT_SCHEMA_VERSION);
+        value["version"] = serde_json::json!(CONFIG_SCHEMA_VERSION);
         let text = value.to_string();
 
         let (config, migrated) = parse_persisted_config(&text)
             .unwrap_or_else(|error| panic!("只用历史键声明版本的配置必须能读出来，实际: {error}"));
-        assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(config.schema_version, CONFIG_SCHEMA_VERSION);
         assert!(!migrated, "版本已经是当前值，不该被当成需要迁移");
         // 设置本身没被吃掉：挑一个有代表性的字段核对。
         assert_eq!(config.baud_rate, "115200");

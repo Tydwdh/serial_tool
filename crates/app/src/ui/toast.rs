@@ -1,5 +1,6 @@
 //! 右上角临时通知覆盖层。
 //!
+//! 只有 `StatusLevel::Error` 会弹出卡片；`Info`/`Warn` 仍写入状态栏，但不再遮挡面板。
 //! 动画和交互思路参考 `egui-notify`（Copyright (c) 2022-2023 ItsEthra，MIT）。
 //! 本实现为适配 egui 0.35 和本项目 `NotificationQueue` 的独立移植；完整许可见
 //! 仓库根目录的 `THIRD_PARTY_NOTICES.md`。
@@ -101,11 +102,19 @@ impl ToastOverlay {
     }
 
     fn collect_new_notifications(&mut self, notifications: &mut NotificationQueue) {
-        for notification in notifications.current() {
+        let mut current = notifications.current();
+        // 同 source 替换保留原队列位置但分配更大的 id，所以队列顺序不保证 id
+        // 单调。若按位置推进水位线，较新的 Info 会挡掉排在其后的旧 Error。
+        current.sort_by_key(|notification| notification.id);
+        for notification in current {
             if notification.id <= self.last_notification_id {
                 continue;
             }
             self.last_notification_id = notification.id;
+            // 红字（Error）才弹卡片；Info/Warn 继续进状态栏，不覆盖工作区。
+            if notification.level != StatusLevel::Error {
+                continue;
+            }
             let now_ms = tool_core::now_timestamp_ms();
             let lifetime_ms = toast_lifetime_ms(notification.level);
             let deadline_ms = lifetime_ms.map(|ttl| now_ms.saturating_add(ttl));
@@ -233,38 +242,74 @@ mod tests {
     }
 
     #[test]
-    fn toast_lifetime_is_half_of_the_status_message_lifetime() {
-        for (level, status_ttl) in [
-            (StatusLevel::Info, 1_500),
-            (StatusLevel::Warn, 2_000),
-            (StatusLevel::Error, 4_000),
-        ] {
-            let mut queue = NotificationQueue::new();
-            let mut overlay = ToastOverlay::default();
-            queue.push("test", level, "一条消息");
-            overlay.collect_new_notifications(&mut queue);
+    fn only_error_notifications_create_toasts() {
+        let mut queue = NotificationQueue::new();
+        let mut overlay = ToastOverlay::default();
+        queue.push("info", StatusLevel::Info, "提示");
+        queue.push("warn", StatusLevel::Warn, "警告");
+        queue.push("error", StatusLevel::Error, "错误");
+        overlay.collect_new_notifications(&mut queue);
 
-            let toast = overlay.toasts.front().expect("一条通知应产生一张卡片");
-            assert_eq!(
-                toast.lifetime_ms,
-                Some(status_ttl / 2),
-                "卡片的读条窗口应是状态栏 TTL 的一半（{level:?}）"
-            );
-            assert_eq!(
-                toast
-                    .deadline_ms
-                    .map(|deadline| deadline - toast.last_update_ms),
-                Some(status_ttl / 2),
-                "卡片一出现就应带着完整的半个窗口，而不是接状态栏那条的截止时间"
-            );
-        }
+        assert_eq!(overlay.toasts.len(), 1);
+        assert_eq!(overlay.toasts.back().unwrap().text, "错误");
+    }
+
+    #[test]
+    fn same_source_replacement_does_not_hide_an_older_error() {
+        let mut queue = NotificationQueue::new();
+        let mut overlay = ToastOverlay::default();
+        queue.push("serial", StatusLevel::Info, "已连接");
+        queue.push("update", StatusLevel::Error, "下载失败");
+        // 同 source 替换保留第一项的位置，却给它更大的 id。
+        queue.push("serial", StatusLevel::Info, "仍然已连接");
+
+        overlay.collect_new_notifications(&mut queue);
+
+        assert_eq!(overlay.toasts.len(), 1);
+        assert_eq!(overlay.toasts.back().unwrap().text, "下载失败");
+    }
+
+    #[test]
+    fn skipped_notifications_do_not_block_a_later_error() {
+        let mut queue = NotificationQueue::new();
+        let mut overlay = ToastOverlay::default();
+        queue.push("serial", StatusLevel::Info, "已连接");
+        overlay.collect_new_notifications(&mut queue);
+        assert!(overlay.toasts.is_empty());
+
+        queue.push("serial", StatusLevel::Error, "访问被拒绝");
+        overlay.collect_new_notifications(&mut queue);
+        assert_eq!(overlay.toasts.len(), 1);
+        assert_eq!(overlay.toasts.back().unwrap().text, "访问被拒绝");
+    }
+
+    #[test]
+    fn error_toast_lifetime_is_half_of_the_status_message_lifetime() {
+        let mut queue = NotificationQueue::new();
+        let mut overlay = ToastOverlay::default();
+        queue.push("test", StatusLevel::Error, "一条消息");
+        overlay.collect_new_notifications(&mut queue);
+
+        let toast = overlay.toasts.front().expect("一条错误通知应产生一张卡片");
+        assert_eq!(
+            toast.lifetime_ms,
+            Some(2_000),
+            "卡片的读条窗口应是状态栏 TTL 的一半"
+        );
+        assert_eq!(
+            toast
+                .deadline_ms
+                .map(|deadline| deadline - toast.last_update_ms),
+            Some(2_000),
+            "卡片一出现就应带着完整的半个窗口，而不是接状态栏那条的截止时间"
+        );
     }
 
     #[test]
     fn toast_progress_uses_the_absolute_deadline() {
         let toast = Toast {
             id: 1,
-            level: StatusLevel::Info,
+            level: StatusLevel::Error,
             text: "test".to_owned(),
             deadline_ms: Some(20_000),
             lifetime_ms: Some(10_000),

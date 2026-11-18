@@ -289,14 +289,9 @@ impl WorkbenchApp {
                 }
             }
             tool_panels::SerialAction::CancelReconnect { port } => {
-                if let Err(error) =
-                    self.workbench
-                        .dispatch(tool_application::AppCommand::CancelReconnect {
-                            port: tool_platform::PortId::new(port),
-                        })
-                {
-                    self.set_status_force(StatusLevel::Error, error.to_string());
-                }
+                // 端口行的 ⟳ 与顶栏 chip 的 × 必须走同一套取消：
+                // 只派发 CancelReconnect 不会清 UI 侧重连表，下一帧仍会重试。
+                self.cancel_auto_reconnect(&port, "已取消自动重连 ");
             }
             tool_panels::SerialAction::RemoveNetwork { port } => {
                 self.serial

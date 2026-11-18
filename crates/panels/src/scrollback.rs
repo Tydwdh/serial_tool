@@ -20,10 +20,21 @@ use crate::DROP_EPISODE_QUIET_MS;
 pub(crate) struct DropEpisode {
     reported: bool,
     last_drop_ms: u64,
+    last_observe_ms: u64,
 }
 
 impl DropEpisode {
     pub(crate) fn observe(&mut self, dropped: u64, now_ms: u64) -> u64 {
+        // 原生文件对话框、最小化窗口都可能让 UI 长时间不调用 observe。
+        // 这段静默里若仍在丢包，恢复后的第一帧必须视为新一轮，而不是继续被
+        // 上一轮的 `reported` 压住。
+        let observed_gap = self.last_observe_ms != 0
+            && now_ms.saturating_sub(self.last_observe_ms) >= DROP_EPISODE_QUIET_MS;
+        self.last_observe_ms = now_ms;
+        if observed_gap {
+            self.reported = false;
+        }
+
         if dropped > 0 {
             self.last_drop_ms = now_ms;
             if self.reported {
@@ -41,6 +52,7 @@ impl DropEpisode {
     pub(crate) fn reset(&mut self) {
         self.reported = false;
         self.last_drop_ms = 0;
+        self.last_observe_ms = 0;
     }
 }
 
@@ -172,5 +184,24 @@ impl ExportChunkState {
 
     pub(crate) fn done(&self) -> bool {
         self.done
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drop_episode_rearms_after_an_unobserved_stall() {
+        let mut episode = DropEpisode::default();
+        assert_eq!(episode.observe(5, 1_000), 5, "首轮丢包应立即上报");
+        assert_eq!(episode.observe(7, 1_100), 0, "同一轮不重复上报");
+
+        // UI 停了超过静默窗口，期间又丢了 9 条；没有 observe(0) 帧可依赖。
+        assert_eq!(
+            episode.observe(9, 1_100 + DROP_EPISODE_QUIET_MS + 1),
+            9,
+            "长停顿后的丢包必须作为新一轮重新上报"
+        );
     }
 }

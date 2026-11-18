@@ -199,6 +199,24 @@ pub async fn install_plugin(
         )
     })?;
 
+    // registry 校验的是 entry.id；包内 manifest 可以声明另一个 id（例如 `..`），
+    // 而安装/卸载都以 manifest.id 为记录键。两者必须一致，否则拒绝安装。
+    let manifest_path = plugin_root.join("plugin.json");
+    let manifest_raw = std::fs::read_to_string(&manifest_path)
+        .map_err(|error| format!("读取插件清单失败：{error}"))?;
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_raw)
+        .map_err(|error| format!("解析插件清单失败：{error}"))?;
+    let manifest_id = manifest
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "插件清单缺少 id".to_owned())?;
+    if manifest_id != entry.id {
+        return Err(format!(
+            "插件包 id 不一致：registry 为 '{}'，plugin.json 为 '{}'",
+            entry.id, manifest_id
+        ));
+    }
+
     // 原子替换 install_dir/<id>/：若旧版本存在，先同卷 rename 到 <id>.old.<pid>/（不删，避免文件锁失败），
     // 再把新版本 rename 到位。旧目录留待下次启动清理（retire_old_plugin_dirs）。
     let dest = install_dir.join(&entry.id);

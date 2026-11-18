@@ -70,6 +70,11 @@ impl PluginManifest {
 
         if self.id.trim().is_empty() {
             errors.push("plugin id 不能为空".to_owned());
+        } else if !is_safe_plugin_id(&self.id) {
+            errors.push(format!(
+                "plugin id '{}' 必须是安全的路径片段（仅字母数字、.、-、_，且不能以 . 开头/结尾或包含 ..）",
+                self.id
+            ));
         }
         if self.name.trim().is_empty() {
             errors.push("plugin name 不能为空".to_owned());
@@ -84,6 +89,11 @@ impl PluginManifest {
         }
         if self.live_main().trim().is_empty() {
             errors.push("plugin live main 不能为空".to_owned());
+        } else if !is_safe_plugin_relative_path(self.live_main()) {
+            errors.push(format!(
+                "plugin live main '{}' 必须是插件根目录内的相对路径（不能是绝对路径、..、Windows 盘符或反斜杠路径）",
+                self.live_main()
+            ));
         }
 
         // command id 集合要留到后面的 ui 循环：ui[].command 必须指向已声明的 command。
@@ -189,6 +199,27 @@ impl PluginManifest {
             .map(|live| live.subscriptions.as_slice())
             .unwrap_or(&[])
     }
+}
+
+/// 插件 id 同时是安装目录名、配置文件名与记录键，必须只能是单个安全路径片段。
+fn is_safe_plugin_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.starts_with('.')
+        && !id.ends_with('.')
+        && !id.contains("..")
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+/// 插件入口必须是根目录内的普通相对路径；拒绝绝对路径、`..`、Windows 盘符与反斜杠。
+fn is_safe_plugin_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.contains('\\')
+        && !path.contains(':')
+        && std::path::Path::new(path)
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -397,4 +428,70 @@ pub struct PluginSummary {
     pub missing_commands: Vec<String>,
     #[serde(default)]
     pub undeclared_commands: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest(id: &str, main: &str) -> PluginManifest {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": "test",
+            "version": "1.0.0",
+            "runtime": "lua",
+            "main": main,
+        }))
+        .expect("minimal manifest JSON")
+    }
+
+    #[test]
+    fn rejects_ids_that_can_escape_the_plugin_directory() {
+        for id in [
+            "..",
+            "/home/user",
+            "a/b",
+            r"..\..",
+            ".hidden",
+            "trailing.",
+            "a..b",
+        ] {
+            assert!(
+                manifest(id, "main.lua").validate().is_err(),
+                "id {id:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_marketplace_style_ids() {
+        for id in ["demo.gcode-sender", "template.hello", "vendor_plugin-1"] {
+            assert!(
+                manifest(id, "main.lua").validate().is_ok(),
+                "id {id:?} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_main_paths_that_escape_the_plugin_root() {
+        for main in [
+            "/dev/zero",
+            "../outside.lua",
+            r"..\outside.lua",
+            r"C:\x.lua",
+            r"lua\x.lua",
+        ] {
+            assert!(
+                manifest("demo.test", main).validate().is_err(),
+                "main {main:?} must be rejected"
+            );
+        }
+        for main in ["main.lua", "lua/main.lua"] {
+            assert!(
+                manifest("demo.test", main).validate().is_ok(),
+                "main {main:?} must be accepted"
+            );
+        }
+    }
 }

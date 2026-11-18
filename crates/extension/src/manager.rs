@@ -245,7 +245,26 @@ impl PluginManager {
     pub fn apply_scan(&mut self, scan: PluginScan) -> usize {
         self.roots = scan.roots;
         self.diagnostics = scan.diagnostics;
+
+        // 插件目录消失（被删除/卸载/临时移走）时，记录和运行时必须一起收掉。
+        // 只 retain 记录会让 Lua 线程继续持有串口、定时器与文件授权，而 UI 已无处可关。
+        let orphans: Vec<String> = self
+            .records
+            .iter()
+            .filter(|(_, record)| !record.root.exists())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &orphans {
+            self.request_cleanup(id);
+        }
         self.records.retain(|_, record| record.root.exists());
+        for id in orphans {
+            if let Some(runtime) = self.lua_runtimes.remove(&id) {
+                runtime.stop();
+                self.stopping_plugins.push((id.clone(), runtime));
+            }
+            self.registered_commands.remove(&id);
+        }
 
         let mut count = 0;
         for candidate in scan.candidates {
@@ -343,8 +362,7 @@ impl PluginManager {
             .ok_or_else(|| ExtensionError::NotFound(plugin_id.to_owned()))?;
 
         let main = record.manifest.live_main().to_owned();
-        let script_path = record.root.join(&main);
-        let script = fs::read_to_string(&script_path)?;
+        let script = read_plugin_script(&record.root, &main)?;
         let context = manifest_context(&record.manifest, &record.root);
 
         let host_services = tool_lua_host::LuaHostServices {
@@ -885,6 +903,29 @@ fn manifest_context(manifest: &PluginManifest, root: &Path) -> serde_json::Value
         "permissions": manifest.permissions,
         "contributes": manifest.contributes
     })
+}
+
+/// 在宿主线程读取插件入口：先 canonicalize 确认落在插件根内，再限制大小。
+/// `manifest.validate` 已经拒绝 `..`/绝对路径，这里防的是符号链接与竞态。
+fn read_plugin_script(root: &Path, main: &str) -> ExtensionResult<String> {
+    const MAX_PLUGIN_SCRIPT_BYTES: u64 = 4 * 1024 * 1024;
+
+    let canonical_root = root.canonicalize()?;
+    let script_path = root.join(main).canonicalize()?;
+    if !script_path.starts_with(&canonical_root) {
+        return Err(ExtensionError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("插件入口 {main} 逃逸出插件目录"),
+        )));
+    }
+    let metadata = fs::metadata(&script_path)?;
+    if !metadata.is_file() || metadata.len() > MAX_PLUGIN_SCRIPT_BYTES {
+        return Err(ExtensionError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("插件入口 {main} 不是普通文件或超过 4 MiB"),
+        )));
+    }
+    Ok(fs::read_to_string(script_path)?)
 }
 
 #[cfg(test)]

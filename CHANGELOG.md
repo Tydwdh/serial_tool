@@ -26,11 +26,19 @@
 - 设备列表不再因端口显示名与端口 ID 相同而重复显示标签；单端口时发送器目标静态显示，不再渲染无意义的选择器。
 - 插件页「刷新」现在真正派发 `DiscoverPlugins`，而不是只显示「刷新已请求」。
 - 「更多」里的设置与插件管理改为浮动窗口，不再作为主 Dock 标签常驻；启动时自动清理旧工作区里残留的这两个标签。
+- **插件边界加固**：插件 `id` 必须是安全路径片段，`main` 必须是插件根内的相对路径并限制 4 MiB；市场安装校验包内 `manifest.id` 与 registry 一致；消失的插件目录会停止其运行时；Lua 裸 bus 禁止发布 `plugin.` 保留前缀，事件回调需要 `bus` 权限；同一毫秒的定时器 id 不再冲突。
+- **传输可靠性**：WebSocket 握手与写入都有超时，worker 在 stop 前先排空命令；发送等待 worker 真正写完；Windows 串口取消会等待 OVERLAPPED 完成，RX drain 读不再无限等待；存储文件 id 拒绝 Windows 根路径/盘符形态。
+- **自动重连**：调度、判定与 UI 倒计时统一到 epoch 秒；手动连接或取消会清除所有待重连与排队任务；端口行取消走统一入口；已有活动端口时自动重连让路。
+- **导出与面板**：终端/日志导出冻结开始时的过滤条件并改用稳定 id，保留上限裁剪不会漏行；日志双击跳转支持视口外目标；图表清空会排空队列并清缓存；长 UI 停滞后丢包提示重新武装。
+- **周期发送与通知**：间隔必须是 1–86400000 的有限值，计时溢出会停止而不是 panic；Toast 按 id 排序，较新的 Info 不会挡掉旧 Error。
+- **配置兼容**：workspace 配置 schema 升到 v2；移除必填字段后，旧版会走「未来版本只读」而不是把新配置当损坏文件隔离。
 
 ### 验证
 
-- `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、
-  `cargo test --workspace --all-targets` 全部通过。
+- `cargo fmt --all --check`、`cargo test --workspace --all-targets`、
+  `cargo test -p tool-panels -p tool-databus -- --ignored` 全部通过；Linux clippy 门禁
+  （`--exclude hardware-workbench-app -- -D warnings`）通过。Windows 专属串口路径另用
+  `x86_64-pc-windows-gnu` 交叉检查 `tool-transport`/`tool-platform` 编译通过。
 
 ## [2.0.0] - 2026-10-30
 

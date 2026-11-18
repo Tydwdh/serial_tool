@@ -115,6 +115,11 @@ fn network_worker_loop(context: NetworkWorkerContext) {
         return;
     }
 
+    // 握手也必须受超时约束：对端接受 TCP 后不回 101 时，tungstenite::client
+    // 会永久阻塞，worker 既看不到 stop 也无法 join。
+    let _ = tcp.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = tcp.set_write_timeout(Some(Duration::from_secs(5)));
+
     // 建立 WebSocket 连接（握手失败同样走失败分支）
     let mut ws = match tungstenite::client(&url, tcp) {
         Ok((ws, _)) => ws,
@@ -130,6 +135,7 @@ fn network_worker_loop(context: NetworkWorkerContext) {
     let _ = ws
         .get_ref()
         .set_read_timeout(Some(Duration::from_millis(100)));
+    let _ = ws.get_ref().set_write_timeout(Some(Duration::from_secs(5)));
 
     // 自我标识（Moonraker 系服务器允许客户端 announce，失败不影响功能）。
     // API key 由旧版 Native UI 已经允许配置，必须和 Web capability 使用
@@ -151,8 +157,9 @@ fn network_worker_loop(context: NetworkWorkerContext) {
     let _ = ws.send(Message::text(identify.to_string()));
 
     let mut next_id: u64 = 2;
-    while !stop.load(Ordering::Acquire) {
-        // 发送队列：文本 → printer.gcode.script
+    loop {
+        // 先排空已接受的命令，再检查 stop：关闭请求到达时不能把已入队的
+        // 写入直接丢掉（调用方可能正等它的 completion）。
         while let Ok(command) = command_rx.try_recv() {
             let (bytes, completion) = match command {
                 SerialCommand::Write { bytes, completion } => (bytes, completion),
@@ -201,6 +208,10 @@ fn network_worker_loop(context: NetworkWorkerContext) {
                     return;
                 }
             }
+        }
+
+        if stop.load(Ordering::Acquire) {
+            break;
         }
 
         // 接收：只转发 gcode_response

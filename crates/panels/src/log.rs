@@ -89,8 +89,10 @@ struct LogFilterKey {
 /// export starts and walks the stable entry order in bounded batches.
 pub struct LogExportCursor {
     filter: LogFilterKey,
-    limit: usize,
-    index: usize,
+    /// 已导出的最后一条稳定 id；保留上限从队首裁剪时不会错位。
+    last_id: Option<u64>,
+    /// 开始导出时的最后一条 id；之后追加的行不属于这次快照。
+    max_id: Option<u64>,
     progress: ExportChunkState,
 }
 
@@ -336,8 +338,8 @@ impl LogPanel {
     pub fn begin_export_cursor(&self) -> LogExportCursor {
         LogExportCursor {
             filter: self.current_filter_key(),
-            limit: self.entry_order.len(),
-            index: 0,
+            last_id: None,
+            max_id: self.entry_order.back().copied(),
             progress: ExportChunkState::new(),
         }
     }
@@ -355,19 +357,30 @@ impl LogPanel {
             return (String::new(), true, 0);
         }
         let budget = scan_budget.max(1);
-        let end = (cursor.index + budget).min(cursor.limit);
         let query = cursor.filter.query();
-        let entries = self
-            .entry_order
-            .iter()
-            .skip(cursor.index)
-            .take(end - cursor.index)
-            .filter_map(|id| self.entries.get(id))
-            .filter(|entry| log_entry_matches(entry, &cursor.filter, &query))
-            .cloned()
-            .collect::<Vec<_>>();
-        cursor.index = end;
-        let done = end >= cursor.limit || end >= self.entry_order.len();
+        let mut entries = Vec::new();
+        let mut scanned = 0;
+        let mut done = true;
+        for &id in &self.entry_order {
+            // 保留上限只会从队首删；按 id 前进，裁剪多少行都不会让后续批次错位。
+            if cursor.last_id.is_some_and(|last| id <= last) {
+                continue;
+            }
+            if cursor.max_id.is_some_and(|max| id > max) {
+                break;
+            }
+            if scanned >= budget {
+                done = false;
+                break;
+            }
+            scanned += 1;
+            cursor.last_id = Some(id);
+            if let Some(entry) = self.entries.get(&id)
+                && log_entry_matches(entry, &cursor.filter, &query)
+            {
+                entries.push(entry.clone());
+            }
+        }
         let (first, has_previous) = cursor.progress.begin();
         let exported = entries.len();
         cursor.progress.finish(done, exported);
@@ -873,8 +886,15 @@ fn render_log_rows(
                 selection,
                 inputs.wheel_scroll_delta_y,
             );
-            pending_navigate =
-                resolve_log_row_interactions(ui, &mut interaction, &frame, rows, selection, inputs);
+            pending_navigate = resolve_log_row_interactions(
+                ui,
+                &mut interaction,
+                &frame,
+                rows,
+                selection,
+                inputs,
+                virtual_rows,
+            );
         });
 
     LogRenderOutcome {
@@ -1342,17 +1362,18 @@ fn resolve_log_row_interactions(
     rows: &VecDeque<LogEntry>,
     selection: &mut RowSelection,
     inputs: &LogRowsInputs,
+    virtual_rows: &VirtualRowIndex,
 ) -> Option<u64> {
     let (scroll_to_row, force_scroll_to_bottom) =
         (inputs.scroll_to_row, inputs.force_scroll_to_bottom);
     let (navigate_target, hovered_row) = resolve_log_row_clicks(
         ui,
-        &mut interaction.hl,
-        &interaction.ctx_response,
+        interaction,
         rows,
         selection,
-        frame.full_rect,
+        frame,
         scroll_to_row,
+        virtual_rows,
     );
 
     // 框选范围文本（移入 context_menu 闭包内按需构造，避免菜单未打开时每帧构造）
@@ -1724,13 +1745,16 @@ fn apply_log_selection_scroll(
 /// 返回 `(双击跳转目标, 悬停行的整行文本与纯消息文本)`。
 fn resolve_log_row_clicks(
     ui: &mut egui::Ui,
-    hl: &mut RowHighlight,
-    ctx_response: &egui::Response,
+    interaction: &mut LogRowsInteraction,
     rows: &VecDeque<LogEntry>,
     selection: &mut RowSelection,
-    full_rect: egui::Rect,
+    frame: &LogRowFrame,
     scroll_to_row: Option<usize>,
+    virtual_rows: &VirtualRowIndex,
 ) -> (Option<u64>, Option<(String, String)>) {
+    let full_rect = frame.full_rect;
+    let hl = &mut interaction.hl;
+    let ctx_response = &interaction.ctx_response;
     let mut navigate_target: Option<u64> = None;
     let frozen_row_idx = hl.resolve_click(
         ui,
@@ -1755,10 +1779,13 @@ fn resolve_log_row_clicks(
     {
         navigate_target = Some(entry.id);
     }
-    // 跳转到目标行
-    if let Some(target_row) = scroll_to_row
-        && let Some((y_top, _)) = hl.row_y_range(target_row)
-    {
+    // 跳转到目标行。目标常在视口外，此时 RowHighlight 没有它的 Y 范围；
+    // 用虚拟行索引算出内容坐标，否则一次性 scroll_to_row 会被白白消费。
+    if let Some(target_row) = scroll_to_row {
+        let y_top = hl
+            .row_y_range(target_row)
+            .map(|(top, _)| top)
+            .unwrap_or_else(|| frame.label_rect.top() + virtual_rows.row_top(target_row));
         let target_rect = egui::Rect::from_min_size(egui::pos2(0.0, y_top), egui::vec2(1.0, 1.0));
         ui.scroll_to_rect(target_rect, Some(egui::Align::Center));
     }
@@ -2212,6 +2239,61 @@ mod tests {
             }
         }
         assert_eq!(rows, 3);
+    }
+
+    #[test]
+    fn export_cursor_survives_retention_trimming_mid_export() {
+        let bus = DataBus::new();
+        let mut panel = LogPanel::new(&bus);
+        panel.set_max_entries(100);
+        for index in 0..120 {
+            panel.push_test_entry(LogEntry {
+                id: index + 1,
+                timestamp_label: "[12:00:00.000]".into(),
+                level: LogLevel::Info,
+                source: "trim-test".into(),
+                message: format!("message-{index}"),
+            });
+        }
+
+        let mut cursor = panel.begin_export_cursor();
+        let mut text = String::new();
+        let (chunk, done, _) =
+            panel.export_cursor_chunk(&mut cursor, TerminalExportFormat::Txt, 50);
+        text.push_str(&chunk);
+        assert!(!done);
+
+        // 导出第一块后继续采集：保留上限从队首裁掉 1..=40，并追加 121..=140。
+        for index in 120..140 {
+            panel.push_test_entry(LogEntry {
+                id: index + 1,
+                timestamp_label: "[12:00:01.000]".into(),
+                level: LogLevel::Info,
+                source: "trim-test".into(),
+                message: format!("message-{index}"),
+            });
+        }
+        panel.set_max_entries(100);
+
+        loop {
+            let (chunk, done, _) =
+                panel.export_cursor_chunk(&mut cursor, TerminalExportFormat::Txt, 20);
+            text.push_str(&chunk);
+            if done {
+                break;
+            }
+        }
+
+        for index in 0..120 {
+            assert!(
+                text.contains(&format!("message-{index}")),
+                "快照内 message-{index} 不应因裁剪被跳过"
+            );
+        }
+        assert!(
+            !text.contains("message-120"),
+            "快照之后追加的行不应进入导出"
+        );
     }
 
     #[test]

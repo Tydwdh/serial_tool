@@ -399,7 +399,22 @@ impl WorkbenchApp {
     /// 记忆就与"最后一次动作是谁做的"对齐。
     pub(crate) fn note_manual_connect(&mut self, port: &str) {
         self.serial.manual_disconnects.remove(port);
-        self.serial.reconnects.cancel(port);
+        // 单活动连接：手动连接任何端口都取代所有待重连/在飞快照。
+        // 只取消本端口会让另一个端口的自动重试在稍后把刚连上的端口踢掉。
+        for entry in self.serial.reconnects.drain() {
+            if let Some(task_id) = entry.task_id {
+                let _ = self
+                    .workbench
+                    .dispatch(tool_application::AppCommand::CancelTask { task_id });
+            }
+            // 正在执行的 Connect 可能已经越过排队检查；让 Workbench 按端口
+            // 关闭 connecting 状态，避免它在手动连接之后落地。
+            let _ = self
+                .workbench
+                .dispatch(tool_application::AppCommand::CancelReconnect {
+                    port: tool_platform::PortId::new(entry.port),
+                });
+        }
     }
 
     /// 挂起一个端口的自动重连（拔线/失联的**唯一**入口）。
@@ -433,9 +448,16 @@ impl WorkbenchApp {
     /// 从前它们各清各的状态：chip 只清 pending、端口行只派发 `CancelReconnect`，
     /// 于是"取消"要么对在飞任务无效，要么下一帧又被挂回来。
     pub(crate) fn cancel_auto_reconnect(&mut self, port: &str, note: &str) {
-        self.serial.reconnects.cancel(port);
+        let cancelled = self.serial.reconnects.cancel(port);
         self.serial.manual_disconnects.insert(port.to_owned());
         self.cancel_pending_port_open_notice(port);
+        // 自动重连派发的是普通 `Connect`，任务号只存在重连表里；
+        // `CancelReconnect` 只认识手动 Reconnect 的 task，必须在这里撤回排队任务。
+        if let Some(task_id) = cancelled.and_then(|entry| entry.task_id) {
+            let _ = self
+                .workbench
+                .dispatch(tool_application::AppCommand::CancelTask { task_id });
+        }
         let _ = self
             .workbench
             .dispatch(tool_application::AppCommand::CancelReconnect {
@@ -445,8 +467,10 @@ impl WorkbenchApp {
     }
 
     /// 自动重连的每帧驱动：先收断开事件，再派发到点的尝试，最后回收在飞任务的结果。
-    pub(crate) fn tick_reconnects(&mut self, ctx: &egui::Context) {
-        let now = ctx.input(|input| input.time);
+    pub(crate) fn tick_reconnects(&mut self) {
+        // 调度（端口列表消失路径）与 UI 倒计时都使用 UNIX epoch 秒；
+        // 这里必须同源，不能混用 `ctx.input().time`（应用启动后的单调秒）。
+        let now = tool_core::now_timestamp_ms() as f64 / 1000.0;
         self.ingest_serial_disconnects(now);
         self.dispatch_due_reconnects(now);
         self.reap_reconnect_tasks(now);
@@ -466,6 +490,16 @@ impl WorkbenchApp {
                 .ports
                 .iter()
                 .any(|item| item.id.as_str() == port);
+            // 单活动连接：已经连着别的端口时，不为旧设备挂自动重连，
+            // 否则到点的 Connect 会先把用户刚连上的端口关掉。
+            if self
+                .workbench
+                .open_port_names()
+                .iter()
+                .any(|open| open != &port)
+            {
+                continue;
+            }
             let note = if vanished {
                 format!("{port} 已断开（设备或链路已失效）")
             } else {
@@ -473,14 +507,36 @@ impl WorkbenchApp {
             };
             self.schedule_auto_reconnect(&port, now, note);
         }
-        // 关掉自动重连勾选时，表里还挂着的等待一律清掉。
+        // 关掉自动重连勾选时，表里还挂着的等待一律清掉，并撤回已派发的任务。
         if !self.serial.auto_reconnect && !self.serial.reconnects.is_empty() {
-            self.serial.reconnects.clear();
+            for entry in self.serial.reconnects.drain() {
+                if let Some(task_id) = entry.task_id {
+                    let _ = self
+                        .workbench
+                        .dispatch(tool_application::AppCommand::CancelTask { task_id });
+                }
+            }
         }
     }
 
     fn dispatch_due_reconnects(&mut self, now: f64) {
         for port in self.serial.reconnects.take_due(now) {
+            // 手动连接已经建立时，到点的自动重连必须让路并取消，不能抢当前连接。
+            if self
+                .workbench
+                .open_port_names()
+                .iter()
+                .any(|open| open != &port)
+            {
+                if let Some(entry) = self.serial.reconnects.cancel(&port)
+                    && let Some(task_id) = entry.task_id
+                {
+                    let _ = self
+                        .workbench
+                        .dispatch(tool_application::AppCommand::CancelTask { task_id });
+                }
+                continue;
+            }
             let settings = match Self::serial_settings_from_state(&self.serial) {
                 Ok(settings) => settings,
                 Err(error) => {

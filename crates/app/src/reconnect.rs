@@ -28,7 +28,7 @@ pub(crate) struct ReconnectEntry {
     pub(crate) port: String,
     /// 已经失败的尝试次数（不含正在飞的那一次）。
     pub(crate) attempts: u32,
-    /// 下一次尝试的时间（秒，来自 `ctx.input().time`）。
+    /// 下一次尝试的时间（UNIX epoch 秒；调度、判定与 UI 倒计时共用同一时钟）。
     pub(crate) next_try_at: f64,
     /// 已派发、还没定终态的那次尝试。
     pub(crate) task_id: Option<TaskId>,
@@ -82,8 +82,9 @@ impl ReconnectTracker {
         self.entries.remove(port)
     }
 
-    pub(crate) fn clear(&mut self) {
-        self.entries.clear();
+    /// 取出全部条目，供手动连接等「一次取代所有待重连」的动作统一取消在飞任务。
+    pub(crate) fn drain(&mut self) -> Vec<ReconnectEntry> {
+        std::mem::take(&mut self.entries).into_values().collect()
     }
 
     /// 已派发、还没定终态的尝试（端口 → 任务号）。

@@ -4,6 +4,10 @@ use crate::state::StatusLevel;
 use eframe::egui;
 use std::sync::{Arc, Mutex};
 
+/// 周期发送的最大间隔：24 小时。超过它的输入不再当作合法周期，
+/// 同时保证 `Duration * 次数` 在可预见的使用期内不会溢出。
+const MAX_PERIODIC_INTERVAL_MS: f64 = 86_400_000.0;
+
 /// 周期发送后台线程的控制状态。
 pub(crate) struct PeriodicSendState {
     /// 取消信号：true 时后台线程应尽快退出。
@@ -53,11 +57,14 @@ impl WorkbenchApp {
             return;
         }
 
-        let interval_ms: f64 = match self.send.periodic_interval_ms.trim().parse() {
-            Ok(v) if v > 0.0 => v,
+        let interval_ms: f64 = match self.send.periodic_interval_ms.trim().parse::<f64>() {
+            Ok(v) if v.is_finite() && (1.0..=MAX_PERIODIC_INTERVAL_MS).contains(&v) => v,
             _ => {
                 self.send.periodic_enabled = false;
-                self.set_status_force(StatusLevel::Warn, "周期发送间隔必须 > 0ms");
+                self.set_status_force(
+                    StatusLevel::Warn,
+                    "周期发送间隔必须是 1–86400000 之间的数字",
+                );
                 return;
             }
         };
@@ -83,7 +90,14 @@ impl WorkbenchApp {
         let event_sink = self.workbench.event_sink();
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let outcome = self.periodic_send.outcome.clone();
-        let interval = std::time::Duration::from_secs_f64(interval_ms / 1000.0);
+        let interval = match std::time::Duration::try_from_secs_f64(interval_ms / 1000.0) {
+            Ok(interval) => interval,
+            Err(_) => {
+                self.send.periodic_enabled = false;
+                self.set_status_force(StatusLevel::Warn, "周期发送间隔超出范围");
+                return;
+            }
+        };
 
         self.periodic_send.cancel = Some(cancel.clone());
 
@@ -91,9 +105,31 @@ impl WorkbenchApp {
             let start = std::time::Instant::now();
             let mut count: u64 = 0;
 
+            let stop_with = |message: String| {
+                cancel.store(true, std::sync::atomic::Ordering::Release);
+                event_sink.publish(tool_core::Event::system_log(
+                    tool_core::LogLevel::Error,
+                    "periodic",
+                    message.clone(),
+                ));
+                if let Ok(mut slot) = outcome.lock() {
+                    *slot = Some((StatusLevel::Error, message));
+                }
+            };
+
             loop {
-                // 基于 start_time + count * interval 计算 absolute deadline
-                let deadline = start + interval * (count as u32 + 1);
+                // 基于 start_time + count * interval 计算 absolute deadline；
+                // 用 checked 运算兜住极端输入，失败时停止而不是让 worker panic。
+                let factor = count
+                    .checked_add(1)
+                    .and_then(|next| u32::try_from(next).ok());
+                let deadline = factor
+                    .and_then(|factor| interval.checked_mul(factor))
+                    .and_then(|offset| start.checked_add(offset));
+                let Some(deadline) = deadline else {
+                    stop_with("周期发送已停止：计时范围溢出".to_owned());
+                    return;
+                };
 
                 // 等到 deadline 或被 cancel：剩余 >2ms 时 sleep 让出 CPU，最后阶段 spin 保精度
                 if wait_until_deadline(deadline, Some(&cancel)) {
@@ -106,16 +142,7 @@ impl WorkbenchApp {
                     .err();
 
                 if let Some(e) = err {
-                    cancel.store(true, std::sync::atomic::Ordering::Release);
-                    let msg = format!("周期发送已在第 {count} 次后停止：{e}");
-                    event_sink.publish(tool_core::Event::system_log(
-                        tool_core::LogLevel::Error,
-                        "periodic",
-                        msg.clone(),
-                    ));
-                    if let Ok(mut slot) = outcome.lock() {
-                        *slot = Some((StatusLevel::Error, msg));
-                    }
+                    stop_with(format!("周期发送已在第 {count} 次后停止：{e}"));
                     return;
                 }
 

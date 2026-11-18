@@ -32,6 +32,7 @@ pub(crate) fn create_bus_api(
             if topic.starts_with("ui.")
                 || topic.starts_with("transport.")
                 || topic.starts_with("log.")
+                || topic.starts_with("plugin.")
             {
                 return Err(mlua::Error::RuntimeError(format!(
                     "bus.publish: topic '{topic}' 是保留前缀，请使用 ctx.ui.* / ctx.serial.* 等专用 API"

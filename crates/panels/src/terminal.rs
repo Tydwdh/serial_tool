@@ -575,7 +575,12 @@ impl TerminalPanel {
         if cursor.progress.done() {
             return (String::new(), true, 0);
         }
-        let query = self.search.query();
+        // 导出期间用户仍可编辑搜索框；谓词必须来自开始导出时的游标快照，
+        // 否则同一文件的前后批次会按两个不同的查询过滤。
+        let query = crate::search::SearchQuery::new(
+            &cursor.filter.search_text,
+            cursor.filter.search_case_sensitive,
+        );
         let mut iter = self.store.iter_after(cursor.last_id).peekable();
         let mut rows = Vec::new();
         let mut scanned = 0;
@@ -2984,6 +2989,41 @@ mod tests {
             }
         }
         assert_eq!(rows, 4);
+    }
+
+    #[test]
+    fn export_cursor_freezes_the_search_filter_at_start() {
+        let bus = DataBus::new();
+        let mut panel = TerminalPanel::new(&bus);
+        for (index, text) in ["alpha", "beta"].into_iter().enumerate() {
+            bus.publish(
+                Event::with_timestamp(
+                    1_000 + index as u64,
+                    serial_topics::SERIAL_RX,
+                    "serial:COM1",
+                    Direction::Rx,
+                    Payload::Bytes(format!("{text}\n").into_bytes()),
+                )
+                .with_metadata(serde_json::json!({ "port": "COM1" })),
+            );
+        }
+        assert_eq!(panel.ingest_all_pending(), 2);
+
+        panel.search.text = "alpha".to_owned();
+        let mut cursor = panel.begin_export_cursor();
+        // 用户在第一块之后改了搜索词；导出仍应只包含开始时的匹配。
+        panel.search.text = "beta".to_owned();
+
+        let mut text = String::new();
+        loop {
+            let (chunk, done, _) =
+                panel.export_cursor_chunk(&mut cursor, TerminalExportFormat::Txt, 1);
+            text.push_str(&chunk);
+            if done {
+                break;
+            }
+        }
+        assert_eq!(text, "alpha");
     }
 
     /// 新逻辑：按 \n 拆分行，同包内不合并，跨包只合并未完成行。

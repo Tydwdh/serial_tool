@@ -87,7 +87,9 @@ impl ChartPanel {
                 .on_hover_text("清除图表中的所有样本数据")
                 .clicked()
             {
-                self.series.clear();
+                // 与 `ChartPanel::clear` 同一条路径：排空订阅、清缓存，
+                // 否则实时流会在下一帧把曲线重新画回来。
+                self.clear();
             }
             if self.dropped_while_paused > 0 {
                 ui.label(
@@ -188,6 +190,8 @@ impl ChartPanel {
         self.series.clear();
         self.cached_window.clear();
         self.dropped_while_paused = 0;
+        // 清空是用户主动丢弃数据；上一轮溢出提示不应继续挂着。
+        let _ = self.subscription.take_dropped_count();
     }
 
     /// 返回当前所有 series 名称（供测试与诊断）。

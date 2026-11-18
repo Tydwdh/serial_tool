@@ -186,9 +186,12 @@ pub mod native {
     fn ensure_relative(root: &Path, id: &FileId) -> Result<PathBuf, StorageError> {
         let relative = Path::new(id.as_str());
         if relative.is_absolute()
-            || relative
-                .components()
-                .any(|component| matches!(component, Component::ParentDir))
+            || relative.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
         {
             return Err(StorageError::Operation(
                 "file id escapes storage root".into(),
